@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/pdfcore"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+
+# 发布配置：面向"单文件/小体积"优化（见 docs/framework-selection.md §4）
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
+strip = true

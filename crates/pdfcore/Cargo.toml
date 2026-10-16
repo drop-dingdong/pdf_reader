@@ -1,0 +1,13 @@
+[package]
+name = "pdfcore"
+description = "PDF 阅读器核心接口层：与 PDF 后端和 UI 工具包均解耦的 trait 与领域模型"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# 本 crate 在 MVP 阶段刻意保持 **零依赖**（纯 std）。原因：
+#  1. 后端实现（pdfium-render + egui）位于各自的 crate，接口层不应反向依赖它们；
+#  2. 零依赖使 `cargo test` 无需下载任何东西，CI 快且离线可跑；
+#  3. 便于未来把 pdfcore 复用到 CLI / 移动端 / WASM。
