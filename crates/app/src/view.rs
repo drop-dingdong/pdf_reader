@@ -317,6 +317,38 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 被引用点**初始的矩形**：以该点为中心的一小块区域（PDF 页面空间）。
+///
+/// 初始化时只为"以后可能被截取"预留一个可编辑的框；**不会**因此触发任何渲染 ——
+/// 只有用户对该标识发起动作（点击 → 截图模式 → Enter）后才会产生截图。
+pub fn default_dest_rect(point: Point) -> Rect {
+    const HALF_WIDTH: f32 = 60.0;
+    const HALF_HEIGHT: f32 = 30.0;
+    Rect::new(
+        point.x - HALF_WIDTH,
+        point.y - HALF_HEIGHT,
+        HALF_WIDTH * 2.0,
+        HALF_HEIGHT * 2.0,
+    )
+}
+
+/// PDF 页面空间矩形 → **屏幕**矩形（把被引用点已存的矩形回填成截图模式的选区初值）。
+pub fn page_rect_to_screen(
+    placement: &PagePlacement,
+    page_rect: Rect,
+    scroll: Vec2,
+    canvas_min: egui::Pos2,
+) -> egui::Rect {
+    let content = placement.rect_to_content(page_rect);
+    egui::Rect::from_min_size(
+        egui::pos2(
+            content.x - scroll.x + canvas_min.x,
+            content.y - scroll.y + canvas_min.y,
+        ),
+        egui::vec2(content.width, content.height),
+    )
+}
+
 /// 画布上的**屏幕矩形** → **内容空间**矩形。
 ///
 /// ## 为什么必须单独有这个函数
@@ -1062,6 +1094,31 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 被引用点的默认矩形：以该点为中心、尺寸固定；页面矩形→屏幕矩形要能来回对上。
+    #[test]
+    fn default_dest_rect_and_page_rect_to_screen() {
+        let rect = default_dest_rect(Point::new(100.0, 200.0));
+        assert_eq!(rect, Rect::new(40.0, 170.0, 120.0, 60.0));
+        assert_eq!(rect.center(), Point::new(100.0, 200.0), "以该点为中心");
+
+        // 页 200×100 放在内容空间 (10,20)，缩放 1、无旋转；滚动 (5,7)，画布原点 (300,40)
+        let placement = PagePlacement::new(
+            PageIndex::FIRST,
+            Rect::new(10.0, 20.0, 200.0, 100.0),
+            Scale::IDENTITY,
+            Rotation::None,
+            Size::new(200.0, 100.0),
+        );
+        let screen = page_rect_to_screen(
+            &placement,
+            Rect::new(30.0, 40.0, 50.0, 20.0),
+            Vec2::new(5.0, 7.0),
+            egui::pos2(300.0, 40.0),
+        );
+        // 内容空间 = 页内 + 页原点 = (40,60,50,20)；屏幕 = 内容 − 滚动 + 画布原点
+        assert_eq!(screen, egui::Rect::from_min_size(egui::pos2(335.0, 93.0), egui::vec2(50.0, 20.0)));
     }
 
     /// 回归：屏幕坐标 → 内容空间必须减去画布原点；且框选区域截到的内容必然**落在当前可见范围内**。

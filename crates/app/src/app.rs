@@ -25,8 +25,9 @@ use pdfcore::prelude::*;
 
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
-    clamp_float_rect, color_image, commands_for_destination, destination_points, fit_inside,
-    compose_snapshot, screen_rect_to_content, veil_bands, view_rect_to_page_rect, SnapshotPage,
+    clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
+    destination_points, fit_inside, compose_snapshot, page_rect_to_screen, screen_rect_to_content,
+    veil_bands, view_rect_to_page_rect, SnapshotPage,
     flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
@@ -89,6 +90,20 @@ impl Tool {
     }
 }
 
+/// 一个**被引用点**（链接跳转目的地）及其可编辑的截图信息。
+///
+/// * `rect`：页面空间的一块矩形，初始化时是点周围的一小块；用户可在截图模式里改；
+/// * `snapshot`：**初始为 `None`** —— 没有额外动作前不渲染任何截图（用户要求）；
+///   只有"点击标识 → 截图模式 → Enter"之后才会变成 `Some`。
+struct DestMark {
+    /// 页面空间的位置。
+    point: Point,
+    /// 页面空间的矩形（与当前页重叠的部分）。
+    rect: Rect,
+    /// 已构建的截图（自包含纹理）。
+    snapshot: Option<egui::TextureHandle>,
+}
+
 /// 截图模式的状态。
 ///
 /// 进入后：主视图的拖动/滚动/缩放/链接跳转等**一律不响应**（瓦片加载仍继续），
@@ -96,10 +111,13 @@ impl Tool {
 /// `Enter` 退出并在终端输出区域信息，`Esc` 退出且无输出。
 #[derive(Default)]
 struct CaptureState {
-    /// 已画出的选区（视图空间）；`None` = 尚未开始
+    /// 已画出的选区（**屏幕**空间）；`None` = 尚未开始
     rect: Option<egui::Rect>,
-    /// 正在拖拽的起点（视图空间）
+    /// 正在拖拽的起点（屏幕空间）
     anchor: Option<egui::Pos2>,
+    /// 由"点击被引用点标识"进入时记录的目标 `(页号, 该页内下标)`；
+    /// `None` = 普通截图（结果只放进浮窗，不回写被引用点）。
+    target: Option<(PageIndex, usize)>,
 }
 
 /// 浮窗内容：纯文字，或一张**自包含的截图**。
@@ -144,8 +162,8 @@ pub struct PdfReaderApp {
     next_float_id: u64,
     /// 是否标注"被引用的点"（链接跳转目的地）。
     show_dest_points: bool,
-    /// 每个目标页上被引用的点（按 0.5pt 去重），下标 = 页号；打开文档时算一次。
-    dest_points: Vec<Vec<Point>>,
+    /// 每个目标页上被引用的点（按 0.5pt 去重）及其矩形/截图，下标 = 页号；打开文档时算一次。
+    dest_marks: Vec<Vec<DestMark>>,
     /// 截图模式状态（`Some` = 处于该模式）。
     capture: Option<CaptureState>,
     /// 本帧累计的"像素格式转换"与"load_texture"耗时（诊断用，定位 150ms 到底在哪一段）。
@@ -220,7 +238,7 @@ impl PdfReaderApp {
             floats: Vec::new(),
             next_float_id: 1,
             show_dest_points: false,
-            dest_points: Vec::new(),
+            dest_marks: Vec::new(),
             capture: None,
             last_convert_ms: 0.0,
             last_upload_ms: 0.0,
@@ -289,8 +307,9 @@ impl PdfReaderApp {
                             .as_ref()
                             .map(|navigation| flatten_outline(&navigation.outline))
                             .unwrap_or_default();
-                        // 被引用的点（链接目的地）也只算一次：按目标页分组、按位置去重
-                        self.dest_points = self
+                        // 被引用的点（链接目的地）也只算一次：按目标页分组、按位置去重；
+                        // 每个点附一个"点周围的小矩形"，截图留待用户发起动作后再构建。
+                        self.dest_marks = self
                             .navigation
                             .as_ref()
                             .map(|navigation| {
@@ -298,6 +317,18 @@ impl PdfReaderApp {
                                     &navigation.links_by_page,
                                     session.page_count() as usize,
                                 )
+                                .into_iter()
+                                .map(|points| {
+                                    points
+                                        .into_iter()
+                                        .map(|point| DestMark {
+                                            point,
+                                            rect: default_dest_rect(point),
+                                            snapshot: None,
+                                        })
+                                        .collect()
+                                })
+                                .collect()
                             })
                             .unwrap_or_default();
                         self.floats.clear();
@@ -591,9 +622,14 @@ impl PdfReaderApp {
                     self.add_test_float();
                 }
                 // 截图模式：进入后主视图只用于框选区域
-                if ui.button("截图").clicked() {
+                // 截图模式**不可相互覆盖**：已在截图（普通截图或编辑被引用点）时按钮无响应，
+                // 直到回到正常阅读模式（Esc / Enter 退出）。
+                if ui
+                    .add_enabled(self.capture.is_none(), egui::Button::new("截图"))
+                    .clicked()
+                {
                     self.capture = Some(CaptureState::default());
-                    self.message = "截图模式：拖动框选区域，Enter 输出并退出，Esc 退出".to_string();
+                    self.message = "截图模式：拖动框选区域，Enter 保存并退出，Esc 退出".to_string();
                 }
 
                 // 搜索（同步接口：大文档可能短暂卡顿，见 decision-log D-03/D-07）
@@ -1159,16 +1195,61 @@ impl PdfReaderApp {
                     LINK_OVERLAY_MIN_ZOOM,
                 )
             {
+                let mut clicked: Option<(PageIndex, usize)> = None;
                 for page in self.visible.clone() {
                     let Some(placement) = session.placement(page).copied() else { continue };
-                    let Some(points) = self.dest_points.get(page.get() as usize) else { continue };
-                    for point in points {
+                    let Some(marks) = self.dest_marks.get(page.get() as usize) else { continue };
+                    for (index, mark) in marks.iter().enumerate() {
                         // PDF 页面空间 → 内容空间 → 视图空间
-                        let content = placement.page_to_content(*point);
-                        let center = canvas.min + EVec2::new(content.x - scroll.x, content.y - scroll.y);
+                        let content = placement.page_to_content(mark.point);
+                        let center =
+                            canvas.min + EVec2::new(content.x - scroll.x, content.y - scroll.y);
+                        // 有截图的点画实心（一眼可辨），没有的画空心
                         painter.circle_stroke(center, 5.0, Stroke::new(1.5, LINK_OVERLAY_COLOR));
-                        painter.circle_filled(center, 1.5, LINK_OVERLAY_COLOR);
+                        if mark.snapshot.is_some() {
+                            painter.circle_filled(center, 2.5, LINK_OVERLAY_COLOR);
+                        } else {
+                            painter.circle_filled(center, 1.5, LINK_OVERLAY_COLOR);
+                        }
+                        // 点击标识 → 进入截图模式，选区初值 = 该点已存的矩形
+                        let hit = egui::Rect::from_center_size(center, EVec2::splat(14.0));
+                        let response = ui.interact(
+                            hit,
+                            Id::unique(("dest-mark", page.get(), index)),
+                            Sense::click(),
+                        );
+                        if response.clicked() {
+                            clicked = Some((page, index));
+                        }
                     }
+                }
+                if let Some(target) = clicked {
+                    // 用该点已存矩形初始化选区（页面空间 → 屏幕空间）
+                    let page = target.0;
+                    let mut selection = None;
+                    if let Some(placement) = session.placement(page).copied() {
+                        if let Some(mark) = self
+                            .dest_marks
+                            .get(page.get() as usize)
+                            .and_then(|marks| marks.get(target.1))
+                        {
+                            selection = Some(page_rect_to_screen(
+                                &placement,
+                                mark.rect,
+                                scroll,
+                                canvas.min,
+                            ));
+                        }
+                    }
+                    self.capture = Some(CaptureState {
+                        rect: selection,
+                        anchor: None,
+                        target: Some(target),
+                    });
+                    self.message = format!(
+                        "编辑被引用点（第 {} 页）：可拖动调整选区，Enter 保存截图，Esc 取消",
+                        page.display_number()
+                    );
                 }
             }
 
@@ -1367,8 +1448,14 @@ impl PdfReaderApp {
                     // 屏幕矩形 → 内容空间矩形（供快照与页面空间换算使用）
                     let selection_rect =
                         screen_rect_to_content(canvas.min, selection, scroll);
-                    // 1) 把选区做成**自包含快照**并放进一个新浮窗（用户需求）
-                    self.capture_into_float(ui, session, selection_rect);
+                    match self.capture.as_ref().and_then(|state| state.target) {
+                        // 1a) 由被引用点标识进入：回写该点的矩形与截图，并用浮窗展示新图
+                        Some((page, index)) => {
+                            self.commit_dest_mark(ui, session, page, index, selection_rect);
+                        }
+                        // 1b) 普通截图：只放进一个新浮窗
+                        None => self.capture_into_float(ui, session, selection_rect),
+                    }
                     let mut parts: Vec<String> = Vec::new();
                     for page in self.visible.clone() {
                         let Some(placement) = session.placement(page).copied() else { continue };
@@ -1416,20 +1503,97 @@ impl PdfReaderApp {
         }
     }
 
-    /// 把选中的区域做成截图快照，放入一个新的浮窗。
+    /// 把截图模式选中的区域**回写**到某个被引用点：保存与该页重叠的矩形 + 构建截图 + 浮窗展示。
     ///
-    /// 快照来源是**已经渲染好的位图**（整页或瓦片，直接从缓存取），因此无需重新渲染；
-    /// 拷贝成独立纹理后与主视图状态完全解耦：之后缩放/滚动/换页都不会改变浮窗内容。
-    fn capture_into_float(
+    /// 用户要求：矩形可能超出单页范围，因此**只保存与当前页重叠的部分**；
+    /// 若完全不重叠则不改动原信息并给出提示。
+    fn commit_dest_mark(
         &mut self,
         ui: &mut egui::Ui,
         session: &DocumentSession,
-        // `content_rect` 已经是**内容空间**矩形（调用方用 `screen_rect_to_content` 换算过）
+        page: PageIndex,
+        index: usize,
         content_rect: Rect,
     ) {
-        // `content_rect` 由调用方从屏幕坐标换算而来（**必须减去画布原点**，见 view::screen_rect_to_content）
+        let Some(placement) = session.placement(page).copied() else { return };
+        // 只保留与目标页重叠的部分（区域可能跨页/跨留白）
+        let Some(overlap) = content_rect.intersection(placement.rect) else {
+            self.message = "截图区域与该被引用点所在页没有重叠，未保存".to_string();
+            return;
+        };
+        if overlap.width <= 0.0 || overlap.height <= 0.0 {
+            self.message = "截图区域与该被引用点所在页没有重叠，未保存".to_string();
+            return;
+        }
+        // 内容空间 → 页面空间（保存到被引用点）
+        let Some(page_rect) = view_rect_to_page_rect(&placement, overlap, Vec2::ZERO) else {
+            self.message = "截图区域换算失败，未保存".to_string();
+            return;
+        };
+        let page_rect = Rect::new(
+            page_rect.x.round(),
+            page_rect.y.round(),
+            page_rect.width.round(),
+            page_rect.height.round(),
+        );
 
-        // 收集覆盖到的页及其**已缓存**位图（先持有 Arc，再借用给合成函数）
+        // 构建快照（只用与该页重叠的部分）
+        let Some(snapshot) = self.snapshot_for(ui, session, overlap) else {
+            self.message = "该区域还没有已渲染的像素（请稍候再试）".to_string();
+            return;
+        };
+        let id = self.next_float_id;
+        self.next_float_id += 1;
+        let texture =
+            ui.ctx()
+                .load_texture(format!("dest-{}-{}", page.get(), index), snapshot, egui::TextureOptions::LINEAR);
+
+        // 回写：矩形 + 截图（初始为 None，只有走到这里才变成 Some）
+        let mut rect_saved = false;
+        if let Some(mark) = self
+            .dest_marks
+            .get_mut(page.get() as usize)
+            .and_then(|marks| marks.get_mut(index))
+        {
+            mark.rect = page_rect;
+            mark.snapshot = Some(texture.clone());
+            rect_saved = true;
+        }
+        if !rect_saved {
+            self.message = "被引用点已不存在，未保存".to_string();
+            return;
+        }
+
+        // 用浮窗展示新构建的图像（用户要求）
+        let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
+        self.floats.push(Float {
+            id,
+            title: format!("引用点截图 #{} · 第 {} 页", index + 1, page.display_number()),
+            content: FloatContent::Image(texture),
+            rect: egui::Rect::from_min_size(
+                egui::pos2(32.0 + cascade, 32.0 + cascade),
+                EVec2::new(
+                    overlap.width.clamp(FLOAT_MIN_SIZE.x, 640.0),
+                    overlap.height.clamp(FLOAT_MIN_SIZE.y, 640.0) + FLOAT_TITLE_HEIGHT,
+                ),
+            ),
+        });
+        self.message = format!(
+            "已保存第 {} 页被引用点 #{} 的截图（矩形 {:.0}×{:.0} pt）",
+            page.display_number(),
+            index + 1,
+            page_rect.width,
+            page_rect.height
+        );
+    }
+
+    /// 从**已缓存**位图合成一块内容空间区域的快照。
+    fn snapshot_for(
+        &self,
+        _ui: &mut egui::Ui,
+        session: &DocumentSession,
+        content_rect: Rect,
+    ) -> Option<egui::ColorImage> {
         let mut owned: Vec<(Rect, Option<Arc<RasterImage>>, Vec<(TileSpec, Arc<RasterImage>)>)> =
             Vec::new();
         for page in self.visible.clone() {
@@ -1447,8 +1611,23 @@ impl PdfReaderApp {
                 tiles: tiles.iter().map(|(tile, image)| (*tile, image.as_ref())).collect(),
             })
             .collect();
+        compose_snapshot(&sources, content_rect)
+    }
 
-        let Some(snapshot) = compose_snapshot(&sources, content_rect) else {
+    /// 把选中的区域做成截图快照，放入一个新的浮窗。
+    ///
+    /// 快照来源是**已经渲染好的位图**（整页或瓦片，直接从缓存取），因此无需重新渲染；
+    /// 拷贝成独立纹理后与主视图状态完全解耦：之后缩放/滚动/换页都不会改变浮窗内容。
+    fn capture_into_float(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &DocumentSession,
+        // `content_rect` 已经是**内容空间**矩形（调用方用 `screen_rect_to_content` 换算过）
+        content_rect: Rect,
+    ) {
+        // `content_rect` 由调用方从屏幕坐标换算而来（**必须减去画布原点**，见 view::screen_rect_to_content）
+
+        let Some(snapshot) = self.snapshot_for(ui, session, content_rect) else {
             self.message = "截图：该区域还没有已渲染的像素（请稍候再试）".to_string();
             return;
         };
