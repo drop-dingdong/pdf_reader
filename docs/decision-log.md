@@ -86,12 +86,27 @@
 
 **测试总数：101 passed, 0 failed, 0 warnings**（pdfcore 85 + backend-pdfium 16）。
 
-### ⏭ 剩余（M1 收尾 → M2）
+### ✅ 已完成：`crates/app`（egui/eframe 桌面壳）
 
-1. `app`（egui 壳）：`ViewerCommand` / `SessionEvent` ↔ 界面、白底页框占位、剪贴板；
-   运行期零件已就绪（`WorkerScheduler` + `LruCache`），可直接注入。
+* 打开方式：命令行参数 / 拖放文件；加密文档弹**模态密码框**（`PasswordRequired` 非故障分支的落地）；
+* 界面：工具栏（翻页/缩放/适应宽度/旋转/目录开关/搜索）、左侧目录、底部状态栏、中央画布；
+* 画布：整页纹理或**瓦片拼接**（分块时）、白底页框占位（D-06）、
+  选区与搜索命中高亮（走 `PagePlacement::rect_to_content` 这条唯一换算链）；
+* 交互：滚轮/`Ctrl`+滚轮缩放、拖动平移、拖选文字、双击选词、快捷键、拖放打开；
+* 运行期零件直接注入：`LruCache`（512 MiB 上限）+ `WorkerScheduler`（并发数取 `Capabilities`）。
+
+> **egui 0.37 的 API 与旧版本差异很大**（`App::ui(ui, frame)` 取代 `update(ctx, frame)`、
+> 侧边/上下栏统一为 `egui::Panel`、`Id::new` 弃用、`smooth_scroll_delta` 取代 `raw_scroll_delta`、
+> 拖放文件是 `Arc<dyn DroppedFile>`）。
+> 纯逻辑已抽到 `crates/app/src/view.rs` 并有 7 个单测；**其余部分必须真实窗口才能验证**，
+> 验收清单见 [crates/app/README.md](../crates/app/README.md)（agent.md 规则 2）。
+
+### ⏭ 剩余
+
+1. **人工验收**：按 app README 的 13 项清单检查（滚动跟手性、旋转页朝向、选择与复制、密码框…）；
 2. 打包（M3）：三平台 CI、动态库随包 + rpath 校验、macOS 签名公证、AppImage；
-3. 真实 PDF 采样集冒烟（旋转页、CJK、加密文档、超大页）。
+3. 真实 PDF 采样集冒烟（CJK、加密、超大页、扫描件）；
+4. M2 增强：原生文件对话框（`rfd`）、最近文件、缩略图侧边栏、大文档搜索放到后台。
 
 > 按 [agent.md](agent.md)：逻辑层测试随代码提交；**需要真实窗口/GPU 的验收项交给你**，
 > 我会在交付时说明"看什么、怎么看"。

@@ -288,6 +288,19 @@ impl DocumentSession {
         self.layout.placement(page)
     }
 
+    /// 取当前视口内可见的页，写入 `out`（复用缓冲区，每帧零分配）。
+    ///
+    /// UI 在绘制前调用它来准备纹理；结果与 [`ViewerCommand::RequestVisible`] 提交渲染时
+    /// 使用的是**同一套判断**（都走 [`PageLayout::visible_pages`]）。
+    pub fn visible_pages(&self, out: &mut Vec<PageIndex>) {
+        self.layout_engine.visible_pages(&self.layout, &self.viewport, out);
+    }
+
+    /// 后台是否还有排队或正在渲染的任务（UI 据此决定要不要持续重绘）。
+    pub fn pending_renders(&self) -> usize {
+        self.scheduler.pending()
+    }
+
     /// 某页当前缩放下的**整页**位图（若已在缓存中）。
     ///
     /// UI 拿它做纹理上传：`RasterImage::to_rgba8()` 之后即可交给 `egui::ColorImage`。

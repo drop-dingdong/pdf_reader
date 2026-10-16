@@ -281,8 +281,8 @@ PDF 页面坐标
 
 | 阶段 | 需要哪些零件就位 |
 | --- | --- |
-| **M1 走通** | `PdfBackend`、`Document`、`PageRaster`、`RenderCache`、`RenderScheduler`、`PageLayout`(VerticalLayout)、`DocumentSession` + egui 壳 |
-| **M2 可用阅读器** | 加 `TextLayer`、`TextSelection`（选区/复制/搜索/大纲/缩略图/密码） |
+| **M1 走通** ✅ | `PdfBackend`、`Document`、`PageRaster`、`RenderCache`(`LruCache`)、`RenderScheduler`(`WorkerScheduler`)、`PageLayout`(VerticalLayout)、`DocumentSession` + `crates/app`（egui 壳）|
+| **M2 可用阅读器** | 加 `TextLayer`、`TextSelection`（已完成基础版）；原生文件对话框、最近文件、缩略图侧边栏、搜索转后台 |
 | **M3 可发布** | 加 `KeyValueStore`、`AppSettings`（设置与最近文件）；打包与 CI；可选静态化 PDFium |
 | **M4 增强** | 新增 `PageLayout` 实现（对开）、批注相关 trait（届时再设计） |
 
