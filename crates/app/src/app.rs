@@ -26,8 +26,8 @@ use pdfcore::prelude::*;
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
-    destination_points, fit_inside, compose_snapshot, page_rect_to_screen, screen_rect_to_content,
-    veil_bands, view_rect_to_page_rect, SnapshotPage,
+    destination_points, find_dest_index, fit_inside, compose_snapshot, page_rect_to_screen,
+    screen_rect_to_content, veil_bands, view_rect_to_page_rect, SnapshotPage,
     flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
@@ -88,6 +88,18 @@ impl Tool {
             Self::Select => "选字",
         }
     }
+}
+
+/// 悬停预览浮窗：鼠标在页内链接上时出现，显示该链接目标的被引用点截图。
+///
+/// 只要指针还在**链接**或**这个浮窗**上就持续存在；点击它则转为永久浮窗（不受鼠标影响）。
+struct HoverTip {
+    /// 对应的被引用点 `(页号, 该页内下标)`
+    target: (PageIndex, usize),
+    /// 屏幕空间锚点（链接矩形的左下角附近）
+    anchor: egui::Pos2,
+    /// 上一帧实际绘制出来的矩形（用于判断"指针是否还在浮窗上"）
+    rect: Option<egui::Rect>,
 }
 
 /// 一个**被引用点**（链接跳转目的地）及其可编辑的截图信息。
@@ -166,6 +178,8 @@ pub struct PdfReaderApp {
     dest_marks: Vec<Vec<DestMark>>,
     /// 截图模式状态（`Some` = 处于该模式）。
     capture: Option<CaptureState>,
+    /// 悬停预览浮窗（鼠标在页内链接上时出现）。
+    hover_tip: Option<HoverTip>,
     /// 本帧累计的"像素格式转换"与"load_texture"耗时（诊断用，定位 150ms 到底在哪一段）。
     last_convert_ms: f64,
     last_upload_ms: f64,
@@ -240,6 +254,7 @@ impl PdfReaderApp {
             show_dest_points: false,
             dest_marks: Vec::new(),
             capture: None,
+            hover_tip: None,
             last_convert_ms: 0.0,
             last_upload_ms: 0.0,
             sidebar_width: 260.0,
@@ -1361,6 +1376,11 @@ impl PdfReaderApp {
                 }
             }
 
+            // 悬停预览：鼠标在页内链接上时，显示该链接目标的被引用点截图（没有则现在渲染一次）
+            if self.capture.is_none() {
+                self.update_and_draw_hover_tip(ui, session, canvas, scroll);
+            }
+
             // 浮窗**最后**绘制与注册 → 位于最上层；后加入的在更上层（见 draw_floats）。
             // 截图模式下所有浮窗不显现（连交互也不注册，避免吃掉框选拖动）。
             if self.capture.is_none() {
@@ -1389,6 +1409,171 @@ impl PdfReaderApp {
             rect,
         });
         self.message = format!("已添加测试浮窗 #{id}");
+    }
+
+    /// 悬停预览浮窗：检测鼠标下的页内链接 → 找到对应被引用点 → 必要时**渲染一次**截图 →
+    /// 画一个临时浮窗。指针离开链接与浮窗后消失；点击它则转为永久浮窗。
+    fn update_and_draw_hover_tip(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &DocumentSession,
+        canvas: egui::Rect,
+        scroll: Vec2,
+    ) {
+        let pointer = ui.ctx().pointer_hover_pos();
+        let mut found: Option<((PageIndex, usize), egui::Pos2)> = None;
+
+        if let (Some(pointer), Some(navigation)) = (pointer, self.navigation.clone()) {
+            'outer: for page in self.visible.clone() {
+                let Some(placement) = session.placement(page).copied() else { continue };
+                for link in navigation.links_on(page) {
+                    // 只在页内跳转（带具体坐标）的链接上响应
+                    let Destination::Page { page: target_page, offset: Some(point) } =
+                        &link.destination
+                    else {
+                        continue;
+                    };
+                    let content = placement.rect_to_content(link.rect);
+                    let screen = egui::Rect::from_min_size(
+                        canvas.min + EVec2::new(content.x - scroll.x, content.y - scroll.y),
+                        EVec2::new(content.width, content.height),
+                    );
+                    if !screen.contains(pointer) {
+                        continue;
+                    }
+                    // 链接 → 被引用点：用与建表相同的量化规则查找
+                    let Some(marks) = self.dest_marks.get(target_page.get() as usize) else {
+                        continue;
+                    };
+                    let positions: Vec<Point> = marks.iter().map(|mark| mark.point).collect();
+                    if let Some(index) = find_dest_index(&positions, *point) {
+                        found = Some((( *target_page, index), screen.left_bottom()));
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        // 指针不在链接上时：只有还在浮窗上才保留
+        let keep_existing = match (&self.hover_tip, pointer) {
+            (Some(tip), Some(pointer)) => tip.rect.map_or(false, |rect| rect.contains(pointer)),
+            _ => false,
+        };
+        match found {
+            Some((target, anchor)) => {
+                self.hover_tip = Some(HoverTip { target, anchor, rect: None });
+            }
+            None if keep_existing => {}
+            None => {
+                self.hover_tip = None;
+                return;
+            }
+        }
+
+        // 需要时**渲染一次**截图（之后复用；这正是"None 才渲染"的懒加载）
+        let Some(tip) = self.hover_tip.as_ref() else { return };
+        let (page, index) = tip.target;
+        let anchor = tip.anchor;
+        let needs_render = self
+            .dest_marks
+            .get(page.get() as usize)
+            .and_then(|marks| marks.get(index))
+            .map_or(false, |mark| mark.snapshot.is_none());
+        if needs_render {
+            let saved_rect = self
+                .dest_marks
+                .get(page.get() as usize)
+                .and_then(|marks| marks.get(index))
+                .map(|mark| mark.rect);
+            if let (Some(saved_rect), Some(placement)) = (saved_rect, session.placement(page).copied())
+            {
+                let content = placement.rect_to_content(saved_rect);
+                if let Some(image) = self.snapshot_for(ui, session, content) {
+                    let texture = ui.ctx().load_texture(
+                        format!("dest-hover-{}-{}", page.get(), index),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    if let Some(mark) = self
+                        .dest_marks
+                        .get_mut(page.get() as usize)
+                        .and_then(|marks| marks.get_mut(index))
+                    {
+                        mark.snapshot = Some(texture);
+                    }
+                }
+            }
+        }
+
+        // 画临时浮窗：贴在链接左下角，夹取在画布内
+        let Some(texture) = self
+            .dest_marks
+            .get(page.get() as usize)
+            .and_then(|marks| marks.get(index))
+            .and_then(|mark| mark.snapshot.clone())
+        else {
+            self.message = "该被引用点还没有可用的截图（稍后重试）".to_string();
+            return;
+        };
+        let size = texture.size_vec2();
+        let wanted = EVec2::new(
+            size.x.clamp(120.0, 420.0),
+            size.y.clamp(80.0, 320.0) + FLOAT_TITLE_HEIGHT,
+        );
+        let rect = clamp_float_rect(
+            egui::Rect::from_min_size(anchor + EVec2::new(12.0, 8.0), wanted),
+            canvas,
+            EVec2::new(120.0, 80.0),
+        );
+        let response = ui.interact(rect, Id::unique("hover-tip"), Sense::click());
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(30, 32, 36));
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(4),
+            Stroke::new(1.0, Color32::from_gray(150)),
+            StrokeKind::Inside,
+        );
+        let title_rect =
+            egui::Rect::from_min_size(rect.min, EVec2::new(rect.width(), FLOAT_TITLE_HEIGHT));
+        painter.rect_filled(title_rect, CornerRadius::same(4), Color32::from_rgb(54, 58, 66));
+        painter.text(
+            title_rect.left_center() + EVec2::new(8.0, 0.0),
+            Align2::LEFT_CENTER,
+            format!("引用点预览 · 第 {} 页（点击固定）", page.display_number()),
+            egui::FontId::proportional(12.0),
+            Color32::WHITE,
+        );
+        let body = egui::Rect::from_min_max(
+            rect.min + EVec2::new(4.0, FLOAT_TITLE_HEIGHT + 4.0),
+            rect.max - EVec2::new(4.0, 4.0),
+        );
+        painter.image(
+            texture.id(),
+            fit_inside(size, body),
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        if let Some(tip) = self.hover_tip.as_mut() {
+            tip.rect = Some(rect);
+        }
+
+        // 点击 → 转为永久浮窗（保留同一张图，不受鼠标位置影响）
+        if response.clicked() {
+            let id = self.next_float_id;
+            self.next_float_id += 1;
+            self.floats.push(Float {
+                id,
+                title: format!("引用点截图 · 第 {} 页", page.display_number()),
+                content: FloatContent::Image(texture),
+                rect: egui::Rect::from_min_size(
+                    egui::pos2(rect.min.x, rect.min.y),
+                    EVec2::new(rect.width(), rect.height()),
+                ),
+            });
+            self.hover_tip = None;
+            self.message = format!("已固定为浮窗 #{id}");
+        }
     }
 
     /// 截图模式：框选区域 + 半透明蒙层（矩形内透明）+ Enter/Esc 退出。

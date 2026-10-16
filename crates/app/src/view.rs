@@ -445,6 +445,24 @@ pub fn clamp_float_rect(rect: egui::Rect, area: egui::Rect, min_size: egui::Vec2
     egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(width, height))
 }
 
+/// 被引用点的去重网格：0.5pt（远小于一个字，肉眼视为同一点）。
+pub const DEST_QUANTUM: f32 = 0.5;
+
+/// 把位置量化到去重网格。**建表与查询必须用同一个函数**，
+/// 否则"链接 → 被引用点"会查不到（两处各写一份量化就迟早会走偏）。
+pub fn quantize_dest_point(point: Point) -> Point {
+    Point::new(
+        (point.x / DEST_QUANTUM).round() * DEST_QUANTUM,
+        (point.y / DEST_QUANTUM).round() * DEST_QUANTUM,
+    )
+}
+
+/// 在一页的已量化位置里查找某个链接目标对应的下标（悬停预览要用它找到被引用点）。
+pub fn find_dest_index(points: &[Point], target: Point) -> Option<usize> {
+    let target = quantize_dest_point(target);
+    points.iter().position(|point| *point == target)
+}
+
 /// 收集**被引用的点**（链接跳转目的地），按目标页分组，并按位置去重。
 ///
 /// * 一条链接只在自己带**具体坐标**（`Destination::Page.offset`）时算一个引用点；
@@ -452,9 +470,6 @@ pub fn clamp_float_rect(rect: egui::Rect, area: egui::Rect, min_size: egui::Vec2
 /// * 大量链接可能指向同一个点，因此按 0.5pt 网格量化后去重（用户要求）；
 /// * 返回 `Vec` 的下标就是目标页号，越界的目标丢弃。
 pub fn destination_points(links_by_page: &[Vec<Link>], page_count: usize) -> Vec<Vec<Point>> {
-    /// 去重网格：0.5pt（远小于一个字，肉眼视为同一点）。
-    const QUANTUM: f32 = 0.5;
-
     let mut out: Vec<Vec<Point>> = vec![Vec::new(); page_count];
     for links in links_by_page {
         for link in links {
@@ -462,10 +477,7 @@ pub fn destination_points(links_by_page: &[Vec<Link>], page_count: usize) -> Vec
                 continue;
             };
             let Some(bucket) = out.get_mut(page.get() as usize) else { continue };
-            let quantized = Point::new(
-                (point.x / QUANTUM).round() * QUANTUM,
-                (point.y / QUANTUM).round() * QUANTUM,
-            );
+            let quantized = quantize_dest_point(*point);
             if !bucket.contains(&quantized) {
                 bucket.push(quantized);
             }
@@ -1094,6 +1106,31 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 建表与查询必须走同一个量化：链接 → 被引用点 的查找才不会落空。
+    #[test]
+    fn dest_lookup_uses_the_same_quantization_as_the_table() {
+        let link = |page: u32, point: Point| Link {
+            rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+            destination: Destination::Page { page: PageIndex::new(page), offset: Some(point) },
+        };
+        let links = vec![
+            vec![link(1, Point::new(10.0, 20.0)), link(1, Point::new(300.0, 400.0))],
+            Vec::new(),
+        ];
+        let points = destination_points(&links, 2);
+        let first_page = &points[1];
+        assert_eq!(first_page.len(), 2);
+
+        // 用"略偏一点"的同一点去查，仍应命中（量化到同一格）
+        assert_eq!(find_dest_index(first_page, Point::new(10.2, 20.2)), Some(0));
+        assert_eq!(find_dest_index(first_page, Point::new(10.0, 20.0)), Some(0));
+        assert_eq!(find_dest_index(first_page, Point::new(300.0, 400.0)), Some(1));
+        // 另一个点 → 未命中
+        assert_eq!(find_dest_index(first_page, Point::new(50.0, 60.0)), None);
+        // 量化函数本身：0.4 → 0.5，0.2 → 0.0
+        assert_eq!(quantize_dest_point(Point::new(10.4, 20.2)), Point::new(10.5, 20.0));
     }
 
     /// 被引用点的默认矩形：以该点为中心、尺寸固定；页面矩形→屏幕矩形要能来回对上。
