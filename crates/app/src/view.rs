@@ -177,6 +177,45 @@ pub fn link_rect_in_page_bounds(rect: Rect, page_size: Size) -> bool {
         && rect.bottom() <= page_size.height + slack
 }
 
+/// 把位图**一遍**转成 egui 的 `ColorImage`。
+///
+/// 为什么不用 `RasterImage::to_rgba8()` + `ColorImage::from_rgba_unmultiplied()`：
+/// 那是**两遍**逐像素处理 + 两次整块分配（实测"新页进入"那一帧 ~150ms）。
+/// 这里一遍完成，且避免每像素 `extend_from_slice` 的调用开销。
+/// PDFium 的 BGRA 是**预乘 alpha**，故用 `from_rgba_premultiplied`
+/// （页面区域 alpha 恒为 255，两者等价）。
+pub fn color_image(
+    format: PixelFormat,
+    data: &[u8],
+    width: u32,
+    height: u32,
+) -> egui::ColorImage {
+    let (w, h) = (width as usize, height as usize);
+    let mut pixels = Vec::with_capacity(w * h);
+    match format {
+        PixelFormat::Bgra8 => {
+            for px in data.chunks_exact(4).take(w * h) {
+                pixels.push(egui::Color32::from_rgba_premultiplied(px[2], px[1], px[0], px[3]));
+            }
+        }
+        PixelFormat::Rgba8 => {
+            for px in data.chunks_exact(4).take(w * h) {
+                pixels.push(egui::Color32::from_rgba_premultiplied(px[0], px[1], px[2], px[3]));
+            }
+        }
+        PixelFormat::Gray8 => {
+            for &gray in data.iter().take(w * h) {
+                pixels.push(egui::Color32::from_gray(gray));
+            }
+        }
+    }
+    egui::ColorImage {
+        size: [w, h],
+        source_size: egui::vec2(w as f32, h as f32),
+        pixels,
+    }
+}
+
 /// 扁平行：`(缩进层级, 标题, 跳转目标)`。
 ///
 /// 侧栏用虚拟化行渲染（只布局可见的那十几行），因此需要先把树**一次性**摊平 ——
@@ -749,6 +788,39 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 位图 → ColorImage：一遍完成、通道顺序正确、尺寸匹配。
+    #[test]
+    fn color_image_converts_bgra_in_one_pass() {
+        // 2×2 BGRA：红 / 绿 / 蓝 / 半透明白
+        let data: Vec<u8> = vec![
+            0, 0, 255, 255, // BGRA 红
+            0, 255, 0, 255, // BGRA 绿
+            255, 0, 0, 255, // BGRA 蓝
+            255, 255, 255, 128,
+        ];
+        let image = color_image(PixelFormat::Bgra8, &data, 2, 2);
+        assert_eq!(image.size, [2, 2]);
+        assert_eq!(image.pixels.len(), 4);
+        assert_eq!(image.pixels[0], egui::Color32::from_rgb(255, 0, 0));
+        assert_eq!(image.pixels[1], egui::Color32::from_rgb(0, 255, 0));
+        assert_eq!(image.pixels[2], egui::Color32::from_rgb(0, 0, 255));
+        assert_eq!(image.pixels[3].a(), 128, "alpha 必须保留");
+
+        // RGBA 走另一条分支
+        let rgba: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 0, 0, 0, 0];
+        let image = color_image(PixelFormat::Rgba8, &rgba, 2, 2);
+        assert_eq!(image.pixels[0], egui::Color32::from_rgb(255, 0, 0));
+
+        // 灰度：R=G=B
+        let gray: Vec<u8> = vec![10, 200, 0, 255];
+        let image = color_image(PixelFormat::Gray8, &gray, 2, 2);
+        assert_eq!(image.pixels[1], egui::Color32::from_rgb(200, 200, 200));
+
+        // 数据不足时不得越界（按可用像素截断）
+        let short = color_image(PixelFormat::Bgra8, &data[..4], 2, 2);
+        assert_eq!(short.pixels.len(), 1, "不足的像素不应被凭空补齐");
     }
 
     /// 大纲摊平：顺序、层级、目标都要原样保留（虚拟化行渲染依赖它）。

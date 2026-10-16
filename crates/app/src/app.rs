@@ -25,8 +25,8 @@ use pdfcore::prelude::*;
 
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
-    commands_for_destination, flatten_outline, link_overlay_visible, link_rect_in_page_bounds,
-    outline_node_count, texture_pages,
+    color_image, commands_for_destination, flatten_outline, link_overlay_visible,
+    link_rect_in_page_bounds, outline_node_count, texture_pages,
     tile_view_rect, tile_view_rect_scaled,
     view_rect_for, view_to_content, KeyedStore,
 };
@@ -103,6 +103,9 @@ pub struct PdfReaderApp {
     show_links: bool,
     /// 大纲的**扁平行**（打开文档时摊平一次；侧栏用虚拟化行渲染，避免每帧布局上千行）。
     outline_rows: Vec<crate::view::OutlineRow>,
+    /// 本帧累计的"像素格式转换"与"load_texture"耗时（诊断用，定位 150ms 到底在哪一段）。
+    last_convert_ms: f64,
+    last_upload_ms: f64,
     /// 侧栏宽度：**由 app 自己保存**。
     ///
     /// egui 的面板尺寸以 `parent_ui.scope_id().with_salt(...)` 为键持久化，
@@ -169,6 +172,8 @@ impl PdfReaderApp {
             tool: Tool::default(),
             show_links: false,
             outline_rows: Vec::new(),
+            last_convert_ms: 0.0,
+            last_upload_ms: 0.0,
             sidebar_width: 260.0,
             password_for: None,
             password_input: String::new(),
@@ -361,7 +366,15 @@ impl PdfReaderApp {
     /// 1. **提前上传相邻页**：会话已按 `PREFETCH_PAGE_RADIUS` 预渲染，这里把它们也传成纹理，
     ///    于是"新页进入视口"那一刻不再有 4 MiB 量级的转换 + GPU 上传开销；
     /// 2. **每帧限量上传**：一帧内同时上传多页会造成明显掉帧，因此设上限、分帧摊开。
-    fn ensure_textures(&mut self, ctx: &egui::Context, session: &DocumentSession) {
+    ///
+    /// `allow_upload = false` 时只更新可见页与裁剪，**跳过转换与上传** ——
+    /// 拖动期间用它把"新页进入"那一帧约 150ms 的逐像素转换挪到松手之后（用户要求）。
+    fn ensure_textures(
+        &mut self,
+        ctx: &egui::Context,
+        session: &DocumentSession,
+        allow_upload: bool,
+    ) -> usize {
         self.visible.clear();
         session.visible_pages(&mut self.visible);
 
@@ -375,11 +388,13 @@ impl PdfReaderApp {
         );
 
         let mut uploaded = 0usize;
-        for page in &targets {
-            if uploaded >= MAX_UPLOADS_PER_FRAME {
-                break;
+        if allow_upload {
+            for page in &targets {
+                if uploaded >= MAX_UPLOADS_PER_FRAME {
+                    break;
+                }
+                uploaded += self.upload_page(ctx, session, *page);
             }
-            uploaded += self.upload_page(ctx, session, *page);
         }
 
         // 裁剪：只保留可见页（±1）与当前页，并且每页只保留"当前比例 + 最近一个旧比例"
@@ -399,6 +414,7 @@ impl PdfReaderApp {
             .unwrap_or(1000);
         self.textures
             .retain_preview_scales(&pages, current_scale_milli);
+        uploaded
     }
 
     /// 上传某一页当前可用的位图（整页或瓦片），返回新上传的纹理数量。
@@ -436,17 +452,18 @@ impl PdfReaderApp {
         if self.textures.contains(&key) {
             return;
         }
-        // 全项目唯一的 BGRA→RGBA 转换点
-        let rgba = image.to_rgba8();
-        let color = egui::ColorImage::from_rgba_unmultiplied(
-            [image.width as usize, image.height as usize],
-            &rgba,
-        );
+        // 全项目唯一的像素格式转换点：**一遍**完成（见 view::color_image 的说明）
+        let started = std::time::Instant::now();
+        let color = color_image(image.format, image.data(), image.width, image.height);
+        self.last_convert_ms += started.elapsed().as_secs_f64() * 1000.0;
+
+        let started = std::time::Instant::now();
         let texture = ctx.load_texture(
             format!("page-{}-{}-{:?}", key.page.get(), key.scale_milli, key.tile),
             color,
             egui::TextureOptions::LINEAR,
         );
+        self.last_upload_ms += started.elapsed().as_secs_f64() * 1000.0;
         self.textures.insert(key, texture);
     }
 
@@ -1231,8 +1248,17 @@ impl eframe::App for PdfReaderApp {
         }
         let previewing = self.previewing();
 
-        self.ensure_textures(&ctx, &session);
+        self.last_convert_ms = 0.0;
+        self.last_upload_ms = 0.0;
+        // 拖动期间**暂缓**转换与上传：把"新页进入"那一帧的逐像素开销挪到松手之后，
+        // 拖动本身只需保证画面跟着走（未就绪的区域显示旧图或白纸）。
+        let dragging = self.drag.is_some();
+        let uploaded = self.ensure_textures(&ctx, &session, !dragging);
         let after_textures = frame_start.elapsed();
+        if uploaded > 0 {
+            // 本帧上传过 → 继续重绘，把"松手后补齐"的过程走完（拖动期间暂缓的上传会在这里补上）
+            ctx.request_repaint();
+        }
 
         self.draw_toolbar(ui, &session);
         self.draw_sidebar(ui, &session);
@@ -1245,10 +1271,12 @@ impl eframe::App for PdfReaderApp {
             let total_ms = after_draw.as_secs_f64() * 1000.0;
             if self.drag.is_some() || total_ms > 25.0 {
                 eprintln!(
-                    "[帧] 总={:.1}ms 输入+pump={:.1}ms 纹理={:.1}ms 绘制={:.1}ms 纹理数={} 命中={} 可见页={} 大纲={} 在飞={}",
+                    "[帧] 总={:.1}ms 输入+pump={:.1}ms 纹理={:.1}ms(转换={:.1} 上传={:.1}) 绘制={:.1}ms 纹理数={} 命中={} 可见页={} 大纲={} 在飞={}",
                     total_ms,
                     after_input.as_secs_f64() * 1000.0,
                     (after_textures - after_input).as_secs_f64() * 1000.0,
+                    self.last_convert_ms,
+                    self.last_upload_ms,
                     (after_draw - after_textures).as_secs_f64() * 1000.0,
                     self.textures.len(),
                     self.hits.len(),
