@@ -24,8 +24,8 @@ use egui::{
 use pdfcore::prelude::*;
 
 use crate::view::{
-    command_for_key, command_for_scroll, command_for_zoom_delta, view_rect_for, view_to_content,
-    KeyedStore,
+    command_for_key, command_for_scroll, command_for_zoom_delta, tile_view_rect,
+    tile_view_rect_scaled, view_rect_for, view_to_content, KeyedStore,
 };
 
 /// 纹理缓存容量（条目数）。真正的淘汰依据是"是否可见"，容量只是兜底。
@@ -40,6 +40,12 @@ const SIDEBAR_MAX_WIDTH: f32 = 640.0;
 /// 一张整页位图的 RGBA 转换 + GPU 上传在毫秒量级；一帧内连传多张就会掉帧。
 /// 设上限后开销被摊到多帧，视觉上是"相邻页稍后补齐"，比"翻页顿一下"好得多。
 const MAX_UPLOADS_PER_FRAME: usize = 2;
+
+/// 缩放/旋转后进入"预览窗口"的时长：这段时间内不提交新渲染、只显示旧图拉伸。
+///
+/// 取 160ms：比人手连续滚轮的间隔（约 50–120ms）略长，因此一次连续缩放只会
+/// 在最后渲染一次；又不至于让单次缩放的清晰图来得太迟。
+const ZOOM_PREVIEW_WINDOW: std::time::Duration = std::time::Duration::from_millis(160);
 
 /// 拖拽中：区分"平移画面"与"选择文字"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +114,15 @@ pub struct PdfReaderApp {
     diagnose: bool,
     /// 上次诊断输出的时间（限流到每秒一次）。
     last_report: std::time::Instant,
+    /// 缩放/旋转"刚变过"的截止时间：在此之前不提交新渲染，全部可见页统一显示旧图拉伸。
+    ///
+    /// 连续滚轮缩放会产生一串中间比例（100→120→140→150），逐个渲染既浪费时间
+    /// 又每步都掉一次帧（第三轮验收"缩放总是有顿感"）。等用户停手再渲染最终比例，
+    /// 中间的过场用旧图顶上 —— 这是"预览质量阶梯"的轻量版。
+    preview_until: Option<std::time::Instant>,
+    /// 上一帧观察到的缩放与旋转，用于检测"刚变过"。
+    last_zoom: f32,
+    last_rotation: Rotation,
 }
 
 impl PdfReaderApp {
@@ -140,6 +155,9 @@ impl PdfReaderApp {
             error: None,
             diagnose: std::env::var_os("PDF_READER_DIAGNOSE").is_some(),
             last_report: std::time::Instant::now(),
+            preview_until: None,
+            last_zoom: 1.0,
+            last_rotation: Rotation::None,
         };
         if let Some(path) = initial {
             app.open(&path, None);
@@ -585,6 +603,7 @@ impl PdfReaderApp {
 
             // 1) 页面
             let visible = self.visible.clone();
+            let previewing = self.previewing();
             let mut report: Vec<String> = Vec::new();
             for page in visible {
                 let Some(placement) = session.placement(page).copied() else {
@@ -596,6 +615,8 @@ impl PdfReaderApp {
                     canvas.min + EVec2::new(page_rect.x, page_rect.y),
                     EVec2::new(page_rect.width, page_rect.height),
                 );
+                // 先铺"纸张"：任何未就绪的区域露出的是白纸，而不是深色画布（D-06 的兜底）
+                paint_placeholder(&painter, screen);
 
                 let whole_key = RenderKey::new(page, placement.scale, placement.rotation);
                 let has_previous = self
@@ -609,15 +630,30 @@ impl PdfReaderApp {
                     Whole,
                     Stretch,
                     Tiles(TileSpec, TileSpec),
+                    /// 用上一档缩放的**瓦片**拼出预览（高倍缩放下没有整页图可拉伸）。
+                    TilePreview(u32),
                     Blank,
                 }
                 let plan = if self.textures.contains(&whole_key) {
                     Plan::Whole
                 } else if let Some((first, last)) = session.visible_tiles(page) {
-                    // 一块真瓦片都没有时，才允许用上一档缩放的旧图拉伸顶替；
+                    // 一块真瓦片都没有时，才允许用上一档的旧图顶替；
                     // 只要有任何一块真瓦片就必须画瓦片，否则旧图会一直盖住已就绪的内容。
-                    if !self.textures.has_tiles(&whole_key) && has_previous {
+                    // 例外：正处于缩放预览窗口内 → 所有可见页统一显示旧内容，避免一半新一半旧
+                    //（第三轮验收："非中心页面没有同样处理"）。
+                    if self.textures.has_tiles(&whole_key) {
+                        Plan::Tiles(first, last)
+                    } else if has_previous {
                         Plan::Stretch
+                    } else if previewing {
+                        match self.textures.best_tile_scale(
+                            page,
+                            placement.rotation,
+                            whole_key.scale_milli,
+                        ) {
+                            Some(old_scale) => Plan::TilePreview(old_scale),
+                            None => Plan::Tiles(first, last),
+                        }
                     } else {
                         Plan::Tiles(first, last)
                     }
@@ -641,6 +677,32 @@ impl PdfReaderApp {
                         paint_image(&painter, texture, screen);
                         ("旧图拉伸", 0, 0)
                     }
+                    Plan::TilePreview(old_scale_milli) => {
+                        let old_page = placement
+                            .page_size
+                            .rotated(placement.rotation)
+                            .scale(old_scale_milli as f32 / 1000.0);
+                        let new_page = placement.pixel_size();
+                        let mut count = 0u32;
+                        for (tile, texture) in
+                            self.textures.tiles_at(page, placement.rotation, old_scale_milli)
+                        {
+                            let pixels = tile.pixel_rect(old_page);
+                            let rect = tile_view_rect_scaled(
+                                page_rect,
+                                pixels,
+                                old_page,
+                                new_page,
+                            );
+                            let tile_screen = egui::Rect::from_min_size(
+                                canvas.min + EVec2::new(rect.x, rect.y),
+                                EVec2::new(rect.width, rect.height),
+                            );
+                            paint_image(&painter, texture, tile_screen);
+                            count += 1;
+                        }
+                        ("旧瓦片预览", count, count)
+                    }
                     Plan::Tiles(first, last) => {
                         // 视口覆盖到的**全部**瓦片都要画：就绪的贴图、未就绪的补白。
                         // v1 只遍历"已缓存"的瓦片，未就绪区域直接露出深色画布 ——
@@ -653,6 +715,8 @@ impl PdfReaderApp {
                                 total += 1;
                                 let tile = TileSpec::new(col, row);
                                 let pixels = tile.pixel_rect(pixel_size);
+                                // 不变量：内容空间单位 == 该页位图像素 → 像素偏移直接相加（D-17）
+                                let rect = tile_view_rect(page_rect, pixels);
                                 let key = RenderKey::tiled(
                                     page,
                                     placement.scale,
@@ -660,15 +724,8 @@ impl PdfReaderApp {
                                     tile,
                                 );
                                 let tile_screen = egui::Rect::from_min_size(
-                                    canvas.min
-                                        + EVec2::new(
-                                            page_rect.x + pixels.x / placement.scale.0,
-                                            page_rect.y + pixels.y / placement.scale.0,
-                                        ),
-                                    EVec2::new(
-                                        pixels.width / placement.scale.0,
-                                        pixels.height / placement.scale.0,
-                                    ),
+                                    canvas.min + EVec2::new(rect.x, rect.y),
+                                    EVec2::new(rect.width, rect.height),
                                 );
                                 match self.textures.get(&key) {
                                     Some(texture) => {
@@ -861,6 +918,17 @@ impl eframe::App for PdfReaderApp {
 
         self.collect_commands(&ctx, &session);
         self.apply_and_pump(&ctx, &mut session);
+
+        // 检测"缩放/旋转刚刚变过"：连续缩放期间不提交渲染，只显示旧图拉伸（见 ZOOM_PREVIEW_WINDOW）
+        let zoom_now = session.state().zoom;
+        let rotation_now = session.state().user_rotation;
+        if (zoom_now - self.last_zoom).abs() > f32::EPSILON || rotation_now != self.last_rotation {
+            self.last_zoom = zoom_now;
+            self.last_rotation = rotation_now;
+            self.preview_until = Some(std::time::Instant::now() + ZOOM_PREVIEW_WINDOW);
+        }
+        let previewing = self.previewing();
+
         self.ensure_textures(&ctx, &session);
 
         self.draw_toolbar(ui, &session);
@@ -868,15 +936,23 @@ impl eframe::App for PdfReaderApp {
         self.draw_status(ui, &session);
         self.draw_canvas(ui, &mut session);
 
-        // 为下一帧备好可见页
-        session.handle(ViewerCommand::RequestVisible, &mut self.events);
-        self.events.clear();
-
-        // 只有后台还有任务时才持续重绘（避免空转）
-        let pending = session.pending_renders();
+        let pending = if previewing {
+            // 预览窗口内**不请求渲染**：把这一串中间比例的钱省下来，只画最终那一次。
+            // 会话在 set_zoom 里已经 cancel_all，所以队列此刻是空的，不会白等。
+            0
+        } else {
+            session.handle(ViewerCommand::RequestVisible, &mut self.events);
+            self.events.clear();
+            session.pending_renders()
+        };
         self.session = Some(session);
 
-        if pending > 0 {
+        // 预览窗口结束后必须自己醒一次，去请求最终比例的渲染
+        if previewing {
+            if let Some(deadline) = self.preview_until {
+                ctx.request_repaint_after(deadline.saturating_duration_since(std::time::Instant::now()));
+            }
+        } else if pending > 0 {
             ctx.request_repaint();
         }
         self.draw_password_prompt(&ctx);
@@ -884,6 +960,12 @@ impl eframe::App for PdfReaderApp {
 }
 
 impl PdfReaderApp {
+    /// 是否正处于"缩放/旋转预览窗口"内（此刻只显示旧图，不提交渲染）。
+    fn previewing(&self) -> bool {
+        self.preview_until
+            .map_or(false, |deadline| std::time::Instant::now() < deadline)
+    }
+
     /// 没有打开文档时的空状态界面。
     fn draw_empty(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
