@@ -877,13 +877,19 @@ impl DocumentSession {
         self.visible_scratch = visible;
     }
 
-    /// 取消所有"页不在 `visible` 中、且不是当前页"的在飞任务。
+    /// 取消所有"已经不可能被用上"的在飞任务：
+    ///
+    /// 1. 页已滚出视口且不是当前页；
+    /// 2. 页仍在视口，但**键已不对应当前布局**（缩放/旋转变了）—— 这类结果渲染出来也会被丢弃，
+    ///    不取消的话 PDFium 会先花时间把它画完，用户感受到的就是"每次缩放都顿一下"（第三轮验收）。
     ///
     /// 用 [`RenderScheduler::cancel_page`] 而不是逐个 `cancel(job)`：两种调度器实现
     /// （后台线程版与同步测试版）都支持按页取消，且都会**补发 `Cancelled` 事件**，
     /// 于是本会话的在飞记录会被 `pump` 正确清理。
     fn cancel_stale_jobs(&mut self, visible: &[PageIndex]) {
         let current = self.state.current_page;
+
+        // 1) 页已经不在视口里
         let mut stale_pages: Vec<PageIndex> = self
             .jobs
             .keys()
@@ -893,6 +899,29 @@ impl DocumentSession {
         stale_pages.sort();
         stale_pages.dedup();
         for page in stale_pages {
+            self.scheduler.cancel_page(page);
+        }
+
+        // 2) 页还在视口，但**键（缩放/旋转）已过时**：这类结果渲染出来也会被丢弃。
+        //    按页取消（而不是逐个 `cancel(job)`）是为了让两种调度器实现都生效 ——
+        //    同步的测试实现没有作业队列，只能按页把已产生的事件改写成 `Cancelled`。
+        //    此刻当前比例的请求还没提交（取消总在提交之前），因此按页取消不会误伤新任务。
+        let mut outdated_pages: Vec<PageIndex> = self
+            .jobs
+            .keys()
+            .filter(|key| visible.contains(&key.page))
+            .filter(|key| {
+                self.layout.placement(key.page).map_or(true, |placement| {
+                    key.scale_milli
+                        != RenderKey::new(key.page, placement.scale, placement.rotation).scale_milli
+                        || key.rotation != placement.rotation
+                })
+            })
+            .map(|key| key.page)
+            .collect();
+        outdated_pages.sort();
+        outdated_pages.dedup();
+        for page in outdated_pages {
             self.scheduler.cancel_page(page);
         }
     }

@@ -223,7 +223,11 @@ pub fn tiles_covering(visible_px: Rect, grid: (u16, u16)) -> Option<(TileSpec, T
 pub enum TilingPolicy {
     /// 从不分块（整页一张位图）。
     Never,
-    /// 页的像素面积超过阈值时才分块（默认 16 MP ≈ 4000×4000 ≈ 单页 64 MB）。
+    /// 页的像素面积超过阈值时才分块。
+    ///
+    /// 默认 4 MP：实测（真实 PDFium）一块 512×512 瓦片约 9ms，而整页渲染在 4 MP 以上
+    /// 就要几十毫秒到几百毫秒、内存随面积线性增长（31 MP = 124 MB）。
+    /// 阈值取 4 MP 是"整页一次画完更省"与"分块更省内存/更跟手"的平衡点（D-15）。
     AbovePixels(u32),
     /// 总是分块。
     Always,
@@ -231,7 +235,7 @@ pub enum TilingPolicy {
 
 impl Default for TilingPolicy {
     fn default() -> Self {
-        Self::AbovePixels(16_000_000)
+        Self::AbovePixels(4_000_000)
     }
 }
 
@@ -609,10 +613,12 @@ mod tests {
     #[test]
     fn tiling_policy_thresholds() {
         let policy = TilingPolicy::default();
-        assert_eq!(policy, TilingPolicy::AbovePixels(16_000_000));
-        // zoom=3 的 612×792 → 1836×2376 ≈ 4.36 MP < 16 MP → 整页
-        assert!(!policy.requires_tiling(Size::new(1836.0, 2376.0)));
-        // zoom=8 → 4896×6336 ≈ 31 MP > 16 MP → 分块
+        assert_eq!(policy, TilingPolicy::AbovePixels(4_000_000));
+        // zoom=2 的 612×792 → 1224×1584 ≈ 1.94 MP < 4 MP → 整页（一次渲染更划算）
+        assert!(!policy.requires_tiling(Size::new(1224.0, 1584.0)));
+        // zoom=3 → 1836×2376 ≈ 4.36 MP > 4 MP → 分块（实测每块 ~9ms，比整页 17MB 快得多）
+        assert!(policy.requires_tiling(Size::new(1836.0, 2376.0)));
+        // zoom=8 → 4896×6336 ≈ 31 MP → 分块（整页要 124 MB）
         assert!(policy.requires_tiling(Size::new(4896.0, 6336.0)));
         assert!(!TilingPolicy::Never.requires_tiling(Size::new(9999.0, 9999.0)));
         assert!(TilingPolicy::Always.requires_tiling(Size::new(1.0, 1.0)));

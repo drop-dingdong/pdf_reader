@@ -232,7 +232,7 @@ PDF 页面坐标
 | `ScrollAnchor` | ▲v3 `{ page, page_point }` —— 视野中心锚点，布局重算前后保持阅读位置不漂移（D-05） |
 | `Scale` | newtype(f32)：设备像素 / point；含 `quantize()`（缓存键量化）与 `dpi()` |
 | `RenderKey` | `{ page, scale_milli, rotation, tile }` ▲v3 —— 缓存键（f32 不能做 `Hash`，故存千分之一整数；瓦片坐标并入键） |
-| `TileSpec` / `TilingPolicy` | ▲v3 瓦片坐标（`grid_for` / `pixel_rect` / `page_rect`）与分块策略（默认 `AbovePixels(16 MP)`）（D-02） |
+| `TileSpec` / `TilingPolicy` | ▲v3 瓦片坐标（`grid_for` / `pixel_rect` / `page_rect`）与分块策略（默认 `AbovePixels(4 MP)`，见 D-15）（D-02） |
 | `RasterImage` | 不可变位图，像素在 `Arc<[u8]>` 中，缓存与 UI 共享零拷贝；`to_rgba8()` 是唯一格式转换点 |
 | `PageText` / `TextChar` / `TextSpan` | 页文本 + 逐字符包围盒 + 样式分段；不变量：`text.chars().count() == chars.len()` |
 | `TextRange` / `TextPosition` / `Selection` | 字符区间（半开、字符下标而非字节）、文档位置、选区（anchor/focus 可反向） |
@@ -257,7 +257,7 @@ PDF 页面坐标
 | 缩放量化 1/8 做缓存键 | 12.5% 内共用位图，滚轮缩放不摧毁缓存 | 精确键：缓存命中率趋近 0 |
 | 剪贴板/文件对话框不进接口层 | 接口层保持无平台依赖，测试无需 mock 系统 API | 建 `Clipboard` trait：为单一平台调用引入抽象 |
 | ▲v3 `Document::page_geometries()` 批量返回页几何 | 布局需一次拿到全部页尺寸才能算内容总高与滚动范围；把 N 次跨 FFI 变成 1 次 `Arc` 克隆 | 逐页查询：打开大文档变慢（D-01） |
-| ▲v3 分块渲染，默认 `AbovePixels(16 MP)` | 高倍缩放下单页位图可达 124 MB；分块后视口内仅 6–9 MB | 始终整页：内存爆炸；始终分块：小页被碎片化、请求数暴增（D-02） |
+| ▲v3 分块渲染，阈值 16 MP → **4 MP**（D-15）| 高倍缩放下单页位图可达 124 MB；分块后一块瓦片仅 ~9ms、视口内 6–9 MB | 始终整页：内存爆炸且高倍时每次缩放都要重画几十 MP；始终分块：小页被碎片化、请求数暴增（D-02/D-15） |
 | ▲v3 用滚动锚点保持视野中心（`ScrollAnchor`） | 缩放/旋转/改排布后阅读位置不漂移；`scroll_to_page` 仍负责跳页与锚点退化路径 | 每次重算布局都回到页首：用户迷失位置（D-05） |
 | ▲v3 导航索引在打开时预解析并合并存储 | 点击链接/大纲 0 次后端调用；解析失败在打开时即暴露 | 实时解析：点击有延迟、UI 需处理"未解析目标"分支（D-08） |
 | ▲v3 搜索保持同步、不引入异步 | 文本提取本就是阻塞任务；异步会带来 runtime 依赖与搜索取消的复杂度 | async 搜索：收益小、接口复杂化（D-03/D-07） |

@@ -266,3 +266,130 @@ fn assembles_a_session_with_the_real_backend() {
     assert_close(placement.rect.width, 400.0);
     assert_close(placement.rect.height, 200.0);
 }
+
+/// 分块渲染的**几何正确性**：整页布满边框与横线的文档里，每一块瓦片都必须有墨。
+///
+/// 这条测试是为了钉住第二轮验收的"800% 视野全黑"：
+/// 当时的适配层把瓦片区域用 `set_origin(-x, -y)` 传成**负起点**，
+/// 而 PDFium 在负起点下不绘制任何内容 —— 于是除左上角外所有瓦片都是空白透明的，
+/// 画布露出深色背景，看起来就是"全黑"。
+#[test]
+fn every_tile_contains_ink_for_a_full_page_document() {
+    let Some(backend) = backend() else { return };
+    let path = common::many_page_pdf_file("tile-ink", 2, 612.0, 792.0);
+    let opened = backend.open(Source::Path(&path), None).expect("打开多页 PDF");
+
+    // 612×792 @2x → 1224×1584 → 网格 3×4
+    let scale = Scale::from_zoom(2.0);
+    assert_eq!(TileSpec::grid_for(Size::new(1224.0, 1584.0)), (3, 4));
+
+    for row in 0..4u16 {
+        for col in 0..3u16 {
+            let tile = opened
+                .raster
+                .render(&RenderRequest::tiled(
+                    PageIndex::FIRST,
+                    scale,
+                    Rotation::None,
+                    TileSpec::new(col, row),
+                ))
+                .expect("瓦片");
+            let ink = tile.data().iter().filter(|&&byte| byte < 100).count();
+            assert!(
+                ink > 50,
+                "瓦片 ({col},{row}) 必须包含墨迹（该页整页都有边框与横线），实际深色字节 {ink}"
+            );
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 瓦片内容必须等于"整页渲染后裁出的同一块区域"：几何、朝向、缩放全都对得上。
+///
+/// 这是分块渲染最强的一条不变量 —— 只要瓦片与整页裁剪一致，
+/// 拼接出来的画面就必然与不分块时逐像素等价。
+#[test]
+fn tiles_match_the_crop_of_the_whole_page_render() {
+    let Some(backend) = backend() else { return };
+    let path = common::many_page_pdf_file("tile-crop", 1, 612.0, 792.0);
+    let opened = backend.open(Source::Path(&path), None).expect("打开");
+
+    // 用 1x 以便逐像素比较（612×792 → 网格 2×2）
+    let scale = Scale::from_zoom(1.0);
+    assert_eq!(TileSpec::grid_for(Size::new(612.0, 792.0)), (2, 2));
+    let whole = opened
+        .raster
+        .render(&RenderRequest::new(PageIndex::FIRST, scale, Rotation::None))
+        .expect("整页");
+    assert_eq!((whole.width, whole.height), (612, 792));
+
+    let pixel_size = Size::new(whole.width as f32, whole.height as f32);
+    for col in 0..2u16 {
+        for row in 0..2u16 {
+            let tile = opened
+                .raster
+                .render(&RenderRequest::tiled(
+                    PageIndex::FIRST,
+                    scale,
+                    Rotation::None,
+                    TileSpec::new(col, row),
+                ))
+                .expect("瓦片");
+            let pixels = TileSpec::new(col, row).pixel_rect(pixel_size);
+
+            let mut worst = 0u8;
+            for y in 0..tile.height as usize {
+                for x in 0..tile.width as usize {
+                    let tile_offset = (y * tile.width as usize + x) * 4;
+                    let whole_offset = ((pixels.y as usize + y) * whole.width as usize
+                        + (pixels.x as usize + x))
+                        * 4;
+                    for channel in 0..4 {
+                        let diff = tile.data()[tile_offset + channel]
+                            .abs_diff(whole.data()[whole_offset + channel]);
+                        worst = worst.max(diff);
+                    }
+                }
+            }
+            assert!(
+                worst <= 16,
+                "瓦片 ({col},{row}) 与整页裁剪不一致：最大通道差 {worst}"
+            );
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 800% 现场诊断：高倍缩放下瓦片是否仍然有内容。
+#[test]
+fn tiles_at_800_percent_still_contain_ink() {
+    let Some(backend) = backend() else { return };
+    let path = common::many_page_pdf_file("tile-800", 2, 612.0, 792.0);
+    let opened = backend.open(Source::Path(&path), None).expect("打开");
+
+    // 612×792 @8x → 4896×6336 → 网格 10×13
+    let scale = Scale::from_zoom(8.0);
+    assert_eq!(TileSpec::grid_for(Size::new(4896.0, 6336.0)), (10, 13));
+
+    for (col, row) in [(0u16, 0u16), (1, 0), (0, 1), (2, 1), (5, 6), (9, 12)] {
+        let started = std::time::Instant::now();
+        let tile = opened
+            .raster
+            .render(&RenderRequest::tiled(
+                PageIndex::FIRST,
+                scale,
+                Rotation::None,
+                TileSpec::new(col, row),
+            ))
+            .expect("瓦片");
+        let ink = tile.data().iter().filter(|&&byte| byte < 100).count();
+        println!(
+            "瓦片 ({col},{row}) {}×{} 用时 {:?} 深色字节 {ink}",
+            tile.width,
+            tile.height,
+            started.elapsed()
+        );
+        assert!(ink > 50, "800% 下瓦片 ({col},{row}) 必须包含墨迹，实际 {ink}");
+    }
+    let _ = std::fs::remove_file(&path);
+}

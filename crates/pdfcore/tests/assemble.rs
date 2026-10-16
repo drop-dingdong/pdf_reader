@@ -538,3 +538,42 @@ fn anchor_falls_back_to_page_top_when_center_is_between_pages() {
         session.viewport().scroll
     );
 }
+
+/// 第三轮验收：缩放之后，**旧比例**的在飞任务必须被取消。
+///
+/// 不取消的话，PDFium（串行）会先把旧比例画完再画新的 ——
+/// 用户感受到的就是"每次缩放都顿一下"。这条测试用同步调度器同样成立：
+/// 同步实现没有作业队列，只能把已产生的事件改写成 `Cancelled`，
+/// 因此"旧比例不得产出 `PageRendered`"是可断言的。
+#[test]
+fn zooming_cancels_in_flight_renders_at_the_old_scale() {
+    let mut session = assemble();
+    let mut events = Vec::new();
+    session.handle(ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)), &mut events);
+
+    // 提交但不取回：此刻 scale=1 的任务处于"在飞"状态
+    session.handle(ViewerCommand::RequestVisible, &mut events);
+    assert!(session.pending_renders() > 0, "应有在飞任务");
+    events.clear();
+
+    // 放大 → 旧比例的在飞任务应被取消
+    session.handle(ViewerCommand::SetZoom(2.0), &mut events);
+    session.handle(ViewerCommand::RequestVisible, &mut events);
+    session.pump(&mut events);
+
+    let old = RenderKey::new(PageIndex::FIRST, Scale::from_zoom(1.0), Rotation::None);
+    let new = RenderKey::new(PageIndex::FIRST, Scale::from_zoom(2.0), Rotation::None);
+    let rendered: Vec<RenderKey> = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::PageRendered(key) => Some(*key),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !rendered.contains(&old),
+        "旧比例不应产出渲染结果（否则白渲染一次）：{rendered:?}"
+    );
+    assert!(rendered.contains(&new), "新比例必须渲染：{rendered:?}");
+    assert!(session.image_for(PageIndex::FIRST).is_some(), "新比例的位图应已入缓存");
+}

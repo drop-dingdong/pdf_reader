@@ -84,7 +84,7 @@ open(path, Some("s3cr3t")) ──▶ Ok(OpenedDocument)               // 成功
    2. 对每个可见页调内部 `request_page(page, Visible)`：
       1. 取 `placement`（`rect = (12, 12, 918, 1188)`，`scale = 1.5`，`rotation = None`）；
       2. ▲v3 **决定是否分块**（见场景 2b）：`placement.pixel_size() = (918, 1188)` →
-         面积 `1,090,584 px ≈ 1.09 MP` < 16 MP → **整页渲染**，`tile = None`；
+         面积 `1,090,584 px ≈ 1.09 MP` < 4 MP → **整页渲染**，`tile = None`；
       3. 算 `RenderKey::new(0, Scale(1.5), None)` → 量化 `1.5 / 0.125 = 12` → `scale_milli = 1500`，`tile = None`；
       4. 查 `cache.get(&key)` → `None`；查在飞集合 → 空；
       5. 组 `RenderRequest { page: 0, scale: 1.5, rotation: None, tile: None, priority: Visible, cancel: CancelToken::new() }`；
@@ -128,7 +128,7 @@ open(path, Some("s3cr3t")) ──▶ Ok(OpenedDocument)               // 成功
 
 ```text
 placement.pixel_size() = 612×8, 792×8 = (4896, 6336) px
-面积 = 4896 × 6336 = 31,021,056 px ≈ 31.0 MP > TilingPolicy::AbovePixels(16 MP)
+面积 = 4896 × 6336 = 31,021,056 px ≈ 31.0 MP > TilingPolicy::AbovePixels(4 MP)
 → 分块（tile = Some(TileSpec { col, row }))
 
 对比：整页一张位图 = 31,021,056 × 4 B = 124,084,224 B ≈ 124 MB（单页！）★
@@ -155,8 +155,8 @@ placement.pixel_size() = 612×8, 792×8 = (4896, 6336) px
 - ★ 分块解决的是**内存**（124 MB → 6–9 MiB），不是速度：渲染总量不变，甚至更多次调用。
   因此只在高倍缩放（面积超阈值）时启用，避免小页被碎片化。
 - ★ 缓存键必须含 `tile`，否则不同瓦片会互相覆盖（表现为"页面上出现了别处的图"）。
-- ★ 阈值 `TilingPolicy::AbovePixels(16_000_000)` 是**内存/调用次数**的唯一调节旋钮：
-  16 MP ≈ 单页 64 MB；若目标机器内存紧张，改成 8 MP（≈32 MB）即可，接口不变。
+- ★ 阈值 `TilingPolicy::AbovePixels(4_000_000)` 是**内存/调用次数**的唯一调节旋钮（D-15）：
+  4 MP ≈ 单页 16 MB；实测一块 512×512 瓦片约 9ms，因此超过 4 MP 后分块比整页更快也更省内存。
 - 缩略图（scale ≈0.2）永远走整页路径：面积远低于阈值。
 
 ---

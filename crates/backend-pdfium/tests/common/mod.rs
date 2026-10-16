@@ -78,3 +78,72 @@ pub fn two_page_pdf_file(name: &str) -> std::path::PathBuf {
     std::fs::write(&path, two_page_pdf()).expect("写入临时 PDF");
     path
 }
+
+/// 生成 `page_count` 页、每页 `width × height` 的 PDF。
+///
+/// 用途：复现"多页 + 高倍缩放"的真实场景（分块渲染、几百页的滚动范围）。
+/// 每页都画满横线与边框，保证页面上到处都有"墨"，便于断言渲染结果不是空白。
+pub fn many_page_pdf(page_count: usize, width: f32, height: f32) -> Vec<u8> {
+    let font_object = 3 + page_count * 2; // 字体对象排在所有页之后
+    let kids: Vec<String> = (0..page_count).map(|index| format!("{} 0 R", 3 + index * 2)).collect();
+
+    let mut objects: Vec<String> = Vec::with_capacity(page_count * 2 + 3);
+    objects.push("<< /Type /Catalog /Pages 2 0 R >>".to_string());
+    objects.push(format!(
+        "<< /Type /Pages /Kids [{}] /Count {page_count} >>",
+        kids.join(" ")
+    ));
+
+    for index in 0..page_count {
+        let content_object = 4 + index * 2;
+        let mut content = format!("0 0 0 RG 4 w 20 20 {} {} re S\n", width - 40.0, height - 40.0);
+        let mut y = height - 80.0;
+        while y > 60.0 {
+            content.push_str(&format!("20 {y} m {} {y} l S\n", width - 20.0));
+            y -= 40.0;
+        }
+        content.push_str(&format!(
+            "BT /F1 24 Tf 72 {} Td (Page {}) Tj ET\n",
+            height - 120.0,
+            index + 1
+        ));
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] \
+             /Resources << /Font << /F1 {font_object} 0 R >> >> /Contents {content_object} 0 R >>"
+        ));
+        objects.push(stream_object(&content));
+    }
+    objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string());
+
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{}\nendobj\n", index + 1, body));
+    }
+
+    let xref_offset = out.len();
+    let size = objects.len() + 1;
+    out.push_str(&format!("xref\n0 {size}\n"));
+    out.push_str("0000000000 65535 f \n");
+    for offset in &offsets {
+        out.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
+    ));
+    out.into_bytes()
+}
+
+/// 把多页测试 PDF 写到临时文件。
+pub fn many_page_pdf_file(
+    name: &str,
+    page_count: usize,
+    width: f32,
+    height: f32,
+) -> std::path::PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(format!("pdfcore-fixture-{name}.pdf"));
+    std::fs::write(&path, many_page_pdf(page_count, width, height)).expect("写入临时 PDF");
+    path
+}

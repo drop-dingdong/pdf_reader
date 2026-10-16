@@ -100,6 +100,14 @@ pub struct PdfReaderApp {
     /// 状态栏文本与错误提示。
     message: String,
     error: Option<String>,
+    /// 运行时诊断输出（环境变量 `PDF_READER_DIAGNOSE=1` 开启）。
+    ///
+    /// 存在的理由：像"800% 时看不到内容"这类问题只在真实窗口 + 真实 GPU 上出现，
+    /// 无头测试无法复现；把每帧的绘制决策打到 stderr，用户就能把实况数据交回来
+    /// （agent.md 规则 2：UI 相关验证交给用户，但要让用户能看到可诊断的信息）。
+    diagnose: bool,
+    /// 上次诊断输出的时间（限流到每秒一次）。
+    last_report: std::time::Instant,
 }
 
 impl PdfReaderApp {
@@ -130,6 +138,8 @@ impl PdfReaderApp {
             show_outline: true,
             message: String::new(),
             error: None,
+            diagnose: std::env::var_os("PDF_READER_DIAGNOSE").is_some(),
+            last_report: std::time::Instant::now(),
         };
         if let Some(path) = initial {
             app.open(&path, None);
@@ -575,8 +585,12 @@ impl PdfReaderApp {
 
             // 1) 页面
             let visible = self.visible.clone();
+            let mut report: Vec<String> = Vec::new();
             for page in visible {
-                let Some(placement) = session.placement(page).copied() else { continue };
+                let Some(placement) = session.placement(page).copied() else {
+                    report.push(format!("p{}: 无布局", page.display_number()));
+                    continue;
+                };
                 let page_rect = view_rect_for(&placement, scroll);
                 let screen = egui::Rect::from_min_size(
                     canvas.min + EVec2::new(page_rect.x, page_rect.y),
@@ -584,66 +598,128 @@ impl PdfReaderApp {
                 );
 
                 let whole_key = RenderKey::new(page, placement.scale, placement.rotation);
-                if let Some(texture) = self.textures.get(&whole_key) {
-                    paint_image(&painter, texture, screen);
-                    continue;
-                }
+                let has_previous = self
+                    .textures
+                    .best_page_texture(page, placement.rotation, whole_key.scale_milli)
+                    .is_some();
 
-                // 分块渲染（高倍缩放）时，视口覆盖到的全部瓦片都要画：就绪的贴图、未就绪的补白。
-                //
-                // v1 只遍历"已缓存"的瓦片，未就绪的区域直接露出深色画布 ——
-                // 高倍缩放时看起来就是"视野全黑"（第二轮验收 §15）。
-                if let Some((first, last)) = session.visible_tiles(page) {
-                    // 一块都还没就绪时，才允许用上一档缩放的旧图拉伸占位；
-                    // 只要有任何一块真瓦片，就必须画瓦片，否则旧图会一直盖住已就绪的内容。
-                    if !self.textures.has_tiles(&whole_key) {
-                        if let Some(previous) = self.textures.best_page_texture(
-                            page,
-                            placement.rotation,
-                            whole_key.scale_milli,
-                        ) {
-                            paint_image(&painter, previous, screen);
-                            continue;
-                        }
+                // 先决策、再落笔：这段"画法"判定同时用于诊断输出，
+                // 出问题时能直接从日志看出走的是哪条路径（agent.md 规则 2：UI 现象靠实测数据定位）。
+                enum Plan {
+                    Whole,
+                    Stretch,
+                    Tiles(TileSpec, TileSpec),
+                    Blank,
+                }
+                let plan = if self.textures.contains(&whole_key) {
+                    Plan::Whole
+                } else if let Some((first, last)) = session.visible_tiles(page) {
+                    // 一块真瓦片都没有时，才允许用上一档缩放的旧图拉伸顶替；
+                    // 只要有任何一块真瓦片就必须画瓦片，否则旧图会一直盖住已就绪的内容。
+                    if !self.textures.has_tiles(&whole_key) && has_previous {
+                        Plan::Stretch
+                    } else {
+                        Plan::Tiles(first, last)
                     }
-                    let pixel_size = placement.pixel_size();
-                    for row in first.row..=last.row {
-                        for col in first.col..=last.col {
-                            let tile = TileSpec::new(col, row);
-                            let pixels = tile.pixel_rect(pixel_size);
-                            let key =
-                                RenderKey::tiled(page, placement.scale, placement.rotation, tile);
-                            let tile_screen = egui::Rect::from_min_size(
-                                canvas.min
-                                    + EVec2::new(
-                                        page_rect.x + pixels.x / placement.scale.0,
-                                        page_rect.y + pixels.y / placement.scale.0,
+                } else if has_previous {
+                    Plan::Stretch
+                } else {
+                    Plan::Blank
+                };
+
+                let (label, ready, total) = match plan {
+                    Plan::Whole => {
+                        let texture = self.textures.get(&whole_key).expect("已判定存在");
+                        paint_image(&painter, texture, screen);
+                        ("整页纹理", 1u32, 1u32)
+                    }
+                    Plan::Stretch => {
+                        let texture = self
+                            .textures
+                            .best_page_texture(page, placement.rotation, whole_key.scale_milli)
+                            .expect("已判定存在");
+                        paint_image(&painter, texture, screen);
+                        ("旧图拉伸", 0, 0)
+                    }
+                    Plan::Tiles(first, last) => {
+                        // 视口覆盖到的**全部**瓦片都要画：就绪的贴图、未就绪的补白。
+                        // v1 只遍历"已缓存"的瓦片，未就绪区域直接露出深色画布 ——
+                        // 高倍缩放时看起来就是"视野全黑"（第二轮验收 §15）。
+                        let pixel_size = placement.pixel_size();
+                        let mut ready = 0u32;
+                        let mut total = 0u32;
+                        for row in first.row..=last.row {
+                            for col in first.col..=last.col {
+                                total += 1;
+                                let tile = TileSpec::new(col, row);
+                                let pixels = tile.pixel_rect(pixel_size);
+                                let key = RenderKey::tiled(
+                                    page,
+                                    placement.scale,
+                                    placement.rotation,
+                                    tile,
+                                );
+                                let tile_screen = egui::Rect::from_min_size(
+                                    canvas.min
+                                        + EVec2::new(
+                                            page_rect.x + pixels.x / placement.scale.0,
+                                            page_rect.y + pixels.y / placement.scale.0,
+                                        ),
+                                    EVec2::new(
+                                        pixels.width / placement.scale.0,
+                                        pixels.height / placement.scale.0,
                                     ),
-                                EVec2::new(
-                                    pixels.width / placement.scale.0,
-                                    pixels.height / placement.scale.0,
-                                ),
-                            );
-                            match self.textures.get(&key) {
-                                Some(texture) => paint_image(&painter, texture, tile_screen),
-                                None => paint_placeholder(&painter, tile_screen),
+                                );
+                                match self.textures.get(&key) {
+                                    Some(texture) => {
+                                        ready += 1;
+                                        paint_image(&painter, texture, tile_screen);
+                                    }
+                                    None => paint_placeholder(&painter, tile_screen),
+                                }
                             }
                         }
+                        ("瓦片", ready, total)
                     }
-                    continue;
-                }
+                    Plan::Blank => {
+                        paint_placeholder(&painter, screen);
+                        ("白底页框", 0, 0)
+                    }
+                };
 
-                // 未分块：新比例的位图还没到，用**上一档缩放**的图拉伸顶上，
-                // 避免缩放过程中出现大片白色填充（第二轮验收 §3）。
-                if let Some(previous) = self.textures.best_page_texture(
-                    page,
-                    placement.rotation,
-                    whole_key.scale_milli,
-                ) {
-                    paint_image(&painter, previous, screen);
-                    continue;
+                if self.diagnose {
+                    report.push(format!(
+                        "p{} 视图矩形=({:.0},{:.0} {:.0}×{:.0}) 画法={label} 瓦片={ready}/{total}",
+                        page.display_number(),
+                        page_rect.x,
+                        page_rect.y,
+                        page_rect.width,
+                        page_rect.height
+                    ));
                 }
-                paint_placeholder(&painter, screen);
+            }
+
+            // 诊断输出（PDF_READER_DIAGNOSE=1）：每秒一次，足够定位"看不到内容"这类问题
+            if self.diagnose
+                && self.last_report.elapsed() >= std::time::Duration::from_secs(1)
+            {
+                self.last_report = std::time::Instant::now();
+                let max_side = ui.ctx().input(|input| input.max_texture_side);
+                eprintln!(
+                    "[诊断] 缩放={:.0}% 视口={:.0}×{:.0} scroll=({:.1},{:.1}) 当前页={} 可见页={:?} \
+                     纹理={} 缓存在飞={} max_texture_side={} | {}",
+                    session.state().zoom * 100.0,
+                    viewport.size.width,
+                    viewport.size.height,
+                    scroll.x,
+                    scroll.y,
+                    session.state().current_page.display_number(),
+                    self.visible.iter().map(|page| page.display_number()).collect::<Vec<_>>(),
+                    self.textures.len(),
+                    session.pending_renders(),
+                    max_side,
+                    report.join(" | ")
+                );
             }
 
             // 2) 高亮（选区 + 搜索命中）
@@ -712,18 +788,7 @@ impl PdfReaderApp {
             if response.drag_stopped() {
                 self.drag = None;
             }
-            if response.triple_clicked() {
-                // 三击选行（第二轮验收：原先三击完全没有受理）
-                if let Some(position) = response.interact_pointer_pos() {
-                    let content = canvas_to_content(canvas, position, scroll);
-                    if let Some(text_position) = session.text_position_at(content) {
-                        self.commands.push(ViewerCommand::SetSelectionGranularity(
-                            SelectionGranularity::Line,
-                        ));
-                        self.commands.push(ViewerCommand::SelectBegin(text_position));
-                    }
-                }
-            } else if response.double_clicked() {
+            if response.double_clicked() {
                 if let Some(position) = response.interact_pointer_pos() {
                     let content = canvas_to_content(canvas, position, scroll);
                     if let Some(text_position) = session.text_position_at(content) {

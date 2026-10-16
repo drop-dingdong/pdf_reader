@@ -202,7 +202,7 @@ pub struct RenderRequest {
 pub enum TilingPolicy {
     /// 从不分块（整页一张位图）。
     Never,
-    /// 页的像素面积超过阈值时才分块（默认：16 MP ≈ 4000×4000）。
+    /// 页的像素面积超过阈值时才分块（默认 4 MP，见 D-15；v3 设计时为 16 MP）。
     AbovePixels(u32),
     /// 总是分块。
     Always,

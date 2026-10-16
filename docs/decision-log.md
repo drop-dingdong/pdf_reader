@@ -8,7 +8,7 @@
 | ID | 来源问题 | 你的决定 | 设计影响 |
 | --- | --- | --- | --- |
 | **D-01** | traits §12-1：批量页尺寸 | **增加批量，提前知道每一页大小** | `Document::page_geometries() -> Result<Arc<[PageGeometry]>>` 成为**必需**方法（open 时备好）；`page_size` / `page_rotation` 降为默认方法（查表）。会话 `new()` 从"N 次跨 FFI"变成 1 次 `Arc` 克隆 |
-| **D-02** | traits §12-2：分块渲染 | **可做分块预渲染** | 新增 `TILE_SIZE = 512`、`TileSpec`、`TilingPolicy::AbovePixels(16 MP)`；`RenderRequest.tile: Option<TileSpec>`、`RenderKey.tile: Option<TileSpec>`；`PageRaster` 契约新增"瓦片只渲染该区域、不得整页后裁剪"；会话新增 `tiles_for()` / `tiling_policy()`；`PagePlacement` 新增 `pixel_size()` |
+| **D-02** | traits §12-2：分块渲染 | **可做分块预渲染** | 新增 `TILE_SIZE = 512`、`TileSpec`、`TilingPolicy::AbovePixels(16 MP)`（**阈值后由 D-15 改为 4 MP**）；`RenderRequest.tile: Option<TileSpec>`、`RenderKey.tile: Option<TileSpec>`；`PageRaster` 契约新增"瓦片只渲染该区域、不得整页后裁剪"；会话新增 `tiles_for()` / `tiling_policy()`；`PagePlacement` 新增 `pixel_size()` |
 | **D-03** | traits §12-3：搜索是否同步 | **保持同步接口，不做异步** | `TextLayer::search` 保持同步；契约注释写明"耗时由调用方承担"。接口层不引入 runtime、不引入搜索取消 |
 | **D-04** | traits §12-4：`&mut self` 例外 | **接受** | `TextSelection` 的 `set_granularity/begin/extend/clear` 保留 `&mut self`，作为全局 `&self` 约定的**唯一例外**并写入文档注释 |
 | **D-05** | traits §12-5：`scroll_to_page` 语义 | **居中是合理的**；补充要求：**scroll 前后保持视野中心对应的页面位置不动** | 保留 `scroll_to_page`（居中+夹取）；新增 `Viewport::center_content_point()`、`ScrollAnchor { page, page_point }`、`PageLayout::scroll_to_anchor(...)`；会话在**任何重算布局**的操作（缩放/旋转/切换排布/窗口缩放）前后自动捕获与恢复锚点；锚点落在页间距时退化为"当前页居中" |
@@ -37,6 +37,8 @@
 | **D-12** | 缺图占位改为：**先用上一档缩放的位图拉伸占位**，连旧图都没有才画白底页框；分块渲染下只要有任一块真瓦片就画瓦片（旧图不许盖住已就绪内容） | 第二轮验收 §3（连续缩放出现大片白填充）与 §15（800% 视野全黑）。**补充 D-06**：白底页框降级为"什么都没有时"的最终兜底 |
 | **D-13** | 拖拽工具只保留 **平移 / 选字** 两档（移除"自动"），按住 `Shift` 临时反选；`PageText::hit_test` 增加容差（字高的一半） | 第二轮验收 §7/§10。"自动"失效的根因正是 `hit_test` 无距离上限：点页面任何位置都会命中"最近的那个字"，于是任何拖拽都变成选字、无法平移 |
 | **D-14** | 预取半径 1 → **2**；纹理上传**每帧限量**（≤2 张）且提前上传相邻页 | 第二轮验收 §2（翻页边界卡顿）：把"新页进入视口那一刻"的渲染与上传开销提前摊掉 |
+| **D-15** | 分块阈值 16 MP → **4 MP**（`TilingPolicy::AbovePixels(4_000_000)`）| 第三轮验收"缩放总有顿感"。实测（真实 PDFium）一块 512×512 瓦片约 **9ms**，而 4 MP 以上的整页渲染要几十到几百毫秒、内存随面积线性增长（31 MP = 124 MB）。超过 4 MP 后分块**既更快也更省内存** |
+| **D-16** | 缩放/旋转后必须**取消"键已过时"的在飞任务**（按页取消，两种调度器实现都生效）；新增 `PDF_READER_DIAGNOSE=1` 运行时诊断输出 | 同上。不取消的话 PDFium（串行）会先把旧比例画完再画新的，用户每次都感到停顿。诊断输出用于定位**只能在真实窗口/GPU 上出现**的问题（agent.md 规则 2：这类现象必须由用户侧提供实测数据） |
 
 ## 3. 代码同步清单（`crates/pdfcore` 目前落后于 v3）
 
