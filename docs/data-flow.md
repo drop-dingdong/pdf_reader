@@ -97,7 +97,7 @@ open(path, Some("s3cr3t")) ──▶ Ok(OpenedDocument)               // 成功
 6. `[UI]` 绘制：`session.image_for(PageIndex(0))` → `Arc<RasterImage>` →
    `image.to_rgba8()` ★（唯一的 BGRA→RGBA 转换点）→ `egui::ColorImage` → `TextureHandle` →
    画在视图矩形 `placement.rect.translate(-viewport.scroll)`。
-   **位图尚未就绪时**：画 ★**白底页框**（`placement.rect` + 1px 灰边），不用上一档拉伸图（decision-log D-06）。
+   **位图尚未就绪时**：先用**上一档缩放的位图拉伸占位**；连旧图都没有才画 ★**白底页框**（`placement.rect` + 1px 灰边）（decision-log D-12，补充 D-06）。
 
 ### 形态变化
 
@@ -112,7 +112,8 @@ open(path, Some("s3cr3t")) ──▶ Ok(OpenedDocument)               // 成功
 | 上屏 | `Vec<u8>` RGBA → `egui::ColorImage` → GPU 纹理 |
 
 ### 关键点
-- ★ **渲染结果下一帧才可见**（异步）：因此缺图时画白底页框占位，滚动/翻页时不会闪。
+- ★ **渲染结果下一帧才可见**（异步）：因此缺图时**先用上一档缩放的旧图拉伸占位**（D-12），
+  连旧图都没有才画白底页框；滚动/翻页时都不会闪。
 - ★ 请求里的 `scale`/`rotation` **原样取自 `PagePlacement`**，会话不自己算。
 - `Arc` 贯穿全程：缓存与 UI 共享同一份像素，只有转 RGBA 时有一次必然的拷贝。
 
@@ -236,9 +237,9 @@ placement.pixel_size() = 612×8, 792×8 = (4896, 6336) px
 - ▲v3 ★ **锚点捕获必须在布局变化之前**，恢复在之后 —— 顺序反了就会"以旧布局的点去新布局里找位置"，产生漂移。
 - ▲v3 ★ 适用场景：`ZoomIn/Out/SetZoom/FitWidth`、`RotateClockwise/SetUserRotation`、
   `SetLayoutMode`、`ResizeViewport`。纯 `ScrollBy/SetScroll/GoToPage` **不用**锚点。
-- ▲v3 锚点落在页间距或页外（`page_at` 返回 `None`）时：**退化为"当前页居中"**（即 `scroll_to_page`），不报错。
+- ▲v3 锚点落在页间距或页外（`page_at` 返回 `None`）时：**退化为"当前页顶部对齐"**（即 `scroll_to_page`；D-11 起该方法是顶部对齐），不报错。
 - ★ `invalidate_render` 必须同时清"在飞"集合，否则旧键会被判定"已在渲染"而永不重提交。
-- `scroll_to_page`（页面居中）**保留**：用于跳页与锚点退化路径（decision-log D-05）。
+- `scroll_to_page`（**顶部对齐 + 横向居中**；D-11 修正了 D-05 的"居中"）**保留**：用于跳页与锚点退化路径（decision-log D-05/D-11）。
 
 ---
 
@@ -256,7 +257,7 @@ placement.pixel_size() = 612×8, 792×8 = (4896, 6336) px
 > ▲v3 若目标页触发分块（高倍缩放），第 4 步提交的是**该页视口覆盖的若干瓦片**，
 > 且都带 `Interactive` 优先级；`cancel_page` 也会一次性清掉该页所有瓦片任务。
 
-**关键点**：`scroll_to_page` 是 `PageLayout` 的默认方法（居中 + 夹取），换成对开布局时跳页行为自动适配。
+**关键点**：`scroll_to_page` 是 `PageLayout` 的默认方法（顶部对齐 + 横向居中 + 夹取，D-11），换成对开布局时跳页行为自动适配。
 
 ---
 
@@ -443,7 +444,7 @@ NavigationIndex {
 
 | 问题 | 你的决定 | 落地位置 |
 | --- | --- | --- |
-| 缺图占位策略 | **白底页框** | 场景 2 步骤 6、场景 2b 步骤 5 |
+| 缺图占位策略 | **先用上一档缩放的位图拉伸**，无旧图才白底页框（D-12） | 场景 2 步骤 6、场景 2b 步骤 5 |
 | 搜索执行位置 | **同步接口，不做异步** | 场景 7 步骤 3、`TextLayer` 契约 |
 | `Destination::Named` | **打开时统一解析并合并存储** | 场景 11、`NavigationIndex` |
 

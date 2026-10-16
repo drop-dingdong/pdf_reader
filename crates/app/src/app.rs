@@ -35,6 +35,12 @@ const TEXTURE_CAPACITY: usize = 64;
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
 const SIDEBAR_MAX_WIDTH: f32 = 640.0;
 
+/// 每帧最多上传几张纹理。
+///
+/// 一张整页位图的 RGBA 转换 + GPU 上传在毫秒量级；一帧内连传多张就会掉帧。
+/// 设上限后开销被摊到多帧，视觉上是"相邻页稍后补齐"，比"翻页顿一下"好得多。
+const MAX_UPLOADS_PER_FRAME: usize = 2;
+
 /// 拖拽中：区分"平移画面"与"选择文字"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DragMode {
@@ -44,22 +50,19 @@ enum DragMode {
     Select,
 }
 
-/// 鼠标拖拽的语义（人工验收反馈：应能显式指定，而不是只靠"是否点到文字"猜）。
+/// 鼠标拖拽的语义（第二轮验收：去掉不可靠的"自动"模式，只留两种明确行为）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Tool {
-    /// 自动：拖到文字上就选字，否则平移画面。
+    /// 总是平移画面（默认：拖拽永远不会意外改动选区）。
     #[default]
-    Auto,
-    /// 总是平移画面。
     Pan,
-    /// 总是选字（拖到空白处则不选择）。
+    /// 总是选字（拖到空白处不产生选区）。
     Select,
 }
 
 impl Tool {
     fn label(self) -> &'static str {
         match self {
-            Self::Auto => "自动",
             Self::Pan => "平移",
             Self::Select => "选字",
         }
@@ -89,6 +92,8 @@ pub struct PdfReaderApp {
     password_for: Option<PathBuf>,
     password_input: String,
     search_input: String,
+    /// 页码输入框（第二轮验收：支持键入页码跳转）。
+    page_input: String,
     hits: Vec<SearchHit>,
     active_hit: Option<usize>,
     show_outline: bool,
@@ -119,6 +124,7 @@ impl PdfReaderApp {
             password_for: None,
             password_input: String::new(),
             search_input: String::new(),
+            page_input: String::new(),
             hits: Vec::new(),
             active_hit: None,
             show_outline: true,
@@ -129,6 +135,20 @@ impl PdfReaderApp {
             app.open(&path, None);
         }
         app
+    }
+
+    /// 跳到第 `index` 条搜索命中。
+    ///
+    /// **把命中位置放到视口中心**（第二轮验收的统一跳转语义）：
+    /// 跳页是"顶部对齐"，搜索命中则是"居中"，因为用户关心的是那一行文字而不是页首。
+    fn goto_hit(&mut self, index: usize) {
+        let Some(hit) = self.hits.get(index) else { return };
+        self.active_hit = Some(index);
+        let page = hit.page;
+        self.commands.push(ViewerCommand::GoToPage(page));
+        if let Some(rect) = hit.rects.first() {
+            self.commands.push(ViewerCommand::CenterOnPagePoint { page, point: rect.center() });
+        }
     }
 
     /// 打开文档（装配会话：LRU 缓存 + 后台调度器 + 纵向布局 + 选区模型）。
@@ -193,7 +213,19 @@ impl PdfReaderApp {
                 })
                 .collect()
         });
+        // 复制：egui 把 Ctrl/Cmd+C 翻译成 `Event::Copy`（**不是** Key 事件），
+        // 因此必须单独识别它 —— 这就是第二轮验收里"复制按钮可用但 Ctrl+C 无反应"的原因。
+        let copy_event = ctx.input(|input| {
+            input.events.iter().any(|event| matches!(event, egui::Event::Copy))
+        });
+        if copy_event {
+            self.commands.push(ViewerCommand::CopySelection);
+        }
         for (key, modifiers) in pressed {
+            // 已经由 Event::Copy 处理过时不重复处理（避免复制两次）
+            if copy_event && key == Key::C {
+                continue;
+            }
             if let Some(command) = command_for_key(key, modifiers, page_count) {
                 self.commands.push(command);
             }
@@ -251,6 +283,10 @@ impl PdfReaderApp {
                     self.error = Some(format!("第 {} 页渲染失败：{error}", page.display_number()));
                 }
                 SessionEvent::Error(error) => self.error = Some(error.to_string()),
+                SessionEvent::CurrentPageChanged(page) => {
+                    // 页码输入框跟随真实当前页，避免显示过期数字
+                    self.page_input = page.display_number().to_string();
+                }
                 SessionEvent::LayoutChanged => {
                     // 布局（缩放/旋转）变化后旧键不再被使用，留下会白占显存
                     self.textures.retain(|key| key.page == current);
@@ -260,31 +296,73 @@ impl PdfReaderApp {
         }
     }
 
-    /// 为可见页准备纹理（整页或瓦片），并裁剪不再可见的纹理。
+    /// 为可见页（以及相邻页）准备纹理，并裁剪不再需要的纹理。
+    ///
+    /// 两个细节都来自第二轮人工验收的"翻页边界处卡顿"：
+    /// 1. **提前上传相邻页**：会话已按 `PREFETCH_PAGE_RADIUS` 预渲染，这里把它们也传成纹理，
+    ///    于是"新页进入视口"那一刻不再有 4 MiB 量级的转换 + GPU 上传开销；
+    /// 2. **每帧限量上传**：一帧内同时上传多页会造成明显掉帧，因此设上限、分帧摊开。
     fn ensure_textures(&mut self, ctx: &egui::Context, session: &DocumentSession) {
         self.visible.clear();
         session.visible_pages(&mut self.visible);
 
-        for page in self.visible.clone() {
-            let Some(placement) = session.placement(page).copied() else {
-                continue;
-            };
-            // 整页路径
-            if let Some(image) = session.image_for(page) {
-                let key = RenderKey::new(page, placement.scale, placement.rotation);
-                self.upload(ctx, key, &image);
+        // 上传目标：可见页优先（顺序在前），随后是相邻页
+        let mut targets = self.visible.clone();
+        if let (Some(first), Some(last)) = (self.visible.first(), self.visible.last()) {
+            if first.get() > 0 {
+                targets.push(PageIndex::new(first.get() - 1));
             }
-            // 分块路径
-            for (tile, image) in session.tiles_for(page) {
-                let key = RenderKey::tiled(page, placement.scale, placement.rotation, tile);
-                self.upload(ctx, key, &image);
+            let next = last.get() + 1;
+            if (next as usize) < session.page_count() as usize {
+                targets.push(PageIndex::new(next));
             }
         }
 
-        let visible = self.visible.clone();
-        let current = session.state().current_page;
-        self.textures
-            .retain(|key| visible.contains(&key.page) || key.page == current);
+        let mut uploaded = 0usize;
+        for page in targets {
+            if uploaded >= MAX_UPLOADS_PER_FRAME {
+                break;
+            }
+            uploaded += self.upload_page(ctx, session, page);
+        }
+
+        // 裁剪：只保留可见页与相邻页的纹理（以及当前页，避免状态栏/缩略图拿到手就丢）
+        let keep = |page: PageIndex| {
+            self.visible.iter().any(|visible| {
+                visible.get().abs_diff(page.get()) <= 1
+            }) || page == session.state().current_page
+        };
+        self.textures.retain(|key| keep(key.page));
+    }
+
+    /// 上传某一页当前可用的位图（整页或瓦片），返回新上传的纹理数量。
+    fn upload_page(
+        &mut self,
+        ctx: &egui::Context,
+        session: &DocumentSession,
+        page: PageIndex,
+    ) -> usize {
+        let Some(placement) = session.placement(page).copied() else {
+            return 0;
+        };
+        let mut count = 0;
+        // 整页路径
+        if let Some(image) = session.image_for(page) {
+            let key = RenderKey::new(page, placement.scale, placement.rotation);
+            if !self.textures.contains(&key) {
+                self.upload(ctx, key, &image);
+                count += 1;
+            }
+        }
+        // 分块路径
+        for (tile, image) in session.tiles_for(page) {
+            let key = RenderKey::tiled(page, placement.scale, placement.rotation, tile);
+            if !self.textures.contains(&key) {
+                self.upload(ctx, key, &image);
+                count += 1;
+            }
+        }
+        count
     }
 
     /// 上传一张位图为纹理（已存在则跳过）。
@@ -333,9 +411,30 @@ impl PdfReaderApp {
                     self.commands.push(ViewerCommand::RotateClockwise);
                 }
                 ui.separator();
-                // 拖拽语义：人工验收反馈要求"平移"与"选字"能显式指定，而不是只靠猜
+                // 页码输入：键入数字后回车跳转（第二轮验收要求）
+                ui.label("跳到：");
+                let page_response = ui.add(
+                    egui::TextEdit::singleline(&mut self.page_input)
+                        .desired_width(56.0)
+                        .hint_text("页码"),
+                );
+                if page_response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    match self.page_input.trim().parse::<u32>() {
+                        Ok(number) if number >= 1 && number <= session.page_count() => {
+                            self.commands.push(ViewerCommand::GoToPage(PageIndex::new(number - 1)));
+                            self.error = None;
+                        }
+                        Ok(number) => {
+                            self.error =
+                                Some(format!("页码 {number} 超出范围（1–{}）", session.page_count()))
+                        }
+                        Err(_) => self.error = Some("请输入数字页码".to_string()),
+                    }
+                }
+                ui.separator();
+                // 拖拽语义：平移 / 选字 两档（"自动"模式不可靠，已按反馈移除）
                 ui.label("拖拽：");
-                for tool in [Tool::Auto, Tool::Pan, Tool::Select] {
+                for tool in [Tool::Pan, Tool::Select] {
                     ui.selectable_value(&mut self.tool, tool, tool.label());
                 }
                 ui.separator();
@@ -367,23 +466,28 @@ impl PdfReaderApp {
                                 format!("找到 {} 处", hits.len())
                             };
                             self.hits = hits;
-                            self.active_hit = if self.hits.is_empty() { None } else { Some(0) };
-                            if let Some(first) = self.hits.first().map(|hit| hit.page) {
-                                self.commands.push(ViewerCommand::GoToPage(first));
-                            }
                             self.error = None;
+                            if self.hits.is_empty() {
+                                self.active_hit = None;
+                            } else {
+                                self.goto_hit(0);
+                            }
                         }
                         Err(error) => self.error = Some(format!("搜索失败：{error}")),
                     }
                 }
                 if !self.hits.is_empty() {
+                    // 上一个 / 下一个（第二轮验收要求补"上一个"）
+                    if ui.button("上一个").clicked() {
+                        let index = match self.active_hit {
+                            Some(0) | None => self.hits.len() - 1,
+                            Some(index) => index - 1,
+                        };
+                        self.goto_hit(index);
+                    }
                     if ui.button("下一个").clicked() {
-                        let next =
-                            self.active_hit.map(|index| index + 1).unwrap_or(0) % self.hits.len();
-                        self.active_hit = Some(next);
-                        if let Some(page) = self.hits.get(next).map(|hit| hit.page) {
-                            self.commands.push(ViewerCommand::GoToPage(page));
-                        }
+                        let index = self.active_hit.map(|index| index + 1).unwrap_or(0) % self.hits.len();
+                        self.goto_hit(index);
                     }
                     ui.label(format!(
                         "{} / {}",
@@ -485,33 +589,61 @@ impl PdfReaderApp {
                     continue;
                 }
 
-                // 分块路径：逐块贴；缺失的块画白底
-                let tiles = session.tiles_for(page);
-                if tiles.is_empty() {
-                    paint_placeholder(&painter, screen);
+                // 分块渲染（高倍缩放）时，视口覆盖到的全部瓦片都要画：就绪的贴图、未就绪的补白。
+                //
+                // v1 只遍历"已缓存"的瓦片，未就绪的区域直接露出深色画布 ——
+                // 高倍缩放时看起来就是"视野全黑"（第二轮验收 §15）。
+                if let Some((first, last)) = session.visible_tiles(page) {
+                    // 一块都还没就绪时，才允许用上一档缩放的旧图拉伸占位；
+                    // 只要有任何一块真瓦片，就必须画瓦片，否则旧图会一直盖住已就绪的内容。
+                    if !self.textures.has_tiles(&whole_key) {
+                        if let Some(previous) = self.textures.best_page_texture(
+                            page,
+                            placement.rotation,
+                            whole_key.scale_milli,
+                        ) {
+                            paint_image(&painter, previous, screen);
+                            continue;
+                        }
+                    }
+                    let pixel_size = placement.pixel_size();
+                    for row in first.row..=last.row {
+                        for col in first.col..=last.col {
+                            let tile = TileSpec::new(col, row);
+                            let pixels = tile.pixel_rect(pixel_size);
+                            let key =
+                                RenderKey::tiled(page, placement.scale, placement.rotation, tile);
+                            let tile_screen = egui::Rect::from_min_size(
+                                canvas.min
+                                    + EVec2::new(
+                                        page_rect.x + pixels.x / placement.scale.0,
+                                        page_rect.y + pixels.y / placement.scale.0,
+                                    ),
+                                EVec2::new(
+                                    pixels.width / placement.scale.0,
+                                    pixels.height / placement.scale.0,
+                                ),
+                            );
+                            match self.textures.get(&key) {
+                                Some(texture) => paint_image(&painter, texture, tile_screen),
+                                None => paint_placeholder(&painter, tile_screen),
+                            }
+                        }
+                    }
                     continue;
                 }
-                let pixel_size = placement.pixel_size();
-                for (tile, _) in tiles {
-                    let pixels = tile.pixel_rect(pixel_size);
-                    let key =
-                        RenderKey::tiled(page, placement.scale, placement.rotation, tile);
-                    let tile_screen = egui::Rect::from_min_size(
-                        canvas.min
-                            + EVec2::new(
-                                page_rect.x + pixels.x / placement.scale.0,
-                                page_rect.y + pixels.y / placement.scale.0,
-                            ),
-                        EVec2::new(
-                            pixels.width / placement.scale.0,
-                            pixels.height / placement.scale.0,
-                        ),
-                    );
-                    match self.textures.get(&key) {
-                        Some(texture) => paint_image(&painter, texture, tile_screen),
-                        None => paint_placeholder(&painter, tile_screen),
-                    }
+
+                // 未分块：新比例的位图还没到，用**上一档缩放**的图拉伸顶上，
+                // 避免缩放过程中出现大片白色填充（第二轮验收 §3）。
+                if let Some(previous) = self.textures.best_page_texture(
+                    page,
+                    placement.rotation,
+                    whole_key.scale_milli,
+                ) {
+                    paint_image(&painter, previous, screen);
+                    continue;
                 }
+                paint_placeholder(&painter, screen);
             }
 
             // 2) 高亮（选区 + 搜索命中）
@@ -527,19 +659,28 @@ impl PdfReaderApp {
             //
             // 在画布上按下时主动结束文本输入：否则工具栏的搜索框仍持有焦点，
             // `Ctrl+C` 会被它吃掉，用户看到的现象是"选中了却复制不出来"（人工验收反馈）。
-            if response.drag_started() || response.clicked() || response.double_clicked() {
+            if response.drag_started()
+                || response.clicked()
+                || response.double_clicked()
+                || response.triple_clicked()
+            {
                 ui.memory_mut(|memory| memory.stop_text_input());
             }
+
+            // 当前生效的拖拽语义：按住 Shift 临时**反选**工具，
+            // 这样想顺手复制一句时不必先切换工具（"自动"模式已按反馈移除）。
+            let inverted = ui.input(|input| input.modifiers.shift);
+            let select_tool = match self.tool {
+                Tool::Select => !inverted,
+                Tool::Pan => inverted,
+            };
 
             if response.drag_started() {
                 if let Some(position) = response.interact_pointer_pos() {
                     let content = canvas_to_content(canvas, position, scroll);
                     let hit = session.text_position_at(content);
-                    // 工具决定语义："平移"永远拖画面，"选字"只在命中文字时选中，
-                    // "自动"沿用"命中文字就选字"的启发式。
-                    match (self.tool, hit) {
-                        (Tool::Select, Some(text_position))
-                        | (Tool::Auto, Some(text_position)) => {
+                    match (select_tool, hit) {
+                        (true, Some(text_position)) => {
                             self.drag = Some(DragMode::Select);
                             self.commands.push(ViewerCommand::SetSelectionGranularity(
                                 SelectionGranularity::Char,
@@ -571,7 +712,18 @@ impl PdfReaderApp {
             if response.drag_stopped() {
                 self.drag = None;
             }
-            if response.double_clicked() {
+            if response.triple_clicked() {
+                // 三击选行（第二轮验收：原先三击完全没有受理）
+                if let Some(position) = response.interact_pointer_pos() {
+                    let content = canvas_to_content(canvas, position, scroll);
+                    if let Some(text_position) = session.text_position_at(content) {
+                        self.commands.push(ViewerCommand::SetSelectionGranularity(
+                            SelectionGranularity::Line,
+                        ));
+                        self.commands.push(ViewerCommand::SelectBegin(text_position));
+                    }
+                }
+            } else if response.double_clicked() {
                 if let Some(position) = response.interact_pointer_pos() {
                     let content = canvas_to_content(canvas, position, scroll);
                     if let Some(text_position) = session.text_position_at(content) {
@@ -581,9 +733,10 @@ impl PdfReaderApp {
                         self.commands.push(ViewerCommand::SelectBegin(text_position));
                     }
                 }
-            } else if response.clicked() {
-                // 点空白处清空选择；点到文字则重新落点。
+            } else if response.clicked() && select_tool {
+                // 选字工具下：点空白处清空选择，点到文字则重新落点。
                 // v1 无条件清空，于是"选完随手点一下"就会把选区清掉、复制扑空。
+                // 平移工具下单击什么都不做 —— 避免误点把辛苦选好的内容清掉。
                 if let Some(position) = response.interact_pointer_pos() {
                     let content = canvas_to_content(canvas, position, scroll);
                     match session.text_position_at(content) {

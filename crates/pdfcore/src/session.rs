@@ -40,6 +40,11 @@ pub const MIN_ZOOM: f32 = 0.1;
 pub const MAX_ZOOM: f32 = 8.0;
 /// 每次"放大/缩小"命令的步进倍率。
 pub const ZOOM_STEP: f32 = 1.25;
+/// 预取半径（可见页前后各预取几页）。
+///
+/// 取 2 而不是 1：翻页边界处的卡顿主要来自"下一页刚进入视口才开始渲染"，
+/// 提前一页开始准备能把它藏到用户看不到的时候。
+pub const PREFETCH_PAGE_RADIUS: u32 = 2;
 
 /// 侧边栏标签页。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -142,6 +147,15 @@ pub enum ViewerCommand {
     SelectAll,
     /// 复制选中文本（会话以 [`SessionEvent::CopyToClipboard`] 把文本交回 UI）。
     CopySelection,
+    /// 把某页上的一个点放到**视口中心**（第二轮验收：搜索命中跳转用它）。
+    ///
+    /// 复用 D-05 的锚点机制。与 [`ViewerCommand::GoToPage`]（顶部对齐）语义不同，二者分工明确。
+    CenterOnPagePoint {
+        /// 页号。
+        page: PageIndex,
+        /// 页内位置（PDF 页面空间，左下原点）。
+        point: Point,
+    },
     /// 请求渲染可见页；UI 每帧调用一次。
     RequestVisible,
 }
@@ -567,6 +581,12 @@ impl DocumentSession {
                     events.push(SessionEvent::CopyToClipboard(text));
                 }
             }
+            ViewerCommand::CenterOnPagePoint { page, point } => {
+                // 直接复用 D-05 的锚点机制：把该页内点放到视口中心
+                self.restore_anchor(ScrollAnchor { page, page_point: point });
+                events.push(SessionEvent::ScrollChanged(self.viewport.scroll));
+                self.sync_current_page(events);
+            }
             ViewerCommand::RequestVisible => self.submit_visible(),
         }
     }
@@ -748,6 +768,29 @@ impl DocumentSession {
         )
     }
 
+    /// 分块渲染时，某页**当前视口覆盖到的瓦片范围**（左上、右下，含端点）。
+    ///
+    /// * 未启用分块时返回 `None`（该页走整页纹理路径）；
+    /// * 与提交渲染（`request_tiles`）用的是**同一套计算**，因此 UI 枚举占位与后端实际
+    ///   渲染的瓦片始终一致 —— 这正是修掉"高倍缩放时未就绪区域露出深色画布"的关键。
+    pub fn visible_tiles(&self, page: PageIndex) -> Option<(TileSpec, TileSpec)> {
+        let placement = self.layout.placement(page)?;
+        let pixel_size = placement.pixel_size();
+        if !self.tiling.requires_tiling(pixel_size) {
+            return None;
+        }
+        let grid = TileSpec::grid_for(pixel_size);
+        let visible = self.viewport.content_rect().intersection(placement.rect)?;
+        // 内容空间 → 该页位图内的像素矩形
+        let visible_px = Rect::new(
+            visible.x - placement.rect.x,
+            visible.y - placement.rect.y,
+            visible.width,
+            visible.height,
+        );
+        tiles_covering(visible_px, grid)
+    }
+
     /// 请求渲染一页（已缓存或已在飞则跳过）。
     ///
     /// D-02：按分块策略分流 —— 小页走整页渲染，超大页只提交"视口覆盖到的瓦片"。
@@ -771,19 +814,8 @@ impl DocumentSession {
     ///
     /// 不整页提交（130 块）的原因：分块的目的是省内存，预取整页会把收益抵消掉。
     fn request_tiles(&mut self, placement: PagePlacement, priority: RenderPriority) {
-        let pixel_size = placement.pixel_size();
-        let grid = TileSpec::grid_for(pixel_size);
-        let Some(visible) = self.viewport.content_rect().intersection(placement.rect) else {
-            return;
-        };
-        // 内容空间 → 该页位图内的像素矩形
-        let visible_px = Rect::new(
-            visible.x - placement.rect.x,
-            visible.y - placement.rect.y,
-            visible.width,
-            visible.height,
-        );
-        let Some((first, last)) = tiles_covering(visible_px, grid) else {
+        // 与 UI 绘制瓦片时使用**同一个**范围计算（`visible_tiles`），避免两处分歧
+        let Some((first, last)) = self.visible_tiles(placement.page) else {
             return;
         };
         for row in first.row..=last.row {
@@ -824,13 +856,18 @@ impl DocumentSession {
             self.request_page(*page, RenderPriority::Visible);
         }
 
+        // 预取半径 2：第二轮验收反馈"翻页边界处卡顿" —— 只预取 ±1 时，
+        // 下一页往往在**刚进入视口**时才开始渲染，那一瞬间的位图上传与渲染开销就表现为卡顿。
         if let (Some(first), Some(last)) = (visible.first().copied(), visible.last().copied()) {
-            let mut prefetch = Vec::with_capacity(2);
-            if first.get() > 0 {
-                prefetch.push(PageIndex::new(first.get() - 1));
-            }
-            if (last.get() as usize) + 1 < self.pages.len() {
-                prefetch.push(PageIndex::new(last.get() + 1));
+            let mut prefetch = Vec::with_capacity(PREFETCH_PAGE_RADIUS as usize * 2);
+            for offset in 1..=PREFETCH_PAGE_RADIUS {
+                if let Some(page) = first.get().checked_sub(offset) {
+                    prefetch.push(PageIndex::new(page));
+                }
+                let next = last.get() + offset;
+                if (next as usize) < self.pages.len() {
+                    prefetch.push(PageIndex::new(next));
+                }
             }
             for page in prefetch {
                 self.request_page(page, RenderPriority::Prefetch);

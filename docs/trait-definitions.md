@@ -915,7 +915,7 @@ impl DocumentSession {
 | 2 | `RenderRequest` / `RenderKey` | 新增 `tile: Option<TileSpec>`；新增 `TILE_SIZE`、`TileSpec`、`TilingPolicy`；`PageRaster` 契约明确"只渲染瓦片、不得整页后裁剪" | D-02 |
 | 3 | `TextLayer::search` | 注释明确"同步、不做异步版本" | D-03 |
 | 4 | `TextSelection` | 明确 `&mut self` 为例外并记录已确认 | D-04 |
-| 5 | `Viewport` / `ScrollAnchor` / `PageLayout` | 新增 `center_content_point()`、`ScrollAnchor`、`scroll_to_anchor()`；`scroll_to_page` 保留居中语义 | D-05 |
+| 5 | `Viewport` / `ScrollAnchor` / `PageLayout` | 新增 `center_content_point()`、`ScrollAnchor`、`scroll_to_anchor()`；`scroll_to_page` 保留居中语义（**v4/D-11 起改为顶部对齐 + 横向居中**，并新增 `ViewerCommand::CenterOnPagePoint` 供搜索跳转居中） | D-05 / D-11 |
 | 6 | `Destination` / `NavigationIndex` | 删除 `Destination::Named`；新增 `NavigationIndex`；`Document::outline()/links()` 合并为 `navigation()` | D-08 |
 | 7 | `PagePlacement` | 新增 `pixel_size()`（分块网格要用） | D-02 |
 | 8 | 会话 API | 新增 `page_geometry` / `tiles_for` / `tiling_policy` / `capture_anchor` / `restore_anchor` / `navigation` | D-01/02/05/08 |

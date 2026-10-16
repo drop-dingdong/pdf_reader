@@ -295,7 +295,14 @@ pub trait PageLayout: Send + Sync {
             .map(|placement| placement.page)
     }
 
-    /// 跳转到某页时应该设置的滚动偏移（默认把该页居中）。
+    /// 跳转到某页时应该设置的滚动偏移。
+    ///
+    /// 语义（第二轮人工验收统一）：**纵向让该页顶部恰好贴住视口顶部**，横向把该页居中。
+    /// 而不是把整页居中 —— 翻页/目录跳转时用户期望"从这一页的开头开始读"，
+    /// 居中会把长页的标题挤到视口上方看不见。
+    ///
+    /// 注意与 [`PageLayout::scroll_to_anchor`] 的分工：
+    /// 本方法用于**跳页**（顶部对齐）；锚点方法用于**重算布局**（保持视野中心不动）。
     fn scroll_to_page(
         &self,
         layout: &DocumentLayout,
@@ -307,7 +314,7 @@ pub trait PageLayout: Send + Sync {
         };
         let target = Vec2::new(
             placement.rect.x + placement.rect.width * 0.5 - viewport_size.width * 0.5,
-            placement.rect.y + placement.rect.height * 0.5 - viewport_size.height * 0.5,
+            placement.rect.y,
         );
         self.clamp_scroll(layout, viewport_size, target)
     }
@@ -496,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_is_clamped_and_page_jump_centers() {
+    fn scrolling_is_clamped_and_page_jump_aligns_top() {
         let layout = VerticalLayout.compute(&small_pages(3), &params(1.0));
         let viewport_size = Size::new(120.0, 150.0);
         let max = VerticalLayout.max_scroll(&layout, viewport_size);
@@ -508,11 +515,20 @@ mod tests {
         // x 轴：内容宽 110 < 视口宽 120 → 居中（偏移为负）；y 轴：内容更高 → 夹取到 [0, max]
         assert_eq!(clamped, Vec2::new(-(120.0 - 110.0) * 0.5, 0.0));
 
-        // 跳页后该页应居中（再被夹取到合法范围）
+        // 跳页：该页**顶部对齐**视口顶部（再夹取到合法范围），而不是把整页居中
         let scroll = VerticalLayout.scroll_to_page(&layout, PageIndex::new(2), viewport_size);
         let placement = layout.placement(PageIndex::new(2)).unwrap();
-        let center = placement.rect.y + placement.rect.height * 0.5 - viewport_size.height * 0.5;
-        assert!((scroll.y - center.min(max.y)).abs() < 1e-3);
+        assert!(
+            (scroll.y - placement.rect.y.min(max.y)).abs() < 1e-3,
+            "期望顶部对齐 {}, 实际 {scroll:?}",
+            placement.rect.y
+        );
+
+        // 页面比视口矮时，顶部对齐会受 max_scroll 限制（不能露出底部空白）
+        let tall_viewport = Size::new(120.0, 620.0);
+        let scroll = VerticalLayout.scroll_to_page(&layout, PageIndex::new(2), tall_viewport);
+        let max = VerticalLayout.max_scroll(&layout, tall_viewport);
+        assert!((scroll.y - max.y).abs() < 1e-3, "夹取到最大偏移，实际 {scroll:?}");
     }
 
     #[test]

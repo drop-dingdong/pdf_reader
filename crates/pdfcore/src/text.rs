@@ -255,7 +255,11 @@ impl PageText {
 
     /// 命中测试：把页面坐标转成字符下标。
     ///
-    /// 先找包围盒真正包含该点的字符；若都没有（点在字距之间），退化为"最近的字符中心"。
+    /// 先找包围盒真正包含该点的字符；若没有（点在字距或行距之间），退化为
+    /// **附近**最近字符的中心 —— "附近"的容差是字符高度的一半。
+    ///
+    /// 容差是必需的：没有它，点在页面空白/页边距上也会命中"全页离得最近的那个字"，
+    /// 于是"拖拽选字"会在任何地方都生效、无法平移画面（第二轮验收反馈的"自动模式不正常"）。
     pub fn hit_test(&self, point: Point) -> Option<u32> {
         let mut nearest: Option<(f32, u32)> = None;
         for (index, ch) in self.chars.iter().enumerate() {
@@ -264,6 +268,17 @@ impl PageText {
             }
             if ch.bbox.contains(point) {
                 return Some(index as u32);
+            }
+            // 容差随字号缩放（小字号页面上也不至于把远处的字算进来）
+            let tolerance = (ch.bbox.height * 0.5).max(2.0);
+            let expanded = Rect::new(
+                ch.bbox.x - tolerance,
+                ch.bbox.y - tolerance,
+                ch.bbox.width + tolerance * 2.0,
+                ch.bbox.height + tolerance * 2.0,
+            );
+            if !expanded.contains(point) {
+                continue;
             }
             let distance = ch.bbox.center().distance(point);
             if nearest.map_or(true, |(best, _)| distance < best) {
@@ -655,8 +670,12 @@ mod tests {
         let page = make_page(0, &["Hello world", "Second line"]);
         assert_eq!(page.hit_test(Point::new(3.0, 5.0)), Some(0));
         assert_eq!(page.hit_test(Point::new(9.0, 5.0)), Some(1));
-        // 点在字距间的空白处，退化为最近的字符
+        // 点在字距间的空白处，退化为最近的字符（容差 = 字高一半）
         assert!(page.hit_test(Point::new(5.9, 5.0)).is_some());
+        // 点在页面空白处（第二行下方很远处）必须返回 None：
+        // 否则"拖拽选字"会在任何地方都生效，无法平移画面
+        assert_eq!(page.hit_test(Point::new(3.0, 200.0)), None, "远离文字的空白点不应命中");
+        assert_eq!(page.hit_test(Point::new(-50.0, 5.0)), None, "页外点不应命中");
         // 框选前两个字符
         assert_eq!(
             page.range_for_rect(Rect::new(0.0, 0.0, 11.0, 10.0)),

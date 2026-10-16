@@ -30,6 +30,72 @@ fn assemble() -> DocumentSession {
     .expect("装配会话")
 }
 
+/// 当前布局下的最大滚动偏移（y 轴）：断言"跳页/兜底滚动会被夹取"时用。
+fn content_max_scroll_y(session: &DocumentSession) -> f32 {
+    (session.layout().content_size.height - session.viewport().size.height).max(0.0)
+}
+
+/// 第二轮验收：搜索命中跳转要把命中位置放到**视口中心**（与跳页的"顶部对齐"区分开）。
+#[test]
+fn center_on_page_point_puts_the_point_at_the_view_center() {
+    let mut session = assemble();
+    let mut events = Vec::new();
+    session.handle(ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)), &mut events);
+
+    let target = Point::new(300.0, 400.0);
+    session.handle(
+        ViewerCommand::CenterOnPagePoint { page: PageIndex::FIRST, point: target },
+        &mut events,
+    );
+
+    let placement = *session.placement(PageIndex::FIRST).expect("第 1 页布局");
+    let content = placement.page_to_content(target);
+    let scroll = session.viewport().scroll;
+    let view = Point::new(content.x - scroll.x, content.y - scroll.y);
+    assert!(
+        (view.x - 350.0).abs() < 0.5 && (view.y - 400.0).abs() < 0.5,
+        "目标点应位于视口中心，实际 {view:?}"
+    );
+    assert_eq!(session.state().current_page, PageIndex::FIRST, "当前页应跟随更新");
+}
+
+/// 第二轮验收：UI 枚举"要画哪些瓦片"必须与实际提交渲染的范围一致
+/// （否则未就绪区域会露出深色画布 —— 800% 时表现为"视野全黑"）。
+#[test]
+fn visible_tiles_matches_the_requested_range() {
+    let backend = MemoryBackend::demo();
+    let opened = backend.open(Source::Bytes(b"%PDF-1.4 fake"), None).unwrap();
+    let raster = opened.raster.clone();
+    let mut session = DocumentSession::new(
+        opened,
+        Arc::new(MemoryCache::new()),
+        Arc::new(ImmediateScheduler::new(raster)),
+        Box::new(VerticalLayout),
+        Box::new(RangeSelection::new()),
+    )
+    .expect("装配会话");
+
+    // 未分块时没有瓦片范围（走整页纹理）
+    session.set_tiling_policy(TilingPolicy::Never);
+    assert!(session.visible_tiles(PageIndex::FIRST).is_none());
+
+    session.set_tiling_policy(TilingPolicy::Always);
+    let mut events = Vec::new();
+    session.handle(ViewerCommand::ResizeViewport(Size::new(300.0, 300.0)), &mut events);
+    session.handle(ViewerCommand::SetScroll(Vec2::ZERO), &mut events);
+
+    let (first, last) = session.visible_tiles(PageIndex::FIRST).expect("强制分块后应有范围");
+    assert_eq!((first.col, first.row), (0, 0));
+    assert_eq!((last.col, last.row), (0, 0), "300×300 视口只覆盖左上角一块瓦片");
+
+    // 提交 + 取回后，缓存里的瓦片应与这个范围完全一致
+    session.handle(ViewerCommand::RequestVisible, &mut events);
+    session.pump(&mut events);
+    let tiles = session.tiles_for(PageIndex::FIRST);
+    assert_eq!(tiles.len(), 1, "只应渲染并缓存这一块");
+    assert_eq!(tiles[0].0, first);
+}
+
 #[test]
 fn assemble_a_reader_from_traits() {
     let mut session = assemble();
@@ -446,9 +512,12 @@ fn zoom_keeps_the_view_center_anchored() {
     );
 }
 
-/// D-05 退化路径：视野中心落在页间距时捕获失败，应退化为"当前页居中"而不是 panic。
+/// D-05 退化路径：视野中心落在页间距时捕获失败，应退化为"当前页顶部对齐"而不是 panic。
+///
+/// 注意第二轮验收统一了跳转语义：`scroll_to_page` 是**顶部对齐**（不再是居中），
+/// 因此锚点捕获失败时的兜底行为也随之变为顶部对齐。
 #[test]
-fn anchor_falls_back_to_page_center_between_pages() {
+fn anchor_falls_back_to_page_top_when_center_is_between_pages() {
     let mut session = assemble();
     let mut events = Vec::new();
     session.handle(ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)), &mut events);
@@ -460,12 +529,12 @@ fn anchor_falls_back_to_page_center_between_pages() {
     let current = session.state().current_page;
     session.handle(ViewerCommand::SetZoom(1.5), &mut events); // 不得 panic
 
-    // 退化行为 = 当前页居中
+    // 退化行为 = 当前页顶部对齐（受 max_scroll 夹取）
     let placement = *session.layout().placement(current).expect("当前页应有布局");
-    let expected = placement.rect.y + placement.rect.height * 0.5 - session.viewport().size.height * 0.5;
+    let expected = placement.rect.y.min(content_max_scroll_y(&session));
     assert!(
         (session.viewport().scroll.y - expected).abs() < 0.5,
-        "期望退化到当前页居中 {expected}，实际 {:?}",
+        "期望退化到当前页顶部对齐 {expected}，实际 {:?}",
         session.viewport().scroll
     );
 }

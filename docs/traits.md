@@ -372,6 +372,10 @@ pub trait PageLayout: Send + Sync {
 - ▲v3 **锚点与居中并存（D-05）**：`scroll_to_page` 保留"页面居中 + 夹取"语义（用于跳页）；
   新增的 `scroll_to_anchor` 用于**任何重算布局**的场景，使"视口中心对应的页内位置"在缩放/旋转前后不动。
   锚点若落在页间距或页外（`page_at` 返回 `None`），退化为"当前页居中"，不报错。
+- ★ **v4 修正（D-11，第二轮人工验收）**：`scroll_to_page` 改为
+  **顶部对齐 + 横向居中**（跳页后"页面最上部恰好完全出现"），锚点退化路径也随之改变；
+  **搜索命中跳转**另走新增的 `ViewerCommand::CenterOnPagePoint`（把命中位置放到视口中心）。
+  `scroll_to_anchor` 的"保持视野中心不动"语义不变。
 
 ---
 

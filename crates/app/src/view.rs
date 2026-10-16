@@ -139,6 +139,37 @@ impl<V> KeyedStore<V> {
         self.order.retain(|key| self.entries.contains_key(key));
     }
 
+    /// 找同一页、同一旋转下**缩放最接近**的整页纹理。
+    ///
+    /// 用途：缩放过程中新比例的位图还没渲染好时，用旧比例的图**拉伸显示**，
+    /// 避免出现大片白色填充（第二轮人工验收反馈）。真正的"最近邻"由 `scale_milli` 决定；
+    /// 瓦片（`tile.is_some()`）不参与匹配 —— 它们的几何含义与整页位图不同。
+    pub fn best_page_texture(
+        &self,
+        page: PageIndex,
+        rotation: Rotation,
+        target_scale_milli: u32,
+    ) -> Option<&V> {
+        self.entries
+            .iter()
+            .filter(|(key, _)| key.page == page && key.rotation == rotation && key.tile.is_none())
+            .min_by_key(|(key, _)| key.scale_milli.abs_diff(target_scale_milli))
+            .map(|(_, value)| value)
+    }
+
+    /// 该键对应的页/缩放/旋转下是否已有**任意一块瓦片**就绪。
+    ///
+    /// 用途：分块渲染时判断"能不能立刻画真内容"。只要能画，就不该用上一档缩放的旧图去顶替，
+    /// 否则瓦片虽已就绪却永远被旧图盖住。
+    pub fn has_tiles(&self, like: &RenderKey) -> bool {
+        self.entries.keys().any(|key| {
+            key.page == like.page
+                && key.scale_milli == like.scale_milli
+                && key.rotation == like.rotation
+                && key.tile.is_some()
+        })
+    }
+
     /// 清空。
     pub fn clear(&mut self) {
         self.entries.clear();
@@ -294,5 +325,57 @@ mod tests {
 
         store.clear();
         assert!(store.is_empty());
+    }
+
+    /// 缩放期间用"上一档缩放"的位图拉伸占位（第二轮验收：避免大片白色填充）。
+    #[test]
+    fn best_page_texture_picks_the_nearest_scale() {
+        let scaled = |page: u32, scale: f32, rotation: Rotation| {
+            RenderKey::new(PageIndex::new(page), Scale::from_zoom(scale), rotation)
+        };
+
+        let mut store = KeyedStore::new(16);
+        store.insert(scaled(0, 1.0, Rotation::None), "one");
+        store.insert(scaled(0, 2.0, Rotation::None), "two");
+        store.insert(scaled(1, 2.0, Rotation::None), "other-page");
+
+        // 目标 2.1 → 最接近的整页图是 2.0
+        assert_eq!(store.best_page_texture(PageIndex::new(0), Rotation::None, 2100), Some(&"two"));
+        // 目标 1.1 → 1.0
+        assert_eq!(store.best_page_texture(PageIndex::new(0), Rotation::None, 1100), Some(&"one"));
+        // 其它页不参与
+        assert_eq!(store.best_page_texture(PageIndex::new(2), Rotation::None, 2000), None);
+        // 旋转不同不可顶替（否则画面会横躺）
+        assert_eq!(
+            store.best_page_texture(PageIndex::new(0), Rotation::Clockwise90, 2000),
+            None
+        );
+    }
+
+    /// 分块渲染时，判断"能不能立刻画真内容"：同页同缩放的瓦片只要有一块就绪就算能。
+    #[test]
+    fn has_tiles_detects_ready_tiles_for_the_same_key() {
+        let mut store = KeyedStore::new(8);
+        let whole = RenderKey::new(PageIndex::new(0), Scale::from_zoom(2.0), Rotation::None);
+        assert!(!store.has_tiles(&whole), "空存储不应报告有瓦片");
+
+        store.insert(
+            RenderKey::tiled(
+                PageIndex::new(0),
+                Scale::from_zoom(2.0),
+                Rotation::None,
+                TileSpec::new(0, 0),
+            ),
+            "tile",
+        );
+        assert!(store.has_tiles(&whole), "同页同缩放的瓦片应被识别");
+        assert!(
+            !store.has_tiles(&RenderKey::new(PageIndex::new(1), Scale::from_zoom(2.0), Rotation::None)),
+            "其它页的瓦片不算"
+        );
+        assert!(
+            !store.has_tiles(&RenderKey::new(PageIndex::new(0), Scale::from_zoom(1.5), Rotation::None)),
+            "其它缩放的瓦片不算"
+        );
     }
 }
