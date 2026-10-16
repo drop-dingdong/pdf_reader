@@ -177,6 +177,65 @@ pub fn link_rect_in_page_bounds(rect: Rect, page_size: Size) -> bool {
         && rect.bottom() <= page_size.height + slack
 }
 
+/// 截图模式的遮罩分块：返回 4 块矩形，把 `hole` 挖空（区域内保持透明）。
+///
+/// egui 没有"擦除"混合，因此"半透明蒙层 + 中间透明"的常规做法就是
+/// **绕开选区画四块**（上/下/左/右）。`hole` 为空时返回整块区域。
+pub fn veil_bands(area: egui::Rect, hole: Option<egui::Rect>) -> Vec<egui::Rect> {
+    let Some(hole) = hole else { return vec![area] };
+    let hole = hole.intersect(area);
+    if hole.width() <= 0.0 || hole.height() <= 0.0 {
+        return vec![area];
+    }
+    let mut bands = Vec::with_capacity(4);
+    // 上
+    if hole.min.y > area.min.y {
+        bands.push(egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, hole.min.y)));
+    }
+    // 下
+    if hole.max.y < area.max.y {
+        bands.push(egui::Rect::from_min_max(egui::pos2(area.min.x, hole.max.y), area.max));
+    }
+    // 左
+    if hole.min.x > area.min.x {
+        bands.push(egui::Rect::from_min_max(
+            egui::pos2(area.min.x, hole.min.y),
+            egui::pos2(hole.min.x, hole.max.y),
+        ));
+    }
+    // 右
+    if hole.max.x < area.max.x {
+        bands.push(egui::Rect::from_min_max(
+            egui::pos2(hole.max.x, hole.min.y),
+            egui::pos2(area.max.x, hole.max.y),
+        ));
+    }
+    bands
+}
+
+/// 视图空间矩形 → 某页的 **PDF 页面空间**矩形（截图功能输出区域信息用）。
+///
+/// 与该页无交集时返回 `None`；交集会先按页面矩形裁剪，再换算到页面空间并归一化。
+pub fn view_rect_to_page_rect(
+    placement: &PagePlacement,
+    view_rect: Rect,
+    scroll: Vec2,
+) -> Option<Rect> {
+    let content = view_rect.translate(scroll);
+    let overlap = content.intersection(placement.rect)?;
+    if overlap.width <= 0.0 || overlap.height <= 0.0 {
+        return None;
+    }
+    let a = placement.content_to_page(Point::new(overlap.x, overlap.y));
+    let b = placement.content_to_page(Point::new(overlap.right(), overlap.bottom()));
+    Some(Rect::new(
+        a.x.min(b.x),
+        a.y.min(b.y),
+        (b.x - a.x).abs(),
+        (b.y - a.y).abs(),
+    ))
+}
+
 /// 浮窗的最小尺寸（egui 单位，因为浮窗是纯 UI 元素）。
 pub const FLOAT_MIN_SIZE: egui::Vec2 = egui::Vec2::new(160.0, 90.0);
 /// 浮窗标题栏高度。
@@ -846,6 +905,62 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 截图遮罩：选区内部必须**不被**蒙层覆盖（即只有四块绕开选区的矩形）。
+    #[test]
+    fn veil_bands_leave_the_selection_transparent() {
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 80.0));
+
+        // 无选区 → 整块蒙层
+        assert_eq!(veil_bands(area, None), vec![area]);
+
+        // 中间选区 → 四块，且没有任何一块覆盖选区中心
+        let hole = egui::Rect::from_min_size(egui::pos2(30.0, 20.0), egui::vec2(40.0, 30.0));
+        let bands = veil_bands(area, Some(hole));
+        assert_eq!(bands.len(), 4);
+        for band in &bands {
+            assert!(!band.contains(hole.center()), "蒙层不得覆盖选区中心");
+        }
+        // 四块面积之和 = 总面积 − 选区面积
+        let covered: f32 = bands.iter().map(|band| band.width() * band.height()).sum();
+        let expected = area.width() * area.height() - hole.width() * hole.height();
+        assert!((covered - expected).abs() < 1e-3, "覆盖面积 {covered} vs {expected}");
+
+        // 选区贴住左边 → 只剩 3 块（左块宽度为 0，不产生）
+        let edge = egui::Rect::from_min_size(egui::pos2(0.0, 20.0), egui::vec2(40.0, 30.0));
+        assert_eq!(veil_bands(area, Some(edge)).len(), 3);
+
+        // 选区完全在区域外 → 退回整块蒙层
+        let outside = egui::Rect::from_min_size(egui::pos2(500.0, 500.0), egui::vec2(10.0, 10.0));
+        assert_eq!(veil_bands(area, Some(outside)), vec![area]);
+    }
+
+    /// 截图区域 → PDF 页面空间：只取与该页的交集，且坐标归一化。
+    #[test]
+    fn view_rect_to_page_rect_maps_and_clips() {
+        // 页 200×100 放在内容空间 (10, 20)，缩放 1、无旋转
+        let placement = PagePlacement::new(
+            PageIndex::FIRST,
+            Rect::new(10.0, 20.0, 200.0, 100.0),
+            Scale::IDENTITY,
+            Rotation::None,
+            Size::new(200.0, 100.0),
+        );
+
+        // 滚动为 0 时，视图矩形 (30,40,50,20) → 内容 (30,40,50,20) → 页内 (20,20)
+        let page_rect = view_rect_to_page_rect(&placement, Rect::new(30.0, 40.0, 50.0, 20.0), Vec2::ZERO)
+            .expect("应命中页面");
+        assert!((page_rect.x - 20.0).abs() < 1e-3);
+        assert!((page_rect.width - 50.0).abs() < 1e-3);
+
+        // 滚动会平移内容：scroll=(10,10) 时同一视图矩形对应的页内区域右移下移
+        let scrolled = view_rect_to_page_rect(&placement, Rect::new(30.0, 40.0, 50.0, 20.0), Vec2::new(10.0, 10.0))
+            .expect("应命中页面");
+        assert!((scrolled.x - 30.0).abs() < 1e-3, "实际 {}", scrolled.x);
+
+        // 完全在页外 → None
+        assert!(view_rect_to_page_rect(&placement, Rect::new(500.0, 500.0, 10.0, 10.0), Vec2::ZERO).is_none());
     }
 
     /// 引用点：按目标页分组、按位置去重、无形坐标的目标不产生标记。

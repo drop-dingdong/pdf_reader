@@ -25,7 +25,8 @@ use pdfcore::prelude::*;
 
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
-    clamp_float_rect, color_image, commands_for_destination, destination_points,
+    clamp_float_rect, color_image, commands_for_destination, destination_points, veil_bands,
+    view_rect_to_page_rect,
     flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
@@ -88,6 +89,19 @@ impl Tool {
     }
 }
 
+/// 截图模式的状态。
+///
+/// 进入后：主视图的拖动/滚动/缩放/链接跳转等**一律不响应**（瓦片加载仍继续），
+/// 浮窗与所有叠层隐藏，主视图蒙上半透明亮灰；鼠标拖出矩形，矩形内透明（"挖洞"）。
+/// `Enter` 退出并在终端输出区域信息，`Esc` 退出且无输出。
+#[derive(Default)]
+struct CaptureState {
+    /// 已画出的选区（视图空间）；`None` = 尚未开始
+    rect: Option<egui::Rect>,
+    /// 正在拖拽的起点（视图空间）
+    anchor: Option<egui::Pos2>,
+}
+
 /// 视图区域内的浮窗（始终在画布内部、可移动/改大小/关闭；现阶段只显示文字）。
 struct Float {
     /// 唯一 id（用于 egui 的交互标识）。
@@ -124,6 +138,8 @@ pub struct PdfReaderApp {
     show_dest_points: bool,
     /// 每个目标页上被引用的点（按 0.5pt 去重），下标 = 页号；打开文档时算一次。
     dest_points: Vec<Vec<Point>>,
+    /// 截图模式状态（`Some` = 处于该模式）。
+    capture: Option<CaptureState>,
     /// 本帧累计的"像素格式转换"与"load_texture"耗时（诊断用，定位 150ms 到底在哪一段）。
     last_convert_ms: f64,
     last_upload_ms: f64,
@@ -197,6 +213,7 @@ impl PdfReaderApp {
             next_float_id: 1,
             show_dest_points: false,
             dest_points: Vec::new(),
+            capture: None,
             last_convert_ms: 0.0,
             last_upload_ms: 0.0,
             sidebar_width: 260.0,
@@ -277,6 +294,7 @@ impl PdfReaderApp {
                             .unwrap_or_default();
                         self.floats.clear();
                         self.next_float_id = 1;
+                        self.capture = None;
                         let title = session.opened().document.info().to_string();
                         self.session = Some(session);
                         self.textures.clear();
@@ -305,6 +323,11 @@ impl PdfReaderApp {
 
     /// 采集输入 → 命令。
     fn collect_commands(&mut self, ctx: &egui::Context, session: &DocumentSession) {
+        // 截图模式下不采集任何"影响主视图显示内容"的命令（滚动/缩放/翻页/复制…）：
+        // 键盘的 Enter/Esc 与框选都在 `draw_canvas` 里处理（那里才有画布矩形与滚动量）。
+        if self.capture.is_some() {
+            return;
+        }
         let page_count = session.page_count();
 
         // 键盘
@@ -559,6 +582,11 @@ impl PdfReaderApp {
                 if ui.button("添加测试浮窗").clicked() {
                     self.add_test_float();
                 }
+                // 截图模式：进入后主视图只用于框选区域
+                if ui.button("截图").clicked() {
+                    self.capture = Some(CaptureState::default());
+                    self.message = "截图模式：拖动框选区域，Enter 输出并退出，Esc 退出".to_string();
+                }
 
                 // 搜索（同步接口：大文档可能短暂卡顿，见 decision-log D-03/D-07）
                 ui.separator();
@@ -742,7 +770,7 @@ impl PdfReaderApp {
                 .ctx()
                 .pointer_hover_pos()
                 .map_or(false, |position| canvas.contains(position));
-            if wheel_targets_canvas(pointer_over_canvas) {
+            if self.capture.is_none() && wheel_targets_canvas(pointer_over_canvas) {
                 let (scroll_delta, zoom_delta, modifiers) = ui.input(|input| {
                     (input.smooth_scroll_delta, input.zoom_delta(), input.modifiers)
                 });
@@ -769,7 +797,7 @@ impl PdfReaderApp {
                 Tool::Select => !inverted_now,
                 Tool::Pan => inverted_now,
             };
-            if response.drag_started() {
+            if self.capture.is_none() && response.drag_started() {
                 self.drag_started_at = Some(std::time::Instant::now());
                 self.last_pan_at = None;
                 if self.diagnose {
@@ -798,7 +826,7 @@ impl PdfReaderApp {
                     }
                 }
             }
-            if response.dragged() {
+            if self.capture.is_none() && response.dragged() {
                 ui.ctx().request_repaint();
                 match self.drag {
                     Some(DragMode::Pan) => {
@@ -1089,7 +1117,8 @@ impl PdfReaderApp {
             }
 
             // 2b) 链接热区框（可开关；缩放过小时不画）
-            if link_overlay_visible(self.show_links, session.state().zoom, LINK_OVERLAY_MIN_ZOOM)
+            if self.capture.is_none()
+                && link_overlay_visible(self.show_links, session.state().zoom, LINK_OVERLAY_MIN_ZOOM)
             {
                 if let Some(navigation) = &self.navigation {
                     for page in self.visible.clone() {
@@ -1115,7 +1144,12 @@ impl PdfReaderApp {
 
             // 2c) 被引用的点（链接跳转目的地）：按位置去重后画记号；
             //     与链接框同样在缩放过小时不显示（用户要求）。
-            if link_overlay_visible(self.show_dest_points, session.state().zoom, LINK_OVERLAY_MIN_ZOOM)
+            if self.capture.is_none()
+                && link_overlay_visible(
+                    self.show_dest_points,
+                    session.state().zoom,
+                    LINK_OVERLAY_MIN_ZOOM,
+                )
             {
                 for page in self.visible.clone() {
                     let Some(placement) = session.placement(page).copied() else { continue };
@@ -1208,7 +1242,7 @@ impl PdfReaderApp {
                 self.drag_started_at = None;
                 self.last_pan_at = None;
             }
-            if response.double_clicked() {
+            if self.capture.is_none() && response.double_clicked() {
                 if let Some(position) = response.interact_pointer_pos() {
                     let content = canvas_to_content(canvas, position, scroll);
                     if let Some(text_position) = session.text_position_at(content) {
@@ -1218,7 +1252,7 @@ impl PdfReaderApp {
                         self.commands.push(ViewerCommand::SelectBegin(text_position));
                     }
                 }
-            } else if response.clicked() {
+            } else if self.capture.is_none() && response.clicked() {
                 if let Some(position) = response.interact_pointer_pos() {
                     let content = canvas_to_content(canvas, position, scroll);
                     // 链接优先：命中热区就跳转（不论当前工具）—— 目的地有坐标时居中（用户要求）
@@ -1238,8 +1272,13 @@ impl PdfReaderApp {
                 }
             }
 
-            // 浮窗**最后**绘制与注册 → 位于最上层；后加入的在更上层（见 draw_floats）
-            self.draw_floats(ui, canvas);
+            // 浮窗**最后**绘制与注册 → 位于最上层；后加入的在更上层（见 draw_floats）。
+            // 截图模式下所有浮窗不显现（连交互也不注册，避免吃掉框选拖动）。
+            if self.capture.is_none() {
+                self.draw_floats(ui, canvas);
+            } else {
+                self.draw_capture(ui, canvas, session, scroll);
+            }
         });
     }
 
@@ -1261,6 +1300,113 @@ impl PdfReaderApp {
             rect,
         });
         self.message = format!("已添加测试浮窗 #{id}");
+    }
+
+    /// 截图模式：框选区域 + 半透明蒙层（矩形内透明）+ Enter/Esc 退出。
+    ///
+    /// * 蒙层用"绕开选区的四块"实现（egui 没有擦除混合，见 `view::veil_bands`）；
+    /// * 拖动即框选；松开后选区保留，可再次拖动重画；
+    /// * `Enter` → 终端输出区域信息（视图坐标 + 覆盖页的页面空间矩形）并退出；
+    /// * `Esc` → 直接退出，无输出。
+    fn draw_capture(
+        &mut self,
+        ui: &mut egui::Ui,
+        canvas: egui::Rect,
+        session: &DocumentSession,
+        scroll: Vec2,
+    ) {
+        // ---- 框选 ----
+        let response = ui.interact(canvas, Id::unique("capture-area"), Sense::drag());
+        if let Some(position) = response.interact_pointer_pos() {
+            if response.drag_started() {
+                self.capture.as_mut().unwrap().anchor = Some(position);
+                self.capture.as_mut().unwrap().rect = None;
+            }
+            if response.dragged() {
+                if let Some(anchor) = self.capture.as_ref().and_then(|state| state.anchor) {
+                    let rect = egui::Rect::from_two_pos(anchor, position).intersect(canvas);
+                    self.capture.as_mut().unwrap().rect = Some(rect);
+                }
+                ui.ctx().request_repaint();
+            }
+        }
+        if response.drag_stopped() {
+            self.capture.as_mut().unwrap().anchor = None;
+        }
+
+        // ---- 蒙层（选区透明）+ 选区边框 ----
+        let selection = self.capture.as_ref().and_then(|state| state.rect);
+        let veil_color = Color32::from_rgba_unmultiplied(225, 225, 225, 110);
+        for band in veil_bands(canvas, selection) {
+            ui.painter().rect_filled(band, CornerRadius::ZERO, veil_color);
+        }
+        if let Some(selection) = selection {
+            ui.painter().rect_stroke(
+                selection,
+                CornerRadius::ZERO,
+                Stroke::new(1.5, Color32::from_rgb(60, 120, 220)),
+                StrokeKind::Inside,
+            );
+        }
+
+        // ---- Enter / Esc ----
+        let (enter, escape) = ui.ctx().input(|input| {
+            (input.key_pressed(egui::Key::Enter), input.key_pressed(egui::Key::Escape))
+        });
+        if enter {
+            match selection {
+                Some(selection) => {
+                    // egui 矩形 → 接口层矩形（同一坐标系，仅类型不同）
+                    let selection_rect = Rect::new(
+                        selection.min.x,
+                        selection.min.y,
+                        selection.width(),
+                        selection.height(),
+                    );
+                    let mut parts: Vec<String> = Vec::new();
+                    for page in self.visible.clone() {
+                        let Some(placement) = session.placement(page).copied() else { continue };
+                        if let Some(page_rect) =
+                            view_rect_to_page_rect(&placement, selection_rect, scroll)
+                        {
+                            parts.push(format!(
+                                "页 {} 页空间 ({:.1},{:.1} {:.1}×{:.1})",
+                                page.display_number(),
+                                page_rect.x,
+                                page_rect.y,
+                                page_rect.width,
+                                page_rect.height
+                            ));
+                        }
+                    }
+                    eprintln!(
+                        "[截图] 视图区域 ({:.1},{:.1} {:.1}×{:.1}){}",
+                        selection.min.x,
+                        selection.min.y,
+                        selection.width(),
+                        selection.height(),
+                        if parts.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" | {}", parts.join(" | "))
+                        }
+                    );
+                    self.message = format!(
+                        "截图区域已输出：{:.0}×{:.0}",
+                        selection.width(),
+                        selection.height()
+                    );
+                }
+                None => {
+                    eprintln!("[截图] 未框选任何区域");
+                    self.message = "截图模式：未框选区域".to_string();
+                }
+            }
+            self.capture = None;
+        } else if escape {
+            self.capture = None;
+            self.message = "已退出截图模式".to_string();
+        }
     }
 
     /// 绘制并处理浮窗：移动（拖标题栏）、改大小（拖右下角）、关闭（右上角 ✕）。
@@ -1307,12 +1453,26 @@ impl PdfReaderApp {
                 );
             }
 
-            // 右上角关闭按钮
-            let close_rect = egui::Rect::from_center_size(
-                egui::pos2(title_rect.right() - 12.0, title_rect.center().y),
-                EVec2::splat(16.0),
+            // 右上角关闭按钮：**画成带底色的圆**，悬停/按下变红 —— 否则只有一个"✕"太不显眼
+            let close_center = egui::pos2(title_rect.right() - 13.0, title_rect.center().y);
+            let close_rect = egui::Rect::from_center_size(close_center, EVec2::splat(18.0));
+            let close_response = ui.interact(close_rect, Id::unique(("float-close", id)), Sense::click());
+            let close_color = if close_response.is_pointer_button_down_on() {
+                Color32::from_rgb(170, 45, 45)
+            } else if close_response.hovered() {
+                Color32::from_rgb(205, 70, 70)
+            } else {
+                Color32::from_gray(95)
+            };
+            ui.painter().circle_filled(close_center, 8.5, close_color);
+            ui.painter().text(
+                close_center,
+                Align2::CENTER_CENTER,
+                "✕",
+                egui::FontId::proportional(12.0),
+                Color32::WHITE,
             );
-            if ui.put(close_rect, egui::Button::new("✕").frame(false)).clicked() {
+            if close_response.on_hover_text("关闭浮窗").clicked() {
                 close = Some(id);
             }
 
@@ -1420,6 +1580,11 @@ impl eframe::App for PdfReaderApp {
 
         let frame_start = std::time::Instant::now();
         self.collect_commands(&ctx, &session);
+        if self.capture.is_some() {
+            // 丢弃工具栏等来源的命令：截图期间不改动主视图内容；
+            // 注意仍然要跑 `apply_and_pump` —— 它负责 `pump`，瓦片加载得以继续。
+            self.commands.clear();
+        }
         self.apply_and_pump(&ctx, &mut session);
         let after_input = frame_start.elapsed();
 
