@@ -645,6 +645,63 @@ impl PdfReaderApp {
             // 画布从拖拽条右侧开始（两者不重叠，拖拽不会被画布抢走）
             let response = ui.interact(canvas, Id::unique("pdf-canvas"), Sense::click_and_drag());
             let painter = ui.painter_at(canvas);
+
+            // ---- 拖动**当帧生效** ----
+            //
+            // 拖动命令原先要等下一帧 `apply_and_pump` 才执行，于是画面永远落后指针一帧；
+            // 快速拖动时就是上百像素的偏差（用户反馈"落后鼠标移动过多"）。
+            // 这里在读取 scroll / 绘制**之前**先处理拖动，内容与指针同帧同步。
+            let inverted_now = ui.input(|input| input.modifiers.shift);
+            let select_now = match self.tool {
+                Tool::Select => !inverted_now,
+                Tool::Pan => inverted_now,
+            };
+            if response.drag_started() {
+                if let Some(position) = response.interact_pointer_pos() {
+                    let content =
+                        canvas_to_content(canvas, position, session.viewport().scroll);
+                    let hit = session.text_position_at(content);
+                    match (select_now, hit) {
+                        (true, Some(text_position)) => {
+                            self.drag = Some(DragMode::Select);
+                            session.handle(
+                                ViewerCommand::SetSelectionGranularity(SelectionGranularity::Char),
+                                &mut self.events,
+                            );
+                            session.handle(
+                                ViewerCommand::SelectBegin(text_position),
+                                &mut self.events,
+                            );
+                        }
+                        _ => self.drag = Some(DragMode::Pan),
+                    }
+                }
+            }
+            if response.dragged() {
+                ui.ctx().request_repaint();
+                match self.drag {
+                    Some(DragMode::Pan) => {
+                        let delta = response.drag_delta();
+                        session.handle(
+                            ViewerCommand::ScrollBy(Vec2::new(-delta.x, -delta.y)),
+                            &mut self.events,
+                        );
+                    }
+                    Some(DragMode::Select) => {
+                        if let Some(position) = response.interact_pointer_pos() {
+                            let content =
+                                canvas_to_content(canvas, position, session.viewport().scroll);
+                            if let Some(text_position) = session.text_position_at(content) {
+                                session.handle(
+                                    ViewerCommand::SelectExtend(text_position),
+                                    &mut self.events,
+                                );
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
             let size = canvas.size();
 
             // 视口变化 → 交给会话（会话据此夹取滚动、更新当前页）
@@ -860,7 +917,7 @@ impl PdfReaderApp {
                         let size = placement.page_size;
                         let first = links[0].rect;
                         eprintln!(
-                            "[链接] p{} 页尺寸={:.1}×{:.1} 热区数={} 首个=({:.1},{:.1} {:.1}×{:.1}) 越界={}",
+                            "[链接] p{} 页尺寸={:.1}×{:.1} 热区数={} 首个=({:.1},{:.1} {:.1}×{:.1}) 越界(粗查,只能发现大偏移)={}",
                             page.display_number(),
                             size.width,
                             size.height,
@@ -920,22 +977,7 @@ impl PdfReaderApp {
                 Tool::Pan => inverted,
             };
 
-            if response.drag_started() {
-                if let Some(position) = response.interact_pointer_pos() {
-                    let content = canvas_to_content(canvas, position, scroll);
-                    let hit = session.text_position_at(content);
-                    match (select_tool, hit) {
-                        (true, Some(text_position)) => {
-                            self.drag = Some(DragMode::Select);
-                            self.commands.push(ViewerCommand::SetSelectionGranularity(
-                                SelectionGranularity::Char,
-                            ));
-                            self.commands.push(ViewerCommand::SelectBegin(text_position));
-                        }
-                        _ => self.drag = Some(DragMode::Pan),
-                    }
-                }
-            }
+            // drag_started / dragged 已在绘制之前处理（当帧生效），此处不重复
             if response.dragged() {
                 // 拖动期间必须持续重绘：命令在**下一帧**才生效，
                 // 若这一帧之后没有新的输入事件（鼠标停住不动），画面就不会更新 ——
@@ -951,9 +993,7 @@ impl PdfReaderApp {
                         }
                     }
                     Some(DragMode::Pan) => {
-                        let delta = response.drag_delta();
-                        self.commands
-                            .push(ViewerCommand::ScrollBy(Vec2::new(-delta.x, -delta.y)));
+                        // 已在绘制之前当帧处理（见"拖动当帧生效"），这里不再重复提交
                     }
                     None => {}
                 }
