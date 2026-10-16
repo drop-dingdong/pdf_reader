@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use crate::document::{Capabilities, Link, OpenedDocument, OutlineNode};
 use crate::error::{CoreError, Result};
-use crate::geometry::{Insets, Point, Rotation, Size, Vec2};
+use crate::geometry::{Insets, Point, Rect, Rotation, Size, Vec2};
 use crate::ids::{JobId, PageIndex};
 use crate::image::RasterImage;
 use crate::layout::{
@@ -26,7 +26,8 @@ use crate::layout::{
     ReadingDirection, Viewport,
 };
 use crate::render::{
-    RenderCache, RenderEvent, RenderKey, RenderPriority, RenderRequest, RenderScheduler, Scale,
+    tiles_covering, RenderCache, RenderEvent, RenderKey, RenderPriority, RenderRequest,
+    RenderScheduler, Scale, TileSpec, TilingPolicy,
 };
 use crate::text::{
     Highlight, HighlightKind, PageText, SearchHit, SearchQuery, SelectionGranularity, TextPosition,
@@ -210,6 +211,8 @@ pub struct DocumentSession {
     submitted: HashSet<RenderKey>,
     jobs: HashMap<RenderKey, JobId>,
     visible_scratch: Vec<PageIndex>,
+    /// D-02：分块策略（默认 `AbovePixels(16 MP)`）。
+    tiling: TilingPolicy,
 }
 
 impl DocumentSession {
@@ -242,6 +245,7 @@ impl DocumentSession {
             submitted: HashSet::new(),
             jobs: HashMap::new(),
             visible_scratch: Vec::new(),
+            tiling: TilingPolicy::default(),
         };
         session.recompute_layout();
         Ok(session)
@@ -284,13 +288,57 @@ impl DocumentSession {
         self.layout.placement(page)
     }
 
-    /// 某页当前缩放下的位图（若已在缓存中）。
+    /// 某页当前缩放下的**整页**位图（若已在缓存中）。
     ///
     /// UI 拿它做纹理上传：`RasterImage::to_rgba8()` 之后即可交给 `egui::ColorImage`。
+    ///
+    /// **分块时返回 `None`** —— 该页的像素请改用 [`DocumentSession::tiles_for`] 拼接。
+    /// 判断依据是 [`DocumentSession::tiling_policy`]，UI 也可据此决定走哪条路径。
     pub fn image_for(&self, page: PageIndex) -> Option<Arc<RasterImage>> {
         let placement = self.layout.placement(page)?;
+        if self.tiling.requires_tiling(placement.pixel_size()) {
+            return None;
+        }
         let key = RenderKey::new(page, placement.scale, placement.rotation);
         self.cache.get(&key)
+    }
+
+    /// 该页当前缩放下的全部**已在缓存中**的瓦片，供 UI 按 `TileSpec::pixel_rect` 拼接绘制。
+    ///
+    /// 未就绪的瓦片不会出现在返回值里 —— UI 应对缺失区域画白底占位（D-06）。
+    pub fn tiles_for(&self, page: PageIndex) -> Vec<(TileSpec, Arc<RasterImage>)> {
+        let Some(placement) = self.layout.placement(page).copied() else {
+            return Vec::new();
+        };
+        let pixel_size = placement.pixel_size();
+        if !self.tiling.requires_tiling(pixel_size) {
+            return Vec::new();
+        }
+        let (cols, rows) = TileSpec::grid_for(pixel_size);
+        let mut out = Vec::new();
+        for row in 0..rows {
+            for col in 0..cols {
+                let tile = TileSpec::new(col, row);
+                let key = RenderKey::tiled(page, placement.scale, placement.rotation, tile);
+                if let Some(image) = self.cache.get(&key) {
+                    out.push((tile, image));
+                }
+            }
+        }
+        out
+    }
+
+    /// 当前分块策略。
+    pub fn tiling_policy(&self) -> TilingPolicy {
+        self.tiling
+    }
+
+    /// 切换分块策略。改变策略会作废在飞任务（缓存键含义随之变化）。
+    pub fn set_tiling_policy(&mut self, policy: TilingPolicy) {
+        if self.tiling != policy {
+            self.tiling = policy;
+            self.invalidate_render();
+        }
     }
 
     /// 已缓存的页文本（不会触发加载）。
@@ -626,21 +674,63 @@ impl DocumentSession {
     }
 
     /// 请求渲染一页（已缓存或已在飞则跳过）。
+    ///
+    /// D-02：按分块策略分流 —— 小页走整页渲染，超大页只提交"视口覆盖到的瓦片"。
+    /// 关键一致性：请求里的 `scale` / `rotation` 必须与布局给出的完全一致，
+    /// 否则渲染结果会与布局对不上（画面错位、高亮偏移）。
     fn request_page(&mut self, page: PageIndex, priority: RenderPriority) {
         let Some(placement) = self.layout.placement(page).copied() else {
             return;
         };
-        // 关键一致性：请求里的 scale/rotation 必须与布局给出的完全一致，
-        // 否则渲染结果会与布局对不上（画面错位、高亮偏移）。
-        let key = RenderKey::new(page, placement.scale, placement.rotation);
+        if self.tiling.requires_tiling(placement.pixel_size()) {
+            self.request_tiles(placement, priority);
+        } else {
+            let key = RenderKey::new(placement.page, placement.scale, placement.rotation);
+            let request = RenderRequest::new(placement.page, placement.scale, placement.rotation)
+                .with_priority(priority);
+            self.submit(request, key);
+        }
+    }
+
+    /// 分块路径：只为"视口在该页位图中覆盖到的瓦片"提交请求。
+    ///
+    /// 不整页提交（130 块）的原因：分块的目的是省内存，预取整页会把收益抵消掉。
+    fn request_tiles(&mut self, placement: PagePlacement, priority: RenderPriority) {
+        let pixel_size = placement.pixel_size();
+        let grid = TileSpec::grid_for(pixel_size);
+        let Some(visible) = self.viewport.content_rect().intersection(placement.rect) else {
+            return;
+        };
+        // 内容空间 → 该页位图内的像素矩形
+        let visible_px = Rect::new(
+            visible.x - placement.rect.x,
+            visible.y - placement.rect.y,
+            visible.width,
+            visible.height,
+        );
+        let Some((first, last)) = tiles_covering(visible_px, grid) else {
+            return;
+        };
+        for row in first.row..=last.row {
+            for col in first.col..=last.col {
+                let tile = TileSpec::new(col, row);
+                let key = RenderKey::tiled(placement.page, placement.scale, placement.rotation, tile);
+                let request =
+                    RenderRequest::tiled(placement.page, placement.scale, placement.rotation, tile)
+                        .with_priority(priority);
+                self.submit(request, key);
+            }
+        }
+    }
+
+    /// 提交任务（已缓存或已在飞则跳过）。
+    fn submit(&mut self, request: RenderRequest, key: RenderKey) {
         if self.submitted.contains(&key) || self.jobs.contains_key(&key) {
             return;
         }
         if self.cache.get(&key).is_some() {
             return;
         }
-        let request = RenderRequest::new(page, placement.scale, placement.rotation)
-            .with_priority(priority);
         let job = self.scheduler.submit(request);
         self.submitted.insert(key);
         self.jobs.insert(key, job);

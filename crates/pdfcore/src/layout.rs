@@ -154,6 +154,13 @@ impl PagePlacement {
         self.rect.size()
     }
 
+    /// 该页在当前缩放下的**像素尺寸**（分块网格用它）。
+    ///
+    /// 在此处一次性取整：瓦片拼接要求整数像素边界，取整只做一次，下游不再各算一遍。
+    pub fn pixel_size(&self) -> Size {
+        Size::new(self.rect.width.round().max(0.0), self.rect.height.round().max(0.0))
+    }
+
     /// **PDF 页面坐标 → 内容空间坐标**（文字高亮、链接热区都要用它）。
     pub fn page_to_content(&self, page_point: Point) -> Point {
         if !self.scale.is_valid() {
@@ -506,5 +513,20 @@ mod tests {
         let layout = VerticalLayout.compute(&pages, &params(1.0));
         assert_eq!(layout.placements[0].rect.size(), a4());
         assert!((layout.placements[0].scale.dpi() - 72.0).abs() < 1e-3);
+    }
+
+    /// D-02：分块网格用的是"取整后的像素尺寸"，取整必须只做一次。
+    #[test]
+    fn pixel_size_rounds_placement_dimensions() {
+        let placement = PagePlacement::new(
+            PageIndex::new(0),
+            Rect::new(12.0, 12.0, 918.4, 1188.6),
+            Scale::from_zoom(1.5),
+            Rotation::None,
+            Size::new(612.0, 792.0),
+        );
+        assert_eq!(placement.pixel_size(), Size::new(918.0, 1189.0));
+        // 与显示尺寸区分：displayed_size 保留小数
+        assert_eq!(placement.displayed_size(), Size::new(918.4, 1188.6));
     }
 }

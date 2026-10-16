@@ -316,3 +316,51 @@ fn session_consumes_bulk_page_geometries_only() {
     );
     assert!((session.placement(PageIndex::new(2)).unwrap().rect.width - 792.0).abs() < 0.5);
 }
+
+/// D-02 端到端：分块策略决定走"整页"还是"瓦片"路径，且瓦片请求只覆盖视口内那几块。
+#[test]
+fn tiling_routes_to_tiles_and_limits_requests_to_the_viewport() {
+    let backend = MemoryBackend::demo();
+    let opened = backend.open(Source::Bytes(b"%PDF-1.4 fake"), None).unwrap();
+    let raster = opened.raster.clone();
+    let cache = Arc::new(MemoryCache::new());
+
+    let mut session = DocumentSession::new(
+        opened,
+        cache.clone(),
+        Arc::new(ImmediateScheduler::new(raster)),
+        Box::new(VerticalLayout),
+        Box::new(RangeSelection::new()),
+    )
+    .expect("装配会话");
+
+    assert_eq!(
+        session.tiling_policy(),
+        TilingPolicy::default(),
+        "默认策略是 AbovePixels(16 MP)"
+    );
+
+    // 强行分块，并把视口缩到只覆盖页面左上角一小块（网格是 2×2）
+    session.set_tiling_policy(TilingPolicy::Always);
+    let mut events = Vec::new();
+    session.handle(ViewerCommand::ResizeViewport(Size::new(300.0, 300.0)), &mut events);
+    session.handle(ViewerCommand::RequestVisible, &mut events);
+    session.pump(&mut events);
+
+    // 分块路径下整页位图不可用（UI 必须走 tiles_for 拼接）
+    assert!(session.image_for(PageIndex::new(0)).is_none());
+
+    let tiles = session.tiles_for(PageIndex::new(0));
+    assert_eq!(tiles.len(), 1, "视口 300×300 只覆盖左上角一块瓦片");
+    let (tile, image) = &tiles[0];
+    assert_eq!((tile.col, tile.row), (0, 0));
+    assert_eq!((image.width, image.height), (512, 512));
+    assert_eq!(cache.stats().entries, 1, "只应渲染被视口覆盖的那一块");
+
+    // 切回整页策略：瓦片路径关闭，整页位图可用
+    session.set_tiling_policy(TilingPolicy::Never);
+    session.handle(ViewerCommand::RequestVisible, &mut events);
+    session.pump(&mut events);
+    assert!(session.tiles_for(PageIndex::new(0)).is_empty());
+    assert_eq!(session.image_for(PageIndex::new(0)).unwrap().width, 612);
+}

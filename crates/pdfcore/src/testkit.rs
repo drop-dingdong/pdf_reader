@@ -269,7 +269,10 @@ impl Document for MemoryDocument {
     }
 }
 
-/// [`PageRaster`] 的内存实现：按页号填纯色，尺寸严格按请求计算。
+/// [`PageRaster`] 的内存实现：按页号（或瓦片坐标）填纯色，尺寸严格按请求计算。
+///
+/// 瓦片请求**只渲染该区域**（不整页渲染后裁剪），并把 `(col, row, page)` 编进像素，
+/// 于是测试可以断言"拿到的确实是请求的那一块"。
 #[derive(Debug)]
 pub struct MemoryRaster {
     pages: Arc<Vec<MemoryPage>>,
@@ -303,9 +306,34 @@ impl PageRaster for MemoryRaster {
             },
         )?;
         let displayed = page.size.rotated(request.rotation);
-        let width = (displayed.width * request.scale.0).round().max(1.0) as u32;
-        let height = (displayed.height * request.scale.0).round().max(1.0) as u32;
-        let color = Self::color_for(request.page);
+        let displayed_px = Size::new(
+            (displayed.width * request.scale.0).round().max(0.0),
+            (displayed.height * request.scale.0).round().max(0.0),
+        );
+
+        let (width, height, color) = match request.tile {
+            None => (
+                displayed_px.width.max(1.0) as u32,
+                displayed_px.height.max(1.0) as u32,
+                Self::color_for(request.page),
+            ),
+            Some(tile) => {
+                let pixels = tile.pixel_rect(displayed_px);
+                if pixels.is_empty() {
+                    return Err(CoreError::Internal(format!(
+                        "瓦片越界：col={} row={}",
+                        tile.col, tile.row
+                    )));
+                }
+                // 像素里编码 (col, row, page)，测试据此断言"这一块确实是该瓦片"
+                (
+                    pixels.width.round().max(1.0) as u32,
+                    pixels.height.round().max(1.0) as u32,
+                    [tile.col as u8, tile.row as u8, (request.page.get() % 251) as u8, 255],
+                )
+            }
+        };
+
         let mut data = Vec::with_capacity(RasterImage::expected_len(width, height, PixelFormat::Rgba8));
         for _ in 0..(width as usize * height as usize) {
             data.extend_from_slice(&color);
@@ -517,7 +545,7 @@ impl PdfBackend for MemoryBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{RenderPriority, Scale};
+    use crate::render::{RenderPriority, Scale, TileSpec};
 
     #[test]
     fn raster_respects_scale_and_rotation() {
@@ -604,5 +632,50 @@ mod tests {
         let limited =
             text.search(&SearchQuery { limit: Some(1), ..SearchQuery::new("page") }).unwrap();
         assert_eq!(limited.len(), 1, "limit 必须生效");
+    }
+
+    /// D-02：瓦片请求只渲染该区域，位图尺寸 = 该瓦片的像素矩形（最后一列不足一整块）。
+    #[test]
+    fn raster_renders_only_the_requested_tile() {
+        let backend = MemoryBackend::demo();
+        let opened = backend.open(Source::Bytes(b"%PDF-fake"), None).unwrap();
+
+        // 612×792pt 在 zoom=8 下为 4896×6336 → 10×13 网格（见 data-flow 场景 2b）
+        let scale = Scale::from_zoom(8.0);
+        let displayed = Size::new(4896.0, 6336.0);
+        assert_eq!(TileSpec::grid_for(displayed), (10, 13));
+
+        // 中间一块：完整 512×512，且像素里带 (col, row, page)
+        let tile = TileSpec::new(1, 1);
+        let request = RenderRequest::tiled(PageIndex::new(0), scale, Rotation::None, tile);
+        let image = opened.raster.render(&request).unwrap();
+        assert_eq!((image.width, image.height), (512, 512));
+        assert_eq!(&image.data()[0..4], &[1, 1, 0, 255]);
+
+        // 最后一列只有 4896 - 9×512 = 288 px 宽
+        let last_col = RenderRequest::tiled(
+            PageIndex::new(0),
+            scale,
+            Rotation::None,
+            TileSpec::new(9, 0),
+        );
+        let image = opened.raster.render(&last_col).unwrap();
+        assert_eq!((image.width, image.height), (288, 512));
+
+        // 越界瓦片必须报错，而不是返回空图
+        let out_of_grid = RenderRequest::tiled(
+            PageIndex::new(0),
+            scale,
+            Rotation::None,
+            TileSpec::new(10, 0),
+        );
+        assert!(opened.raster.render(&out_of_grid).is_err());
+
+        // 整页路径仍然可用（用低倍率，避免测试里分配上百 MB）
+        let whole = opened
+            .raster
+            .render(&RenderRequest::new(PageIndex::new(0), Scale::IDENTITY, Rotation::None))
+            .unwrap();
+        assert_eq!((whole.width, whole.height), (612, 792));
     }
 }
