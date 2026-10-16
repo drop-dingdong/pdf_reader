@@ -26,7 +26,7 @@ use pdfcore::prelude::*;
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, destination_points, fit_inside,
-    compose_snapshot, veil_bands, view_rect_to_page_rect, SnapshotPage,
+    compose_snapshot, screen_rect_to_content, veil_bands, view_rect_to_page_rect, SnapshotPage,
     flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
@@ -1364,20 +1364,17 @@ impl PdfReaderApp {
         if enter {
             match selection {
                 Some(selection) => {
-                    // egui 矩形 → 接口层矩形（同一坐标系，仅类型不同）
-                    let selection_rect = Rect::new(
-                        selection.min.x,
-                        selection.min.y,
-                        selection.width(),
-                        selection.height(),
-                    );
+                    // 屏幕矩形 → 内容空间矩形（供快照与页面空间换算使用）
+                    let selection_rect =
+                        screen_rect_to_content(canvas.min, selection, scroll);
                     // 1) 把选区做成**自包含快照**并放进一个新浮窗（用户需求）
-                    self.capture_into_float(ui, session, scroll, selection_rect);
+                    self.capture_into_float(ui, session, selection_rect);
                     let mut parts: Vec<String> = Vec::new();
                     for page in self.visible.clone() {
                         let Some(placement) = session.placement(page).copied() else { continue };
+                        // 注意：`selection_rect` 已是**内容空间**，故这里传零滚动
                         if let Some(page_rect) =
-                            view_rect_to_page_rect(&placement, selection_rect, scroll)
+                            view_rect_to_page_rect(&placement, selection_rect, Vec2::ZERO)
                         {
                             parts.push(format!(
                                 "页 {} 页空间 ({:.1},{:.1} {:.1}×{:.1})",
@@ -1427,16 +1424,10 @@ impl PdfReaderApp {
         &mut self,
         ui: &mut egui::Ui,
         session: &DocumentSession,
-        scroll: Vec2,
-        selection: Rect,
+        // `content_rect` 已经是**内容空间**矩形（调用方用 `screen_rect_to_content` 换算过）
+        content_rect: Rect,
     ) {
-        // 视图空间 → 内容空间（位图像素与内容空间同尺度）
-        let content_rect = Rect::new(
-            selection.x + scroll.x,
-            selection.y + scroll.y,
-            selection.width,
-            selection.height,
-        );
+        // `content_rect` 由调用方从屏幕坐标换算而来（**必须减去画布原点**，见 view::screen_rect_to_content）
 
         // 收集覆盖到的页及其**已缓存**位图（先持有 Arc，再借用给合成函数）
         let mut owned: Vec<(Rect, Option<Arc<RasterImage>>, Vec<(TileSpec, Arc<RasterImage>)>)> =
@@ -1471,8 +1462,8 @@ impl PdfReaderApp {
         );
         // 默认窗口大小按区域尺寸给（夹取在合理范围内），之后可自由改大小
         let size = EVec2::new(
-            selection.width.clamp(FLOAT_MIN_SIZE.x, 640.0),
-            selection.height.clamp(FLOAT_MIN_SIZE.y, 640.0) + FLOAT_TITLE_HEIGHT,
+            content_rect.width.clamp(FLOAT_MIN_SIZE.x, 640.0),
+            content_rect.height.clamp(FLOAT_MIN_SIZE.y, 640.0) + FLOAT_TITLE_HEIGHT,
         );
         let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
         self.floats.push(Float {

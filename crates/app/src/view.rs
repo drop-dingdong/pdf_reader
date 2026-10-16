@@ -317,6 +317,23 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 画布上的**屏幕矩形** → **内容空间**矩形。
+///
+/// ## 为什么必须单独有这个函数
+/// `Response::interact_pointer_pos()`（以及 `Response::rect`）给的是**窗口绝对（屏幕）坐标**，
+/// 而内容空间的原点是**画布左上角**。截图时若直接拿屏幕坐标加 `scroll`，
+/// 结果会整体偏移 `canvas.min`（有侧栏时约 265×40 px）——
+/// 高倍缩放下这点偏移足以落到**视野之外**，表现就是"截到的图像与框选位置不符、
+/// 而且显示的是屏幕外区域"（用户实测反馈）。
+pub fn screen_rect_to_content(canvas_min: egui::Pos2, rect: egui::Rect, scroll: Vec2) -> Rect {
+    Rect::new(
+        rect.min.x - canvas_min.x + scroll.x,
+        rect.min.y - canvas_min.y + scroll.y,
+        rect.width(),
+        rect.height(),
+    )
+}
+
 /// 截图模式的遮罩分块：返回 4 块矩形，把 `hole` 挖空（区域内保持透明）。
 ///
 /// egui 没有"擦除"混合，因此"半透明蒙层 + 中间透明"的常规做法就是
@@ -1045,6 +1062,37 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 回归：屏幕坐标 → 内容空间必须减去画布原点；且框选区域截到的内容必然**落在当前可见范围内**。
+    #[test]
+    fn screen_rect_to_content_subtracts_the_canvas_origin() {
+        // 画布左上角在屏幕 (265, 40)（左侧有 260px 侧栏 + 5px 拖拽条）
+        let canvas_min = egui::pos2(265.0, 40.0);
+        let selection = egui::Rect::from_min_size(egui::pos2(365.0, 140.0), egui::vec2(100.0, 50.0));
+        let scroll = Vec2::new(1000.0, 2000.0);
+
+        let content = screen_rect_to_content(canvas_min, selection, scroll);
+        assert_eq!(content, Rect::new(1100.0, 2100.0, 100.0, 50.0));
+
+        // 反例：漏掉 canvas.min 会得到这个（正是缺陷时的取值）
+        let buggy = Rect::new(
+            selection.min.x + scroll.x,
+            selection.min.y + scroll.y,
+            selection.width(),
+            selection.height(),
+        );
+        assert_ne!(content, buggy, "漏减画布原点会整体偏移 canvas.min");
+
+        // 关键性质：**框选区域截到的内容必然落在当前可见范围内**（用户实测的判据）
+        let viewport = Size::new(800.0, 600.0);
+        let visible = Rect::new(scroll.x, scroll.y, viewport.width, viewport.height);
+        let inside = egui::Rect::from_min_size(egui::pos2(300.0, 200.0), egui::vec2(100.0, 50.0));
+        let content = screen_rect_to_content(canvas_min, inside, scroll);
+        assert!(
+            visible.intersection(content).is_some(),
+            "截图内容 {content:?} 必须落在可见范围 {visible:?} 内"
+        );
     }
 
     /// 快照合成：白底、按页裁剪、支持整页与分块两种来源。
