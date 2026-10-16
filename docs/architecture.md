@@ -1,25 +1,27 @@
-# MVP PDF 阅读器 —— 接口层设计文档（**评审稿 v1**）
+# MVP PDF 阅读器 —— 接口层设计文档（**v3**）
 
-> 配套文档：[traits.md](traits.md)（trait 接口设计，含逐个 trait 的目的注释）
+> 配套文档：[trait-definitions.md](trait-definitions.md)（签名级定义，v3）、[traits.md](traits.md)（设计意图）、[data-flow.md](data-flow.md)（数据流推演，v3）、[decision-log.md](decision-log.md)（决策记录）
 > 技术栈已定：Rust + egui/eframe + PDFium（见 [framework-selection.md](framework-selection.md)）
-> 状态：**待你评审**。本稿只定义接口与结构，不含实现代码。
+> 状态：**架构与 8 项批复已确认**。`▲v3` 标记本次变更处。
 
 ---
 
-## 0. 需要你确认的 8 件事（先看这里）
+## 0. 批复状态（v3）
 
-| # | 待确认 | 我的建议 |
+你已确认"trait 架构合理"，并逐条批复了 5 个接口问题与 3 个数据流细节 —— 完整记录见 [decision-log.md](decision-log.md)。
+
+| # | 事项 | 结论 |
 | --- | --- | --- |
-| 1 | MVP 功能边界 | 打开/滚动/缩放/翻页/选择复制/搜索/大纲/缩略图/链接跳转；**不做**批注、表单、打印、双页对开、OCR |
-| 2 | 并发模型 | 单后台渲染线程 + 优先级队列 + UI 每帧轮询事件（不用 async/await） |
-| 3 | trait 的 `&self` 约定 | 全部 `&self`（PDFium 后端内部用 `Mutex`），实现者不必关心线程安全，由 `Capabilities::max_concurrency` 声明并发上限 |
-| 4 | 文本层作为"可选零件" | 用 `Option<Arc<dyn TextLayer>>` + `Capabilities`，以便同一套 UI 能跑在只有渲染能力的后端（如 hayro）上 |
-| 5 | 坐标系与单位 | PDF 页面空间用 point/左下原点/y 向上；内容与视图空间用像素/左上原点/y 向下；换算只允许发生在一处 |
-| 6 | 缓存键量化 | 缩放按 1/8 步长量化后再做缓存键，避免滚轮缩放导致缓存全部失效 |
-| 7 | 会话层是否接触平台 API | 不接触。剪贴板、文件对话框通过 `SessionEvent` 交回 UI，`pdfcore` 保持零依赖 |
-| 8 | 拆分方式 | 独立 crate `pdfcore`（接口层，零依赖）+ 后续 `backend-pdfium`、`app` |
+| 1 | MVP 功能边界 | 沿用：打开/滚动/缩放/翻页/选择复制/搜索/大纲/缩略图/链接跳转；不做批注、表单、打印、双页对开、OCR。**（此项只是随架构整体认可，若需增删请直接指出）** |
+| 2 | 并发模型 | 确认：单后台渲染线程 + 优先级队列 + UI 每帧轮询事件（D-00c） |
+| 3 | trait 的 `&self` 约定 | 确认；唯一例外是 `TextSelection` 的 4 个改状态方法（**D-04**） |
+| 4 | 文本层作为"可选零件" | 确认：`Option<Arc<dyn TextLayer>>` + `Capabilities` |
+| 5 | 坐标系与单位 | 确认；**新增第 5 条不变量**：分块拼接必须整数像素对齐（见 §5） |
+| 6 | 缓存键量化 | 确认：1/8 步长；**瓦片坐标并入缓存键**（**D-02**） |
+| 7 | 会话层不接触平台 API | 确认 |
+| 8 | 拆分方式 | 确认：独立零依赖 crate `pdfcore`；**导航索引上移到接口层**（**D-08**） |
 
-第 1、2、4 条是最影响后续工作量的决策；第 5 条是最容易埋 bug 的地方，建议重点看 §5。
+本轮四项签名级变更：**D-01** 批量页几何、**D-02** 分块预渲染、**D-05** 滚动锚点、**D-08** 导航索引预解析。
 
 ---
 
@@ -181,12 +183,13 @@ PDF 页面坐标
   ──− 视口滚动偏移（Viewport.scroll）────────────────────────▶ 视图空间坐标
 ```
 
-**四条必须守住的不变量**（将由单测锁定）：
+**五条必须守住的不变量**（将由单测锁定）：
 
 1. 后端给出的字符包围盒**永远是 PDF 页面空间**（左下原点）。任何"顺手翻一下 y"的实现都会让高亮整体上下颠倒。
 2. **只有 `PagePlacement` 负责 page ↔ content 换算**（`page_to_content` / `content_to_page` / `rect_to_content`）。UI 与后端都不得自己算。
 3. **旋转必须先于缩放**，且 `Rotation::map_point` 在 **0° 与 180° 时同样包含 y 轴翻转**（这是实现中最常见的错误：0° 时直接返回原点）。
 4. **渲染请求里的 `scale` 与 `rotation` 必须取自 `PagePlacement`**，不能各自计算 —— 否则会出现"布局转了、位图没转"或"高亮与文字错位"。
+5. ▲v3 **分块（tile）必须整数像素对齐**：瓦片在缓存键里带 `(col, row)`，渲染时按 `TileSpec::page_rect()` 的 PDF 空间裁剪区**直接渲染**（不得整页后裁剪），拼接时以 `TileSpec::pixel_rect()` 的整数像素矩形为准 —— 否则会出现 1px 缝隙或重叠导致的模糊带。
 
 ---
 
@@ -209,7 +212,7 @@ PDF 页面坐标
 | 枚举 | 用途 |
 | --- | --- |
 | `Source<'a>` | 打开来源：`Path(&Path)` / `Bytes(&[u8])`（网络下载、单测、剪贴板流） |
-| `Destination` | 跳转目标：`Page{page, offset}` / `Named(String)` / `Uri(String)`，大纲与链接共用 |
+| `Destination` | ▲v3 跳转目标：`Page{page, offset}` / `Uri(String)`，大纲与链接共用；**命名目标已在打开时解析掉，故无 `Named` 变体**（D-08） |
 | `RenderEvent` | 调度器 → 会话：`Rendered{key, image}` / `Failed{page, error}` / `Cancelled{page}` |
 | `SessionEvent` | 会话 → UI：`PageRendered` / `CurrentPageChanged` / `SelectionChanged` / `CopyToClipboard(String)` / `Error(CoreError)` 等 |
 | `ViewerCommand` | UI → 会话：`ResizeViewport` / `ScrollBy` / `GoToPage` / `SetZoom` / `FitWidth` / `SetSelectionGranularity` / `SelectBegin` / `SelectExtend` / `RequestVisible` 等 |
@@ -221,12 +224,15 @@ PDF 页面坐标
 | 类型 | 作用 |
 | --- | --- |
 | `OpenedDocument` | 装配包：`Arc<dyn Document>` + `Arc<dyn PageRaster>` + `Option<Arc<dyn TextLayer>>` + `Capabilities` |
-| `PageGeometry` | `{ size, rotation }` —— 每页尺寸与自带旋转（**旋转必须逐页**，不能全局一个值） |
-| `PagePlacement` | `{ page, rect, scale, rotation, page_size }` —— 布局结果，也是坐标系换算的唯一入口 |
+| `PageGeometry` | `{ size, rotation }` —— 每页尺寸与自带旋转（**旋转必须逐页**）；▲v3 由 `Document::page_geometries()` 批量返回 |
+| `NavigationIndex` | ▲v3 `{ outline, links_by_page, named_destinations, unresolved }` —— 打开时预解析并合并存储的全部导航数据（D-08） |
+| `PagePlacement` | `{ page, rect, scale, rotation, page_size }` —— 布局结果，也是坐标系换算的唯一入口；▲v3 加 `pixel_size()` |
 | `DocumentLayout` | `{ content_size, placements }` —— 内容总尺寸（算滚动范围）+ 每页位置 |
-| `Viewport` | `{ size, scroll }` —— 视口尺寸与滚动偏移 |
+| `Viewport` | `{ size, scroll }` —— 视口尺寸与滚动偏移；▲v3 加 `center_content_point()` |
+| `ScrollAnchor` | ▲v3 `{ page, page_point }` —— 视野中心锚点，布局重算前后保持阅读位置不漂移（D-05） |
 | `Scale` | newtype(f32)：设备像素 / point；含 `quantize()`（缓存键量化）与 `dpi()` |
-| `RenderKey` | `{ page, scale_milli, rotation }` —— 缓存键（f32 不能做 `Hash`，故存千分之一整数） |
+| `RenderKey` | `{ page, scale_milli, rotation, tile }` ▲v3 —— 缓存键（f32 不能做 `Hash`，故存千分之一整数；瓦片坐标并入键） |
+| `TileSpec` / `TilingPolicy` | ▲v3 瓦片坐标（`grid_for` / `pixel_rect` / `page_rect`）与分块策略（默认 `AbovePixels(16 MP)`）（D-02） |
 | `RasterImage` | 不可变位图，像素在 `Arc<[u8]>` 中，缓存与 UI 共享零拷贝；`to_rgba8()` 是唯一格式转换点 |
 | `PageText` / `TextChar` / `TextSpan` | 页文本 + 逐字符包围盒 + 样式分段；不变量：`text.chars().count() == chars.len()` |
 | `TextRange` / `TextPosition` / `Selection` | 字符区间（半开、字符下标而非字节）、文档位置、选区（anchor/focus 可反向） |
@@ -250,6 +256,11 @@ PDF 页面坐标
 | `visible_pages` 用 `&mut Vec` 出参 | 每帧调用，复用缓冲避免 60 次/秒的分配 | 返回 `Vec`：简单但每帧分配 |
 | 缩放量化 1/8 做缓存键 | 12.5% 内共用位图，滚轮缩放不摧毁缓存 | 精确键：缓存命中率趋近 0 |
 | 剪贴板/文件对话框不进接口层 | 接口层保持无平台依赖，测试无需 mock 系统 API | 建 `Clipboard` trait：为单一平台调用引入抽象 |
+| ▲v3 `Document::page_geometries()` 批量返回页几何 | 布局需一次拿到全部页尺寸才能算内容总高与滚动范围；把 N 次跨 FFI 变成 1 次 `Arc` 克隆 | 逐页查询：打开大文档变慢（D-01） |
+| ▲v3 分块渲染，默认 `AbovePixels(16 MP)` | 高倍缩放下单页位图可达 124 MB；分块后视口内仅 6–9 MB | 始终整页：内存爆炸；始终分块：小页被碎片化、请求数暴增（D-02） |
+| ▲v3 用滚动锚点保持视野中心（`ScrollAnchor`） | 缩放/旋转/改排布后阅读位置不漂移；`scroll_to_page` 仍负责跳页与锚点退化路径 | 每次重算布局都回到页首：用户迷失位置（D-05） |
+| ▲v3 导航索引在打开时预解析并合并存储 | 点击链接/大纲 0 次后端调用；解析失败在打开时即暴露 | 实时解析：点击有延迟、UI 需处理"未解析目标"分支（D-08） |
+| ▲v3 搜索保持同步、不引入异步 | 文本提取本就是阻塞任务；异步会带来 runtime 依赖与搜索取消的复杂度 | async 搜索：收益小、接口复杂化（D-03/D-07） |
 
 ---
 
@@ -277,10 +288,14 @@ PDF 页面坐标
 
 ---
 
-## 10. 请你重点检查的三处
+## 10. 复核要点与下一步
 
-1. **§1.1 的 MVP 边界**是否与你的预期一致 —— 少一项会让 M2 返工，多一项会拖慢首发。
-2. **§4.1 的并发模型**是否接受"单渲染线程 + 每帧轮询"——它决定了 PDFium 适配层的写法与流畅度上限。
-3. **§5 的坐标系约定**是否认同"布局独占换算权 + 后端只给 PDF 空间坐标"——这是后期最贵的 bug 来源。
+三处重点已确认（MVP 功能边界、并发模型、坐标系约定）。本轮批复后**唯一待你确认的**是 §0 第 1 行：
 
-确认后我再补 `traits.md` 的逐方法细节评审意见，并按你的批复实现（或先只实现 `pdfcore` 与假后端，用单测锁定上述不变量）。
+- **MVP 功能边界是否要增删？** —— 少一项会让 M2 返工，多一项会拖慢首发。
+
+下一步（详见 [decision-log.md](decision-log.md) §3 代码同步清单 / §4 开工顺序）：
+
+1. 装/续装 Rust 工具链，先让**现有** `crates/pdfcore` 的测试跑通（证明 v1/v2 代码自洽）；
+2. 按 **D-01 / D-02 / D-05 / D-08** 逐项改造为 v3，**每项带测试**（agent.md 规则 1）；
+3. 全部测试通过后提交（agent.md 规则 3），再进入 `backend-pdfium` 适配层（M1）。

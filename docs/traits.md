@@ -1,8 +1,11 @@
-# trait 接口设计（**评审稿 v1**）
+# trait 接口设计（**v3**）
+
+> 本文件记录**每个 trait 的设计意图**（"为什么需要它"）。12 个待批复问题已全部确认，见 [§12](#12-5-个接口问题--已批复v3) 与 [decision-log.md](decision-log.md)。
+> **签名以 [trait-definitions.md](trait-definitions.md) v3 为准**；下文声明已同步为 v3 口径，`▲v3` 标记本轮变更。
 
 > 配套文档：[architecture.md](architecture.md)（分层、并发、坐标系、决策）
 > 阅读方式：每个 trait 先看 Rust 声明里的 `///` 注释（说明**为什么需要它**），再看紧随其后的"评审要点"。
-> 状态：**待你评审**，未写实现代码。
+> 状态：**v3 已定稿待实现**（签名见 [trait-definitions.md](trait-definitions.md)）。
 
 ## 全局约定
 
@@ -57,41 +60,46 @@ pub trait PdfBackend: Send + Sync {
 ## 2. `Document` —— 只读文档结构
 
 ```rust
-/// **文档结构**：只读、无状态、可并发访问的文档信息。
+/// **文档结构**：只读、可并发访问的文档信息。<!-- ▲v3 -->
 ///
 /// ## 这个 trait 存在的目的
 /// 把"文档结构查询"从具体后端中抽出，使布局引擎与会话可以在不知道 PDFium 存在的情况下工作，
 /// 也让单测能构造一个"3 页、尺寸写死"的假文档。
-/// 它只覆盖**不变的部分**：页数、页尺寸、`/Rotate`、元数据、大纲、链接；
+/// 它只覆盖**不变的部分**：页几何、元数据、导航索引；
 /// 页面**像素**归 [`PageRaster`]，页面**文字**归 [`TextLayer`]。
 ///
 /// ## 实现者义务
-/// * `info()` 必须 O(1)：页数与元数据在打开时已解析完毕，不要每次重新解析。
-/// * `page_size` / `page_rotation` 返回**未旋转**的原始值 —— 旋转由布局叠加。
-/// * 大纲与链接属可选能力：不支持时返回空 `Vec`，只有真正的解析失败才返回错误。
+/// * `info()` / `page_geometries()` / `navigation()` 都必须 O(1)
+///   （打开时已解析并缓存，调用只做 `Arc` 克隆）。
+/// * `PageGeometry` 里的尺寸与旋转是**未旋转**的原始值 —— 旋转由布局叠加。
+/// * 导航索引不含"待解析"目标：解析不了的名称归入 `NavigationIndex::unresolved`。
 pub trait Document: Send + Sync {
     /// 元数据与页数。
     fn info(&self) -> &DocumentInfo;
 
-    /// 某页的原始尺寸（PDF point，未旋转）。
-    fn page_size(&self, page: PageIndex) -> Result<Size>;
+    /// ▲v3 **批量**页几何（尺寸 + 逐页 `/Rotate`）。打开时已备好，O(1) 返回。
+    fn page_geometries(&self) -> Result<Arc<[PageGeometry]>>;
 
-    /// 某页自带的 `/Rotate`。默认不旋转。
+    /// 单页尺寸；默认实现查批量表（越界返回 `PageOutOfRange`）。
+    fn page_size(&self, page: PageIndex) -> Result<Size> { /* 默认：查 page_geometries() */ }
+
+    /// 单页自带的 `/Rotate`；默认实现查批量表，缺省为不旋转。
+    fn page_rotation(&self, page: PageIndex) -> Result<Rotation> { /* 默认：查 page_geometries() */ }
+
+    /// ▲v3 导航索引：大纲 + 逐页链接 + 命名目标，**打开时一次性解析并合并存储**。O(1) 返回。
     ///
-    /// 注意它是**逐页**的：一篇文档里不同页可以有不同的旋转值。
-    fn page_rotation(&self, page: PageIndex) -> Result<Rotation> { /* 默认 Ok(Rotation::None) */ }
-
-    /// 大纲（书签）树。默认返回空列表。
-    fn outline(&self) -> Result<Vec<OutlineNode>> { /* 默认 Ok(Vec::new()) */ }
-
-    /// 某页的超链接热区。默认返回空列表。
-    fn links(&self, page: PageIndex) -> Result<Vec<Link>> { /* 默认 Ok(Vec::new()) */ }
+    /// 取代了 v2 的 `outline()` 与 `links(page)`：点击链接/大纲时不再访问后端。
+    fn navigation(&self) -> Result<Arc<NavigationIndex>>;
 }
 ```
 
 **评审要点**
 
-- `page_size` 被调用 N 次（N = 页数）来建立布局，每页一次跨 FFI 调用；对数千页文档是可以接受的（只在打开/旋转/缩放时重建），但如果你希望更快，可以增加一个批量方法 `page_sizes(&self) -> Result<Vec<Size>>`。**要加吗？**
+- ▲v3 **批量页几何（D-01）**：布局要一次拿到全部页尺寸才能算内容总高度与滚动范围；
+  逐页跨 FFI 查询会把"打开大文档"变成 N 次调用。因此 `page_geometries()` 是必需方法，
+  `page_size` / `page_rotation` 退化为查表的默认方法。
+- ▲v3 **导航索引（D-08）**：命名目标在打开时统一解析，因此 `Destination` 不再有 `Named` 变体，
+  UI 不可能遇到"未解析目标"。代价是打开时间略增；若实测拖慢，改成惰性构建即可，**签名不变**。
 - 没有 `close()`：靠 `Arc` 的 drop。这是有意的——避免"忘了关"导致的 PDFium 句柄泄漏。
 - `info()` 返回 `&DocumentInfo` 而非克隆：元数据不变，避免每帧克隆字符串。
 
@@ -124,7 +132,7 @@ pub trait PageRaster: Send + Sync {
 **评审要点**
 
 - **没有缩略图方法**（有意）：缩略图 = 小 `Scale` 的普通渲染请求，由 `scale_for_target_width()` 从页尺寸换算得到，因此缩略图与主视图共享同一份缓存。→ 少一个 trait、少一条重复渲染路径。
-- **没有分块（tile）渲染**：MVP 以"整页一张位图 + 缩放量化"实现。超大页面（如海报）在高缩放下会吃内存，M4 若需要可分块，届时在 `RenderRequest` 里加 `tile: Option<TileSpec>` 即可，`PageRaster` 签名不变。**是否接受先不分块？**
+- ▲v3 **支持分块（tile）渲染（D-02）**：`RenderRequest.tile: Option<TileSpec>` —— `None` = 整页，`Some` = 只渲染该瓦片。是否分块由 `TilingPolicy::AbovePixels(16_000_000)` 决定（≈ 单页位图 64 MB 的上限）。契约要求"按 `TileSpec::page_rect()` 的裁剪矩形**直接渲染该区域**，不得整页后裁剪"。实测收益：`612×792pt` 页在 `zoom = 8` 时整页位图为 **124 MB**，分块后视口内仅需 **6–9 MB**。
 - 返回 `Arc<RasterImage>` 而不是 `RasterImage`：缓存与 UI 纹理上传需要共享同一份像素，避免拷贝。
 
 ---
@@ -345,6 +353,10 @@ pub trait PageLayout: Send + Sync {
     /// 跳转到某页时应该设置的滚动偏移（默认把该页居中，并夹取到合法范围）。
     fn scroll_to_page(&self, layout: &DocumentLayout, page: PageIndex, viewport_size: Size) -> Vec2 { /* 默认实现 */ }
 
+    /// ▲v3 **保持视野中心不动**：把某个"页内位置"放到视口中心，返回应设置的滚动偏移。
+    /// 由会话在任何**重算布局**的操作前后调用（缩放/旋转/切换排布/窗口缩放）。
+    fn scroll_to_anchor(&self, layout: &DocumentLayout, page: PageIndex, page_point: Point, viewport_size: Size) -> Vec2 { /* 默认实现 */ }
+
     /// 最大滚动偏移。
     fn max_scroll(&self, layout: &DocumentLayout, viewport_size: Size) -> Vec2 { /* 默认实现 */ }
 
@@ -357,7 +369,9 @@ pub trait PageLayout: Send + Sync {
 
 - `compute` 接收 `&[PageGeometry]`（每页尺寸 + 自带旋转）而不是 `&[Size]`：因为 `/Rotate` 是**逐页**的。**这是对"全局一个旋转值"写法的有意否决。**
 - `visible_pages` 目前是"遍历所有 placement 做矩形相交"：数千页时每帧 O(N)，实测在微秒级，可接受；十万页文档再换二分查找（`DocumentLayout` 内部可加按 y 排序的索引，接口不变）。
-- 默认实现的 `scroll_to_page` 是"页面居中"；如果你希望"页面顶端对齐"或"保留旧滚动比例"，告诉我，改默认实现即可，不影响任何调用方。
+- ▲v3 **锚点与居中并存（D-05）**：`scroll_to_page` 保留"页面居中 + 夹取"语义（用于跳页）；
+  新增的 `scroll_to_anchor` 用于**任何重算布局**的场景，使"视口中心对应的页内位置"在缩放/旋转前后不动。
+  锚点若落在页间距或页外（`page_at` 返回 `None`），退化为"当前页居中"，不报错。
 
 ---
 
@@ -419,7 +433,7 @@ pub trait KeyValueStore: Send + Sync {
 | `SelectionGranularity` | `Char` / `Word` / `Line` | 单击/双击/三击；展开逻辑在 `PageText::range_at` |
 | `SidebarTab` | `None` / `Outline` / `Thumbnails` / `Search` | 纯 UI 状态 |
 | `Source<'a>` | `Path` / `Bytes` | 打开来源；单测用 `Bytes` 可避免产生临时文件 |
-| `Destination` | `Page{page, offset}` / `Named` / `Uri` | 大纲与链接共用；`Named` 需后端二次解析 |
+| `Destination` | ▲v3 `Page{page, offset}` / `Uri` | 大纲与链接共用；**命名目标在打开时已解析**，UI 不会遇到"待解析"目标（D-08） |
 | `RenderEvent` | `Rendered{key, image}` / `Failed{page, error}` / `Cancelled{page}` | 调度器 → 会话；`Rendered` 携带位图，会话直接写缓存 |
 | `SessionEvent` | `ViewportChanged` / `LayoutChanged` / `ScrollChanged` / `CurrentPageChanged` / `SelectionChanged` / `SidebarChanged` / `PageRendered` / `PageRenderFailed` / `PageTextLoaded` / `CopyToClipboard` / `Error` | 会话 → UI：UI 只依赖这个枚举驱动界面刷新 |
 | `ViewerCommand` | 视口/滚动/翻页/缩放/旋转/侧边栏/粒度/选择/复制/请求可见页 | UI → 会话；每个命令互斥且幂等（可安全重复发送） |
@@ -432,12 +446,14 @@ pub trait KeyValueStore: Send + Sync {
 
 ---
 
-## 12. 请你重点批复的 5 个接口问题
+## 12. 5 个接口问题 —— 已批复（v3）
 
-1. **`Document` 是否增加批量 `page_sizes()`**（§2）？影响打开大文档的耗时。
-2. **`PageRaster` 是否先不做分块渲染**（§3）？影响超大页面的内存上限。
-3. **搜索是否保持同步接口**（§6）？影响全文搜索时的 UI 卡顿。
-4. **`TextSelection` 用 `&mut self` 的例外是否接受**（§7）？
-5. **`scroll_to_page` 默认"页面居中"是否合适**（§8）？
+| # | 问题 | 你的决定 | 落地 |
+| --- | --- | --- | --- |
+| 1 | `Document` 是否增加批量页尺寸 | **增加批量，提前知道每一页大小** | `page_geometries() -> Arc<[PageGeometry]>` 成为必需方法（见 D-01） |
+| 2 | `PageRaster` 是否分块渲染 | **可做分块预渲染** | `RenderRequest/RenderKey` 加 `tile`，新增 `TileSpec`/`TilingPolicy`（见 D-02） |
+| 3 | 搜索是否保持同步 | **同步，不做异步** | `TextLayer::search` 契约写明耗时由调用方承担（见 D-03） |
+| 4 | `TextSelection` 的 `&mut self` 例外 | **接受** | 保留，并作为全局约定的唯一例外写入注释（见 D-04） |
+| 5 | `scroll_to_page` 语义 | **居中合理**；并补充要求 **scroll 前后保持视野中心对应的页面位置不动** | 保留居中；新增 `ScrollAnchor` + `PageLayout::scroll_to_anchor()`，由会话在重算布局前后自动使用（见 D-05） |
 
-批复后我会据此定稿 `traits.md`，再进入实现（建议先实现 `pdfcore` + 内存假后端，用单测锁定 §5 的坐标不变量与布局行为）。
+> 本表的"落地"列指向 [decision-log.md](decision-log.md) 的条目；**签名以 [trait-definitions.md](trait-definitions.md) v3 为准** —— 本文件是设计意图记录，其下方 §2/§3/§8 的声明已同步为 v3 口径。

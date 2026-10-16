@@ -1,7 +1,7 @@
-# trait 具体定义（**定稿候选 v2**）
+# trait 具体定义（**定稿候选 v3**）
 
-> 配套：[architecture.md](architecture.md)（分层与决策）、[traits.md](traits.md)（每个 trait 的设计意图）、[data-flow.md](data-flow.md)（场景化数据流）
-> 本稿是**签名级**定义：与你批复的架构一致，批准后可直接落到 `crates/pdfcore`（去掉注释即为源码）。
+> 配套：[architecture.md](architecture.md)、[traits.md](traits.md)、[data-flow.md](data-flow.md)、[decision-log.md](decision-log.md)
+> **v3 并入你批复的 8 条决定**（批量页几何 / 分块预渲染 / 搜索同步 / `&mut self` 例外 / 滚动锚点 / 白底占位 / 导航索引预解析）。文中 `▲v3` 标记本次变更处，便于复核。
 > 全文遵循：`&self` 接收者、对象安全（可用 `Arc<dyn T>`）、返回自有数据、能力缺失用 `Option`/`Unsupported` 表达。
 
 ---
@@ -17,43 +17,35 @@ trait PdfBackend {
 }
 ```
 
-其中 4 个点我做了不同选择，逐条说明（这也是本设计最需要你确认的取舍）：
+其中 4 个点我做了不同选择：
 
 | 你的写法 | 我的写法 | 原因 |
 | --- | --- | --- |
-| `type Document;`（关联类型） | 返回 `Arc<dyn Document>` | 关联类型会让 trait **无法作为 trait object 使用**（除非写 `dyn PdfBackend<Document = X>`），于是"运行期替换后端"就要把泛型传染给整条调用链 |
-| `fn open(...)`（无 `&self`） | `fn open(&self, ...)` | 静态方法无法承载实例状态（PDFium 初始化句柄、字体配置、内存上限），也无法把后端放进 `Vec<Box<dyn PdfBackend>>` 做多后端回退 |
-| `-> Option<Document>` | `-> Result<OpenedDocument>` | `Option` 丢失失败原因：是**加密需要密码**、密码错误、文件损坏，还是 IO 失败？这四种在 UI 上的处理完全不同 |
-| `path: Path` | `source: Source<'_>` | `Path` 是 unsized 类型，按值传参编译不过（须 `&Path`/`PathBuf`）；另外把"来源"建模成枚举后可同时支持路径与内存字节 |
+| `type Document;`（关联类型） | 返回 `Arc<dyn Document>` | 关联类型让 trait **无法作为 trait object 使用**（除非写 `dyn PdfBackend<Document = X>`），"运行期替换后端"的泛型会传染整条调用链 |
+| `fn open(...)`（无 `&self`） | `fn open(&self, ...)` | 静态方法无法承载实例状态（PDFium 句柄、字体配置、内存上限），也放不进 `Vec<Box<dyn PdfBackend>>` |
+| `-> Option<Document>` | `-> Result<OpenedDocument>` | `Option` 丢失失败原因：**加密需密码**、密码错误、文件损坏、IO 失败在 UI 上处理完全不同 |
+| `path: Path` | `source: Source<'_>` | `Path` 是 unsized，按值传参编译不过；枚举后能同时支持路径与内存字节 |
 
-**关联类型 vs trait object 的代价对比**（这是唯一的实质分歧）：
+**关联类型 vs trait object**：
 
 ```rust
-// A. 关联类型风格：静态分发、零成本，但泛型会向上传染
-trait PdfBackendA {
-    type Document; type Raster; type Text;
-    fn open(&self, path: &Path) -> Result<(Self::Document, Self::Raster, Self::Text)>;
-}
-fn build_session<B: PdfBackendA>(backend: &B, ...) { ... }   // 泛型从这里开始传染
+// A. 关联类型风格：静态分发、零成本，但泛型向上传染
+trait PdfBackendA { type Document; type Raster; type Text;
+    fn open(&self, path: &Path) -> Result<(Self::Document, Self::Raster, Self::Text)>; }
 struct App<B: PdfBackendA> { backend: B, /* …整棵 UI 都带上 B… */ }
 // ✗ 无法写 Vec<Box<dyn PdfBackendA>>；✗ 单测替身会改变 App 的类型
 
 // B. dyn 风格（本设计）：运行期可替换，签名稳定
-trait PdfBackendB {
-    fn open(&self, source: Source<'_>, password: Option<&str>) -> Result<OpenedDocument>;
-}
+trait PdfBackendB { fn open(&self, source: Source<'_>, password: Option<&str>) -> Result<OpenedDocument>; }
 struct App { backend: Arc<dyn PdfBackendB>, /* 与具体后端无关 */ }
 // ✓ Vec<Arc<dyn PdfBackendB>> 可用；✓ 测试注入内存后端，App 类型不变
 ```
 
-**什么时候该用关联类型**：只有一个确定实现、且希望内联/零虚函数开销时（例如库内部把 `PdfiumDocument` 作为唯一后端）。本项目明确要"多后端 + 测试替身 + 将来可能加 hayro"，所以选 dyn 风格。
-**代价**：每次调用有一次虚表跳转（对渲染这种毫秒级操作完全可忽略）。
+**什么时候用关联类型**：只有一个确定实现、且要内联/零虚调用时。本项目明确要"多后端 + 测试替身 + 将来可能加 hayro"，故选 dyn。代价是每次调用一次虚表跳转（对毫秒级渲染可忽略）。
 
 ---
 
 ## 1. 类型词典
-
-trait 签名里出现的全部类型，先列在这里，后面 §2 的 trait 定义直接引用。
 
 ### 1.1 几何与标识
 
@@ -83,7 +75,7 @@ pub struct PageIndex(pub u32);   // FIRST; new; get; display_number; next; prev
 pub struct JobId(pub u64);
 ```
 
-### 1.2 文档与能力
+### 1.2 文档、能力与导航索引 ▲v3
 
 ```rust
 /// 打开来源。
@@ -102,21 +94,40 @@ pub struct DocumentInfo {
     pub file_size_bytes: Option<u64>,
 }
 
-/// 跳转目标（大纲与链接共用）。
+/// ▲v3 跳转目标（大纲与链接共用）—— **总是已解析**：
+/// 后端在 open 时把 PDF 的命名目标（`/Named`、`/Dests` 字典里的名称）解析成具体页，
+/// UI 永远不会拿到"待解析"的目标，因此点击链接时不需要再访问后端。
+/// （v2 里的 `Named(String)` 变体已删除，见 decision-log D-08。）
 pub enum Destination {
     Page { page: PageIndex, offset: Option<Point> },  // 页内落点，PDF 页面空间
-    Named(String),                                     // PDF 命名目标，需后端二次解析
-    Uri(String),
+    Uri(String),                                      // 外部链接
 }
 
 /// 页内超链接热区（PDF 页面空间）。
 pub struct Link { pub rect: Rect, pub destination: Destination }
 
-/// 大纲节点（递归树）。
+/// 大纲节点（递归树；destination 同样已解析）。
 pub struct OutlineNode {
     pub title: String,
     pub destination: Option<Destination>,
     pub children: Vec<OutlineNode>,
+}
+
+/// ▲v3 导航索引：open 时**一次性解析并合并存储**的全部导航数据。
+///
+/// 为什么合并成一个结构：
+/// * 点击链接/大纲时不再访问后端（纯内存查找，O(1)）；
+/// * 页内链接可以随页面一起预取，缩略图侧边栏也能一次拿到；
+/// * 命名目标解析失败时不会静默变成"点了没反应"，而是被记进 `unresolved` 供诊断。
+pub struct NavigationIndex {
+    /// 大纲树（destination 已解析）。
+    pub outline: Vec<OutlineNode>,
+    /// 逐页链接热区；下标 = 页号，越界即该页无链接。
+    pub links_by_page: Vec<Vec<Link>>,
+    /// 名称 → 目标（PDF 交叉引用、命名目标），保留供"命名的目录项"与调试使用。
+    pub named_destinations: HashMap<String, Destination>,
+    /// 无法解析的名称；仅用于诊断（UI 可忽略）。
+    pub unresolved: Vec<String>,
 }
 
 /// 后端能力声明：UI 据此决定显示哪些入口。
@@ -140,7 +151,7 @@ pub struct OpenedDocument {
 //  page_count(); has_text_layer(); text_layer() -> Option<&Arc<dyn TextLayer>>
 ```
 
-### 1.3 渲染
+### 1.3 渲染（含分块）▲v3
 
 ```rust
 /// 缩放：设备像素 / point。
@@ -148,9 +159,25 @@ pub struct Scale(pub f32);
 //  const IDENTITY(1.0); from_zoom(f32); from_dpi(f32); zoom(); dpi(); is_valid()
 //  quantize() -> 量化到 1/8 步长（缓存键用，避免滚轮缩放摧毁缓存）
 
-/// 缓存键：页 + 量化缩放（千分之一，整数以便 Hash/Eq）+ 旋转。
-pub struct RenderKey { pub page: PageIndex, pub scale_milli: u32, pub rotation: Rotation }
-//  new(page, scale, rotation); scale() -> Scale
+/// ▲v3 瓦片边长（设备像素）。做成常量而非配置：它是缓存键的一部分，
+/// 变动会导致全部瓦片失效，没有"运行期可调"的必要。
+pub const TILE_SIZE: u16 = 512;
+
+/// ▲v3 瓦片坐标（列、行），网格由该页的**像素尺寸**决定。
+pub struct TileSpec { pub col: u16, pub row: u16 }
+//  grid_for(displayed_size: Size) -> (u16, u16)          ⌈宽/512⌉ × ⌈高/512⌉
+//  pixel_rect(displayed_size: Size) -> Rect              该瓦片在"旋转后页位图"中的像素矩形
+//  page_rect(page_size: Size, rotation: Rotation) -> Rect 该瓦片在 PDF 页面空间的裁剪矩形
+//                                                         （渲染请求携带它，避免后端自己推算）
+
+/// 缓存键：页 + 量化缩放 + 旋转 + 瓦片坐标（整页渲染时为 None）。
+pub struct RenderKey {
+    pub page: PageIndex,
+    pub scale_milli: u32,      // 量化缩放 ×1000（f32 不能做 Hash/Eq）
+    pub rotation: Rotation,
+    pub tile: Option<TileSpec>,   // ▲v3
+}
+//  new(page, scale, rotation)（整页）; tiled(page, scale, rotation, tile); scale() -> Scale
 
 /// 渲染优先级（rank() 越小越优先）。
 pub enum RenderPriority { Interactive, Visible, Prefetch, Background }
@@ -163,15 +190,29 @@ pub struct RenderRequest {
     pub page: PageIndex,
     pub scale: Scale,
     pub rotation: Rotation,        // 必须是布局给出的最终旋转
+    pub tile: Option<TileSpec>,    // ▲v3 None = 整页；Some = 只渲染该瓦片
     pub priority: RenderPriority,
     pub cancel: CancelToken,
 }
-//  new(page, scale, rotation)（默认 Visible）; with_priority(p); key() -> RenderKey
+//  new(page, scale, rotation)                     → 整页（默认 Visible）
+//  tiled(page, scale, rotation, tile)             → 单瓦片
+//  with_priority(p); key() -> RenderKey
+
+/// ▲v3 何时分块：按"页的像素面积"阈值决定，避免小页被碎片化。
+pub enum TilingPolicy {
+    /// 从不分块（整页一张位图）。
+    Never,
+    /// 页的像素面积超过阈值时才分块（默认：16 MP ≈ 4000×4000）。
+    AbovePixels(u32),
+    /// 总是分块。
+    Always,
+}
+//  Default = AbovePixels(16_000_000)
 
 /// 位图格式（PDFium 原生 BGRA；egui 要 RGBA）。
 pub enum PixelFormat { Rgba8, Bgra8, Gray8 }   // bytes_per_pixel(); has_alpha()
 
-/// 一页渲染结果（不可变，像素在 Arc<[u8]> 中共享）。
+/// 一页/一块瓦片的渲染结果（不可变，像素在 Arc<[u8]> 中共享）。
 pub struct RasterImage { pub width: u32, pub height: u32, pub format: PixelFormat, data: Arc<[u8]> }
 //  new(..) -> Option<Self>（长度不符返回 None）; expected_len(); stride(); size(); data(); byte_len()
 //  to_rgba8() -> Vec<u8>    ← 全项目唯一的格式转换点
@@ -210,8 +251,7 @@ pub struct TextChar { pub ch: char, pub bbox: Rect, pub origin: Point, pub span:
 /// 样式分段。
 pub struct TextSpan { pub range: TextRange, pub font_size: f32 }
 
-/// 一页文本层。
-/// 不变量：text.chars().count() == chars.len()。
+/// 一页文本层。不变量：text.chars().count() == chars.len()。
 pub struct PageText { pub page: PageIndex, pub text: String, pub chars: Vec<TextChar>, pub spans: Vec<TextSpan> }
 //  len(); is_empty(); chars_in(range); text_for_range(range); rects_for_range(range)（按行合并）
 //  range_for_rect(rect); hit_test(pdf_point); word_range_at(i); line_range_at(i)
@@ -236,7 +276,7 @@ pub struct SearchQuery {
 pub struct SearchHit { pub page: PageIndex, pub range: TextRange, pub rects: Vec<Rect> }
 ```
 
-### 1.5 布局
+### 1.5 布局与滚动锚点 ▲v3
 
 ```rust
 /// 每页几何：原始尺寸 + 自带 /Rotate（**逐页**，不能全局一个值）。
@@ -261,6 +301,11 @@ pub struct LayoutParams {
 /// 视口。
 pub struct Viewport { pub size: Size, pub scroll: Vec2 }   // scroll = 视口左上角在内容空间中的坐标
 //  content_rect() -> Rect
+//  ▲v3 center_content_point() -> Point   视口中心在内容空间中的坐标（用于捕获锚点）
+
+/// ▲v3 滚动锚点：视口中心对应的"页内位置"（PDF 页面空间）。
+/// 布局重算（缩放、旋转、切换排布、窗口缩放）前后用它把视野中心钉回原处。
+pub struct ScrollAnchor { pub page: PageIndex, pub page_point: Point }
 
 /// 某一页的摆放结果 —— **坐标系换算的唯一入口**。
 pub struct PagePlacement {
@@ -274,6 +319,7 @@ pub struct PagePlacement {
 //  page_to_content(pdf_point) -> Point       PDF 页面空间 → 内容空间
 //  content_to_page(content_point) -> Point   内容空间 → PDF 页面空间
 //  rect_to_content(pdf_rect) -> Rect         四角取外接矩形（对 90°/270° 安全）
+//  pixel_size() -> Size                      旋转后尺寸 × scale，取整为像素（分块网格要用）
 
 /// 整篇文档的布局结果。
 pub struct DocumentLayout { pub content_size: Size, pub placements: Vec<PagePlacement> }
@@ -354,9 +400,11 @@ pub enum SessionEvent {
 /// * 加密且未给密码 → [`CoreError::PasswordRequired`]；密码错误 → [`CoreError::IncorrectPassword`]。
 ///   两者都是**非故障**分支：UI 弹密码框后重试，而不是弹错误提示。
 /// * 不在 `open` 之后继续持有文档所有权：文档生命周期由返回值的 `Arc` 决定，
-///   因此"关闭文档"= drop，不需要 `close()`（少一个可能忘记调用的 API）。
+///   因此"关闭文档"= drop，不需要 `close()`。
 /// * 必须提供 [`PageRaster`]；[`TextLayer`] 可缺省，此时必须把
 ///   [`Capabilities::text_layer`] 声明为 `false`，否则 UI 会显示无效入口。
+/// * ▲v3 **打开时预解析**：页几何表与 [`NavigationIndex`] 应在 `open` 内一次性备好
+///   （命名目标、逐页链接、页尺寸与 `/Rotate`），使运行期查询是纯内存操作。
 pub trait PdfBackend: Send + Sync {
     /// 后端名称（"pdfium" / "hayro" / "memory"），用于"关于"与日志。
     fn name(&self) -> &'static str;
@@ -369,50 +417,59 @@ pub trait PdfBackend: Send + Sync {
 }
 ```
 
-**谁实现**：`PdfiumBackend`（真实）、`MemoryBackend`（testkit）、未来 `HayroBackend`。
+**谁实现**：`PdfiumBackend`、`MemoryBackend`（testkit）、未来 `HayroBackend`。
 
 ---
 
-### 2.2 `Document` —— 只读文档结构
+### 2.2 `Document` —— 只读文档结构 ▲v3
 
-**数据形态**：`PageIndex` → 页尺寸 / `/Rotate`；无输入 → 元数据 / 大纲 / 链接。
+**数据形态**：无输入 → 页几何表 / 导航索引（两者都是 O(1) 的 `Arc` 克隆）。
 
 ```rust
 /// **文档结构**：只读、可并发访问的文档信息。
 ///
 /// ## 目的
-/// 只覆盖 PDF 里**不变的部分**（页数、页尺寸、`/Rotate`、元数据、大纲、链接），
-/// 使布局与会话无需知道 PDFium 存在；单测也能构造"3 页、尺寸写死"的假文档。
-/// 页面**像素**归 [`PageRaster`]，页面**文字**归 [`TextLayer`]——三者刻意分开，
-/// 因为它们的性能特征与可用性完全不同。
+/// 只覆盖 PDF 里**不变的部分**（页数、页几何、元数据、导航索引），使布局与会话无需知道
+/// PDFium 存在；单测也能构造"3 页、尺寸写死"的假文档。页面**像素**归 [`PageRaster`]，
+/// 页面**文字**归 [`TextLayer`] —— 三者刻意分开，因为它们的性能特征与可用性完全不同。
 ///
 /// ## 实现者义务
-/// * `info()` 必须 O(1)（打开时已解析完毕）。
-/// * `page_size` / `page_rotation` 返回**未旋转**的原始值；旋转由布局叠加。
-/// * 大纲与链接属可选能力：不支持时返回空 `Vec`，只有真正解析失败才返回错误。
+/// * ▲v3 `page_geometries()` 与 `navigation()` 必须在 `open` 时备好并**缓存**，
+///   调用只做 `Arc` 克隆（O(1)），因此 UI 每帧调用也不会有跨 FFI 开销；
+///   惰性实现请用 `OnceLock`，不要在每次调用时重新解析。
+/// * 返回的 `PageGeometry::size` / `rotation` 是**未旋转**的原始值；旋转由布局叠加。
+/// * 导航索引不含"未解析"的目标：解析不了的名称归入
+///   [`NavigationIndex::unresolved`]，不要泄漏给 UI 当作可点击项。
 pub trait Document: Send + Sync {
     /// 元数据与页数。
     fn info(&self) -> &DocumentInfo;
 
-    /// 某页的原始尺寸（PDF point，未旋转）。
-    fn page_size(&self, page: PageIndex) -> Result<Size>;
-
-    /// 某页自带的 `/Rotate`。默认不旋转。
+    /// ▲v3 **批量**页几何（尺寸 + 逐页 `/Rotate`）。打开时已备好，O(1) 返回。
     ///
-    /// 注意是**逐页**的：同一文档不同页可有不同旋转值。
+    /// 之所以是批量而不是"逐页查询"：布局要一次性拿到全部页尺寸才能算出内容总高度与
+    /// 滚动范围；逐页跨 FFI 查询会把打开大文档变成 N 次调用。
+    fn page_geometries(&self) -> Result<Arc<[PageGeometry]>>;
+
+    /// 单页尺寸；默认实现查批量表（越界返回 `PageOutOfRange`）。
+    /// 频繁路径请直接用 `page_geometries()`，避免重复的 `Arc` 克隆与边界检查。
+    fn page_size(&self, page: PageIndex) -> Result<Size> {
+        let geometries = self.page_geometries()?;
+        geometries
+            .get(page.get() as usize)
+            .map(|geometry| geometry.size)
+            .ok_or(CoreError::PageOutOfRange { page, page_count: geometries.len() as u32 })
+    }
+
+    /// 单页自带的 `/Rotate`；默认实现查批量表，缺省为不旋转。
     fn page_rotation(&self, page: PageIndex) -> Result<Rotation> {
-        Ok(Rotation::None)
+        let geometries = self.page_geometries()?;
+        Ok(geometries.get(page.get() as usize).map(|geometry| geometry.rotation).unwrap_or(Rotation::None))
     }
 
-    /// 大纲（书签）树。默认空列表。
-    fn outline(&self) -> Result<Vec<OutlineNode>> {
-        Ok(Vec::new())
-    }
-
-    /// 某页的超链接热区。默认空列表。
-    fn links(&self, page: PageIndex) -> Result<Vec<Link>> {
-        Ok(Vec::new())
-    }
+    /// ▲v3 导航索引：大纲 + 逐页链接 + 命名目标，**打开时一次性解析并合并存储**。O(1) 返回。
+    ///
+    /// 取代了 v2 的 `outline()` 与 `links(page)`：点击链接/大纲时不再访问后端。
+    fn navigation(&self) -> Result<Arc<NavigationIndex>>;
 }
 ```
 
@@ -420,12 +477,12 @@ pub trait Document: Send + Sync {
 
 ---
 
-### 2.3 `PageRaster` —— 光栅化（最核心的替换缝）
+### 2.3 `PageRaster` —— 光栅化（最核心的替换缝）▲v3
 
-**数据形态**：`&RenderRequest`（页 + 缩放 + 旋转 + 优先级 + 取消令牌）→ `Arc<RasterImage>`。
+**数据形态**：`&RenderRequest`（页 + 缩放 + 旋转 + **可选瓦片** + 优先级 + 取消令牌）→ `Arc<RasterImage>`。
 
 ```rust
-/// **光栅化能力**：把一页按请求渲染成位图。
+/// **光栅化能力**：把一页（或一页中的一块瓦片）按请求渲染成位图。
 ///
 /// ## 目的
 /// 把"PDF 后端"压缩成**一个方法**：
@@ -438,15 +495,21 @@ pub trait Document: Send + Sync {
 ///   PDFium 必须声明 1。
 /// * 渲染前若 [`CancelToken::is_cancelled`] 为真，立即返回 [`CoreError::Cancelled`]
 ///   （PDFium 无法中断进行中的渲染，取消只在任务开始前有效）。
-/// * 返回位图尺寸应等于"旋转后页尺寸 × scale"，允许 ±1 像素取整误差。
+/// * 整页渲染（`tile == None`）：位图尺寸 = "旋转后页尺寸 × scale"，允许 ±1 像素取整误差。
+/// * ▲v3 瓦片渲染（`tile == Some(spec)`）：**只渲染该瓦片**，位图尺寸 =
+///   `spec.pixel_rect(displayed_size)` 的尺寸（最后一列/行不足 [`TILE_SIZE`]）。
+///   必须用 `spec.page_rect(page_size, rotation)` 作为裁剪矩形**直接渲染该区域**，
+///   **不得先整页渲染再裁剪** —— 否则分块就失去了省内存的意义。
+///   （pdfium 适配层用位图尺寸 + 渲染原点即可实现：`PdfRenderConfig::set_origin()`。）
+/// * 瓦片必须对齐整数像素边界，拼接时不得重叠或留缝。
 /// * 如实填写 [`PixelFormat`]（PDFium 原生 BGRA，不要假装 RGBA）。
 pub trait PageRaster: Send + Sync {
-    /// 渲染一页。
+    /// 渲染一页或一页中的一块瓦片。
     fn render(&self, request: &RenderRequest) -> Result<Arc<RasterImage>>;
 }
 ```
 
-**刻意的缺失**：没有 `render_thumbnail()`（缩略图 = 小 `Scale` 的普通请求，与主视图共享缓存）、没有分块参数（M4 若需要，在 `RenderRequest` 加 `tile` 字段，签名不变）。
+**刻意的缺失**：没有 `render_thumbnail()`（缩略图 = 小 `Scale` 的整页请求，与主视图共享缓存）。
 
 **谁实现**：`PdfiumRaster`、`MemoryRaster`。
 
@@ -457,15 +520,16 @@ pub trait PageRaster: Send + Sync {
 **数据形态**：`&RenderKey` → `Option<Arc<RasterImage>>`；写入 `RenderKey + Arc<RasterImage>`。
 
 ```rust
-/// **位图缓存**：`RenderKey` → 位图。
+/// **位图缓存**：`RenderKey` → 位图（瓦片也是位图，因此同一套缓存同时服务整页与瓦片）。
 ///
 /// ## 目的
 /// 把"缓存策略"独立出来：MVP 用几十行 `HashMap` 先跑通，之后换 LRU / 内存上限 / 落盘，
-/// **不改任何调用方**；单测里还能用"永不命中"或"只留一页"的缓存验证重渲染逻辑。
+/// **不改任何调用方**；单测里还能用"永不命中"的缓存验证重渲染逻辑。
 ///
 /// ## 实现者义务
 /// * `get` 被 UI 线程每帧调用多次，必须 O(1) 且不长时间持锁。
 /// * 不得返回尺寸/格式与键不匹配的位图。
+/// * ▲v3 瓦片键与整页键可能同时存在；`remove_page` 必须把该页的**两种键**都清掉。
 pub trait RenderCache: Send + Sync {
     /// 查询；未命中返回 `None`。
     fn get(&self, key: &RenderKey) -> Option<Arc<RasterImage>>;
@@ -473,7 +537,7 @@ pub trait RenderCache: Send + Sync {
     /// 写入（同键覆盖）。`image` 为 `Arc`，与 UI 共享像素，不产生拷贝。
     fn insert(&self, key: RenderKey, image: Arc<RasterImage>);
 
-    /// 丢弃某一页的所有缩放版本。
+    /// 丢弃某一页的所有缩放版本与所有瓦片。
     fn remove_page(&self, page: PageIndex);
 
     /// 清空。
@@ -486,7 +550,7 @@ pub trait RenderCache: Send + Sync {
 }
 ```
 
-**谁实现**：`LruCache`（app 侧）、`MemoryCache`（testkit）、测试用的 `NeverHitCache`。
+**谁实现**：`LruCache`（app 侧）、`MemoryCache`（testkit）。
 
 ---
 
@@ -500,15 +564,16 @@ pub trait RenderCache: Send + Sync {
 /// ## 目的
 /// 让 UI 完全不必知道"谁在渲染、几个线程、PDFium 是否线程安全"：
 /// * `submit` 非阻塞，UI 每帧都可放心调用；
-/// * 结果用 `drain_events` 轮询取回，与 egui "每帧拉取"模型天然契合
-///   （不需要把 UI 状态塞进回调，也不会出现回调跨帧持有 UI 引用）；
+/// * 结果用 `drain_events` 轮询取回，与 egui "每帧拉取"模型天然契合；
 /// * 真实实现 = 后台线程 + 优先级队列；测试实现可**同步渲染**，
 ///   于是「UI → 会话 → 调度 → 后端 → 缓存 → UI」能确定性地在单测里跑通。
 ///
 /// ## 实现者义务
 /// * `submit` 立即返回，不得同步等待（同步实现仅用于测试）。
-/// * 必须自行去重：同一 [`RenderKey`] 已在队列或飞行中时忽略重复提交。
+/// * 必须自行去重：同一 [`RenderKey`]（含瓦片坐标）已在队列或飞行中时忽略重复提交。
 /// * 必须遵守 [`Capabilities::max_concurrency`]；对 PDFium 只能是 1（即单工作线程）。
+/// * ▲v3 分块后同页会出现多个任务，优先级相同者按"距视口中心由近到远"或
+///   "行优先"顺序出队均可，但**不得**让整页任务插到瓦片任务之前（二者互斥，不会同时存在）。
 pub trait RenderScheduler: Send + Sync {
     /// 提交任务；返回任务号用于取消。
     fn submit(&self, request: RenderRequest) -> JobId;
@@ -516,7 +581,7 @@ pub trait RenderScheduler: Send + Sync {
     /// 取消指定任务。
     fn cancel(&self, job: JobId);
 
-    /// 取消某一页的所有任务（该页滚出视口）。
+    /// 取消某一页的所有任务（含该页所有瓦片）。
     fn cancel_page(&self, page: PageIndex);
 
     /// 取消全部任务（关闭文档、缩放/旋转导致缓存键整体失效）。
@@ -530,7 +595,7 @@ pub trait RenderScheduler: Send + Sync {
 }
 ```
 
-**谁实现**：`WorkerScheduler`（后台线程 + 优先级队列，app 侧）、`ImmediateScheduler`（testkit，同步）。
+**谁实现**：`WorkerScheduler`（后台线程 + 优先级队列）、`ImmediateScheduler`（testkit，同步）。
 
 ---
 
@@ -548,10 +613,12 @@ pub trait RenderScheduler: Send + Sync {
 ///
 /// ## 实现者义务
 /// * 必须保证 [`PageText`] 的"字符一一对应"不变量：
-///   `text.chars().count() == chars.len()`（缺位置的字符也要带零包围盒占位），
-///   否则高亮会整体错位。
+///   `text.chars().count() == chars.len()`（缺位置的字符也要带零包围盒占位）。
 /// * 包围盒必须在 **PDF 页面空间**（左下原点、point）。
 /// * 文本提取可能很慢，实现应自带缓存或依赖会话层的页文本缓存。
+/// * ▲v3 `search` 是**同步**方法（已定稿，不做异步版本）：
+///   耗时由调用方承担 —— MVP 里 UI 若担心卡顿，可自行放到自己的后台任务里跑，
+///   接口层不为此引入异步复杂度。
 pub trait TextLayer: Send + Sync {
     /// 取某页文本层。
     fn page_text(&self, page: PageIndex) -> Result<Arc<PageText>>;
@@ -581,14 +648,17 @@ pub trait TextLayer: Send + Sync {
 /// 把"选中状态机"从 UI 事件与文档内容中剥离：
 /// * 它**不含文档内容**，只记两个字符位置，因此可 100% 单测（含反向拖拽、跨页、全选）；
 /// * UI 只负责把鼠标坐标交给 [`PageText::hit_test`]，再把结果交给本 trait；
-/// * `highlight` / `selected_text` 有默认实现（基于 `selection()` + 调用方给的取文本闭包），
-///   因此实现者最少只需写 5 个方法。
+/// * `highlight` / `selected_text` 有默认实现，实现者最少只需写 5 个方法。
 ///
 /// ## 实现者义务
 /// * `begin` 重置选择、`extend` 更新焦点；收到的 `position` 应已由调用方按
-///   [`SelectionGranularity`] 展开（见 [`PageText::range_at`]）——"什么叫一个单词"
-///   不是本 trait 的职责。
+///   [`SelectionGranularity`] 展开（见 [`PageText::range_at`]）。
 /// * 只需 `Send`（选区属于 UI 线程，但会话可整体被移动到其它线程）。
+///
+/// ## 关于 `&mut self`（已确认保留）
+/// 改选区的 4 个方法用 `&mut self`，是本项目对"全局 `&self` 约定"的**唯一例外**：
+/// 选区是纯 UI 状态、不允许并发访问，`&mut self` 让实现方免锁，并把
+/// "只有 UI 线程能改选区"写进类型。你已确认接受此例外（decision-log D-04）。
 pub trait TextSelection: Send {
     /// 当前粒度。
     fn granularity(&self) -> SelectionGranularity;
@@ -614,7 +684,6 @@ pub trait TextSelection: Send {
     }
 
     /// 计算高亮矩形；默认实现按页取区间再调 [`PageText::rects_for_range`]。
-    /// 文本尚未加载的页会被跳过（UI 可先请求该页文本再重算）。
     fn highlight(&self, text_of: &dyn Fn(PageIndex) -> Option<Arc<PageText>>) -> Vec<Highlight>;
 
     /// 取选中文本用于复制；跨页以换行连接。默认实现。
@@ -622,13 +691,11 @@ pub trait TextSelection: Send {
 }
 ```
 
-> **与"全局 `&self`"约定的唯一例外**：改选区的 4 个方法用 `&mut self`。选区是纯 UI 状态、不允许并发，用 `&mut self` 能让实现方免锁，并把"只有 UI 线程能改选区"写进类型。若你更希望完全统一，我可以把它们也改成 `&self` + 内部 `Mutex`（代价是每次拖拽都加锁）。
-
-**谁实现**：`RangeSelection`（pdfcore 自带，约 30 行）、将来可能的 `MultiSelection`。
+**谁实现**：`RangeSelection`（pdfcore 自带）、将来可能的 `MultiSelection`。
 
 ---
 
-### 2.8 `PageLayout` —— 布局引擎（纯函数）
+### 2.8 `PageLayout` —— 布局引擎（纯函数）▲v3
 
 **数据形态**：`&[PageGeometry]` + `&LayoutParams` → `DocumentLayout`；查询时用 `DocumentLayout` + `Viewport` → 页集合 / 坐标。
 
@@ -643,7 +710,7 @@ pub trait TextSelection: Send {
 ///
 /// ## 实现者义务
 /// * `compute` 必须是纯函数（相同输入 → 相同输出）。
-/// * `placements` 顺序必须与页序一致且覆盖所有页（缺页 = 该页永远渲染不出来）。
+/// * `placements` 顺序必须与页序一致且覆盖所有页。
 /// * 必须把 `params.user_rotation` 与每页自带 `rotation` 叠加后写进
 ///   [`PagePlacement::rotation`] —— 渲染请求会直接采用它。
 pub trait PageLayout: Send + Sync {
@@ -660,6 +727,19 @@ pub trait PageLayout: Send + Sync {
 
     /// 跳转到某页时应设置的滚动偏移（默认：页面居中，并夹取到合法范围）。
     fn scroll_to_page(&self, layout: &DocumentLayout, page: PageIndex, viewport_size: Size) -> Vec2;
+
+    /// ▲v3 **保持视野中心不动**：把某个"页内位置"放到视口中心，返回应设置的滚动偏移。
+    ///
+    /// 默认实现：`placement.page_to_content(page_point)` → 减去视口一半 → 夹取。
+    /// 由会话在**任何重算布局**的操作前后调用（缩放、旋转、切换排布、窗口缩放），
+    /// 使用户的阅读位置不因布局变化而漂移（decision-log D-05）。
+    fn scroll_to_anchor(
+        &self,
+        layout: &DocumentLayout,
+        page: PageIndex,
+        page_point: Point,
+        viewport_size: Size,
+    ) -> Vec2;
 
     /// 最大滚动偏移。
     fn max_scroll(&self, layout: &DocumentLayout, viewport_size: Size) -> Vec2;
@@ -703,7 +783,66 @@ pub trait KeyValueStore: Send + Sync {
 
 ---
 
-## 3. 接线总图：谁产出谁消费
+## 3. 会话对外 API（装配面，v3 增补）
+
+`DocumentSession` 不是 trait，但它是"把上面 9 个零件拼起来"后 UI 唯一持有的对象。v3 因分块与锚点新增了 4 个方法：
+
+```rust
+impl DocumentSession {
+    // 装配
+    pub fn new(
+        opened: OpenedDocument,
+        cache: Arc<dyn RenderCache>,
+        scheduler: Arc<dyn RenderScheduler>,
+        layout_engine: Box<dyn PageLayout>,
+        selection: Box<dyn TextSelection>,
+    ) -> Result<Self>;
+
+    // 每帧
+    pub fn handle(&mut self, command: ViewerCommand, events: &mut Vec<SessionEvent>);
+    pub fn pump(&mut self, events: &mut Vec<SessionEvent>);
+
+    // 只读访问（UI 绘制用）
+    pub fn page_count(&self) -> u32;
+    pub fn state(&self) -> &ViewerState;
+    pub fn layout(&self) -> &DocumentLayout;
+    pub fn viewport(&self) -> &Viewport;
+    pub fn placement(&self, page: PageIndex) -> Option<&PagePlacement>;
+    pub fn capabilities(&self) -> Capabilities;
+
+    /// ▲v3 单页几何（来自后端批量表的本地副本，O(1)）。
+    pub fn page_geometry(&self, page: PageIndex) -> Option<PageGeometry>;
+
+    /// 整页位图（未分块时使用）；分块时返回 `None`。
+    pub fn image_for(&self, page: PageIndex) -> Option<Arc<RasterImage>>;
+
+    /// ▲v3 该页当前缩放下的全部**已在缓存中**的瓦片（分块时使用），供 UI 拼接绘制。
+    pub fn tiles_for(&self, page: PageIndex) -> Vec<(TileSpec, Arc<RasterImage>)>;
+
+    /// ▲v3 当前分块策略（UI 可据此决定走 `image_for` 还是 `tiles_for`）。
+    pub fn tiling_policy(&self) -> TilingPolicy;
+
+    /// ▲v3 捕获/恢复视野中心锚点（会话在重算布局的操作内部自动使用）。
+    pub fn capture_anchor(&self) -> Option<ScrollAnchor>;
+    pub fn restore_anchor(&mut self, anchor: ScrollAnchor);
+
+    // 文本与导航
+    pub fn page_text(&mut self, page: PageIndex) -> Option<Arc<PageText>>;
+    pub fn cached_page_text(&self, page: PageIndex) -> Option<Arc<PageText>>;
+    pub fn text_position_at(&mut self, content_point: Point) -> Option<TextPosition>;
+    pub fn highlight_selection(&self) -> Vec<Highlight>;
+    pub fn selected_text(&self) -> String;
+    pub fn highlights_for_search(&self, hits: &[SearchHit], active: Option<usize>) -> Vec<Highlight>;
+
+    /// ▲v3 导航索引（O(1) 克隆）；取代 v2 的 `outline()` 与 `links(page)`。
+    pub fn navigation(&self) -> Result<Arc<NavigationIndex>>;
+    pub fn search(&self, query: &SearchQuery) -> Result<Vec<SearchHit>>;
+}
+```
+
+---
+
+## 4. 接线总图：谁产出谁消费
 
 ```text
                         ┌──────────────────────────────────────────┐
@@ -713,24 +852,25 @@ pub trait KeyValueStore: Send + Sync {
                     ┌───────────────────┴────────────────────┐
                     ▼                    ▼                       ▼
           Arc<dyn Document>     Arc<dyn PageRaster>    Option<Arc<dyn TextLayer>>
-          （结构/大纲/链接）      （像素）                （文字/搜索）
-                    │                    │                       │
-                    │                    ▼                       │
-                    │          ┌──────────────────┐              │
-                    │          │ RenderScheduler  │◀── RenderRequest（由会话按布局产出）
-                    │          │  submit/cancel   │
-                    │          │  drain_events    │──▶ RenderEvent
-                    │          └────────┬─────────┘              │
-                    │                   │ 调用 render()          │
-                    │                   ▼                        │
-                    │            Arc<RasterImage> ──▶ RenderCache（键=页+量化缩放+旋转）
-                    │                                            │
-   UI：ViewerCommand ──▶┌──────────────────────────────────────┐  │
-                        │ DocumentSession（装配点）             │  │
-   UI：SessionEvent  ◀──│  PageLayout / TextSelection 注入      │◀─┘ page_text()/search()
+          ├ page_geometries()          │（像素）                │（文字/搜索）
+          └ navigation()               │                       │
+             ▲v3 打开时备好            ▼                       │
+             │                ┌──────────────────┐             │
+             │                │ RenderScheduler  │◀─ RenderRequest（会话按布局产出，
+             │                │  submit/cancel   │   ▲v3 分块时每页多个瓦片请求）
+             │                │  drain_events    │──▶ RenderEvent
+             │                └────────┬─────────┘             │
+             │                         │ render()              │
+             │                         ▼                       │
+             │                  Arc<RasterImage> ──▶ RenderCache（键含 tile）
+             │                                                 │
+   UI：ViewerCommand ──▶┌──────────────────────────────────────┐ │
+                        │ DocumentSession（装配点）             │ │
+   UI：SessionEvent  ◀──│  PageLayout / TextSelection 注入      │◀┘ page_text()/search()
                         └──────────────────────────────────────┘
                                         ▲
                                         │ compute() / visible_pages() / page_at()
+                                        │ ▲v3 scroll_to_anchor()
                                 Arc<dyn PageLayout>
 ```
 
@@ -739,12 +879,12 @@ pub trait KeyValueStore: Send + Sync {
 | 组件 | 线程 |
 | --- | --- |
 | `DocumentSession`、`TextSelection`、`PageLayout`、`Document`、`TextLayer` | UI 线程（`TextLayer` 也可被后台搜索任务调用，故要求 `Send + Sync`） |
-| `RenderScheduler` 的工作线程 → `PageRaster` | 后台（数量 = `Capabilities::max_concurrency`，PDFium = 1） |
+| `RenderScheduler` 工作线程 → `PageRaster` | 后台（数量 = `Capabilities::max_concurrency`，PDFium = 1） |
 | `RenderCache` | 两侧都访问（内部加锁） |
 
 ---
 
-## 4. 对象安全自检
+## 5. 对象安全自检
 
 | trait | 泛型方法 | `impl Trait` 返回 | `async fn` | 可作为 `dyn` |
 | --- | --- | --- | --- | --- |
@@ -754,20 +894,33 @@ pub trait KeyValueStore: Send + Sync {
 | `RenderCache` | 无 | 无 | 无 | ✅ `Arc<dyn RenderCache>` |
 | `RenderScheduler` | 无 | 无 | 无 | ✅ `Arc<dyn RenderScheduler>` |
 | `TextLayer` | 无 | 无 | 无 | ✅ `Arc<dyn TextLayer>` |
-| `TextSelection` | 无 | 无 | 无 | ✅ `Box<dyn TextSelection>`（注意 `&mut self` 方法不影响对象安全） |
+| `TextSelection` | 无 | 无 | 无 | ✅ `Box<dyn TextSelection>`（`&mut self` 不影响对象安全） |
 | `PageLayout` | 无 | 无 | 无 | ✅ `Box<dyn PageLayout>` |
 | `KeyValueStore` | 无 | 无 | 无 | ✅ `Arc<dyn KeyValueStore>` |
 
-> 唯一需要留意的是 `TextSelection::highlight(&self, text_of: &dyn Fn(...))`：`dyn Fn` 参数是对象安全的（它本身是 trait object），不影响本 trait 作为 `dyn` 使用。
-
 ---
 
-## 5. 与 v1 评审稿的差异（便于你复核）
+## 6. 版本差异（便于复核）
 
-| 位置 | v1 | v2（本稿） | 原因 |
+### v2 → v3（并入 8 条批复）
+
+| # | 位置 | 变更 | 对应决定 |
 | --- | --- | --- | --- |
-| `PageLayout::compute` | `&[Size]` | **`&[PageGeometry]`** | `/Rotate` 是逐页的，`Size` 表达不了 |
-| `LayoutParams.rotation` | 全局 `rotation` | **`user_rotation`**（与页自带旋转叠加） | 同上 |
+| 1 | `Document` | 新增 `page_geometries() -> Arc<[PageGeometry]>`（批量、O(1)）；`page_size`/`page_rotation` 降级为默认方法 | D-01 |
+| 2 | `RenderRequest` / `RenderKey` | 新增 `tile: Option<TileSpec>`；新增 `TILE_SIZE`、`TileSpec`、`TilingPolicy`；`PageRaster` 契约明确"只渲染瓦片、不得整页后裁剪" | D-02 |
+| 3 | `TextLayer::search` | 注释明确"同步、不做异步版本" | D-03 |
+| 4 | `TextSelection` | 明确 `&mut self` 为例外并记录已确认 | D-04 |
+| 5 | `Viewport` / `ScrollAnchor` / `PageLayout` | 新增 `center_content_point()`、`ScrollAnchor`、`scroll_to_anchor()`；`scroll_to_page` 保留居中语义 | D-05 |
+| 6 | `Destination` / `NavigationIndex` | 删除 `Destination::Named`；新增 `NavigationIndex`；`Document::outline()/links()` 合并为 `navigation()` | D-08 |
+| 7 | `PagePlacement` | 新增 `pixel_size()`（分块网格要用） | D-02 |
+| 8 | 会话 API | 新增 `page_geometry` / `tiles_for` / `tiling_policy` / `capture_anchor` / `restore_anchor` / `navigation` | D-01/02/05/08 |
+
+### v1 → v2
+
+| 位置 | v1 | v2 | 原因 |
+| --- | --- | --- | --- |
+| `PageLayout::compute` | `&[Size]` | `&[PageGeometry]` | `/Rotate` 是逐页的，`Size` 表达不了 |
+| `LayoutParams.rotation` | 全局 `rotation` | `user_rotation`（与页自带旋转叠加） | 同上 |
 | `ViewerCommand` | 无粒度命令 | 增加 `SetSelectionGranularity` | 双击选词需要 UI 先告知粒度 |
-| `SelectBegin` 语义 | 只放锚点 | **按粒度展开成完整区间** | 否则双击后选区为空，需再发一次 extend 才生效 |
-| `OpenedDocument` | 不可克隆 | **`Clone`** | 便于"同一文档换一套能力声明"来测降级路径 |
+| `SelectBegin` 语义 | 只放锚点 | 按粒度展开成完整区间 | 否则双击后选区为空 |
+| `OpenedDocument` | 不可克隆 | `Clone` | 便于"同一文档换一套能力声明"测降级路径 |
