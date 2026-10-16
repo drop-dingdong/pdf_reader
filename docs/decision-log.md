@@ -49,13 +49,29 @@
 
 ## 4. 下一步（M1：接入真实后端）
 
-v3 接口层与内存假后端已全部就绪并测试通过，接下来按 [architecture.md](architecture.md) §9 进入 M1：
+### ✅ 已完成：`crates/backend-pdfium`（2026-10）
 
-1. 新建 `crates/backend-pdfium`：实现 `PdfBackend` / `Document`（含 `page_geometries()` 批量表与
-   `navigation()` 预解析）/ `PageRaster`（整页 + `set_origin()` 分块）/ `TextLayer`；
-2. 用真实 PDF 采样集做冒烟测试（旋转页、CJK、加密文档、带大纲与链接的文档）；
-3. `app`（egui 壳）：`ViewerCommand` / `SessionEvent` ↔ 界面、白底页框占位、剪贴板；
-4. 打包（三平台 CI、动态库随包 + rpath 校验）。
+`PdfBackend` / `Document` / `PageRaster` / `TextLayer` 四个 trait 的真实实现已落地并测试通过：
+
+* **D-01**：`open` 时一次性读出全部页几何（含逐页 `/Rotate`）；
+* **D-02**：瓦片走 PDFium 原生的部分渲染（`set_origin`），**只渲染被请求的区域**；
+  真实 PDF 的测试断言"包含文字的那块瓦片有墨迹、页面底部空白瓦片零墨迹"；
+* **D-08**：大纲与逐页链接在打开时采集完毕；PDFium 自身已把命名目标解析成具体页；
+* 测试用 PDF **由 Rust 现场生成**（2 页、1 页带 `/Rotate 90`、含大纲与链接），仓库无二进制夹具；
+* 找不到动态库时测试**跳过并打印指引**（`scripts/fetch-pdfium.sh`）。
+
+顺带修掉一个真实缺陷：`DocumentSession::selected_text` 原先只读缓存，导致"全选 + 复制"
+会静默漏掉未加载的页 —— 现改为**按需加载**选区覆盖的页（`&mut self`），
+而 `highlight_selection` 保持"尽力而为"（只画已加载的页），避免为高亮拉起整本文本。
+
+**测试总数：81 passed, 0 failed, 0 warnings**（pdfcore 65 + backend-pdfium 16）。
+
+### ⏭ 剩余（M1 收尾 → M2）
+
+1. `app`（egui 壳）：`ViewerCommand` / `SessionEvent` ↔ 界面、白底页框占位、剪贴板、
+   真实后台调度器（`WorkerScheduler`）与带内存上限的缓存（`LruCache`）；
+2. 打包（M3）：三平台 CI、动态库随包 + rpath 校验、macOS 签名公证、AppImage；
+3. 真实 PDF 采样集冒烟（旋转页、CJK、加密文档、超大页）。
 
 > 按 [agent.md](agent.md)：逻辑层测试随代码提交；**需要真实窗口/GPU 的验收项交给你**，
 > 我会在交付时说明"看什么、怎么看"。

@@ -1,0 +1,14 @@
+[package]
+name = "backend-pdfium"
+description = "PDFium 后端：把 pdfium-render 适配成 pdfcore 的 trait 实现"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pdfcore = { path = "../pdfcore" }
+# 接口层与 UI 都不依赖本 crate；只有 app 在组装时引用它。
+# 说明：pdfium-render 在**运行期**绑定 PDFium 动态库（见 scripts/fetch-pdfium.sh），
+# 因此本 crate 编译不需要 PDFium，只有跑测试/运行程序时需要。
+pdfium-render = "0.9"

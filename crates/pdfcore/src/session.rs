@@ -368,6 +368,9 @@ impl DocumentSession {
     }
 
     /// 当前选区的高亮矩形。
+    ///
+    /// **尽力而为**：文本尚未加载的页会被跳过（UI 每帧只画可见页，因此通常已经加载）。
+    /// 这样高亮不会为了"全选"而把整本文档的文本一次性拉起来。
     pub fn highlight_selection(&self) -> Vec<Highlight> {
         let texts = &self.page_texts;
         let lookup = move |page: PageIndex| -> Option<Arc<PageText>> { texts.get(&page).cloned() };
@@ -375,10 +378,25 @@ impl DocumentSession {
     }
 
     /// 当前选中的文本。
-    pub fn selected_text(&self) -> String {
+    ///
+    /// 与 [`DocumentSession::highlight_selection`] 不同，这里**会按需加载**选区覆盖的页文本：
+    /// 复制必须完整，不能因为某页尚未加载就静默漏掉内容（"全选 + 复制"就依赖这一点）。
+    /// 代价是跨页大选区会触发多页文本提取 —— 这是复制语义本身的要求。
+    pub fn selected_text(&mut self) -> String {
+        self.load_selection_text();
         let texts = &self.page_texts;
         let lookup = move |page: PageIndex| -> Option<Arc<PageText>> { texts.get(&page).cloned() };
         self.selection.selected_text(&lookup)
+    }
+
+    /// 把选区覆盖到的页文本全部加载进缓存（惰性、按需）。
+    fn load_selection_text(&mut self) {
+        let Some(selection) = self.selection.selection() else {
+            return;
+        };
+        for (page, _) in selection.page_ranges() {
+            let _ = self.page_text(page);
+        }
     }
 
     /// 把搜索命中转成高亮；`active` 为当前跳转到的那一条（用更醒目的配色）。

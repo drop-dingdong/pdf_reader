@@ -834,7 +834,8 @@ impl DocumentSession {
     pub fn cached_page_text(&self, page: PageIndex) -> Option<Arc<PageText>>;
     pub fn text_position_at(&mut self, content_point: Point) -> Option<TextPosition>;
     pub fn highlight_selection(&self) -> Vec<Highlight>;
-    pub fn selected_text(&self) -> String;
+    /// 复制语义要求完整：这里**会按需加载**选区覆盖的页文本，因此需要 `&mut self`。
+    pub fn selected_text(&mut self) -> String;
     pub fn highlights_for_search(&self, hits: &[SearchHit], active: Option<usize>) -> Vec<Highlight>;
 
     /// ▲v3 导航索引（O(1) 克隆）；取代 v2 的 `outline()` 与 `links(page)`。
