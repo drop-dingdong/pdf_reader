@@ -177,6 +177,55 @@ pub fn link_rect_in_page_bounds(rect: Rect, page_size: Size) -> bool {
         && rect.bottom() <= page_size.height + slack
 }
 
+/// 浮窗的最小尺寸（egui 单位，因为浮窗是纯 UI 元素）。
+pub const FLOAT_MIN_SIZE: egui::Vec2 = egui::Vec2::new(160.0, 90.0);
+/// 浮窗标题栏高度。
+pub const FLOAT_TITLE_HEIGHT: f32 = 22.0;
+/// 浮窗右下角缩放把手边长。
+pub const FLOAT_HANDLE_SIZE: f32 = 16.0;
+
+/// 把浮窗矩形夹取到**视图区域内部**（用户要求：浮窗始终在视图区域内），并保证不小于最小尺寸。
+///
+/// 区域本身比最小尺寸还小时以区域为准（不会算出负尺寸）。
+pub fn clamp_float_rect(rect: egui::Rect, area: egui::Rect, min_size: egui::Vec2) -> egui::Rect {
+    let max_width = area.width().max(0.0);
+    let max_height = area.height().max(0.0);
+    let width = rect.width().max(min_size.x.min(max_width)).min(max_width);
+    let height = rect.height().max(min_size.y.min(max_height)).min(max_height);
+    let x = rect.min.x.clamp(area.min.x, (area.max.x - width).max(area.min.x));
+    let y = rect.min.y.clamp(area.min.y, (area.max.y - height).max(area.min.y));
+    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(width, height))
+}
+
+/// 收集**被引用的点**（链接跳转目的地），按目标页分组，并按位置去重。
+///
+/// * 一条链接只在自己带**具体坐标**（`Destination::Page.offset`）时算一个引用点；
+///   只有页、没有坐标的目标不产生标记（没有具体位置可标）；
+/// * 大量链接可能指向同一个点，因此按 0.5pt 网格量化后去重（用户要求）；
+/// * 返回 `Vec` 的下标就是目标页号，越界的目标丢弃。
+pub fn destination_points(links_by_page: &[Vec<Link>], page_count: usize) -> Vec<Vec<Point>> {
+    /// 去重网格：0.5pt（远小于一个字，肉眼视为同一点）。
+    const QUANTUM: f32 = 0.5;
+
+    let mut out: Vec<Vec<Point>> = vec![Vec::new(); page_count];
+    for links in links_by_page {
+        for link in links {
+            let Destination::Page { page, offset: Some(point) } = &link.destination else {
+                continue;
+            };
+            let Some(bucket) = out.get_mut(page.get() as usize) else { continue };
+            let quantized = Point::new(
+                (point.x / QUANTUM).round() * QUANTUM,
+                (point.y / QUANTUM).round() * QUANTUM,
+            );
+            if !bucket.contains(&quantized) {
+                bucket.push(quantized);
+            }
+        }
+    }
+    out
+}
+
 /// 滚轮是否应作用于**文档视图**（而不是侧栏、工具栏等区域）。
 ///
 /// 实测缺陷：在侧栏里滚动时文档也跟着滚 —— egui 的 `ScrollArea` 会消费滚动增量，
@@ -797,6 +846,73 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 引用点：按目标页分组、按位置去重、无形坐标的目标不产生标记。
+    #[test]
+    fn destination_points_group_by_page_and_dedupe_by_position() {
+        let link = |destination: Destination| Link { rect: Rect::new(0.0, 0.0, 10.0, 10.0), destination };
+        let links_by_page = vec![
+            vec![
+                // 两个链接指向**同一点** → 只记一次
+                link(Destination::Page { page: PageIndex::new(1), offset: Some(Point::new(10.0, 20.0)) }),
+                link(Destination::Page { page: PageIndex::new(1), offset: Some(Point::new(10.2, 20.2)) }),
+                // 另一个点 → 另记一次
+                link(Destination::Page { page: PageIndex::new(1), offset: Some(Point::new(300.0, 400.0)) }),
+                // 只有页、没有坐标 → 不产生标记
+                link(Destination::Page { page: PageIndex::new(2), offset: None }),
+                // 外部 URI → 忽略
+                link(Destination::Uri("https://example.com".into())),
+            ],
+            // 第 2 页上的链接也可以指向第 1 页（同样落在同一个 0.5pt 网格上 → 仍视为同一点）
+            vec![link(Destination::Page { page: PageIndex::new(1), offset: Some(Point::new(10.2, 20.2)) })],
+        ];
+
+        let points = destination_points(&links_by_page, 3);
+        assert_eq!(points.len(), 3, "按目标页分桶");
+        assert_eq!(
+            points[1],
+            vec![Point::new(10.0, 20.0), Point::new(300.0, 400.0)],
+            "同一点去重（10.2/20.2 量化到 0.5pt 网格后仍是 10.0/20.0），不同点保留"
+        );
+        assert!(points[2].is_empty(), "无坐标的目标不产生标记");
+        assert!(points[0].is_empty());
+
+        // 越界目标丢弃，不 panic
+        let points = destination_points(&links_by_page, 1);
+        assert_eq!(points.len(), 1);
+    }
+
+    /// 浮窗：夹取到视图区域内、不小于最小尺寸、区域过小时不产生负尺寸。
+    #[test]
+    fn clamp_float_rect_keeps_the_window_inside_the_view() {
+        let rect = |x: f32, y: f32, w: f32, h: f32| {
+            egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
+        };
+        let area = rect(100.0, 50.0, 800.0, 600.0);
+
+        // 拖到右下角外 → 拉回区域内部
+        let clamped = clamp_float_rect(rect(2000.0, 2000.0, 300.0, 200.0), area, FLOAT_MIN_SIZE);
+        assert!(clamped.max.x <= area.max.x + 1e-3 && clamped.max.y <= area.max.y + 1e-3);
+        assert!(clamped.min.x >= area.min.x && clamped.min.y >= area.min.y);
+
+        // 拖到左上角外 → 拉回区域内
+        let clamped = clamp_float_rect(rect(-500.0, -500.0, 300.0, 200.0), area, FLOAT_MIN_SIZE);
+        assert_eq!((clamped.min.x, clamped.min.y), (area.min.x, area.min.y));
+
+        // 太小 → 抬到最小尺寸
+        let clamped = clamp_float_rect(rect(200.0, 100.0, 10.0, 10.0), area, FLOAT_MIN_SIZE);
+        assert_eq!((clamped.width(), clamped.height()), (FLOAT_MIN_SIZE.x, FLOAT_MIN_SIZE.y));
+
+        // 比区域还大 → 收缩到区域尺寸
+        let clamped = clamp_float_rect(rect(100.0, 50.0, 5000.0, 5000.0), area, FLOAT_MIN_SIZE);
+        assert_eq!((clamped.width(), clamped.height()), (area.width(), area.height()));
+
+        // 区域本身比最小尺寸还小 → 不得出现负尺寸
+        let tiny = rect(0.0, 0.0, 40.0, 30.0);
+        let clamped = clamp_float_rect(rect(0.0, 0.0, 200.0, 200.0), tiny, FLOAT_MIN_SIZE);
+        assert!(clamped.width() >= 0.0 && clamped.height() >= 0.0);
+        assert_eq!(clamped.width(), tiny.width());
     }
 
     /// 回归：指针不在画布上（例如在侧栏里滚动）时，滚轮**不得**作用于文档视图。

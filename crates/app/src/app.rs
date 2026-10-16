@@ -25,8 +25,9 @@ use pdfcore::prelude::*;
 
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
-    color_image, commands_for_destination, flatten_outline, link_overlay_visible,
-    link_rect_in_page_bounds, outline_node_count, texture_pages, wheel_targets_canvas,
+    clamp_float_rect, color_image, commands_for_destination, destination_points,
+    flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
+    texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
     view_rect_for, view_to_content, KeyedStore,
 };
@@ -87,6 +88,18 @@ impl Tool {
     }
 }
 
+/// 视图区域内的浮窗（始终在画布内部、可移动/改大小/关闭；现阶段只显示文字）。
+struct Float {
+    /// 唯一 id（用于 egui 的交互标识）。
+    id: u64,
+    /// 标题栏文字。
+    title: String,
+    /// 正文（现阶段只显示文字）。
+    text: String,
+    /// 在**视图区域**（画布）内的矩形；每帧会被夹取回区域内。
+    rect: egui::Rect,
+}
+
 /// 应用状态。
 pub struct PdfReaderApp {
     session: Option<DocumentSession>,
@@ -103,6 +116,14 @@ pub struct PdfReaderApp {
     show_links: bool,
     /// 大纲的**扁平行**（打开文档时摊平一次；侧栏用虚拟化行渲染，避免每帧布局上千行）。
     outline_rows: Vec<crate::view::OutlineRow>,
+    /// 视图区域内的浮窗；**后加入的排在后面 → 绘制与交互都在更上层**（用户要求"后出现的浮窗更高"）。
+    floats: Vec<Float>,
+    /// 下一个浮窗 id。
+    next_float_id: u64,
+    /// 是否标注"被引用的点"（链接跳转目的地）。
+    show_dest_points: bool,
+    /// 每个目标页上被引用的点（按 0.5pt 去重），下标 = 页号；打开文档时算一次。
+    dest_points: Vec<Vec<Point>>,
     /// 本帧累计的"像素格式转换"与"load_texture"耗时（诊断用，定位 150ms 到底在哪一段）。
     last_convert_ms: f64,
     last_upload_ms: f64,
@@ -172,6 +193,10 @@ impl PdfReaderApp {
             tool: Tool::default(),
             show_links: false,
             outline_rows: Vec::new(),
+            floats: Vec::new(),
+            next_float_id: 1,
+            show_dest_points: false,
+            dest_points: Vec::new(),
             last_convert_ms: 0.0,
             last_upload_ms: 0.0,
             sidebar_width: 260.0,
@@ -239,6 +264,19 @@ impl PdfReaderApp {
                             .as_ref()
                             .map(|navigation| flatten_outline(&navigation.outline))
                             .unwrap_or_default();
+                        // 被引用的点（链接目的地）也只算一次：按目标页分组、按位置去重
+                        self.dest_points = self
+                            .navigation
+                            .as_ref()
+                            .map(|navigation| {
+                                destination_points(
+                                    &navigation.links_by_page,
+                                    session.page_count() as usize,
+                                )
+                            })
+                            .unwrap_or_default();
+                        self.floats.clear();
+                        self.next_float_id = 1;
                         let title = session.opened().document.info().to_string();
                         self.session = Some(session);
                         self.textures.clear();
@@ -516,6 +554,11 @@ impl PdfReaderApp {
                 ui.toggle_value(&mut self.show_outline, "目录");
                 // 链接热区框（用户需求）：勾选后用红色空心框显示链接 bbox
                 ui.checkbox(&mut self.show_links, "链接框");
+                // 被引用的点（链接目的地）：与链接框同样的缩放阈值（过小不显示）
+                ui.checkbox(&mut self.show_dest_points, "引用点");
+                if ui.button("添加测试浮窗").clicked() {
+                    self.add_test_float();
+                }
 
                 // 搜索（同步接口：大文档可能短暂卡顿，见 decision-log D-03/D-07）
                 ui.separator();
@@ -1070,6 +1113,23 @@ impl PdfReaderApp {
                 }
             }
 
+            // 2c) 被引用的点（链接跳转目的地）：按位置去重后画记号；
+            //     与链接框同样在缩放过小时不显示（用户要求）。
+            if link_overlay_visible(self.show_dest_points, session.state().zoom, LINK_OVERLAY_MIN_ZOOM)
+            {
+                for page in self.visible.clone() {
+                    let Some(placement) = session.placement(page).copied() else { continue };
+                    let Some(points) = self.dest_points.get(page.get() as usize) else { continue };
+                    for point in points {
+                        // PDF 页面空间 → 内容空间 → 视图空间
+                        let content = placement.page_to_content(*point);
+                        let center = canvas.min + EVec2::new(content.x - scroll.x, content.y - scroll.y);
+                        painter.circle_stroke(center, 5.0, Stroke::new(1.5, LINK_OVERLAY_COLOR));
+                        painter.circle_filled(center, 1.5, LINK_OVERLAY_COLOR);
+                    }
+                }
+            }
+
             // 3) 交互
             //
             // 在画布上按下时主动结束文本输入：否则工具栏的搜索框仍持有焦点，
@@ -1177,7 +1237,116 @@ impl PdfReaderApp {
                     }
                 }
             }
+
+            // 浮窗**最后**绘制与注册 → 位于最上层；后加入的在更上层（见 draw_floats）
+            self.draw_floats(ui, canvas);
         });
+    }
+
+    /// 添加一个"测试浮窗"（带任意文字），位置按已有浮窗数量级联偏移。
+    fn add_test_float(&mut self) {
+        let id = self.next_float_id;
+        self.next_float_id += 1;
+        let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(24.0 + cascade, 24.0 + cascade),
+            EVec2::new(280.0, 150.0),
+        );
+        self.floats.push(Float {
+            id,
+            title: format!("测试浮窗 #{id}"),
+            text: format!(
+                "这是第 {id} 个测试浮窗。\n目前只显示文字。\n\n可以拖动标题栏移动、\n拖右下角改变大小、\n点右上角 ✕ 关闭。"
+            ),
+            rect,
+        });
+        self.message = format!("已添加测试浮窗 #{id}");
+    }
+
+    /// 绘制并处理浮窗：移动（拖标题栏）、改大小（拖右下角）、关闭（右上角 ✕）。
+    ///
+    /// 注册顺序即层级：按 `floats` 顺序注册 → **后加入的浮窗既画在上面、也优先拿到鼠标**
+    /// （用户要求"后出现的浮窗更高"）。子区域（标题栏/把手/关闭按钮）在主提之后注册，
+    /// 因此优先于主体，不会被主体吞掉。
+    fn draw_floats(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
+        if self.floats.is_empty() {
+            return;
+        }
+        let mut close: Option<u64> = None;
+        for index in 0..self.floats.len() {
+            // 每帧夹取回视图区域内（用户要求：浮窗始终在视图区域内部）
+            let rect = clamp_float_rect(self.floats[index].rect, canvas, FLOAT_MIN_SIZE);
+            self.floats[index].rect = rect;
+            let id = self.floats[index].id;
+
+            // 主体：占住点击，避免"点在浮窗上却给文档落了光标"；不参与拖动
+            let _ = ui.interact(rect, Id::unique(("float", id)), Sense::click());
+
+            // 标题栏：拖动移动
+            let title_rect =
+                egui::Rect::from_min_size(rect.min, EVec2::new(rect.width(), FLOAT_TITLE_HEIGHT));
+            let title = ui.interact(title_rect, Id::unique(("float-title", id)), Sense::drag());
+            if title.dragged() {
+                self.floats[index].rect = rect.translate(title.drag_delta());
+            }
+
+            // 右下角把手：拖动改大小（不小于最小尺寸）
+            let handle_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.right() - FLOAT_HANDLE_SIZE, rect.bottom() - FLOAT_HANDLE_SIZE),
+                EVec2::splat(FLOAT_HANDLE_SIZE),
+            );
+            let handle = ui.interact(handle_rect, Id::unique(("float-resize", id)), Sense::drag());
+            if handle.dragged() {
+                let delta = handle.drag_delta();
+                self.floats[index].rect = egui::Rect::from_min_size(
+                    rect.min,
+                    EVec2::new(
+                        (rect.width() + delta.x).max(FLOAT_MIN_SIZE.x),
+                        (rect.height() + delta.y).max(FLOAT_MIN_SIZE.y),
+                    ),
+                );
+            }
+
+            // 右上角关闭按钮
+            let close_rect = egui::Rect::from_center_size(
+                egui::pos2(title_rect.right() - 12.0, title_rect.center().y),
+                EVec2::splat(16.0),
+            );
+            if ui.put(close_rect, egui::Button::new("✕").frame(false)).clicked() {
+                close = Some(id);
+            }
+
+            // ---- 绘制 ----
+            let painter = ui.painter();
+            painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(30, 32, 36));
+            painter.rect_stroke(
+                rect,
+                CornerRadius::same(4),
+                Stroke::new(1.0, Color32::from_gray(130)),
+                StrokeKind::Inside,
+            );
+            painter.rect_filled(title_rect, CornerRadius::same(4), Color32::from_rgb(54, 58, 66));
+            painter.text(
+                title_rect.left_center() + EVec2::new(8.0, 0.0),
+                Align2::LEFT_CENTER,
+                &self.floats[index].title,
+                egui::FontId::proportional(13.0),
+                Color32::WHITE,
+            );
+            // 缩放手柄示意
+            painter.rect_filled(handle_rect.shrink(5.0), CornerRadius::ZERO, Color32::from_gray(120));
+            painter.text(
+                rect.min + EVec2::new(10.0, FLOAT_TITLE_HEIGHT + 8.0),
+                Align2::LEFT_TOP,
+                &self.floats[index].text,
+                egui::FontId::proportional(13.0),
+                Color32::from_gray(225),
+            );
+        }
+        if let Some(id) = close {
+            self.floats.retain(|window| window.id != id);
+            self.message = format!("已关闭浮窗 #{id}");
+        }
     }
 
     /// 命中当前页的链接热区则发出跳转命令，返回是否命中。
