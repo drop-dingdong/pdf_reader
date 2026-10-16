@@ -124,6 +124,20 @@ pub fn tile_view_rect_scaled(
     )
 }
 
+/// 画布矩形 = 中央面板区域去掉左侧拖拽条，**高度必须保持满高**。
+///
+/// ## 为什么单拎出来
+/// 第五轮验收出现"分割线能拖，但没有任何图像"：当时用
+/// `ui.allocate_painter(5px × 整高)` 画拖拽条，纵向布局把**整个高度**都分配给了它，
+/// 画布拿到的高度就是 0 —— 什么都画不出来。
+/// 现在拖拽条与画布都用"显式矩形 + `interact`"，不参与布局流；这个函数负责算矩形，
+/// 并由 `canvas_rect_keeps_full_height` 钉住"高度不得被吃掉"。
+pub fn canvas_rect_for(full: egui::Rect, handle_width: f32) -> egui::Rect {
+    // 夹取拖拽条宽度，避免区域比它更窄时出现负尺寸矩形
+    let handle = handle_width.max(0.0).min(full.width().max(0.0));
+    egui::Rect::from_min_max(egui::pos2(full.min.x + handle, full.min.y), full.max)
+}
+
 /// 一个带容量上限的键值存储（用于 `RenderKey` → 纹理）。
 ///
 /// 与 LRU 位图缓存的区别：这里存的是 GPU 纹理句柄（`egui::TextureHandle`），
@@ -264,15 +278,22 @@ impl<V> KeyedStore<V> {
     /// 旋转也必须匹配：旧旋转的图是横躺的，留着只会画错。
     pub fn retain_preview_scales(
         &mut self,
-        pages: &[PageIndex],
-        rotation: Rotation,
+        pages: &[(PageIndex, Rotation)],
         current_scale_milli: u32,
     ) {
+        // 注意：旋转必须**按页**取（同一份文档里各页的 /Rotate 可能不同），
+        // 否则含混合旋转的文档里，与"当前页"旋转不同的那些页纹理会被误删（页面空白）。
+        let rotation_of = |page: PageIndex| {
+            pages
+                .iter()
+                .find(|(candidate, _)| *candidate == page)
+                .map(|(_, rotation)| *rotation)
+        };
+
         // 每页选出"最接近当前比例的另一个比例"
         let mut alternate: HashMap<PageIndex, u32> = HashMap::new();
         for key in self.entries.keys() {
-            if !pages.contains(&key.page)
-                || key.rotation != rotation
+            if rotation_of(key.page) != Some(key.rotation)
                 || key.scale_milli == current_scale_milli
             {
                 continue;
@@ -287,8 +308,7 @@ impl<V> KeyedStore<V> {
         }
 
         self.retain(|key| {
-            pages.contains(&key.page)
-                && key.rotation == rotation
+            rotation_of(key.page) == Some(key.rotation)
                 && (key.scale_milli == current_scale_milli
                     || alternate.get(&key.page) == Some(&key.scale_milli))
         });
@@ -584,6 +604,30 @@ mod tests {
         assert_eq!(store.tiles_at(PageIndex::new(0), Rotation::None, 2000).len(), 1);
     }
 
+    /// 回归：画布必须保留**全部剩余高度**。
+    ///
+    /// 第五轮缺陷：拖拽条用 `allocate_painter(5px × 整高)` 画，纵向布局把整高吃光，
+    /// 画布高度变成 0 → "分割线能拖，但没有任何图像"。
+    #[test]
+    fn canvas_rect_keeps_full_height() {
+        let full = egui::Rect::from_min_size(egui::pos2(260.0, 40.0), egui::vec2(840.0, 800.0));
+
+        let canvas = canvas_rect_for(full, 5.0);
+        assert_eq!(canvas.min.x, 265.0, "画布应从拖拽条右侧开始");
+        assert_eq!(canvas.min.y, 40.0);
+        assert_eq!(canvas.width(), 835.0, "只让出拖拽条的宽度");
+        assert_eq!(canvas.height(), 800.0, "高度必须保持满高（这正是当时的缺陷）");
+
+        // 侧栏隐藏时不让位
+        assert_eq!(canvas_rect_for(full, 0.0), full);
+
+        // 区域比拖拽条还窄时不得出现负尺寸
+        let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(3.0, 10.0));
+        let canvas = canvas_rect_for(tiny, 5.0);
+        assert!(canvas.width() >= 0.0 && canvas.height() >= 0.0, "实际 {canvas:?}");
+        assert_eq!(canvas.height(), 10.0, "仍要保持满高");
+    }
+
     /// 缩放过场要用的"上一档"必须保留，但比例不能无限堆积（第五轮验收：相邻页闪白）。
     #[test]
     fn retain_preview_scales_keeps_current_and_one_old_scale() {
@@ -603,7 +647,7 @@ mod tests {
         // 旧旋转的图留着只会画成横躺
         store.insert(key(page, 2.0, Rotation::Clockwise90), 2.0);
 
-        store.retain_preview_scales(&[page, other], Rotation::None, 2000);
+        store.retain_preview_scales(&[(page, Rotation::None), (other, Rotation::None)], 2000);
 
         assert!(store.contains(&key(page, 2.0, Rotation::None)), "当前比例必须保留");
         assert!(

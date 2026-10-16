@@ -24,7 +24,7 @@ use egui::{
 use pdfcore::prelude::*;
 
 use crate::view::{
-    command_for_key, command_for_scroll, command_for_zoom_delta, tile_view_rect,
+    canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta, tile_view_rect,
     tile_view_rect_scaled, view_rect_for, view_to_content, KeyedStore,
 };
 
@@ -352,22 +352,28 @@ impl PdfReaderApp {
         }
 
         // 裁剪：只保留可见页（±1）与当前页，并且每页只保留"当前比例 + 最近一个旧比例"
-        // —— 旧比例是缩放过场要用的（第五轮验收：丢掉其它页的旧图会让它们闪白）。
-        let mut pages = self.visible.clone();
+        // —— 旧比例是缩放过场要用的（第四轮验收：丢掉其它页的旧图会让它们闪白）。
+        //
+        // 旋转按页取：同一份文档里各页的 /Rotate 可能不同。
+        let mut pages: Vec<(PageIndex, Rotation)> = self
+            .visible
+            .iter()
+            .filter_map(|page| session.placement(*page).map(|placement| (*page, placement.rotation)))
+            .collect();
         let current = session.state().current_page;
-        if !pages.contains(&current) {
-            pages.push(current);
+        if !pages.iter().any(|(page, _)| *page == current) {
+            if let Some(placement) = session.placement(current) {
+                pages.push((current, placement.rotation));
+            }
         }
-        let rotation = session
-            .placement(current)
-            .map(|placement| placement.rotation)
-            .unwrap_or(Rotation::None);
         let current_scale_milli = session
             .placement(current)
-            .map(|placement| RenderKey::new(current, placement.scale, rotation).scale_milli)
+            .map(|placement| {
+                RenderKey::new(current, placement.scale, placement.rotation).scale_milli
+            })
             .unwrap_or(1000);
         self.textures
-            .retain_preview_scales(&pages, rotation, current_scale_milli);
+            .retain_preview_scales(&pages, current_scale_milli);
     }
 
     /// 上传某一页当前可用的位图（整页或瓦片），返回新上传的纹理数量。
@@ -594,19 +600,27 @@ impl PdfReaderApp {
     /// 画布：页面（纹理或白底页框）+ 高亮 + 鼠标交互。
     fn draw_canvas(&mut self, ui: &mut egui::Ui, session: &mut DocumentSession) {
         egui::CentralPanel::default().show(ui, |ui| {
+            // 同时用"显式矩形 + interact"处理这两个区域，而**不是** `allocate_painter`：
+            // 后者会按布局流占用空间 —— 上一版用 `allocate_painter(5px × 整高)` 画拖拽条，
+            // 结果整高都被它吃掉，画布高度变成 0，界面看起来就是"分割线能拖但没有任何图像"。
+            let full = ui.available_rect_before_wrap();
+            let handle_width = if self.show_outline { SIDEBAR_HANDLE_WIDTH } else { 0.0 };
+            let canvas = canvas_rect_for(full, handle_width);
+
             // 侧栏拖拽条：宽度完全由我们自己记（见 `draw_sidebar` 的说明）。
-            // 拖它改变 `sidebar_width`，下一帧 `exact_size` 立即生效 —— 不依赖 egui 的内建持久化。
             if self.show_outline {
-                let (strip_response, strip) = ui.allocate_painter(
-                    EVec2::new(SIDEBAR_HANDLE_WIDTH, ui.available_height()),
-                    Sense::drag(),
+                let strip_rect = egui::Rect::from_min_size(
+                    full.min,
+                    EVec2::new(SIDEBAR_HANDLE_WIDTH, full.height()),
                 );
+                let strip_response =
+                    ui.interact(strip_rect, Id::unique("sidebar-handle"), Sense::drag());
                 let active = strip_response.hovered() || strip_response.dragged();
                 if active {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                 }
-                strip.rect_filled(
-                    strip_response.rect,
+                ui.painter().rect_filled(
+                    strip_rect,
                     CornerRadius::ZERO,
                     if active { Color32::from_gray(120) } else { Color32::from_gray(70) },
                 );
@@ -616,9 +630,10 @@ impl PdfReaderApp {
                 }
             }
 
-            let size = ui.available_size();
-            let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
-            let canvas = response.rect;
+            // 画布从拖拽条右侧开始（两者不重叠，拖拽不会被画布抢走）
+            let response = ui.interact(canvas, Id::unique("pdf-canvas"), Sense::click_and_drag());
+            let painter = ui.painter_at(canvas);
+            let size = canvas.size();
 
             // 视口变化 → 交给会话（会话据此夹取滚动、更新当前页）
             let viewport = *session.viewport();
