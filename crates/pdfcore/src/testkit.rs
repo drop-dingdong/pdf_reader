@@ -169,7 +169,15 @@ impl RenderScheduler for ImmediateScheduler {
     }
 
     fn cancel_page(&self, page: PageIndex) {
-        self.events.lock().unwrap().retain(|event| event_page(event) != Some(page));
+        // 契约要求：取消**必须补发 Cancelled 事件**，否则会话的"在飞集合"永远清不掉，
+        // 该页再也不会被重新请求。同步实现里任务在 submit 时就已完成，
+        // 因此这里把该页已产生的事件改写成 Cancelled（顺带释放位图）。
+        let mut events = self.events.lock().unwrap();
+        for event in events.iter_mut() {
+            if event_page(event) == Some(page) {
+                *event = RenderEvent::Cancelled { page };
+            }
+        }
     }
 
     fn cancel_all(&self) {

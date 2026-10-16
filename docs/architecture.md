@@ -82,8 +82,8 @@
 | 1 | `PdfBackend` | 工厂：打开文档、声明能力 | 必需 | pdfium / hayro / 内存 |
 | 2 | `Document` | 只读结构：页数、页尺寸、`/Rotate`、元数据、大纲、链接 | 必需 | 同上 |
 | 3 | `PageRaster` | 光栅化一页 | 必需 | pdfium / 假渲染器 |
-| 4 | `RenderCache` | 位图缓存（键 → 位图） | 必需 | HashMap / LRU / 落盘 |
-| 5 | `RenderScheduler` | 排队、优先级、取消、事件回传 | 必需 | 后台线程池 / **同步实现**（测试用） |
+| 4 | `RenderCache` | 位图缓存（键 → 位图） | 必需 | `LruCache`（pdfcore 自带，带内存上限）/ `MemoryCache`（testkit） |
+| 5 | `RenderScheduler` | 排队、优先级、取消、事件回传 | 必需 | `WorkerScheduler`（pdfcore 自带，后台线程 + 优先级队列）/ `ImmediateScheduler`（testkit，同步） |
 | 6 | `TextLayer` | 文本提取 + 搜索 | 可选 | pdfium / 假文本层 |
 | 7 | `TextSelection` | 选区记账（不含文档内容） | 必需（有默认实现） | `RangeSelection` |
 | 8 | `PageLayout` | 页几何 → 内容空间排布（纯函数） | 必需（有默认实现） | `VerticalLayout` / 未来对开 |

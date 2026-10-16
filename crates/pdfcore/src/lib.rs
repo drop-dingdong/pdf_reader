@@ -63,6 +63,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod cache;
 pub mod document;
 pub mod error;
 pub mod geometry;
@@ -70,6 +71,7 @@ pub mod ids;
 pub mod image;
 pub mod layout;
 pub mod render;
+pub mod scheduler;
 pub mod session;
 pub mod store;
 pub mod testkit;
@@ -77,6 +79,9 @@ pub mod text;
 
 /// 常用类型的一次性导入。
 pub mod prelude {
+    // 运行期"电池"：默认的调度器与缓存实现（纯 std，可直接用于桌面 app）
+    pub use crate::cache::{LruCache, DEFAULT_CAPACITY_BYTES};
+    pub use crate::scheduler::WorkerScheduler;
     pub use crate::document::{
         Capabilities, Destination, Document, DocumentInfo, Link, NavigationIndex, OpenedDocument,
         OutlineNode, PdfBackend, Permissions, Source,

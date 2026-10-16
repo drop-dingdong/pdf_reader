@@ -66,10 +66,30 @@
 
 **测试总数：81 passed, 0 failed, 0 warnings**（pdfcore 65 + backend-pdfium 16）。
 
+### ✅ 已完成：运行期零件（`WorkerScheduler` + `LruCache`）
+
+放在 `pdfcore`（而不是 app）里的理由：它们是**纯 std** 实现，且只有放在这里才能被
+`cargo test` 完整覆盖（放 app 侧就只能通过 UI 验证，违背 agent.md 规则 2 的精神）。
+
+* `pdfcore::scheduler::WorkerScheduler`：后台线程 + 优先级队列（`Interactive < Visible < Prefetch
+  < Background`，同优先级 FIFO）、按 `RenderKey` 去重、并发数取 `Capabilities::max_concurrency`；
+  **取消不静默丢弃** —— 被取消的任务会被补发 `RenderEvent::Cancelled`，
+  否则会话的"在飞集合"永远清不掉、该页再也不会被重新请求（这是设计调度器时发现的关键契约）。
+* `pdfcore::cache::LruCache`：LRU + 字节上限（默认 512 MiB）；淘汰以 `RenderKey` 为单位，
+  因此分块时淘汰的是单块瓦片；单张超限时保留最后一张，避免"存进去立刻被丢"的抖动。
+* 会话新增"滚出视口即取消"：`cancel_stale_jobs()` 按页取消不可见的在飞任务
+  （用 `cancel_page` 而非逐个 `cancel(job)`，两种调度器实现都支持且都会补发事件）。
+
+顺带修掉第二个真实缺陷：**"当前页"原先只认视口顶部探针**，导致滚动到文档末尾时
+较短的一页（带 `/Rotate` 的横向页 / 最后一页）永远当不上"当前页"，页号卡在前一页。
+现改为优先取视口中心，取不到再退回顶部探针。
+
+**测试总数：101 passed, 0 failed, 0 warnings**（pdfcore 85 + backend-pdfium 16）。
+
 ### ⏭ 剩余（M1 收尾 → M2）
 
-1. `app`（egui 壳）：`ViewerCommand` / `SessionEvent` ↔ 界面、白底页框占位、剪贴板、
-   真实后台调度器（`WorkerScheduler`）与带内存上限的缓存（`LruCache`）；
+1. `app`（egui 壳）：`ViewerCommand` / `SessionEvent` ↔ 界面、白底页框占位、剪贴板；
+   运行期零件已就绪（`WorkerScheduler` + `LruCache`），可直接注入。
 2. 打包（M3）：三平台 CI、动态库随包 + rpath 校验、macOS 签名公证、AppImage；
 3. 真实 PDF 采样集冒烟（旋转页、CJK、加密文档、超大页）。
 

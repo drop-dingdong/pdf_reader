@@ -550,7 +550,7 @@ pub trait RenderCache: Send + Sync {
 }
 ```
 
-**谁实现**：`LruCache`（app 侧）、`MemoryCache`（testkit）。
+**谁实现**：`LruCache`（pdfcore 自带，LRU + 内存上限）、`MemoryCache`（testkit，无淘汰）。
 
 ---
 
@@ -595,7 +595,8 @@ pub trait RenderScheduler: Send + Sync {
 }
 ```
 
-**谁实现**：`WorkerScheduler`（后台线程 + 优先级队列）、`ImmediateScheduler`（testkit，同步）。
+**谁实现**：`WorkerScheduler`（pdfcore 自带：后台线程 + 优先级队列 + 去重 + 补发取消事件）、
+`ImmediateScheduler`（testkit，同步，用于确定性测试）。
 
 ---
 

@@ -697,14 +697,20 @@ impl DocumentSession {
 
     /// 视口顶部所在的页 —— 这是"当前页"的判定依据。
     fn sync_current_page(&mut self, events: &mut Vec<SessionEvent>) {
-        let probe = Point::new(
+        // 先看**视口中心**所在的页，再退回"视口顶部 + 1px"的探针。
+        //
+        // 为什么不是只用顶部探针：滚动被夹取到最大偏移后，较短的一页（例如带 /Rotate 的横向页
+        // 或文档最后一页）可能**永远到不了视口顶部**，于是状态栏页号会卡在前一页 ——
+        // 这是实测到的真实缺陷（见 tests/runtime.rs 的 scrolling_away_cancels_stale_work）。
+        let window = self.viewport.content_rect();
+        let top_probe = Point::new(
             self.viewport.scroll.x + self.viewport.size.width * 0.5,
             self.viewport.scroll.y + 1.0,
         );
         let found = self
             .layout_engine
-            .page_at(&self.layout, probe)
-            .or_else(|| self.layout_engine.page_at(&self.layout, self.viewport.content_rect().center()));
+            .page_at(&self.layout, window.center())
+            .or_else(|| self.layout_engine.page_at(&self.layout, top_probe));
         if let Some(page) = found {
             if page != self.state.current_page {
                 self.state.current_page = page;
@@ -797,6 +803,10 @@ impl DocumentSession {
         let mut visible = std::mem::take(&mut self.visible_scratch);
         self.layout_engine.visible_pages(&self.layout, &self.viewport, &mut visible);
 
+        // 先取消"已滚出视口且不是当前页"的在飞任务，再提交新任务：
+        // PDFium 只能串行渲染，队列里堆着看不见的页会直接拖慢用户正在看的那一页。
+        self.cancel_stale_jobs(&visible);
+
         for page in &visible {
             self.request_page(*page, RenderPriority::Visible);
         }
@@ -815,6 +825,26 @@ impl DocumentSession {
         }
 
         self.visible_scratch = visible;
+    }
+
+    /// 取消所有"页不在 `visible` 中、且不是当前页"的在飞任务。
+    ///
+    /// 用 [`RenderScheduler::cancel_page`] 而不是逐个 `cancel(job)`：两种调度器实现
+    /// （后台线程版与同步测试版）都支持按页取消，且都会**补发 `Cancelled` 事件**，
+    /// 于是本会话的在飞记录会被 `pump` 正确清理。
+    fn cancel_stale_jobs(&mut self, visible: &[PageIndex]) {
+        let current = self.state.current_page;
+        let mut stale_pages: Vec<PageIndex> = self
+            .jobs
+            .keys()
+            .map(|key| key.page)
+            .filter(|page| *page != current && !visible.contains(page))
+            .collect();
+        stale_pages.sort();
+        stale_pages.dedup();
+        for page in stale_pages {
+            self.scheduler.cancel_page(page);
+        }
     }
 }
 
