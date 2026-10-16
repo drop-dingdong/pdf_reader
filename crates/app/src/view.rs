@@ -177,6 +177,44 @@ pub fn link_rect_in_page_bounds(rect: Rect, page_size: Size) -> bool {
         && rect.bottom() <= page_size.height + slack
 }
 
+/// 大纲节点总数（含子节点）。诊断用：侧栏若一次布局上百行，会稳定吃掉几十毫秒/帧。
+pub fn outline_node_count(nodes: &[OutlineNode]) -> usize {
+    nodes
+        .iter()
+        .map(|node| 1 + outline_node_count(&node.children))
+        .sum()
+}
+
+/// 需要**上传并保留**纹理的页集合：可见页 + 前后各一页（当前页必含，越界自动裁剪）。
+///
+/// ## 为什么必须是"单一来源"
+/// 上传（预热相邻页）与裁剪必须用**同一个集合**。曾经上传用"可见页 ±1"、
+/// 裁剪只用"可见页"，于是相邻页的纹理**上传完立刻被裁掉**，下一帧又上传 ——
+/// 实测 200% 缩放下每帧有 **302ms** 全花在这个抖动上（800% 走分块、没有整页图可传，
+/// 所以只有 0.2ms，这也是"中间缩放比例最卡"的原因）。
+pub fn texture_pages(visible: &[PageIndex], current: PageIndex, page_count: u32) -> Vec<PageIndex> {
+    let mut pages: Vec<PageIndex> = Vec::with_capacity(visible.len() + 3);
+    for page in visible {
+        if page.get() > 0 && !pages.contains(&PageIndex::new(page.get() - 1)) {
+            pages.push(PageIndex::new(page.get() - 1));
+        }
+        if !pages.contains(page) {
+            pages.push(*page);
+        }
+        let next = page.get() + 1;
+        if next < page_count && !pages.contains(&PageIndex::new(next)) {
+            pages.push(PageIndex::new(next));
+        }
+    }
+    if !pages.contains(&current) && current.get() < page_count {
+        pages.push(current);
+    }
+    pages.retain(|page| page.get() < page_count);
+    pages.sort();
+    pages.dedup();
+    pages
+}
+
 /// 一个带容量上限的键值存储（用于 `RenderKey` → 纹理）。
 ///
 /// 与 LRU 位图缓存的区别：这里存的是 GPU 纹理句柄（`egui::TextureHandle`），
@@ -692,6 +730,50 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 大纲节点计数（诊断用：侧栏一次布局上百行会稳定吃掉几十毫秒/帧）。
+    #[test]
+    fn outline_node_count_counts_nested_nodes() {
+        let leaf = |title: &str| OutlineNode {
+            title: title.to_string(),
+            destination: None,
+            children: Vec::new(),
+        };
+        let mut root = leaf("章 1");
+        root.children = vec![leaf("节 1.1"), leaf("节 1.2")];
+        let nodes = vec![root, leaf("章 2")];
+        assert_eq!(outline_node_count(&nodes), 4, "根 1 + 它的 2 个子节点 + 根 2 = 4");
+        assert_eq!(outline_node_count(&[]), 0);
+    }
+
+    /// 上传与裁剪必须共用同一集合，否则相邻页纹理会被"上传→裁掉→再上传"地抖动。
+    #[test]
+    fn texture_pages_covers_visible_plus_neighbours() {
+        let visible = [PageIndex::new(4)];
+        let pages = texture_pages(&visible, PageIndex::new(4), 10);
+        assert_eq!(
+            pages,
+            vec![PageIndex::new(3), PageIndex::new(4), PageIndex::new(5)],
+            "可见页 ±1 都要（上传与裁剪共用）"
+        );
+
+        // 首尾越界自动裁剪
+        assert_eq!(
+            texture_pages(&[PageIndex::FIRST], PageIndex::FIRST, 10),
+            vec![PageIndex::FIRST, PageIndex::new(1)]
+        );
+        let last = PageIndex::new(9);
+        assert_eq!(texture_pages(&[last], last, 10), vec![PageIndex::new(8), last]);
+
+        // 当前页不在可见集合里时也要保留
+        let pages = texture_pages(&[PageIndex::new(4)], PageIndex::new(7), 10);
+        assert!(pages.contains(&PageIndex::new(7)), "当前页必须保留");
+
+        // 多页可见时不重复
+        let pages = texture_pages(&[PageIndex::new(4), PageIndex::new(5)], PageIndex::new(4), 10);
+        assert_eq!(pages, vec![PageIndex::new(3), PageIndex::new(4), PageIndex::new(5), PageIndex::new(6)]);
+        assert_eq!(pages.len(), 4, "不得有重复项");
     }
 
     /// 回归：画布必须保留**全部剩余高度**。

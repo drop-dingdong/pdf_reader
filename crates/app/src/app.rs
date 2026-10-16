@@ -25,8 +25,9 @@ use pdfcore::prelude::*;
 
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
-    commands_for_destination, link_overlay_visible, link_rect_in_page_bounds, tile_view_rect,
-    tile_view_rect_scaled,
+    commands_for_destination, link_overlay_visible, link_rect_in_page_bounds,
+    outline_node_count, texture_pages,
+    tile_view_rect, tile_view_rect_scaled,
     view_rect_for, view_to_content, KeyedStore,
 };
 
@@ -353,41 +354,32 @@ impl PdfReaderApp {
         self.visible.clear();
         session.visible_pages(&mut self.visible);
 
-        // 上传目标：可见页优先（顺序在前），随后是相邻页
-        let mut targets = self.visible.clone();
-        if let (Some(first), Some(last)) = (self.visible.first(), self.visible.last()) {
-            if first.get() > 0 {
-                targets.push(PageIndex::new(first.get() - 1));
-            }
-            let next = last.get() + 1;
-            if (next as usize) < session.page_count() as usize {
-                targets.push(PageIndex::new(next));
-            }
-        }
+        // 上传目标 = 保留目标（**同一个集合**，见 `view::texture_pages`）：
+        // 曾经两者不一致（上传"可见页 ±1"、裁剪只留"可见页"），导致相邻页纹理
+        // 每帧被反复上传又丢弃 —— 200% 缩放下实测每帧 300ms 全耗在这里。
+        let targets = texture_pages(
+            &self.visible,
+            session.state().current_page,
+            session.page_count(),
+        );
 
         let mut uploaded = 0usize;
-        for page in targets {
+        for page in &targets {
             if uploaded >= MAX_UPLOADS_PER_FRAME {
                 break;
             }
-            uploaded += self.upload_page(ctx, session, page);
+            uploaded += self.upload_page(ctx, session, *page);
         }
 
         // 裁剪：只保留可见页（±1）与当前页，并且每页只保留"当前比例 + 最近一个旧比例"
         // —— 旧比例是缩放过场要用的（第四轮验收：丢掉其它页的旧图会让它们闪白）。
         //
         // 旋转按页取：同一份文档里各页的 /Rotate 可能不同。
-        let mut pages: Vec<(PageIndex, Rotation)> = self
-            .visible
+        let pages: Vec<(PageIndex, Rotation)> = targets
             .iter()
             .filter_map(|page| session.placement(*page).map(|placement| (*page, placement.rotation)))
             .collect();
         let current = session.state().current_page;
-        if !pages.iter().any(|(page, _)| *page == current) {
-            if let Some(placement) = session.placement(current) {
-                pages.push((current, placement.rotation));
-            }
-        }
         let current_scale_milli = session
             .placement(current)
             .map(|placement| {
@@ -1219,7 +1211,7 @@ impl eframe::App for PdfReaderApp {
             let total_ms = after_draw.as_secs_f64() * 1000.0;
             if self.drag.is_some() || total_ms > 25.0 {
                 eprintln!(
-                    "[帧] 总={:.1}ms 输入+pump={:.1}ms 纹理={:.1}ms 绘制={:.1}ms 纹理数={} 命中={} 可见页={} 在飞={}",
+                    "[帧] 总={:.1}ms 输入+pump={:.1}ms 纹理={:.1}ms 绘制={:.1}ms 纹理数={} 命中={} 可见页={} 大纲={} 在飞={}",
                     total_ms,
                     after_input.as_secs_f64() * 1000.0,
                     (after_textures - after_input).as_secs_f64() * 1000.0,
@@ -1227,6 +1219,10 @@ impl eframe::App for PdfReaderApp {
                     self.textures.len(),
                     self.hits.len(),
                     self.visible.len(),
+                    self.navigation
+                        .as_ref()
+                        .map(|navigation| outline_node_count(&navigation.outline))
+                        .unwrap_or(0),
                     session.pending_renders()
                 );
             }
