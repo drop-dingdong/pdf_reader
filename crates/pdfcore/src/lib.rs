@@ -98,9 +98,7 @@ pub mod prelude {
         CancelToken, CacheStats, PageRaster, RenderCache, RenderEvent, RenderKey, RenderPriority,
         RenderRequest, RenderScheduler, Scale, TileSpec, TilingPolicy, TILE_SIZE,
     };
-    pub use crate::session::{
-        DocumentSession, RenderQuality, SessionEvent, SidebarTab, ViewerCommand, ViewerState,
-    };
+    pub use crate::session::{DocumentSession, SessionEvent, SidebarTab, ViewerCommand, ViewerState};
     pub use crate::store::{AppSettings, KeyValueStore, RecentFiles};
     pub use crate::text::{
         Highlight, HighlightKind, PageText, RangeSelection, SearchHit, SearchQuery, Selection,

@@ -40,33 +40,6 @@ pub const MIN_ZOOM: f32 = 0.1;
 pub const MAX_ZOOM: f32 = 8.0;
 /// 每次"放大/缩小"命令的步进倍率。
 pub const ZOOM_STEP: f32 = 1.25;
-/// 预览档除数：预览档 ≈ 目标缩放 ÷ 该值（预览像素数是完整档的 1/K²）。
-pub const PREVIEW_DIVISOR: f32 = 4.0;
-/// 预览档下限。
-pub const PREVIEW_SCALE_MIN: f32 = 0.25;
-/// 预览档与完整档至少差这么多倍才启用。
-pub const PREVIEW_MIN_GAP: f32 = 2.0;
-
-/// 渲染质量档位（预渲染阶梯，见 docs/preview-ladder-design.md）。
-///
-/// 关键点：质量档**就是"更小的 `Scale`"** —— [`RenderKey`] 已按 `scale_milli` 分键，
-/// 缓存天然支持同页多档共存，因此本机制不需要改动键、缓存或后端。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RenderQuality {
-    /// 完整质量：按 [`PagePlacement::scale`] 渲染（默认）。
-    #[default]
-    Full,
-    /// 预览质量：按"[`DocumentSession::preview_scale`]"渲染（更小、更便宜、稍糊），
-    /// 供 UI 在缩放/旋转手势进行中使用。
-    Preview,
-}
-
-/// 某页在给定比例下的像素尺寸（= 显示尺寸 × 比例）。
-fn pixel_size_at(placement: &PagePlacement, scale: Scale) -> Size {
-    let points_x = placement.rect.width / placement.scale.0.max(f32::EPSILON);
-    let points_y = placement.rect.height / placement.scale.0.max(f32::EPSILON);
-    Size::new((points_x * scale.0).round(), (points_y * scale.0).round())
-}
 /// 预取半径（可见页前后各预取几页）。
 ///
 /// 取 2 而不是 1：翻页边界处的卡顿主要来自"下一页刚进入视口才开始渲染"，
@@ -108,8 +81,6 @@ pub struct ViewerState {
     pub page_gap: f32,
     /// 页面留白。
     pub margin: Insets,
-    /// 渲染质量档位（预渲染阶梯；默认完整质量）。
-    pub render_quality: RenderQuality,
 }
 
 impl Default for ViewerState {
@@ -124,7 +95,6 @@ impl Default for ViewerState {
             selection_granularity: SelectionGranularity::Char,
             page_gap: 12.0,
             margin: Insets::all(12.0),
-            render_quality: RenderQuality::Full,
         }
     }
 }
@@ -186,8 +156,6 @@ pub enum ViewerCommand {
         /// 页内位置（PDF 页面空间，左下原点）。
         point: Point,
     },
-    /// 切换渲染质量（预渲染阶梯）：UI 在手势开始/结束时发送。
-    SetRenderQuality(RenderQuality),
     /// 请求渲染可见页；UI 每帧调用一次。
     RequestVisible,
 }
@@ -362,57 +330,6 @@ impl DocumentSession {
         self.cache.get(&key)
     }
 
-
-    /// 该页的**预览档**比例；不必要时返回 `None`（表示"就用完整档"）。
-    ///
-    /// 规则（已评审）：
-    /// 1. 完整档本身就便宜（低于分块阈值）→ 不启用 —— 降质没有意义；
-    /// 2. 目标缩放 ÷ [`PREVIEW_DIVISOR`]，再**向下量化到 2 的幂**：
-    ///    连续滚轮跨十几档时，预览档只会命中 2–3 个不同的键，会话的"同键去重"因此能挡住重复渲染；
-    /// 3. 量化后与完整档差距不足 [`PREVIEW_MIN_GAP`] 倍 → 不启用。
-    pub fn preview_scale(&self, page: PageIndex) -> Option<Scale> {
-        let placement = self.layout.placement(page)?;
-        let full = placement.scale.0;
-        if !(full.is_finite() && full > 0.0) {
-            return None;
-        }
-        // 完整档便宜 → 不必降质
-        if !self.tiling.requires_tiling(placement.pixel_size()) {
-            return None;
-        }
-        let target = (full / PREVIEW_DIVISOR).max(PREVIEW_SCALE_MIN);
-        let quantized = 2f32.powf(target.log2().floor()).max(PREVIEW_SCALE_MIN);
-        if full / quantized < PREVIEW_MIN_GAP {
-            return None;
-        }
-        Some(Scale::from_zoom(quantized))
-    }
-
-    /// 该页**当前实际会请求**的比例：预览模式下是预览档，否则是布局比例。
-    ///
-    /// UI 用它来查"这一档"的位图（[`DocumentSession::image_at`]），
-    /// 而不是想当然地用 `placement.scale`。
-    pub fn render_scale(&self, page: PageIndex) -> Option<Scale> {
-        let placement = self.layout.placement(page)?;
-        if self.state.render_quality == RenderQuality::Preview {
-            if let Some(preview) = self.preview_scale(page) {
-                return Some(preview);
-            }
-        }
-        Some(placement.scale)
-    }
-
-    /// 按**具体比例**取整页位图。
-    ///
-    /// [`DocumentSession::image_for`] 是按布局比例取的，预览档取不到；预览阶梯需要这个方法。
-    pub fn image_at(&self, page: PageIndex, scale: Scale) -> Option<Arc<RasterImage>> {
-        let placement = self.layout.placement(page)?;
-        if self.tiling.requires_tiling(pixel_size_at(&placement, scale)) {
-            return None;
-        }
-        self.cache.get(&RenderKey::new(page, scale, placement.rotation))
-    }
-
     /// 该页当前缩放下的全部**已在缓存中**的瓦片，供 UI 按 `TileSpec::pixel_rect` 拼接绘制。
     ///
     /// 未就绪的瓦片不会出现在返回值里 —— UI 应对缺失区域画白底占位（D-06）。
@@ -420,10 +337,7 @@ impl DocumentSession {
         let Some(placement) = self.layout.placement(page).copied() else {
             return Vec::new();
         };
-        let Some(scale) = self.render_scale(page) else {
-            return Vec::new();
-        };
-        let pixel_size = pixel_size_at(&placement, scale);
+        let pixel_size = placement.pixel_size();
         if !self.tiling.requires_tiling(pixel_size) {
             return Vec::new();
         }
@@ -432,8 +346,7 @@ impl DocumentSession {
         for row in 0..rows {
             for col in 0..cols {
                 let tile = TileSpec::new(col, row);
-                // 用**实际请求**的比例（预览模式下是预览档），否则 UI 会去取一张不存在的键
-                let key = RenderKey::tiled(page, scale, placement.rotation, tile);
+                let key = RenderKey::tiled(page, placement.scale, placement.rotation, tile);
                 if let Some(image) = self.cache.get(&key) {
                     out.push((tile, image));
                 }
@@ -674,20 +587,6 @@ impl DocumentSession {
                 events.push(SessionEvent::ScrollChanged(self.viewport.scroll));
                 self.sync_current_page(events);
             }
-            ViewerCommand::SetRenderQuality(quality) => {
-                if self.state.render_quality != quality {
-                    self.state.render_quality = quality;
-                    // 切到预览时，完整档的在飞任务注定被浪费（手势还在继续），立刻取消 ——
-                    // 否则 PDFium 会先把昂贵的那一张画完，预览反而迟到。
-                    if quality == RenderQuality::Preview {
-                        let mut visible = Vec::new();
-                        self.layout_engine.visible_pages(&self.layout, &self.viewport, &mut visible);
-                        for page in visible {
-                            self.scheduler.cancel_page(page);
-                        }
-                    }
-                }
-            }
             ViewerCommand::RequestVisible => self.submit_visible(),
         }
     }
@@ -876,17 +775,7 @@ impl DocumentSession {
     ///   渲染的瓦片始终一致 —— 这正是修掉"高倍缩放时未就绪区域露出深色画布"的关键。
     pub fn visible_tiles(&self, page: PageIndex) -> Option<(TileSpec, TileSpec)> {
         let placement = self.layout.placement(page)?;
-        self.visible_tiles_at(page, placement.scale)
-    }
-
-    /// 同上，但按**指定比例**计算（预览档的可见瓦片范围与完整档不同）。
-    pub fn visible_tiles_at(
-        &self,
-        page: PageIndex,
-        scale: Scale,
-    ) -> Option<(TileSpec, TileSpec)> {
-        let placement = self.layout.placement(page)?;
-        let pixel_size = pixel_size_at(&placement, scale);
+        let pixel_size = placement.pixel_size();
         if !self.tiling.requires_tiling(pixel_size) {
             return None;
         }
@@ -908,22 +797,14 @@ impl DocumentSession {
     /// 关键一致性：请求里的 `scale` / `rotation` 必须与布局给出的完全一致，
     /// 否则渲染结果会与布局对不上（画面错位、高亮偏移）。
     fn request_page(&mut self, page: PageIndex, priority: RenderPriority) {
-        let Some(scale) = self.render_scale(page) else {
-            return;
-        };
-        self.request_page_at(page, priority, scale);
-    }
-
-    /// 按**指定比例**请求一页（预取固定用完整档，见 `submit_visible`）。
-    fn request_page_at(&mut self, page: PageIndex, priority: RenderPriority, scale: Scale) {
         let Some(placement) = self.layout.placement(page).copied() else {
             return;
         };
-        if self.tiling.requires_tiling(pixel_size_at(&placement, scale)) {
-            self.request_tiles(placement, scale, priority);
+        if self.tiling.requires_tiling(placement.pixel_size()) {
+            self.request_tiles(placement, priority);
         } else {
-            let key = RenderKey::new(page, scale, placement.rotation);
-            let request = RenderRequest::new(page, scale, placement.rotation)
+            let key = RenderKey::new(placement.page, placement.scale, placement.rotation);
+            let request = RenderRequest::new(placement.page, placement.scale, placement.rotation)
                 .with_priority(priority);
             self.submit(request, key);
         }
@@ -932,17 +813,17 @@ impl DocumentSession {
     /// 分块路径：只为"视口在该页位图中覆盖到的瓦片"提交请求。
     ///
     /// 不整页提交（130 块）的原因：分块的目的是省内存，预取整页会把收益抵消掉。
-    fn request_tiles(&mut self, placement: PagePlacement, scale: Scale, priority: RenderPriority) {
-        // 与 UI 绘制瓦片时使用**同一个**范围计算（`visible_tiles_at`），避免两处分歧
-        let Some((first, last)) = self.visible_tiles_at(placement.page, scale) else {
+    fn request_tiles(&mut self, placement: PagePlacement, priority: RenderPriority) {
+        // 与 UI 绘制瓦片时使用**同一个**范围计算（`visible_tiles`），避免两处分歧
+        let Some((first, last)) = self.visible_tiles(placement.page) else {
             return;
         };
         for row in first.row..=last.row {
             for col in first.col..=last.col {
                 let tile = TileSpec::new(col, row);
-                let key = RenderKey::tiled(placement.page, scale, placement.rotation, tile);
+                let key = RenderKey::tiled(placement.page, placement.scale, placement.rotation, tile);
                 let request =
-                    RenderRequest::tiled(placement.page, scale, placement.rotation, tile)
+                    RenderRequest::tiled(placement.page, placement.scale, placement.rotation, tile)
                         .with_priority(priority);
                 self.submit(request, key);
             }
@@ -989,10 +870,7 @@ impl DocumentSession {
                 }
             }
             for page in prefetch {
-                // 预取**固定用完整档**：用户停手后马上要看的就是它，预取一堆糊图没有意义
-                if let Some(placement) = self.layout.placement(page).copied() {
-                    self.request_page_at(page, RenderPriority::Prefetch, placement.scale);
-                }
+                self.request_page(page, RenderPriority::Prefetch);
             }
         }
 

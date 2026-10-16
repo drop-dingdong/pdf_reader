@@ -125,8 +125,6 @@ pub struct PdfReaderApp {
     /// 上一帧观察到的缩放与旋转，用于检测"刚变过"。
     last_zoom: f32,
     last_rotation: Rotation,
-    /// 会话当前是否处于预览质量档（避免每帧重复发 `SetRenderQuality`）。
-    preview_mode: bool,
 }
 
 impl PdfReaderApp {
@@ -162,7 +160,6 @@ impl PdfReaderApp {
             preview_until: None,
             last_zoom: 1.0,
             last_rotation: Rotation::None,
-            preview_mode: false,
         };
         if let Some(path) = initial {
             app.open(&path, None);
@@ -389,22 +386,18 @@ impl PdfReaderApp {
         let Some(placement) = session.placement(page).copied() else {
             return 0;
         };
-        // **实际请求的比例**：预览模式下是预览档（= 更小的 scale），不是布局比例
-        let Some(scale) = session.render_scale(page) else {
-            return 0;
-        };
         let mut count = 0;
         // 整页路径
-        if let Some(image) = session.image_at(page, scale) {
-            let key = RenderKey::new(page, scale, placement.rotation);
+        if let Some(image) = session.image_for(page) {
+            let key = RenderKey::new(page, placement.scale, placement.rotation);
             if !self.textures.contains(&key) {
                 self.upload(ctx, key, &image);
                 count += 1;
             }
         }
-        // 分块路径（`tiles_for` 内部同样按实际请求的比例取）
+        // 分块路径
         for (tile, image) in session.tiles_for(page) {
-            let key = RenderKey::tiled(page, scale, placement.rotation, tile);
+            let key = RenderKey::tiled(page, placement.scale, placement.rotation, tile);
             if !self.textures.contains(&key) {
                 self.upload(ctx, key, &image);
                 count += 1;
@@ -818,7 +811,7 @@ impl PdfReaderApp {
                 let max_side = ui.ctx().input(|input| input.max_texture_side);
                 eprintln!(
                     "[诊断] 缩放={:.0}% 视口={:.0}×{:.0} scroll=({:.1},{:.1}) 当前页={} 可见页={:?} \
-                     纹理={} 缓存在飞={} 预览中={} 预览档={} max_texture_side={} | {}",
+                     纹理={} 缓存在飞={} 预览中={} max_texture_side={} | {}",
                     session.state().zoom * 100.0,
                     viewport.size.width,
                     viewport.size.height,
@@ -829,7 +822,6 @@ impl PdfReaderApp {
                     self.textures.len(),
                     session.pending_renders(),
                     previewing,
-                    if self.preview_mode { "预览" } else { "完整" },
                     max_side,
                     report.join(" | ")
                 );
@@ -992,47 +984,9 @@ impl eframe::App for PdfReaderApp {
         self.draw_status(ui, &session);
         self.draw_canvas(ui, &mut session);
 
-        // ---- 预渲染阶梯（docs/preview-ladder-design.md）----
-        //
-        // 手势中：先看缓存里有没有**精度已经不低于预览档**的旧内容。
-        //   * 有 → 什么都不请求，直接显示它（用户要求：旧存档够精就别再渲染预览，省一次且更清楚）；
-        //   * 没有 → 切到预览档并请求（便宜的一档，画面能跟着手势走）。
-        // 手势结束 → 切回完整档，请求清晰图。
-        let mut need_preview = false;
-        if previewing {
-            for page in &self.visible {
-                let (Some(preview), Some(placement)) =
-                    (session.preview_scale(*page), session.placement(*page))
-                else {
-                    continue;
-                };
-                let preview_milli =
-                    RenderKey::new(*page, preview, placement.rotation).scale_milli;
-                if !self
-                    .textures
-                    .has_scale_at_least(*page, placement.rotation, preview_milli)
-                {
-                    need_preview = true;
-                    break;
-                }
-            }
-        }
-        let want_preview = previewing && need_preview;
-        if self.preview_mode != want_preview {
-            session.handle(
-                ViewerCommand::SetRenderQuality(if want_preview {
-                    RenderQuality::Preview
-                } else {
-                    RenderQuality::Full
-                }),
-                &mut self.events,
-            );
-            self.events.clear();
-            self.preview_mode = want_preview;
-        }
-
-        let skip_requests = previewing && !need_preview;
-        let pending = if skip_requests {
+        let pending = if previewing {
+            // 预览窗口内**不请求渲染**：把这一串中间比例的钱省下来，只画最终那一次。
+            // 会话在 set_zoom 里已经 cancel_all，所以队列此刻是空的，不会白等。
             0
         } else {
             session.handle(ViewerCommand::RequestVisible, &mut self.events);
@@ -1041,14 +995,10 @@ impl eframe::App for PdfReaderApp {
         };
         self.session = Some(session);
 
-        // 手势结束后必须自己醒一次，去请求完整档；手势中若有预览任务在跑也要持续重绘
+        // 预览窗口结束后必须自己醒一次，去请求最终比例的渲染
         if previewing {
-            if need_preview {
-                ctx.request_repaint();
-            } else if let Some(deadline) = self.preview_until {
-                ctx.request_repaint_after(
-                    deadline.saturating_duration_since(std::time::Instant::now()),
-                );
+            if let Some(deadline) = self.preview_until {
+                ctx.request_repaint_after(deadline.saturating_duration_since(std::time::Instant::now()));
             }
         } else if pending > 0 {
             ctx.request_repaint();
