@@ -25,7 +25,8 @@ use pdfcore::prelude::*;
 
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
-    commands_for_destination, link_overlay_visible, tile_view_rect, tile_view_rect_scaled,
+    commands_for_destination, link_overlay_visible, link_rect_in_page_bounds, tile_view_rect,
+    tile_view_rect_scaled,
     view_rect_for, view_to_content, KeyedStore,
 };
 
@@ -847,6 +848,33 @@ impl PdfReaderApp {
                 paint_highlight(&painter, session, &highlight, scroll, canvas.min);
             }
 
+            // 链接热区诊断（PDF_READER_DIAGNOSE=1）：热区越界 = 坐标空间不一致
+            if self.diagnose {
+                if let Some(navigation) = &self.navigation {
+                    for page in self.visible.clone() {
+                        let Some(placement) = session.placement(page).copied() else { continue };
+                        let links = navigation.links_on(page);
+                        if links.is_empty() {
+                            continue;
+                        }
+                        let size = placement.page_size;
+                        let first = links[0].rect;
+                        eprintln!(
+                            "[链接] p{} 页尺寸={:.1}×{:.1} 热区数={} 首个=({:.1},{:.1} {:.1}×{:.1}) 越界={}",
+                            page.display_number(),
+                            size.width,
+                            size.height,
+                            links.len(),
+                            first.x,
+                            first.y,
+                            first.width,
+                            first.height,
+                            if link_rect_in_page_bounds(first, size) { "否" } else { "是" }
+                        );
+                    }
+                }
+            }
+
             // 2b) 链接热区框（可开关；缩放过小时不画）
             if link_overlay_visible(self.show_links, session.state().zoom, LINK_OVERLAY_MIN_ZOOM)
             {
@@ -909,6 +937,10 @@ impl PdfReaderApp {
                 }
             }
             if response.dragged() {
+                // 拖动期间必须持续重绘：命令在**下一帧**才生效，
+                // 若这一帧之后没有新的输入事件（鼠标停住不动），画面就不会更新 ——
+                // 表现出来就是"拖动过程中视野不动、松手才跳一下"。
+                ui.ctx().request_repaint();
                 match self.drag {
                     Some(DragMode::Select) => {
                         if let Some(position) = response.interact_pointer_pos() {
@@ -925,6 +957,27 @@ impl PdfReaderApp {
                     }
                     None => {}
                 }
+            }
+
+            // 拖动过程诊断：把 egui 报的状态与下一帧要执行的滚动量打出来（PDF_READER_DIAGNOSE=1）
+            if self.diagnose
+                && (response.drag_started()
+                    || response.dragged()
+                    || response.drag_stopped()
+                    || response.clicked())
+            {
+                eprintln!(
+                    "[拖动] started={} dragged={} stopped={} clicked={} 模式={:?} 指针={:?} delta={:?} 当前scroll=({:.1},{:.1})",
+                    response.drag_started(),
+                    response.dragged(),
+                    response.drag_stopped(),
+                    response.clicked(),
+                    self.drag,
+                    response.interact_pointer_pos().map(|p| (p.x, p.y)),
+                    response.drag_delta(),
+                    scroll.x,
+                    scroll.y
+                );
             }
             if response.drag_stopped() {
                 self.drag = None;

@@ -163,6 +163,20 @@ pub fn commands_for_destination(destination: &Destination) -> Vec<ViewerCommand>
     }
 }
 
+/// 链接热区是否落在页面范围内（诊断用）。
+///
+/// 若某个文件的链接框"与超链接位置不符"，先看这条：
+/// **热区坐标超出了页尺寸** 就意味着坐标空间不一致（例如 PDF 的 `MediaBox` 原点不为 0，
+/// 或 `CropBox` 与 `MediaBox` 不同），而不是"框画错了"。
+/// 允许 1pt 的浮点余量。
+pub fn link_rect_in_page_bounds(rect: Rect, page_size: Size) -> bool {
+    let slack = 1.0;
+    rect.x >= -slack
+        && rect.y >= -slack
+        && rect.right() <= page_size.width + slack
+        && rect.bottom() <= page_size.height + slack
+}
+
 /// 一个带容量上限的键值存储（用于 `RenderKey` → 纹理）。
 ///
 /// 与 LRU 位图缓存的区别：这里存的是 GPU 纹理句柄（`egui::TextureHandle`），
@@ -627,6 +641,19 @@ mod tests {
             .iter()
             .any(|(tile, value)| *tile == TileSpec::new(0, 0) && **value == "old-a"));
         assert_eq!(store.tiles_at(PageIndex::new(0), Rotation::None, 2000).len(), 1);
+    }
+
+    /// 诊断助手：判断热区是否越界（越界即坐标空间不一致的证据）。
+    #[test]
+    fn link_rect_in_page_bounds_detects_coordinate_space_mismatch() {
+        let page = Size::new(612.0, 792.0);
+        assert!(link_rect_in_page_bounds(Rect::new(72.0, 700.0, 200.0, 20.0), page));
+        // 浮点余量：贴边不算越界
+        assert!(link_rect_in_page_bounds(Rect::new(0.0, 0.0, 612.0, 792.0), page));
+        // 典型的"整体偏移"：MediaBox 原点不为 0 时，热区会跑到页外
+        assert!(!link_rect_in_page_bounds(Rect::new(72.0, 800.0, 200.0, 20.0), page));
+        assert!(!link_rect_in_page_bounds(Rect::new(-40.0, 100.0, 20.0, 20.0), page));
+        assert!(!link_rect_in_page_bounds(Rect::new(600.0, 100.0, 100.0, 20.0), page));
     }
 
     /// 链接跳转语义：有落点 → 先跳页再居中；无落点 → 只跳页（顶部对齐）。
