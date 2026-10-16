@@ -47,7 +47,7 @@ impl SharedDocument {
         let page_count = document.pages().len() as u32;
         let geometries = collect_geometries(&document, page_count)?;
         let info = collect_info(&document, page_count);
-        let navigation = Arc::new(collect_navigation(&document, page_count));
+        let navigation = Arc::new(collect_navigation(&document, page_count, &geometries));
 
         Ok(Self { document, info, geometries, navigation })
     }
@@ -98,7 +98,14 @@ fn collect_geometries(document: &PdfDocument<'static>, page_count: u32) -> Resul
         } else {
             displayed
         };
-        geometries.push(PageGeometry::new(size, rotation));
+        // 渲染盒原点（MediaBox ∩ CropBox 的左下角）：文本/注释坐标按 MediaBox 给出，
+        // 而渲染按这个盒子 —— 原点不为 0 的 PDF 上，所有页面空间几何都会整体偏移，
+        // 因此这里记录下来，供文本与链接坐标归一化（见 PageGeometry::origin）。
+        let origin = match page.boundaries().bounding() {
+            Ok(boundary) => Point::new(points(boundary.bounds.left()), points(boundary.bounds.bottom())),
+            Err(_) => Point::ORIGIN,
+        };
+        geometries.push(PageGeometry::with_origin(size, rotation, origin));
     }
     Ok(geometries.into())
 }
@@ -139,7 +146,24 @@ fn collect_info(document: &PdfDocument<'static>, page_count: u32) -> DocumentInf
 /// `/Named`、`/Dests` 名称解析成了具体页（[`PdfDestination::page_index`] 直接给页号）。
 /// pdfium-render 没有暴露"名称 → 目标"的独立查询，因此 `named_destinations` 保持为空，
 /// 这也符合 D-08 的目标：**UI 永远不会拿到"未解析"的目标**。
-fn collect_navigation(document: &PdfDocument<'static>, page_count: u32) -> NavigationIndex {
+fn collect_navigation(
+    document: &PdfDocument<'static>,
+    page_count: u32,
+    geometries: &[PageGeometry],
+) -> NavigationIndex {
+    /// 把页面空间的矩形归一化到"渲染盒"坐标系（减去该页原点）。
+    fn normalize(rect: Rect, geometries: &[PageGeometry], page: PageIndex) -> Rect {
+        match geometries.get(page.get() as usize) {
+            Some(geometry) if geometry.origin != Point::ORIGIN => Rect::new(
+                rect.x - geometry.origin.x,
+                rect.y - geometry.origin.y,
+                rect.width,
+                rect.height,
+            ),
+            _ => rect,
+        }
+    }
+
     let outline = document
         .bookmarks()
         .iter()
@@ -155,7 +179,9 @@ fn collect_navigation(document: &PdfDocument<'static>, page_count: u32) -> Navig
                     continue;
                 };
                 let Ok(rect) = link.rect() else { continue };
-                links.push(Link { rect: to_rect(rect), destination });
+                // 归一化到渲染盒坐标系，否则原点不为 0 的 PDF 上热区会整体偏移
+                let normalized = normalize(to_rect(rect), geometries, PageIndex::new(index));
+                links.push(Link { rect: normalized, destination });
             }
         }
         links_by_page.push(links);

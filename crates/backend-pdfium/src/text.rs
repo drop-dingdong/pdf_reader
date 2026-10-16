@@ -27,10 +27,24 @@ impl TextLayer for PdfiumTextLayer {
 
         let mut buffer = String::new();
         let mut chars = Vec::with_capacity(text.len().max(0) as usize);
+        // 渲染盒原点：文本坐标按 MediaBox 给出，而渲染按 MediaBox ∩ CropBox。
+        // 原点不为 0 的 PDF 上必须减去它，否则选取/搜索高亮会相对渲染图整体偏移。
+        let origin = self
+            .0
+            .geometries
+            .get(page.get() as usize)
+            .map(|geometry| geometry.origin)
+            .unwrap_or(Point::ORIGIN);
         for character in text.chars().iter() {
             let ch = character.unicode_char().unwrap_or('\u{FFFD}');
             // 包围盒在 PDF 页面空间（左下原点）—— 与 pdfcore 的约定一致，不做任何翻转
-            let bbox = character.tight_bounds().map(to_rect).unwrap_or(Rect::ZERO);
+            let raw = character.tight_bounds().map(to_rect).unwrap_or(Rect::ZERO);
+            let bbox = Rect::new(
+                raw.x - origin.x,
+                raw.y - origin.y,
+                raw.width,
+                raw.height,
+            );
             buffer.push(ch);
             chars.push(TextChar { ch, bbox, origin: Point::new(bbox.x, bbox.y), span: 0 });
         }

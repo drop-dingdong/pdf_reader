@@ -393,3 +393,90 @@ fn tiles_at_800_percent_still_contain_ink() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+/// 坐标归一化：`MediaBox` 原点非 0 时，**文本与链接热区**都必须归一化到渲染盒坐标系。
+///
+/// 这是"某些 PDF 的链接框/选取高亮与文字整体错位"的修复验证：
+/// PDFium 的文本与注释坐标按 `MediaBox`，而渲染按 `MediaBox ∩ CropBox`，
+/// 两者原点不同就会整体偏移。
+#[test]
+fn geometry_text_and_links_are_normalized_to_the_rendered_box() {
+    let Some(backend) = backend() else { return };
+    let path = common::offset_media_box_pdf_file("offset-media-box");
+    let opened = backend.open(Source::Path(&path), None).expect("打开");
+
+    let geometries = opened.document.page_geometries().expect("批量页几何");
+    assert_eq!(geometries.len(), 1);
+    // 尺寸不受原点影响（仍是 612×792），原点被记录下来
+    assert_close(geometries[0].size.width, 612.0);
+    assert_close(geometries[0].size.height, 792.0);
+    assert_close(geometries[0].origin.x, 20.0);
+    assert_close(geometries[0].origin.y, 30.0);
+
+    // 链接热区：原始 /Rect [70 500 300 520] → 归一化后应整体减去 (20, 30)
+    let navigation = opened.document.navigation().expect("导航索引");
+    let links = navigation.links_on(PageIndex::FIRST);
+    assert_eq!(links.len(), 1);
+    assert_close(links[0].rect.x, 50.0);
+    assert_close(links[0].rect.y, 470.0);
+    assert_close(links[0].rect.width, 230.0);
+    assert_close(links[0].rect.height, 20.0);
+    // 归一化后必须落在页面范围内（这正是"错位"时不会满足的条件）
+    assert!(links[0].rect.x >= 0.0 && links[0].rect.right() <= 612.5);
+    assert!(links[0].rect.y >= 0.0 && links[0].rect.bottom() <= 792.5);
+
+    // 文本字符框同样归一化：文字基点 x=72 → 归一化后 ≈ 52
+    let text = opened
+        .text
+        .as_ref()
+        .expect("文本层")
+        .page_text(PageIndex::FIRST)
+        .expect("文本层");
+    let first = text
+        .chars_in(TextRange::new(0, 1))
+        .first()
+        .expect("至少一个字符");
+    assert!(
+        (first.bbox.x - 52.0).abs() < 4.0,
+        "字符 x 应约为 52（72−20），实际 {}",
+        first.bbox.x
+    );
+    // **像素级对齐检验**（不依赖字体度量猜测）：把这一页渲染出来，取墨迹范围，
+    // 换算到 PDF 页面空间后必须与归一化后的字符框重叠 ——
+    // 这正是用户反馈"选取区域/搜索高亮与实际文字不符"的直接判据。
+    let image = opened
+        .raster
+        .render(&RenderRequest::new(PageIndex::FIRST, Scale::IDENTITY, Rotation::None))
+        .expect("整页渲染");
+    assert_eq!((image.width, image.height), (612, 792));
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for y in 0..image.height {
+        for x in 0..image.width {
+            let offset = ((y * image.width + x) * 4) as usize;
+            if image.data()[offset..offset + 3].iter().all(|byte| *byte < 128) {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    assert!(min_x != u32::MAX, "测试页应当有文字墨迹");
+    // 图像 y 向下、PDF 页面空间 y 向上
+    let ink = pdfcore::prelude::Rect::new(
+        min_x as f32,
+        792.0 - max_y as f32 - 1.0,
+        (max_x - min_x) as f32,
+        (max_y - min_y) as f32,
+    );
+    let overlaps = |a: pdfcore::prelude::Rect, b: pdfcore::prelude::Rect| {
+        a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
+    };
+    assert!(
+        overlaps(ink, first.bbox),
+        "归一化后的字符框 {:?} 必须与实际墨迹 {ink:?} 重叠",
+        first.bbox
+    );
+
+    let _ = std::fs::remove_file(&path);
+}

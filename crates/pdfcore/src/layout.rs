@@ -22,12 +22,26 @@ pub struct PageGeometry {
     pub size: Size,
     /// 页面自带的 `/Rotate`。
     pub rotation: Rotation,
+    /// **渲染所用盒子**的左下角在页面坐标系中的位置。
+    ///
+    /// 为什么需要：PDF 里的文本与注释坐标按 `MediaBox` 表示，而实际渲染的是
+    /// `MediaBox ∩ CropBox`（PDFium 官方文档也提示用 `FPDF_GetPageBoundingBox()`
+    /// 过滤文本）。当两者原点不同时，**一切页面空间几何**（字符框、链接热区、搜索高亮）
+    /// 都会相对渲染图整体偏移 —— 修法就是在后端把它们统一减去这个原点。
+    ///
+    /// 绝大多数 PDF 这里是 `(0, 0)`，因此该字段默认值不改变既有行为。
+    pub origin: Point,
 }
 
 impl PageGeometry {
-    /// 构造。
+    /// 构造（原点为 `(0, 0)`，适用于绝大多数 PDF）。
     pub const fn new(size: Size, rotation: Rotation) -> Self {
-        Self { size, rotation }
+        Self { size, rotation, origin: Point::ORIGIN }
+    }
+
+    /// 构造并指定**渲染盒原点**（见 [`PageGeometry::origin`]）。
+    pub const fn with_origin(size: Size, rotation: Rotation, origin: Point) -> Self {
+        Self { size, rotation, origin }
     }
 
     /// 叠加用户旋转后的**实际**旋转。

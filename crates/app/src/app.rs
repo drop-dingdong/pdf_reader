@@ -134,6 +134,14 @@ pub struct PdfReaderApp {
     /// 上一帧观察到的缩放与旋转，用于检测"刚变过"。
     last_zoom: f32,
     last_rotation: Rotation,
+    /// 进程启动时刻：所有时序诊断都按"相对它的秒数"输出（用户要求：秒 + 浮点）。
+    started_at: std::time::Instant,
+    /// 本次拖动开始时刻（拖动结束时清空）。
+    drag_started_at: Option<std::time::Instant>,
+    /// 上一次"拖动位移生效"的诊断时刻，用于给出帧间隔。
+    last_pan_at: Option<std::time::Instant>,
+    /// 上一次记录的可见页集，用于检测"因拖动而重新决定显示内容"。
+    last_visible: Vec<PageIndex>,
 }
 
 impl PdfReaderApp {
@@ -170,6 +178,10 @@ impl PdfReaderApp {
             preview_until: None,
             last_zoom: 1.0,
             last_rotation: Rotation::None,
+            started_at: std::time::Instant::now(),
+            drag_started_at: None,
+            last_pan_at: None,
+            last_visible: Vec::new(),
         };
         if let Some(path) = initial {
             app.open(&path, None);
@@ -657,6 +669,14 @@ impl PdfReaderApp {
                 Tool::Pan => inverted_now,
             };
             if response.drag_started() {
+                self.drag_started_at = Some(std::time::Instant::now());
+                self.last_pan_at = None;
+                if self.diagnose {
+                    eprintln!(
+                        "[时序] 拖动开始 t={:.6}s",
+                        self.started_at.elapsed().as_secs_f64()
+                    );
+                }
                 if let Some(position) = response.interact_pointer_pos() {
                     let content =
                         canvas_to_content(canvas, position, session.viewport().scroll);
@@ -682,10 +702,44 @@ impl PdfReaderApp {
                 match self.drag {
                     Some(DragMode::Pan) => {
                         let delta = response.drag_delta();
+                        let before = session.viewport().scroll;
                         session.handle(
                             ViewerCommand::ScrollBy(Vec2::new(-delta.x, -delta.y)),
                             &mut self.events,
                         );
+                        let after = session.viewport().scroll;
+                        if self.diagnose && after != before {
+                            let now = std::time::Instant::now();
+                            let since_start = self
+                                .drag_started_at
+                                .map(|start| now.duration_since(start).as_secs_f64() * 1000.0)
+                                .unwrap_or(0.0);
+                            let since_last = self
+                                .last_pan_at
+                                .map(|last| now.duration_since(last).as_secs_f64() * 1000.0)
+                                .unwrap_or(f64::NAN);
+                            eprintln!(
+                                "[时序] 拖动位移生效 t={:.6}s Δ起={:.1}ms Δ上次={:.1}ms scroll=({:.1},{:.1})",
+                                self.started_at.elapsed().as_secs_f64(),
+                                since_start,
+                                since_last,
+                                after.x,
+                                after.y
+                            );
+                            self.last_pan_at = Some(now);
+                            // "因为拖动而重新决定显示内容"= 可见页集合发生变化（要换/补位图）
+                            let mut visible = Vec::new();
+                            session.visible_pages(&mut visible);
+                            if visible != self.last_visible {
+                                eprintln!(
+                                    "[时序] 可见页集变化 t={:.6}s Δ起={:.1}ms 可见页={:?}",
+                                    self.started_at.elapsed().as_secs_f64(),
+                                    since_start,
+                                    visible.iter().map(|page| page.display_number()).collect::<Vec<_>>()
+                                );
+                                self.last_visible = visible;
+                            }
+                        }
                     }
                     Some(DragMode::Select) => {
                         if let Some(position) = response.interact_pointer_pos() {
@@ -1020,7 +1074,20 @@ impl PdfReaderApp {
                 );
             }
             if response.drag_stopped() {
+                if self.diagnose {
+                    let total = self
+                        .drag_started_at
+                        .map(|start| start.elapsed().as_secs_f64() * 1000.0)
+                        .unwrap_or(0.0);
+                    eprintln!(
+                        "[时序] 拖动结束 t={:.6}s 全程={:.1}ms",
+                        self.started_at.elapsed().as_secs_f64(),
+                        total
+                    );
+                }
                 self.drag = None;
+                self.drag_started_at = None;
+                self.last_pan_at = None;
             }
             if response.double_clicked() {
                 if let Some(position) = response.interact_pointer_pos() {

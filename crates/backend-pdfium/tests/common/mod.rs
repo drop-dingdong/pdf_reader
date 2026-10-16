@@ -147,3 +147,51 @@ pub fn many_page_pdf_file(
     std::fs::write(&path, many_page_pdf(page_count, width, height)).expect("写入临时 PDF");
     path
 }
+
+/// 生成一页 PDF，其 `/MediaBox` 原点**不为 0**（`[20 30 632 822]`）。
+///
+/// 用途：复现"文本/注释坐标按 MediaBox，而渲染按 MediaBox ∩ CropBox"造成的整体错位。
+/// 内容与热区都写在页面坐标 (20,30) 起算的空间里，因此归一化后应当整体减去 (20,30)。
+pub fn offset_media_box_pdf() -> Vec<u8> {
+    let content = "BT /F1 24 Tf 72 700 Td (Offset box) Tj ET\n";
+    let objects: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        // 页面：MediaBox 原点 (20,30)，尺寸仍是 612×792
+        "<< /Type /Page /Parent 2 0 R /MediaBox [20 30 632 822] \
+         /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R /Annots [6 0 R] >>"
+            .to_string(),
+        stream_object(content),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        // 链接热区：写在 MediaBox 坐标系里（y=500 附近）
+        "<< /Type /Annot /Subtype /Link /Rect [70 500 300 520] /Border [0 0 1] \
+         /Dest [3 0 R /Fit] >>"
+            .to_string(),
+    ];
+
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{}\nendobj\n", index + 1, body));
+    }
+    let xref_offset = out.len();
+    let size = objects.len() + 1;
+    out.push_str(&format!("xref\n0 {size}\n"));
+    out.push_str("0000000000 65535 f \n");
+    for offset in &offsets {
+        out.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
+    ));
+    out.into_bytes()
+}
+
+/// 把"MediaBox 原点非 0"的测试 PDF 写到临时文件。
+pub fn offset_media_box_pdf_file(name: &str) -> std::path::PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(format!("pdfcore-fixture-{name}.pdf"));
+    std::fs::write(&path, offset_media_box_pdf()).expect("写入临时 PDF");
+    path
+}

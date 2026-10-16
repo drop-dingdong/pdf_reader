@@ -330,6 +330,11 @@ impl DocumentSession {
         self.cache.get(&key)
     }
 
+    /// 某页的几何（尺寸 + 自带旋转 + 渲染盒原点）。
+    pub fn page_geometry(&self, page: PageIndex) -> Option<PageGeometry> {
+        self.pages.get(page.get() as usize).copied()
+    }
+
     /// 命中某页上的超链接：把 **PDF 页面空间**的点交给链接热区判断。
     ///
     /// 返回的目标**总是已解析**（D-08 在 `open` 时就把命名目标解析完了），
