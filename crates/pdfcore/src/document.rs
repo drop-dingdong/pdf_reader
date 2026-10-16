@@ -7,9 +7,10 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::geometry::{Point, Rect, Rotation, Size};
 use crate::ids::PageIndex;
+use crate::layout::PageGeometry;
 use crate::render::PageRaster;
 use crate::text::TextLayer;
 
@@ -209,18 +210,38 @@ pub trait PdfBackend: Send + Sync {
 ///
 /// ## 实现者义务
 /// * 所有方法都是 `&self`，需要内部可变性的实现（如惰性缓存）请用 `Mutex`/`OnceLock`。
-/// * `page_size` / `page_rotation` 返回的是**未旋转**的 PDF 原始值；旋转由调用方叠加。
+/// * **`page_geometries()` 必须在打开时备好**并缓存（O(1) 返回 `Arc` 克隆）；
+///   布局要一次性拿到全部页尺寸才能算出内容总高度与滚动范围。
+/// * `PageGeometry` 里的尺寸与旋转都是**未旋转**的 PDF 原始值；旋转由调用方叠加。
 /// * 大纲与链接属于"可选能力"：不支持时返回空 `Vec` 而不是错误，只有真正的解析失败才报错。
 pub trait Document: Send + Sync {
     /// 元数据与页数（必须 O(1) 返回，通常在打开时已经解析完毕）。
     fn info(&self) -> &DocumentInfo;
 
-    /// 某页的原始尺寸（PDF point，未旋转）。
-    fn page_size(&self, page: PageIndex) -> Result<Size>;
+    /// **批量**页几何（原始尺寸 + 每页自带的 `/Rotate`）。
+    ///
+    /// 打开时已备好，O(1) 返回；调用方只做一次 `Arc` 克隆，不需要逐页跨 FFI 查询。
+    fn page_geometries(&self) -> Result<Arc<[PageGeometry]>>;
 
-    /// 某页自带的 `/Rotate`。默认不旋转。
-    fn page_rotation(&self, _page: PageIndex) -> Result<Rotation> {
-        Ok(Rotation::None)
+    /// 某页的原始尺寸（PDF point，未旋转）。
+    ///
+    /// 默认实现查批量表；越界返回 [`CoreError::PageOutOfRange`]。
+    /// 频繁路径请直接用 [`Document::page_geometries`]，避免重复的 `Arc` 克隆与边界检查。
+    fn page_size(&self, page: PageIndex) -> Result<Size> {
+        let geometries = self.page_geometries()?;
+        geometries
+            .get(page.get() as usize)
+            .map(|geometry| geometry.size)
+            .ok_or(CoreError::PageOutOfRange { page, page_count: geometries.len() as u32 })
+    }
+
+    /// 某页自带的 `/Rotate`；默认实现查批量表。越界同样返回 [`CoreError::PageOutOfRange`]。
+    fn page_rotation(&self, page: PageIndex) -> Result<Rotation> {
+        let geometries = self.page_geometries()?;
+        geometries
+            .get(page.get() as usize)
+            .map(|geometry| geometry.rotation)
+            .ok_or(CoreError::PageOutOfRange { page, page_count: geometries.len() as u32 })
     }
 
     /// 大纲（书签）树。默认返回空。

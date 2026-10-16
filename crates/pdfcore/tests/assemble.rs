@@ -258,3 +258,61 @@ fn backend_without_text_layer_still_works() {
         .search(&SearchQuery::new("page"))
         .is_err_and(|error| error.is_unsupported()));
 }
+
+/// D-01 的守门测试：只实现批量接口，并在单页接口上 `panic!`。
+///
+/// 如果 `DocumentSession::new` 未来退回"逐页查询 page_size/page_rotation"，
+/// 这个测试会立刻 panic 失败 —— 从而锁死"一次批量拿全部页几何"的设计。
+struct BulkOnlyDocument {
+    info: DocumentInfo,
+    geometries: Arc<[PageGeometry]>,
+}
+
+impl Document for BulkOnlyDocument {
+    fn info(&self) -> &DocumentInfo {
+        &self.info
+    }
+
+    fn page_geometries(&self) -> Result<Arc<[PageGeometry]>> {
+        Ok(self.geometries.clone())
+    }
+
+    fn page_size(&self, _page: PageIndex) -> Result<Size> {
+        panic!("会话不应逐页查询 page_size（D-01：必须走批量页几何）")
+    }
+
+    fn page_rotation(&self, _page: PageIndex) -> Result<Rotation> {
+        panic!("会话不应逐页查询 page_rotation（D-01：必须走批量页几何）")
+    }
+}
+
+#[test]
+fn session_consumes_bulk_page_geometries_only() {
+    let backend = MemoryBackend::demo();
+    let opened = backend.open(Source::Bytes(b"%PDF-1.4 fake"), None).unwrap();
+
+    let document: Arc<dyn Document> = Arc::new(BulkOnlyDocument {
+        info: opened.document.info().clone(),
+        geometries: opened.document.page_geometries().unwrap(),
+    });
+    let rebuilt =
+        OpenedDocument::new(document, opened.raster.clone(), None, Capabilities::minimal());
+
+    // 能构造成功本身就证明只用了批量接口（否则 BulkOnlyDocument 会 panic）
+    let session = DocumentSession::new(
+        rebuilt,
+        Arc::new(MemoryCache::new()),
+        Arc::new(ImmediateScheduler::new(opened.raster.clone())),
+        Box::new(VerticalLayout),
+        Box::new(RangeSelection::new()),
+    )
+    .expect("装配会话");
+
+    assert_eq!(session.page_count(), 3);
+    // 逐页旋转必须原样流入布局
+    assert_eq!(
+        session.placement(PageIndex::new(2)).unwrap().rotation,
+        Rotation::Clockwise90
+    );
+    assert!((session.placement(PageIndex::new(2)).unwrap().rect.width - 792.0).abs() < 0.5);
+}

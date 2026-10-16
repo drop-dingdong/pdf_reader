@@ -21,6 +21,7 @@ use crate::error::{CoreError, Result};
 use crate::geometry::{Point, Rect, Rotation, Size};
 use crate::ids::{JobId, PageIndex};
 use crate::image::{PixelFormat, RasterImage};
+use crate::layout::PageGeometry;
 use crate::render::{
     CacheStats, PageRaster, RenderCache, RenderEvent, RenderKey, RenderRequest, RenderScheduler,
 };
@@ -215,10 +216,26 @@ impl MemoryPage {
 }
 
 /// [`Document`] 的内存实现。
+///
+/// 这里**只实现 `page_geometries()`**（v3 的批量接口），`page_size` / `page_rotation`
+/// 完全依赖 trait 的默认实现 —— 因此这个类型同时充当"批量表被正确用于单页查询"的验证载体。
 #[derive(Debug)]
 pub struct MemoryDocument {
     info: DocumentInfo,
     pages: Arc<Vec<MemoryPage>>,
+    geometries: Arc<[PageGeometry]>,
+}
+
+impl MemoryDocument {
+    /// 由页面清单构建（几何表在此一次性算好，模拟"打开时备好"）。
+    fn new(info: DocumentInfo, pages: Arc<Vec<MemoryPage>>) -> Self {
+        let geometries: Arc<[PageGeometry]> = pages
+            .iter()
+            .map(|page| PageGeometry::new(page.size, page.rotation))
+            .collect::<Vec<_>>()
+            .into();
+        Self { info, pages, geometries }
+    }
 }
 
 impl Document for MemoryDocument {
@@ -226,18 +243,8 @@ impl Document for MemoryDocument {
         &self.info
     }
 
-    fn page_size(&self, page: PageIndex) -> Result<Size> {
-        self.pages
-            .get(page.get() as usize)
-            .map(|page| page.size)
-            .ok_or(CoreError::PageOutOfRange { page, page_count: self.pages.len() as u32 })
-    }
-
-    fn page_rotation(&self, page: PageIndex) -> Result<Rotation> {
-        self.pages
-            .get(page.get() as usize)
-            .map(|page| page.rotation)
-            .ok_or(CoreError::PageOutOfRange { page, page_count: self.pages.len() as u32 })
+    fn page_geometries(&self) -> Result<Arc<[PageGeometry]>> {
+        Ok(self.geometries.clone())
     }
 
     fn outline(&self) -> Result<Vec<OutlineNode>> {
@@ -499,7 +506,7 @@ impl PdfBackend for MemoryBackend {
         };
 
         Ok(OpenedDocument::new(
-            Arc::new(MemoryDocument { info, pages: self.pages.clone() }),
+            Arc::new(MemoryDocument::new(info, self.pages.clone())),
             Arc::new(MemoryRaster::new(self.pages.clone())),
             Some(Arc::new(MemoryTextLayer::new(self.pages.clone()))),
             self.capabilities(),
@@ -550,6 +557,34 @@ mod tests {
             Err(CoreError::IncorrectPassword)
         ));
         assert!(backend.open(Source::Bytes(b"%PDF-fake"), Some("secret")).is_ok());
+    }
+
+    /// D-01：批量页几何必须是唯一数据源，且单页查询（默认方法）能取到逐页旋转。
+    #[test]
+    fn bulk_geometries_drive_per_page_defaults() {
+        let backend = MemoryBackend::demo();
+        let opened = backend.open(Source::Bytes(b"%PDF-fake"), None).unwrap();
+
+        let geometries = opened.document.page_geometries().unwrap();
+        assert_eq!(geometries.len(), 3);
+        assert_eq!(geometries[0].size, Size::new(612.0, 792.0));
+        assert_eq!(geometries[2].rotation, Rotation::Clockwise90, "逐页 /Rotate 必须保留");
+
+        // 默认方法从批量表取数
+        assert_eq!(opened.document.page_size(PageIndex::new(0)).unwrap(), Size::new(612.0, 792.0));
+        assert_eq!(opened.document.page_rotation(PageIndex::new(2)).unwrap(), Rotation::Clockwise90);
+        assert_eq!(opened.document.page_rotation(PageIndex::new(0)).unwrap(), Rotation::None);
+
+        // 越界：两个默认方法都必须报错（不能静默返回默认值）
+        assert!(matches!(
+            opened.document.page_size(PageIndex::new(99)),
+            Err(CoreError::PageOutOfRange { page, page_count })
+                if page == PageIndex::new(99) && page_count == 3
+        ));
+        assert!(matches!(
+            opened.document.page_rotation(PageIndex::new(99)),
+            Err(CoreError::PageOutOfRange { .. })
+        ));
     }
 
     #[test]

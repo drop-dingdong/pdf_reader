@@ -224,15 +224,9 @@ impl DocumentSession {
         layout_engine: Box<dyn PageLayout>,
         selection: Box<dyn TextSelection>,
     ) -> Result<Self> {
-        let page_count = opened.page_count();
-        let mut pages = Vec::with_capacity(page_count as usize);
-        for index in 0..page_count {
-            let page = PageIndex::new(index);
-            let size = opened.document.page_size(page)?;
-            // 单页的 /Rotate 解析失败不应阻止文档打开，退化为不旋转。
-            let rotation = opened.document.page_rotation(page).unwrap_or(Rotation::None);
-            pages.push(PageGeometry::new(size, rotation));
-        }
+        // D-01：一次拿到全部页几何（后端在 open 时已备好批量表），
+        // 取代原先"循环 N 次 page_size/page_rotation"的逐页跨 FFI 查询。
+        let pages: Vec<PageGeometry> = opened.document.page_geometries()?.to_vec();
 
         let mut session = Self {
             opened,
