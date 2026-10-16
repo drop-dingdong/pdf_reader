@@ -1190,8 +1190,10 @@ impl eframe::App for PdfReaderApp {
             return;
         };
 
+        let frame_start = std::time::Instant::now();
         self.collect_commands(&ctx, &session);
         self.apply_and_pump(&ctx, &mut session);
+        let after_input = frame_start.elapsed();
 
         // 检测"缩放/旋转刚刚变过"：连续缩放期间不提交渲染，只显示旧图拉伸（见 ZOOM_PREVIEW_WINDOW）
         let zoom_now = session.state().zoom;
@@ -1204,11 +1206,31 @@ impl eframe::App for PdfReaderApp {
         let previewing = self.previewing();
 
         self.ensure_textures(&ctx, &session);
+        let after_textures = frame_start.elapsed();
 
         self.draw_toolbar(ui, &session);
         self.draw_sidebar(ui, &session);
         self.draw_status(ui, &session);
         self.draw_canvas(ui, &mut session);
+        let after_draw = frame_start.elapsed();
+
+        // 每帧耗时分解：拖动期间（或单帧明显慢时）打印，用来定位"不跟手"到底花在哪
+        if self.diagnose {
+            let total_ms = after_draw.as_secs_f64() * 1000.0;
+            if self.drag.is_some() || total_ms > 25.0 {
+                eprintln!(
+                    "[帧] 总={:.1}ms 输入+pump={:.1}ms 纹理={:.1}ms 绘制={:.1}ms 纹理数={} 命中={} 可见页={} 在飞={}",
+                    total_ms,
+                    after_input.as_secs_f64() * 1000.0,
+                    (after_textures - after_input).as_secs_f64() * 1000.0,
+                    (after_draw - after_textures).as_secs_f64() * 1000.0,
+                    self.textures.len(),
+                    self.hits.len(),
+                    self.visible.len(),
+                    session.pending_renders()
+                );
+            }
+        }
 
         let pending = if previewing {
             // 预览窗口内**不请求渲染**：把这一串中间比例的钱省下来，只画最终那一次。
