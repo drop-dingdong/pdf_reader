@@ -1,6 +1,8 @@
 # 预渲染阶梯（preview ladder）设计 —— 待评审
 
-> 状态：**设计草案，未写代码**（按项目规则：先设计、评审通过再实现）。
+> 状态：**已实现**（用户确认 + 补充一条规则后落地；见 §10）。
+> 实现：`crates/pdfcore/src/session.rs`、`crates/app/src/{app,view}.rs`；
+> 测试：`crates/pdfcore/tests/preview_ladder.rs`（6 项）+ app 的 2 项。
 > 相关：D-12（旧图顶替）、D-15（分块阈值 4 MP）、D-18（160ms 预览窗口）、D-19（纹理保留）。
 > 背景讨论见 [deep-zoom-design.md](deep-zoom-design.md) §1。
 
@@ -214,3 +216,56 @@ fn request_page(&mut self, page: PageIndex, priority: RenderPriority) {
    强行降质没有意义。
 4. **手势结束判定沿用 160ms？** 推荐是；若你觉得"清晰图来得慢"，可以降到 100ms
    （代价是快速连续操作时可能多渲染一次完整档）。
+
+
+---
+
+## 10. 实现记录与两处调整（相对草案）
+
+### 10.1 用户补充：旧存档够精就直接用
+
+> "如果有某个页面存在旧存档，且精度大于 preview 对应的 k=4 的精度，那么直接用旧存档渲染即可。"
+
+已实现，且**判断放在 app 侧**（信息在那里）：
+
+```rust
+// app：手势中先看缓存里有没有"精度不低于预览档"的旧内容
+for page in &self.visible {
+    let (Some(preview), Some(placement)) = (session.preview_scale(*page), session.placement(*page)) else { continue };
+    let preview_milli = RenderKey::new(*page, preview, placement.rotation).scale_milli;
+    if !self.textures.has_scale_at_least(*page, placement.rotation, preview_milli) {
+        need_preview = true;   // 只有"没有够精的旧内容"时才值得渲染预览
+        break;
+    }
+}
+```
+
+* 有够精的旧内容 → **什么都不请求**（连预览都不渲染），直接显示它：省一次渲染，画面也更清楚；
+* 没有 → 切到预览档并请求（便宜的一档，画面跟着手势走）；
+* 配套：`KeyedStore::has_scale_at_least()`（整页或瓦片都算，同页同旋转）；
+  另外 `best_page_texture` 在"距离相同"时改为**偏好更高精度**（否则 HashMap 遍历顺序会让结果不确定）。
+
+### 10.2 偏差：「差距 ≥ 2 倍」改为「完整档需要分块时才启用」
+
+草案 §3.3 写的是"预览档与完整档差距不足 2 倍就不启用"。实际实现时发现：
+因为预览档 = 目标 ÷ 4 再**向下量化到 2 的幂**，差距**恒 ≥ 2 倍**，这条判断永远不会生效。
+
+改为与 D-15 一致的判据：**只在该页完整档需要分块时（> 4 MP）启用预览**。
+这样 200% 以下（A4 约 1.9 MP，整页只要几十毫秒）行为与今天完全一致，
+300%/400%/800% 则走预览档 —— 与草案表格的预期一致。
+
+### 10.3 落地参数（与原推荐一致）
+
+| 参数 | 值 |
+| --- | --- |
+| `PREVIEW_DIVISOR` | 4.0 |
+| 预览档量化 | 向下取 2 的幂（0.25/0.5/1/2/4…） |
+| `PREVIEW_SCALE_MIN` | 0.25 |
+| 启用条件 | 完整档像素 > 分块阈值（4 MP） |
+| 手势结束判定 | 160 ms（沿用 D-18 的窗口） |
+| 预取 | **固定完整档** |
+
+### 10.4 诊断
+
+`PDF_READER_DIAGNOSE=1` 的诊断行新增 `预览档=预览/完整`，
+可直接看出某一帧走的是哪一档（配合 `画法=` 判断画面来源）。

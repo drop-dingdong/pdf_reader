@@ -206,8 +206,26 @@ impl<V> KeyedStore<V> {
         self.entries
             .iter()
             .filter(|(key, _)| key.page == page && key.rotation == rotation && key.tile.is_none())
-            .min_by_key(|(key, _)| key.scale_milli.abs_diff(target_scale_milli))
+            // 距离相同时偏好**更高比例**（更清楚）；否则 HashMap 的遍历顺序会让结果不确定
+            .min_by_key(|(key, _)| {
+                (key.scale_milli.abs_diff(target_scale_milli), u32::MAX - key.scale_milli)
+            })
             .map(|(_, value)| value)
+    }
+
+    /// 是否存在该页该旋转下、比例**不低于** `scale_milli` 的纹理（整页或瓦片）。
+    ///
+    /// 用途（用户要求）：缩放手势中若缓存里已有**精度高于预览档**的旧内容，
+    /// 就直接用它渲染，不再提交预览渲染 —— 既省一次渲染，画面也更清楚。
+    pub fn has_scale_at_least(
+        &self,
+        page: PageIndex,
+        rotation: Rotation,
+        scale_milli: u32,
+    ) -> bool {
+        self.entries.keys().any(|key| {
+            key.page == page && key.rotation == rotation && key.scale_milli >= scale_milli
+        })
     }
 
     /// 该键对应的页/缩放/旋转下是否已有**任意一块瓦片**就绪。
@@ -626,6 +644,51 @@ mod tests {
         let canvas = canvas_rect_for(tiny, 5.0);
         assert!(canvas.width() >= 0.0 && canvas.height() >= 0.0, "实际 {canvas:?}");
         assert_eq!(canvas.height(), 10.0, "仍要保持满高");
+    }
+
+    /// 旧存档够精就别再渲染预览（用户要求）：`has_scale_at_least` 只认同页同旋转、比例不低的条目。
+    #[test]
+    fn has_scale_at_least_matches_only_finer_same_page_same_rotation() {
+        let page = PageIndex::new(0);
+        let mut store = KeyedStore::new(16);
+        store.insert(
+            RenderKey::new(page, Scale::from_zoom(4.0), Rotation::None),
+            "four",
+        );
+
+        // 预览档 2.0：已有 4.0 的旧图 → 够用，不必渲染预览
+        assert!(store.has_scale_at_least(page, Rotation::None, 2000));
+        // 预览档 8.0（比已有的更精）：不够用 → 需要渲染
+        assert!(!store.has_scale_at_least(page, Rotation::None, 8000));
+        // 其它页 / 其它旋转不算
+        assert!(!store.has_scale_at_least(PageIndex::new(1), Rotation::None, 2000));
+        assert!(!store.has_scale_at_least(page, Rotation::Clockwise90, 2000));
+
+        // 瓦片也算（分块渲染下旧内容就是瓦片）
+        store.insert(
+            RenderKey::tiled(
+                page,
+                Scale::from_zoom(8.0),
+                Rotation::None,
+                TileSpec::new(0, 0),
+            ),
+            "tile",
+        );
+        assert!(store.has_scale_at_least(page, Rotation::None, 8000));
+    }
+
+    /// 距离相同时 `best_page_texture` 应挑**更清楚**的那一档。
+    #[test]
+    fn best_page_texture_prefers_the_finer_scale_on_ties() {
+        let page = PageIndex::new(0);
+        let mut store = KeyedStore::new(16);
+        store.insert(RenderKey::new(page, Scale::from_zoom(1.0), Rotation::None), "coarse");
+        store.insert(RenderKey::new(page, Scale::from_zoom(3.0), Rotation::None), "fine");
+        // 目标 2.0：1.0 与 3.0 距离相同 → 取更清楚的 3.0
+        assert_eq!(
+            store.best_page_texture(page, Rotation::None, 2000),
+            Some(&"fine")
+        );
     }
 
     /// 缩放过场要用的"上一档"必须保留，但比例不能无限堆积（第五轮验收：相邻页闪白）。
