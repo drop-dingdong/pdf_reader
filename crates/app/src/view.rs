@@ -253,6 +253,47 @@ impl<V> KeyedStore<V> {
             .collect()
     }
 
+    /// 裁剪纹理：只保留这些页在 `current_scale_milli` 与**每页最接近它的另一个比例**上的条目。
+    ///
+    /// 两个方向都要顾：
+    /// * **不能全丢**：缩放过场要用上一档的旧内容顶上，否则会闪白 ——
+    ///   v1 在 `LayoutChanged` 时只留"当前页"的纹理，于是中心页正常、相邻页闪白
+    ///   （第四轮验收反馈的现象）；
+    /// * **不能全留**：一次连续缩放会产生十几档比例，显存会无限增长。
+    ///
+    /// 旋转也必须匹配：旧旋转的图是横躺的，留着只会画错。
+    pub fn retain_preview_scales(
+        &mut self,
+        pages: &[PageIndex],
+        rotation: Rotation,
+        current_scale_milli: u32,
+    ) {
+        // 每页选出"最接近当前比例的另一个比例"
+        let mut alternate: HashMap<PageIndex, u32> = HashMap::new();
+        for key in self.entries.keys() {
+            if !pages.contains(&key.page)
+                || key.rotation != rotation
+                || key.scale_milli == current_scale_milli
+            {
+                continue;
+            }
+            let distance = key.scale_milli.abs_diff(current_scale_milli);
+            match alternate.get(&key.page) {
+                Some(existing) if existing.abs_diff(current_scale_milli) <= distance => {}
+                _ => {
+                    alternate.insert(key.page, key.scale_milli);
+                }
+            }
+        }
+
+        self.retain(|key| {
+            pages.contains(&key.page)
+                && key.rotation == rotation
+                && (key.scale_milli == current_scale_milli
+                    || alternate.get(&key.page) == Some(&key.scale_milli))
+        });
+    }
+
     /// 清空。
     pub fn clear(&mut self) {
         self.entries.clear();
@@ -537,7 +578,48 @@ mod tests {
 
         let old = store.tiles_at(PageIndex::new(0), Rotation::None, 1000);
         assert_eq!(old.len(), 2, "旧档应有 2 块");
-        assert!(old.iter().any(|(tile, value)| *tile == TileSpec::new(0, 0) && **value == "old-a"));
+        assert!(old
+            .iter()
+            .any(|(tile, value)| *tile == TileSpec::new(0, 0) && **value == "old-a"));
         assert_eq!(store.tiles_at(PageIndex::new(0), Rotation::None, 2000).len(), 1);
+    }
+
+    /// 缩放过场要用的"上一档"必须保留，但比例不能无限堆积（第五轮验收：相邻页闪白）。
+    #[test]
+    fn retain_preview_scales_keeps_current_and_one_old_scale() {
+        let page = PageIndex::new(0);
+        let other = PageIndex::new(1);
+        let key = |page: PageIndex, scale: f32, rotation: Rotation| {
+            RenderKey::new(page, Scale::from_zoom(scale), rotation)
+        };
+
+        let mut store = KeyedStore::new(64);
+        for scale in [1.0, 1.25, 1.5, 2.0, 3.0] {
+            store.insert(key(page, scale, Rotation::None), scale);
+        }
+        store.insert(key(other, 1.5, Rotation::None), 1.5);
+        store.insert(key(other, 2.0, Rotation::None), 2.0);
+        store.insert(key(PageIndex::new(2), 2.0, Rotation::None), 2.0);
+        // 旧旋转的图留着只会画成横躺
+        store.insert(key(page, 2.0, Rotation::Clockwise90), 2.0);
+
+        store.retain_preview_scales(&[page, other], Rotation::None, 2000);
+
+        assert!(store.contains(&key(page, 2.0, Rotation::None)), "当前比例必须保留");
+        assert!(
+            store.contains(&key(page, 1.5, Rotation::None)),
+            "最近的旧比例必须保留（缩放过场要用它顶替，否则闪白）"
+        );
+        assert!(!store.contains(&key(page, 1.25, Rotation::None)), "更旧的档应丢弃");
+        assert!(!store.contains(&key(page, 1.0, Rotation::None)));
+        assert!(!store.contains(&key(page, 3.0, Rotation::None)));
+        assert!(!store.contains(&key(page, 2.0, Rotation::Clockwise90)), "旧旋转必须丢弃");
+        assert!(
+            !store.contains(&key(PageIndex::new(2), 2.0, Rotation::None)),
+            "不在保留列表里的页应丢弃"
+        );
+        // 其它可见页同样"当前 + 最近旧档"
+        assert!(store.contains(&key(other, 2.0, Rotation::None)));
+        assert!(store.contains(&key(other, 1.5, Rotation::None)));
     }
 }

@@ -34,6 +34,8 @@ const TEXTURE_CAPACITY: usize = 64;
 /// 侧栏宽度范围（内容空间像素）。宽度由 app 自己保存 —— 见 `sidebar_width` 的说明。
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
 const SIDEBAR_MAX_WIDTH: f32 = 640.0;
+/// 侧栏拖拽条的宽度（由 app 自己处理拖拽，见 `draw_sidebar` 的说明）。
+const SIDEBAR_HANDLE_WIDTH: f32 = 5.0;
 
 /// 每帧最多上传几张纹理。
 ///
@@ -300,7 +302,6 @@ impl PdfReaderApp {
         }
         session.pump(&mut self.events);
 
-        let current = session.state().current_page;
         for event in std::mem::take(&mut self.events) {
             match event {
                 SessionEvent::CopyToClipboard(text) => {
@@ -314,10 +315,6 @@ impl PdfReaderApp {
                 SessionEvent::CurrentPageChanged(page) => {
                     // 页码输入框跟随真实当前页，避免显示过期数字
                     self.page_input = page.display_number().to_string();
-                }
-                SessionEvent::LayoutChanged => {
-                    // 布局（缩放/旋转）变化后旧键不再被使用，留下会白占显存
-                    self.textures.retain(|key| key.page == current);
                 }
                 _ => {}
             }
@@ -354,13 +351,23 @@ impl PdfReaderApp {
             uploaded += self.upload_page(ctx, session, page);
         }
 
-        // 裁剪：只保留可见页与相邻页的纹理（以及当前页，避免状态栏/缩略图拿到手就丢）
-        let keep = |page: PageIndex| {
-            self.visible.iter().any(|visible| {
-                visible.get().abs_diff(page.get()) <= 1
-            }) || page == session.state().current_page
-        };
-        self.textures.retain(|key| keep(key.page));
+        // 裁剪：只保留可见页（±1）与当前页，并且每页只保留"当前比例 + 最近一个旧比例"
+        // —— 旧比例是缩放过场要用的（第五轮验收：丢掉其它页的旧图会让它们闪白）。
+        let mut pages = self.visible.clone();
+        let current = session.state().current_page;
+        if !pages.contains(&current) {
+            pages.push(current);
+        }
+        let rotation = session
+            .placement(current)
+            .map(|placement| placement.rotation)
+            .unwrap_or(Rotation::None);
+        let current_scale_milli = session
+            .placement(current)
+            .map(|placement| RenderKey::new(current, placement.scale, rotation).scale_milli)
+            .unwrap_or(1000);
+        self.textures
+            .retain_preview_scales(&pages, rotation, current_scale_milli);
     }
 
     /// 上传某一页当前可用的位图（整页或瓦片），返回新上传的纹理数量。
@@ -533,10 +540,14 @@ impl PdfReaderApp {
         }
         let navigation = self.navigation.clone();
         let width = self.sidebar_width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
-        let response = egui::Panel::left("outline")
-            .resizable(true)
-            .default_size(width)
-            .size_range(SIDEBAR_MIN_WIDTH..=SIDEBAR_MAX_WIDTH)
+        // 尺寸由我们自己控制（`exact_size`），可拖拽的分隔条在画布左侧 —— 见 `draw_canvas`。
+        //
+        // 不用 egui 内建拖拽的原因：面板状态以 `parent_ui.scope_id().with_salt(id)` 为键持久化，
+        // 而 eframe 每帧传入的是**新的根 `Ui`**，于是拖拽结果写进去、下一帧读不回来 ——
+        // 第三、四轮验收两次反馈"空有动作没有结果"，根因就在这里。
+        egui::Panel::left("outline")
+            .resizable(false)
+            .exact_size(width)
             .show(ui, |ui| {
                 ui.heading("目录");
                 ui.separator();
@@ -554,9 +565,6 @@ impl PdfReaderApp {
                     }
                 });
             });
-        // 记住这一帧的实际宽度：egui 的面板状态以父 Ui 的 id 为键，
-        // 而 eframe 每帧给的是新的根 Ui，因此持久化读不回来 —— 由我们自己回填。
-        self.sidebar_width = response.response.rect.width();
     }
 
     fn draw_status(&self, ui: &mut egui::Ui, session: &DocumentSession) {
@@ -586,6 +594,28 @@ impl PdfReaderApp {
     /// 画布：页面（纹理或白底页框）+ 高亮 + 鼠标交互。
     fn draw_canvas(&mut self, ui: &mut egui::Ui, session: &mut DocumentSession) {
         egui::CentralPanel::default().show(ui, |ui| {
+            // 侧栏拖拽条：宽度完全由我们自己记（见 `draw_sidebar` 的说明）。
+            // 拖它改变 `sidebar_width`，下一帧 `exact_size` 立即生效 —— 不依赖 egui 的内建持久化。
+            if self.show_outline {
+                let (strip_response, strip) = ui.allocate_painter(
+                    EVec2::new(SIDEBAR_HANDLE_WIDTH, ui.available_height()),
+                    Sense::drag(),
+                );
+                let active = strip_response.hovered() || strip_response.dragged();
+                if active {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+                strip.rect_filled(
+                    strip_response.rect,
+                    CornerRadius::ZERO,
+                    if active { Color32::from_gray(120) } else { Color32::from_gray(70) },
+                );
+                if strip_response.dragged() {
+                    self.sidebar_width = (self.sidebar_width + strip_response.drag_delta().x)
+                        .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+                }
+            }
+
             let size = ui.available_size();
             let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
             let canvas = response.rect;
@@ -637,28 +667,30 @@ impl PdfReaderApp {
                 let plan = if self.textures.contains(&whole_key) {
                     Plan::Whole
                 } else if let Some((first, last)) = session.visible_tiles(page) {
-                    // 一块真瓦片都没有时，才允许用上一档的旧图顶替；
-                    // 只要有任何一块真瓦片就必须画瓦片，否则旧图会一直盖住已就绪的内容。
-                    // 例外：正处于缩放预览窗口内 → 所有可见页统一显示旧内容，避免一半新一半旧
-                    //（第三轮验收："非中心页面没有同样处理"）。
+                    // 优先级：当前比例的真瓦片 → 上一档的整页图 → 上一档的瓦片 → 白纸。
+                    // 只要当前比例还有内容没到齐，就尽量用旧内容顶上，绝不让页面闪白
+                    // （第四轮验收：中心页不闪、相邻页闪白，就是因为相邻页没有旧图可用）。
                     if self.textures.has_tiles(&whole_key) {
                         Plan::Tiles(first, last)
                     } else if has_previous {
                         Plan::Stretch
-                    } else if previewing {
-                        match self.textures.best_tile_scale(
-                            page,
-                            placement.rotation,
-                            whole_key.scale_milli,
-                        ) {
-                            Some(old_scale) => Plan::TilePreview(old_scale),
-                            None => Plan::Tiles(first, last),
-                        }
+                    } else if let Some(old_scale) = self.textures.best_tile_scale(
+                        page,
+                        placement.rotation,
+                        whole_key.scale_milli,
+                    ) {
+                        Plan::TilePreview(old_scale)
                     } else {
                         Plan::Tiles(first, last)
                     }
                 } else if has_previous {
                     Plan::Stretch
+                } else if let Some(old_scale) = self.textures.best_tile_scale(
+                    page,
+                    placement.rotation,
+                    whole_key.scale_milli,
+                ) {
+                    Plan::TilePreview(old_scale)
                 } else {
                     Plan::Blank
                 };
@@ -764,7 +796,7 @@ impl PdfReaderApp {
                 let max_side = ui.ctx().input(|input| input.max_texture_side);
                 eprintln!(
                     "[诊断] 缩放={:.0}% 视口={:.0}×{:.0} scroll=({:.1},{:.1}) 当前页={} 可见页={:?} \
-                     纹理={} 缓存在飞={} max_texture_side={} | {}",
+                     纹理={} 缓存在飞={} 预览中={} max_texture_side={} | {}",
                     session.state().zoom * 100.0,
                     viewport.size.width,
                     viewport.size.height,
@@ -774,6 +806,7 @@ impl PdfReaderApp {
                     self.visible.iter().map(|page| page.display_number()).collect::<Vec<_>>(),
                     self.textures.len(),
                     session.pending_renders(),
+                    previewing,
                     max_side,
                     report.join(" | ")
                 );
