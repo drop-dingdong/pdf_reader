@@ -25,8 +25,8 @@ use pdfcore::prelude::*;
 
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
-    clamp_float_rect, color_image, commands_for_destination, destination_points, veil_bands,
-    view_rect_to_page_rect,
+    clamp_float_rect, color_image, commands_for_destination, destination_points, fit_inside,
+    compose_snapshot, veil_bands, view_rect_to_page_rect, SnapshotPage,
     flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
@@ -102,14 +102,22 @@ struct CaptureState {
     anchor: Option<egui::Pos2>,
 }
 
-/// 视图区域内的浮窗（始终在画布内部、可移动/改大小/关闭；现阶段只显示文字）。
+/// 浮窗内容：纯文字，或一张**自包含的截图**。
+enum FloatContent {
+    /// 纯文字。
+    Text(String),
+    /// 截图（独立纹理，与主视图状态解耦；改窗口大小只改变显示尺寸，不改变内容）。
+    Image(egui::TextureHandle),
+}
+
+/// 视图区域内的浮窗（始终在画布内部、可移动/改大小/关闭）。
 struct Float {
     /// 唯一 id（用于 egui 的交互标识）。
     id: u64,
     /// 标题栏文字。
     title: String,
-    /// 正文（现阶段只显示文字）。
-    text: String,
+    /// 内容（文字或截图）。
+    content: FloatContent,
     /// 在**视图区域**（画布）内的矩形；每帧会被夹取回区域内。
     rect: egui::Rect,
 }
@@ -1294,9 +1302,9 @@ impl PdfReaderApp {
         self.floats.push(Float {
             id,
             title: format!("测试浮窗 #{id}"),
-            text: format!(
+            content: FloatContent::Text(format!(
                 "这是第 {id} 个测试浮窗。\n目前只显示文字。\n\n可以拖动标题栏移动、\n拖右下角改变大小、\n点右上角 ✕ 关闭。"
-            ),
+            )),
             rect,
         });
         self.message = format!("已添加测试浮窗 #{id}");
@@ -1363,6 +1371,8 @@ impl PdfReaderApp {
                         selection.width(),
                         selection.height(),
                     );
+                    // 1) 把选区做成**自包含快照**并放进一个新浮窗（用户需求）
+                    self.capture_into_float(ui, session, scroll, selection_rect);
                     let mut parts: Vec<String> = Vec::new();
                     for page in self.visible.clone() {
                         let Some(placement) = session.placement(page).copied() else { continue };
@@ -1407,6 +1417,71 @@ impl PdfReaderApp {
             self.capture = None;
             self.message = "已退出截图模式".to_string();
         }
+    }
+
+    /// 把选中的区域做成截图快照，放入一个新的浮窗。
+    ///
+    /// 快照来源是**已经渲染好的位图**（整页或瓦片，直接从缓存取），因此无需重新渲染；
+    /// 拷贝成独立纹理后与主视图状态完全解耦：之后缩放/滚动/换页都不会改变浮窗内容。
+    fn capture_into_float(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &DocumentSession,
+        scroll: Vec2,
+        selection: Rect,
+    ) {
+        // 视图空间 → 内容空间（位图像素与内容空间同尺度）
+        let content_rect = Rect::new(
+            selection.x + scroll.x,
+            selection.y + scroll.y,
+            selection.width,
+            selection.height,
+        );
+
+        // 收集覆盖到的页及其**已缓存**位图（先持有 Arc，再借用给合成函数）
+        let mut owned: Vec<(Rect, Option<Arc<RasterImage>>, Vec<(TileSpec, Arc<RasterImage>)>)> =
+            Vec::new();
+        for page in self.visible.clone() {
+            let Some(placement) = session.placement(page).copied() else { continue };
+            if placement.rect.intersection(content_rect).is_none() {
+                continue;
+            }
+            owned.push((placement.rect, session.image_for(page), session.tiles_for(page)));
+        }
+        let sources: Vec<SnapshotPage<'_>> = owned
+            .iter()
+            .map(|(rect, whole, tiles)| SnapshotPage {
+                rect: *rect,
+                whole: whole.as_deref(),
+                tiles: tiles.iter().map(|(tile, image)| (*tile, image.as_ref())).collect(),
+            })
+            .collect();
+
+        let Some(snapshot) = compose_snapshot(&sources, content_rect) else {
+            self.message = "截图：该区域还没有已渲染的像素（请稍候再试）".to_string();
+            return;
+        };
+
+        let id = self.next_float_id;
+        self.next_float_id += 1;
+        let texture = ui.ctx().load_texture(
+            format!("snapshot-{id}"),
+            snapshot,
+            egui::TextureOptions::LINEAR,
+        );
+        // 默认窗口大小按区域尺寸给（夹取在合理范围内），之后可自由改大小
+        let size = EVec2::new(
+            selection.width.clamp(FLOAT_MIN_SIZE.x, 640.0),
+            selection.height.clamp(FLOAT_MIN_SIZE.y, 640.0) + FLOAT_TITLE_HEIGHT,
+        );
+        let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
+        self.floats.push(Float {
+            id,
+            title: format!("截图 #{id}"),
+            content: FloatContent::Image(texture),
+            rect: egui::Rect::from_min_size(egui::pos2(32.0 + cascade, 32.0 + cascade), size),
+        });
+        self.message = format!("已把截图放入浮窗 #{id}");
     }
 
     /// 绘制并处理浮窗：移动（拖标题栏）、改大小（拖右下角）、关闭（右上角 ✕）。
@@ -1495,13 +1570,33 @@ impl PdfReaderApp {
             );
             // 缩放手柄示意
             painter.rect_filled(handle_rect.shrink(5.0), CornerRadius::ZERO, Color32::from_gray(120));
-            painter.text(
-                rect.min + EVec2::new(10.0, FLOAT_TITLE_HEIGHT + 8.0),
-                Align2::LEFT_TOP,
-                &self.floats[index].text,
-                egui::FontId::proportional(13.0),
-                Color32::from_gray(225),
-            );
+            match &self.floats[index].content {
+                FloatContent::Text(text) => {
+                    painter.text(
+                        rect.min + EVec2::new(10.0, FLOAT_TITLE_HEIGHT + 8.0),
+                        Align2::LEFT_TOP,
+                        text,
+                        egui::FontId::proportional(13.0),
+                        Color32::from_gray(225),
+                    );
+                }
+                FloatContent::Image(texture) => {
+                    // 正文区域：按**保持长宽比**放进窗口（居中、不拉伸变形）；
+                    // 改变窗口大小只影响显示尺寸，图片内容本身不变。
+                    let body = egui::Rect::from_min_max(
+                        rect.min + EVec2::new(4.0, FLOAT_TITLE_HEIGHT + 4.0),
+                        rect.max - EVec2::new(4.0, 4.0),
+                    );
+                    let size = texture.size_vec2();
+                    let target = fit_inside(size, body);
+                    painter.image(
+                        texture.id(),
+                        target,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+            }
         }
         if let Some(id) = close {
             self.floats.retain(|window| window.id != id);

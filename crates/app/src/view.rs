@@ -177,6 +177,146 @@ pub fn link_rect_in_page_bounds(rect: Rect, page_size: Size) -> bool {
         && rect.bottom() <= page_size.height + slack
 }
 
+/// 合成快照时"一页可用的已渲染位图"。
+///
+/// 位图像素与内容空间**同尺度**（D-17 的不变量），因此像素偏移可以直接相加。
+pub struct SnapshotPage<'a> {
+    /// 该页在内容空间的矩形（其尺寸就是位图像素尺寸）。
+    pub rect: Rect,
+    /// 整页位图（未分块且已缓存时可用）。
+    pub whole: Option<&'a RasterImage>,
+    /// 已缓存的瓦片（分块时可用）。
+    pub tiles: Vec<(TileSpec, &'a RasterImage)>,
+}
+
+/// 把 `content_rect` 覆盖到的**已渲染像素**拷成一张自包含图像（截图快照）。
+///
+/// ## 为什么存成内存快照，而不是"引用已渲染纹理的对应区域"
+/// 1. 主视图一旦缩放或换页，原纹理会被淘汰或换成另一比例 —— 浮窗内容会失效或显示错区域；
+/// 2. 区域可能跨页、跨留白，单张纹理根本无法表达；
+/// 3. 快照自包含，与主视图状态完全解耦，单页/多页走**同一条**代码路径。
+///
+/// 代价只有一次区域像素拷贝（区域 ≤ 一屏）。未被页面覆盖或**尚未就绪**的地方保持白色。
+/// 完全没有可用像素时返回 `None`（调用方据此提示）。
+pub fn compose_snapshot(pages: &[SnapshotPage<'_>], content_rect: Rect) -> Option<egui::ColorImage> {
+    let width = content_rect.width.ceil().max(1.0) as usize;
+    let height = content_rect.height.ceil().max(1.0) as usize;
+    // 白底：页面未覆盖处（页间距、页边距）与未就绪处都留白
+    let mut rgba = vec![255u8; width * height * 4];
+    let origin = content_rect.min();
+
+    /// 把源位图的一个子矩形拷进目标缓冲；越界一律裁剪。
+    fn blit(
+        image: &RasterImage,
+        source_origin: (i64, i64),
+        source: (i64, i64, i64, i64),
+        out: &mut [u8],
+        out_size: (usize, usize),
+        dest: (i64, i64),
+    ) {
+        let (sx, sy, sw, sh) = source;
+        let stride = image.format.bytes_per_pixel() as i64;
+        for row in 0..sh {
+            let source_y = sy + row - source_origin.1;
+            let dest_y = dest.1 + row;
+            if source_y < 0 || source_y >= image.height as i64 {
+                continue;
+            }
+            if dest_y < 0 || dest_y >= out_size.1 as i64 {
+                continue;
+            }
+            for column in 0..sw {
+                let source_x = sx + column - source_origin.0;
+                let dest_x = dest.0 + column;
+                if source_x < 0 || source_x >= image.width as i64 {
+                    continue;
+                }
+                if dest_x < 0 || dest_x >= out_size.0 as i64 {
+                    continue;
+                }
+                let from = ((source_y * image.width as i64 + source_x) * stride) as usize;
+                let to = ((dest_y * out_size.0 as i64 + dest_x) * 4) as usize;
+                let data = image.data();
+                let (r, g, b) = match image.format {
+                    PixelFormat::Bgra8 => (data[from + 2], data[from + 1], data[from]),
+                    PixelFormat::Rgba8 => (data[from], data[from + 1], data[from + 2]),
+                    PixelFormat::Gray8 => (data[from], data[from], data[from]),
+                };
+                out[to] = r;
+                out[to + 1] = g;
+                out[to + 2] = b;
+                out[to + 3] = 255;
+            }
+        }
+    }
+
+    let mut painted = false;
+    for page in pages {
+        let Some(overlap) = page.rect.intersection(content_rect) else { continue };
+        if overlap.width <= 0.0 || overlap.height <= 0.0 {
+            continue;
+        }
+        let destination = (
+            (overlap.x - origin.x).round() as i64,
+            (overlap.y - origin.y).round() as i64,
+        );
+        let source_x = (overlap.x - page.rect.x).round() as i64;
+        let source_y = (overlap.y - page.rect.y).round() as i64;
+        let width_px = overlap.width.round() as i64;
+        let height_px = overlap.height.round() as i64;
+
+        if let Some(image) = page.whole {
+            blit(
+                image,
+                (0, 0),
+                (source_x, source_y, width_px, height_px),
+                &mut rgba,
+                (width, height),
+                destination,
+            );
+            painted = true;
+            continue;
+        }
+
+        // 分块：逐块与源矩形求交后拷贝
+        for (tile, image) in &page.tiles {
+            let tile_rect = tile.pixel_rect(page.rect.size());
+            let tile_origin = (tile_rect.x.round() as i64, tile_rect.y.round() as i64);
+            let left = source_x.max(tile_origin.0);
+            let top = source_y.max(tile_origin.1);
+            let right = (source_x + width_px).min(tile_origin.0 + image.width as i64);
+            let bottom = (source_y + height_px).min(tile_origin.1 + image.height as i64);
+            if left >= right || top >= bottom {
+                continue;
+            }
+            blit(
+                image,
+                tile_origin,
+                (left, top, right - left, bottom - top),
+                &mut rgba,
+                (width, height),
+                (destination.0 + (left - source_x), destination.1 + (top - source_y)),
+            );
+            painted = true;
+        }
+    }
+
+    if !painted {
+        return None;
+    }
+    Some(color_image(PixelFormat::Rgba8, &rgba, width as u32, height as u32))
+}
+
+/// 把图像按**保持长宽比**的方式放进 `area`（居中，不拉伸变形）。
+pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
+    if image.x <= 0.0 || image.y <= 0.0 || area.width() <= 0.0 || area.height() <= 0.0 {
+        return area;
+    }
+    let scale = (area.width() / image.x).min(area.height() / image.y);
+    let size = egui::vec2(image.x * scale, image.y * scale);
+    egui::Rect::from_center_size(area.center(), size)
+}
+
 /// 截图模式的遮罩分块：返回 4 块矩形，把 `hole` 挖空（区域内保持透明）。
 ///
 /// egui 没有"擦除"混合，因此"半透明蒙层 + 中间透明"的常规做法就是
@@ -905,6 +1045,94 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 快照合成：白底、按页裁剪、支持整页与分块两种来源。
+    #[test]
+    fn compose_snapshot_blits_pages_tiles_and_leaves_white_outside() {
+        let make = |width: u32, height: u32, fill: u8| {
+            let mut data = Vec::with_capacity((width * height * 4) as usize);
+            for _ in 0..(width * height) {
+                data.extend_from_slice(&[fill, fill, fill, 255]); // BGRA：灰
+            }
+            RasterImage::new(width, height, PixelFormat::Bgra8, std::sync::Arc::from(data))
+                .expect("位图")
+        };
+
+        // 整页来源：页 4×4 放在内容空间 (10,10)，整页填 100
+        let whole = make(4, 4, 100);
+        let pages = vec![SnapshotPage {
+            rect: Rect::new(10.0, 10.0, 4.0, 4.0),
+            whole: Some(&whole),
+            tiles: Vec::new(),
+        }];
+
+        // 区域完全落在页内 → 全部为 100
+        let snapshot = compose_snapshot(&pages, Rect::new(11.0, 11.0, 2.0, 2.0)).expect("应有内容");
+        assert_eq!(snapshot.size, [2, 2]);
+        assert!(snapshot.pixels.iter().all(|pixel| pixel.r() == 100));
+
+        // 区域跨出页面 → 页外部分留白（255）
+        let snapshot = compose_snapshot(&pages, Rect::new(12.0, 12.0, 4.0, 4.0)).expect("应有内容");
+        assert_eq!(snapshot.size, [4, 4]);
+        assert_eq!(snapshot.pixels[0].r(), 100, "页内像素应拷贝过来");
+        assert_eq!(snapshot.pixels[3 * 4 + 3].r(), 255, "页外像素应为白");
+
+        // 完全在页外 → 无可用像素
+        assert!(compose_snapshot(&pages, Rect::new(100.0, 100.0, 4.0, 4.0)).is_none());
+
+        // 分块来源：瓦片是 512×512 的网格，因此页要够大才能放两块（1024×512）
+        let left = make(512, 512, 50);
+        let right = make(512, 512, 200);
+        let tiled = vec![SnapshotPage {
+            rect: Rect::new(0.0, 0.0, 1024.0, 512.0),
+            whole: None,
+            tiles: vec![
+                (TileSpec::new(0, 0), &left),
+                (TileSpec::new(1, 0), &right),
+            ],
+        }];
+        let snapshot =
+            compose_snapshot(&tiled, Rect::new(0.0, 0.0, 1024.0, 512.0)).expect("应有内容");
+        assert_eq!(snapshot.size, [1024, 512]);
+        assert_eq!(snapshot.pixels[0].r(), 50, "左块覆盖 x<512");
+        assert_eq!(snapshot.pixels[511].r(), 50);
+        assert_eq!(snapshot.pixels[512].r(), 200, "右块覆盖 x≥512");
+        assert_eq!(snapshot.pixels[1024 * 10].r(), 50, "第二行左侧仍是左块");
+        assert_eq!(snapshot.pixels[1024 * 10 + 512].r(), 200, "第二行右侧仍是右块");
+
+        // 多页 + 页间距：中间留白
+        let top = make(2, 2, 10);
+        let bottom = make(2, 2, 20);
+        let stacked = vec![
+            SnapshotPage { rect: Rect::new(0.0, 0.0, 2.0, 2.0), whole: Some(&top), tiles: Vec::new() },
+            SnapshotPage { rect: Rect::new(0.0, 3.0, 2.0, 2.0), whole: Some(&bottom), tiles: Vec::new() },
+        ];
+        let snapshot = compose_snapshot(&stacked, Rect::new(0.0, 0.0, 2.0, 5.0)).expect("应有内容");
+        assert_eq!(snapshot.size, [2, 5]);
+        assert_eq!(snapshot.pixels[0].r(), 10, "第一页");
+        assert_eq!(snapshot.pixels[2 * 2].r(), 255, "页间距应留白");
+        assert_eq!(snapshot.pixels[3 * 2].r(), 20, "第二页");
+    }
+
+    /// 图像按保持长宽比放进窗口区域（居中、不拉伸）。
+    #[test]
+    fn fit_inside_preserves_aspect_ratio() {
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
+
+        // 宽图 → 受宽度限制，高度按比例
+        let fitted = fit_inside(egui::vec2(400.0, 100.0), area);
+        assert_eq!(fitted.width(), 200.0);
+        assert_eq!(fitted.height(), 50.0);
+        assert_eq!(fitted.center(), area.center());
+
+        // 高图 → 受高度限制
+        let fitted = fit_inside(egui::vec2(100.0, 400.0), area);
+        assert_eq!(fitted.height(), 100.0);
+        assert_eq!(fitted.width(), 25.0);
+
+        // 退化输入不 panic
+        assert_eq!(fit_inside(egui::vec2(0.0, 0.0), area), area);
     }
 
     /// 截图遮罩：选区内部必须**不被**蒙层覆盖（即只有四块绕开选区的矩形）。
