@@ -118,6 +118,32 @@ impl Viewport {
     pub fn content_rect(&self) -> Rect {
         Rect::new(self.scroll.x, self.scroll.y, self.size.width, self.size.height)
     }
+
+    /// 视口中心在内容空间中的坐标（D-05：捕获锚点的起点）。
+    pub fn center_content_point(&self) -> Point {
+        Point::new(
+            self.scroll.x + self.size.width * 0.5,
+            self.scroll.y + self.size.height * 0.5,
+        )
+    }
+}
+
+/// 滚动锚点：视口中心对应的"页内位置"（PDF 页面空间）。
+///
+/// ## 为什么需要它
+/// 缩放、旋转、切换排布模式、窗口缩放都会**重算布局**，从而使滚动偏移失去意义。
+/// 若每次都退回"当前页居中"，用户的阅读位置会在每次缩放后漂移。
+/// 做法是：布局变化**之前**记下"视口中心落在哪一页的哪个点"，变化**之后**再把该点
+/// 放回视口中心。
+///
+/// 顺序很关键：捕获必须在布局变化之前，恢复必须在之后 —— 反过来就是"拿旧布局的点
+/// 去新布局里找位置"，必然漂移。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollAnchor {
+    /// 所在页。
+    pub page: PageIndex,
+    /// 页内位置（PDF 页面空间，左下原点）。
+    pub page_point: Point,
 }
 
 /// 某一页在内容空间中的摆放结果。
@@ -284,6 +310,31 @@ pub trait PageLayout: Send + Sync {
             placement.rect.y + placement.rect.height * 0.5 - viewport_size.height * 0.5,
         );
         self.clamp_scroll(layout, viewport_size, target)
+    }
+
+    /// **保持视野中心不动**：把某个"页内位置"放到视口中心，返回应设置的滚动偏移（D-05）。
+    ///
+    /// 由 [`crate::session::DocumentSession`] 在**任何重算布局**的操作前后调用
+    /// （缩放、旋转、切换排布、窗口缩放），使用户的阅读位置不因布局变化而漂移。
+    ///
+    /// 默认实现：`placement.page_to_content(page_point)` → 减去视口一半 → 夹取。
+    /// 页号不存在时返回零偏移（调用方应退化为 `scroll_to_page`）。
+    fn scroll_to_anchor(
+        &self,
+        layout: &DocumentLayout,
+        page: PageIndex,
+        page_point: Point,
+        viewport_size: Size,
+    ) -> Vec2 {
+        let Some(placement) = layout.placement(page) else {
+            return Vec2::ZERO;
+        };
+        let target = placement.page_to_content(page_point);
+        let scroll = Vec2::new(
+            target.x - viewport_size.width * 0.5,
+            target.y - viewport_size.height * 0.5,
+        );
+        self.clamp_scroll(layout, viewport_size, scroll)
     }
 
     /// 最大滚动偏移。
@@ -528,5 +579,36 @@ mod tests {
         assert_eq!(placement.pixel_size(), Size::new(918.0, 1189.0));
         // 与显示尺寸区分：displayed_size 保留小数
         assert_eq!(placement.displayed_size(), Size::new(918.4, 1188.6));
+    }
+
+    /// D-05：视口中心与"把页内点放回中心"的默认实现。
+    #[test]
+    fn viewport_center_and_scroll_to_anchor() {
+        let viewport = Viewport::new(Size::new(200.0, 100.0), Vec2::new(50.0, 10.0));
+        assert_eq!(viewport.center_content_point(), Point::new(150.0, 60.0));
+
+        // 两页 100×200、留白 5、页间距 10 → 页 0 矩形 (5, 5, 100, 200)
+        let layout = VerticalLayout.compute(&small_pages(2), &params(1.0));
+        // 页内点 (50, 100)（PDF 空间）→ 内容空间 (5+50, 5+(200−100)) = (55, 105)
+        // 视口 60×80 → scroll = (55−30, 105−40) = (25, 65)
+        let scroll = VerticalLayout.scroll_to_anchor(
+            &layout,
+            PageIndex::new(0),
+            Point::new(50.0, 100.0),
+            Size::new(60.0, 80.0),
+        );
+        assert!((scroll.x - 25.0).abs() < 1e-3, "got {scroll:?}");
+        assert!((scroll.y - 65.0).abs() < 1e-3, "got {scroll:?}");
+
+        // 页号不存在时返回零偏移（调用方据此退化）
+        assert_eq!(
+            VerticalLayout.scroll_to_anchor(
+                &layout,
+                PageIndex::new(99),
+                Point::new(0.0, 0.0),
+                Size::new(60.0, 80.0)
+            ),
+            Vec2::ZERO
+        );
     }
 }

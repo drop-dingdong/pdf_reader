@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use pdfcore::prelude::*;
-use pdfcore::testkit::{ImmediateScheduler, MemoryBackend, MemoryCache};
+use pdfcore::testkit::{ImmediateScheduler, MemoryBackend, MemoryCache, MemoryPage};
 
 /// 装配一个会话：等价于 UI 启动时做的那几行。
 fn assemble() -> DocumentSession {
@@ -344,6 +344,8 @@ fn tiling_routes_to_tiles_and_limits_requests_to_the_viewport() {
     session.set_tiling_policy(TilingPolicy::Always);
     let mut events = Vec::new();
     session.handle(ViewerCommand::ResizeViewport(Size::new(300.0, 300.0)), &mut events);
+    // 明确回到内容原点：视口恰好覆盖页 0 的左上角 198×288 像素（都在第 0 块瓦片内）
+    session.handle(ViewerCommand::SetScroll(Vec2::ZERO), &mut events);
     session.handle(ViewerCommand::RequestVisible, &mut events);
     session.pump(&mut events);
 
@@ -363,4 +365,86 @@ fn tiling_routes_to_tiles_and_limits_requests_to_the_viewport() {
     session.pump(&mut events);
     assert!(session.tiles_for(PageIndex::new(0)).is_empty());
     assert_eq!(session.image_for(PageIndex::new(0)).unwrap().width, 612);
+}
+
+/// D-05 端到端：缩放前后"视野中心对应的页内位置"必须不变。
+///
+/// 数值取自 data-flow 场景 4：612×792pt 页、zoom 1.5、视口 900×1000、scroll (0,0)
+/// → 中心对应页 0 的 PDF (292.00, 466.67)。
+/// 注意用**单页**文档：demo 文档第 3 页带 /Rotate 90，会让内容宽度变大并水平居中，
+/// 从而改变页 0 的横向位置（那些数字只适用于单页文档）。
+#[test]
+fn zoom_keeps_the_view_center_anchored() {
+    let backend = MemoryBackend::new(vec![MemoryPage::new(
+        Size::new(612.0, 792.0),
+        Rotation::None,
+        vec!["Hello world".to_string(), "Second line".to_string()],
+    )]);
+    let opened = backend.open(Source::Bytes(b"%PDF-1.4 fake"), None).unwrap();
+    let raster = opened.raster.clone();
+    let mut session = DocumentSession::new(
+        opened,
+        Arc::new(MemoryCache::new()),
+        Arc::new(ImmediateScheduler::new(raster)),
+        Box::new(VerticalLayout),
+        Box::new(RangeSelection::new()),
+    )
+    .expect("装配会话");
+
+    let mut events = Vec::new();
+    session.handle(ViewerCommand::SetZoom(1.5), &mut events);
+    session.handle(ViewerCommand::ResizeViewport(Size::new(900.0, 1000.0)), &mut events);
+    session.handle(ViewerCommand::SetScroll(Vec2::ZERO), &mut events);
+
+    let before = session.capture_anchor().expect("视口中心应落在页 0 上");
+    assert_eq!(before.page, PageIndex::new(0));
+    assert!((before.page_point.x - 292.0).abs() < 0.01, "got {:?}", before.page_point);
+    assert!((before.page_point.y - 466.67).abs() < 0.01, "got {:?}", before.page_point);
+
+    // 放大到 2.0：视野中心必须仍是同一个页内位置
+    session.handle(ViewerCommand::SetZoom(2.0), &mut events);
+    let after = session.capture_anchor().expect("缩放后中心仍应落在页 0 上");
+    assert_eq!(after.page, before.page);
+    assert!(
+        (after.page_point.x - before.page_point.x).abs() < 0.05
+            && (after.page_point.y - before.page_point.y).abs() < 0.05,
+        "缩放后视野中心漂移了：{before:?} → {after:?}"
+    );
+
+    // 对应的滚动偏移与文档推算一致： (146.00, 162.67)
+    assert!((session.viewport().scroll.x - 146.0).abs() < 0.5, "got {:?}", session.viewport().scroll);
+    assert!((session.viewport().scroll.y - 162.67).abs() < 0.5, "got {:?}", session.viewport().scroll);
+
+    // 再缩回去也必须回到原处（可逆）
+    session.handle(ViewerCommand::SetZoom(1.5), &mut events);
+    let round_trip = session.capture_anchor().expect("缩回后中心仍应落在页 0 上");
+    assert!(
+        (round_trip.page_point.x - before.page_point.x).abs() < 0.1
+            && (round_trip.page_point.y - before.page_point.y).abs() < 0.1,
+        "往复缩放后中心漂移了：{before:?} → {round_trip:?}"
+    );
+}
+
+/// D-05 退化路径：视野中心落在页间距时捕获失败，应退化为"当前页居中"而不是 panic。
+#[test]
+fn anchor_falls_back_to_page_center_between_pages() {
+    let mut session = assemble();
+    let mut events = Vec::new();
+    session.handle(ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)), &mut events);
+
+    // zoom=1 时页 0 矩形 y 12..804、页 1 起点 y=816；让中心落在 810（页间距内）
+    session.handle(ViewerCommand::SetScroll(Vec2::new(0.0, 410.0)), &mut events);
+    assert!(session.capture_anchor().is_none(), "中心落在页间距，应捕获失败");
+
+    let current = session.state().current_page;
+    session.handle(ViewerCommand::SetZoom(1.5), &mut events); // 不得 panic
+
+    // 退化行为 = 当前页居中
+    let placement = *session.layout().placement(current).expect("当前页应有布局");
+    let expected = placement.rect.y + placement.rect.height * 0.5 - session.viewport().size.height * 0.5;
+    assert!(
+        (session.viewport().scroll.y - expected).abs() < 0.5,
+        "期望退化到当前页居中 {expected}，实际 {:?}",
+        session.viewport().scroll
+    );
 }

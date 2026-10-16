@@ -87,7 +87,7 @@ pub mod prelude {
     pub use crate::image::{PixelFormat, RasterImage};
     pub use crate::layout::{
         DocumentLayout, LayoutParams, PageGeometry, PageLayout, PageLayoutMode, PagePlacement,
-        ReadingDirection, VerticalLayout, Viewport,
+        ReadingDirection, ScrollAnchor, VerticalLayout, Viewport,
     };
     pub use crate::render::{
         CancelToken, CacheStats, PageRaster, RenderCache, RenderEvent, RenderKey, RenderPriority,

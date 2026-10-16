@@ -23,7 +23,7 @@ use crate::ids::{JobId, PageIndex};
 use crate::image::RasterImage;
 use crate::layout::{
     DocumentLayout, LayoutParams, PageGeometry, PageLayout, PageLayoutMode, PagePlacement,
-    ReadingDirection, Viewport,
+    ReadingDirection, ScrollAnchor, Viewport,
 };
 use crate::render::{
     tiles_covering, RenderCache, RenderEvent, RenderKey, RenderPriority, RenderRequest,
@@ -341,6 +341,27 @@ impl DocumentSession {
         }
     }
 
+    /// 捕获当前视野中心对应的页内位置（D-05）。
+    ///
+    /// 中心落在页间距或页外（`page_at` 返回 `None`）时返回 `None`，
+    /// 调用方应退化为"当前页居中"（见 [`DocumentSession::restore_anchor`] 的调用方）。
+    pub fn capture_anchor(&self) -> Option<ScrollAnchor> {
+        let center = self.viewport.center_content_point();
+        let page = self.layout_engine.page_at(&self.layout, center)?;
+        let placement = self.layout.placement(page)?;
+        Some(ScrollAnchor { page, page_point: placement.content_to_page(center) })
+    }
+
+    /// 把锚点重新放回视口中心（`scroll_to_anchor` 内部已做夹取）。
+    pub fn restore_anchor(&mut self, anchor: ScrollAnchor) {
+        self.viewport.scroll = self.layout_engine.scroll_to_anchor(
+            &self.layout,
+            anchor.page,
+            anchor.page_point,
+            self.viewport.size,
+        );
+    }
+
     /// 已缓存的页文本（不会触发加载）。
     pub fn cached_page_text(&self, page: PageIndex) -> Option<Arc<PageText>> {
         self.page_texts.get(&page).cloned()
@@ -431,12 +452,13 @@ impl DocumentSession {
     pub fn handle(&mut self, command: ViewerCommand, events: &mut Vec<SessionEvent>) {
         match command {
             ViewerCommand::ResizeViewport(size) => {
+                // D-05：窗口尺寸变化同样保持视野中心 —— 用**旧**视口捕获锚点，
+                // 换尺寸后把它放回新的视口中心（布局本身不随视口变化）。
+                let anchor = self.capture_anchor();
                 self.viewport.size = size;
-                let clamped =
-                    self.layout_engine.clamp_scroll(&self.layout, size, self.viewport.scroll);
-                self.viewport.scroll = clamped;
+                self.apply_anchor(anchor);
                 events.push(SessionEvent::ViewportChanged);
-                events.push(SessionEvent::ScrollChanged(clamped));
+                events.push(SessionEvent::ScrollChanged(self.viewport.scroll));
                 self.sync_current_page(events);
             }
             ViewerCommand::ScrollBy(delta) => {
@@ -463,24 +485,20 @@ impl DocumentSession {
             ViewerCommand::SetLayoutMode(mode) => {
                 if self.state.layout_mode != mode {
                     self.state.layout_mode = mode;
-                    self.recompute_layout();
-                    events.push(SessionEvent::LayoutChanged);
-                    self.sync_current_page(events);
+                    self.relayout_keeping_anchor(events);
                 }
             }
             ViewerCommand::SetUserRotation(rotation) => {
                 if self.state.user_rotation != rotation {
                     self.state.user_rotation = rotation;
                     self.invalidate_render();
-                    self.recompute_layout();
-                    events.push(SessionEvent::LayoutChanged);
+                    self.relayout_keeping_anchor(events);
                 }
             }
             ViewerCommand::RotateClockwise => {
                 self.state.user_rotation = self.state.user_rotation.compose(Rotation::Clockwise90);
                 self.invalidate_render();
-                self.recompute_layout();
-                events.push(SessionEvent::LayoutChanged);
+                self.relayout_keeping_anchor(events);
             }
             ViewerCommand::SetSidebar(tab) => {
                 self.state.sidebar = tab;
@@ -570,6 +588,30 @@ impl DocumentSession {
         self.layout = self.layout_engine.compute(&self.pages, &params);
     }
 
+    /// D-05：把锚点放回视口中心；锚点缺失（中心落在页间距）时退化为"当前页居中"。
+    fn apply_anchor(&mut self, anchor: Option<ScrollAnchor>) {
+        match anchor {
+            Some(anchor) => self.restore_anchor(anchor),
+            None => {
+                self.viewport.scroll = self.layout_engine.scroll_to_page(
+                    &self.layout,
+                    self.state.current_page,
+                    self.viewport.size,
+                );
+            }
+        }
+    }
+
+    /// D-05：重算布局并保持视野中心（捕获 → 重算 → 恢复 → 事件）。
+    fn relayout_keeping_anchor(&mut self, events: &mut Vec<SessionEvent>) {
+        let anchor = self.capture_anchor();
+        self.recompute_layout();
+        self.apply_anchor(anchor);
+        events.push(SessionEvent::LayoutChanged);
+        events.push(SessionEvent::ScrollChanged(self.viewport.scroll));
+        self.sync_current_page(events);
+    }
+
     /// 缩放/旋转变化后，旧的渲染任务与缓存键都失效了。
     fn invalidate_render(&mut self) {
         self.scheduler.cancel_all();
@@ -615,16 +657,15 @@ impl DocumentSession {
         if (clamped - self.state.zoom).abs() < f32::EPSILON {
             return;
         }
-        // 缩放锚点取"当前页居中"：最可预测、也最不容易让用户迷失。
-        // 若将来要支持"以光标为锚点缩放"，只需在这里保留光标所在的内容坐标。
+        // D-05：锚点必须在改状态**之前**捕获（用旧布局），改完再放回。
+        let anchor = self.capture_anchor();
         self.state.zoom = clamped;
         self.invalidate_render();
         self.recompute_layout();
-        self.viewport.scroll = self
-            .layout_engine
-            .scroll_to_page(&self.layout, self.state.current_page, self.viewport.size);
+        self.apply_anchor(anchor);
         events.push(SessionEvent::LayoutChanged);
         events.push(SessionEvent::ScrollChanged(self.viewport.scroll));
+        self.sync_current_page(events);
     }
 
     fn fit_width(&mut self, events: &mut Vec<SessionEvent>) {
