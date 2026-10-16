@@ -210,7 +210,7 @@ fn hit_testing_maps_mouse_to_text_position() {
 
 #[test]
 fn search_and_outline_come_from_the_backend() {
-    let mut session = assemble();
+    let session = assemble();
     let hits = session.search(&SearchQuery::new("page")).expect("假后端支持搜索");
     assert_eq!(hits.len(), 2);
 

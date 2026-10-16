@@ -304,8 +304,9 @@ impl PageRaster for MemoryRaster {
             data.extend_from_slice(&color);
         }
         let data: Arc<[u8]> = Arc::from(data.into_boxed_slice());
-        RasterImage::new(width, height, PixelFormat::Rgba8, data)
-            .ok_or_else(|| CoreError::Internal("假光栅器生成的位图长度不匹配".to_string()))
+        let image = RasterImage::new(width, height, PixelFormat::Rgba8, data)
+            .ok_or_else(|| CoreError::Internal("假光栅器生成的位图长度不匹配".to_string()))?;
+        Ok(Arc::new(image))
     }
 }
 

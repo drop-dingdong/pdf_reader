@@ -16,9 +16,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::document::{Capabilities, Document, Link, OpenedDocument, OutlineNode};
+use crate::document::{Capabilities, Link, OpenedDocument, OutlineNode};
 use crate::error::{CoreError, Result};
-use crate::geometry::{Insets, Point, Rect, Rotation, Size, Vec2};
+use crate::geometry::{Insets, Point, Rotation, Size, Vec2};
 use crate::ids::{JobId, PageIndex};
 use crate::image::RasterImage;
 use crate::layout::{
@@ -26,12 +26,11 @@ use crate::layout::{
     ReadingDirection, Viewport,
 };
 use crate::render::{
-    PageRaster, RenderCache, RenderEvent, RenderKey, RenderPriority, RenderRequest, RenderScheduler,
-    Scale,
+    RenderCache, RenderEvent, RenderKey, RenderPriority, RenderRequest, RenderScheduler, Scale,
 };
 use crate::text::{
-    Highlight, HighlightKind, PageText, SearchHit, SearchQuery, SelectionGranularity, TextLayer,
-    TextPosition, TextSelection,
+    Highlight, HighlightKind, PageText, SearchHit, SearchQuery, SelectionGranularity, TextPosition,
+    TextSelection,
 };
 
 /// 最小缩放倍数。
