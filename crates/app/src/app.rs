@@ -25,7 +25,7 @@ use pdfcore::prelude::*;
 
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
-    commands_for_destination, link_overlay_visible, link_rect_in_page_bounds,
+    commands_for_destination, flatten_outline, link_overlay_visible, link_rect_in_page_bounds,
     outline_node_count, texture_pages,
     tile_view_rect, tile_view_rect_scaled,
     view_rect_for, view_to_content, KeyedStore,
@@ -42,6 +42,8 @@ const SIDEBAR_HANDLE_WIDTH: f32 = 5.0;
 
 /// 显示链接热区框所需的最低缩放：更小的时候热区框会糊成一片，反而干扰阅读（用户要求）。
 const LINK_OVERLAY_MIN_ZOOM: f32 = 0.75;
+/// 大纲每行的固定高度（虚拟化行渲染要求等行高）。
+const OUTLINE_ROW_HEIGHT: f32 = 18.0;
 /// 链接热区框的颜色（空心红线，用户指定）。
 const LINK_OVERLAY_COLOR: Color32 = Color32::from_rgb(220, 40, 40);
 
@@ -99,6 +101,8 @@ pub struct PdfReaderApp {
     tool: Tool,
     /// 是否画出链接热区框（工具栏 checkbox，默认关闭）。
     show_links: bool,
+    /// 大纲的**扁平行**（打开文档时摊平一次；侧栏用虚拟化行渲染，避免每帧布局上千行）。
+    outline_rows: Vec<crate::view::OutlineRow>,
     /// 侧栏宽度：**由 app 自己保存**。
     ///
     /// egui 的面板尺寸以 `parent_ui.scope_id().with_salt(...)` 为键持久化，
@@ -164,6 +168,7 @@ impl PdfReaderApp {
             drag: None,
             tool: Tool::default(),
             show_links: false,
+            outline_rows: Vec::new(),
             sidebar_width: 260.0,
             password_for: None,
             password_input: String::new(),
@@ -223,6 +228,12 @@ impl PdfReaderApp {
                 ) {
                     Ok(session) => {
                         self.navigation = session.navigation().ok();
+                        // 摊平一次即可（虚拟化行渲染需要行列表）
+                        self.outline_rows = self
+                            .navigation
+                            .as_ref()
+                            .map(|navigation| flatten_outline(&navigation.outline))
+                            .unwrap_or_default();
                         let title = session.opened().document.info().to_string();
                         self.session = Some(session);
                         self.textures.clear();
@@ -581,9 +592,32 @@ impl PdfReaderApp {
                     ui.label("（本文档没有书签）");
                     return;
                 }
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for node in &navigation.outline {
-                        draw_outline_node(ui, node, 0, &mut self.commands, session);
+                // **虚拟化行**：只布局可见的那十几行。
+                // 实测 1292 个节点时，每帧全量布局要花约 42ms（与缩放无关，纯 UI 开销）。
+                let rows = &self.outline_rows;
+                let row_height = OUTLINE_ROW_HEIGHT;
+                egui::ScrollArea::vertical().show_rows(ui, row_height, rows.len(), |ui, range| {
+                    for index in range {
+                        let Some((depth, title, destination)) = rows.get(index) else { continue };
+                        ui.horizontal(|ui| {
+                            ui.add_space(*depth as f32 * 12.0);
+                            let clickable = destination.is_some();
+                            let label = if clickable {
+                                RichText::new(title).strong()
+                            } else {
+                                RichText::new(title)
+                            };
+                            if ui
+                                .add_enabled(clickable, egui::Button::new(label).frame(false))
+                                .clicked()
+                            {
+                                if let Some(Destination::Page { page, .. }) = destination {
+                                    if page.get() < session.page_count() {
+                                        self.commands.push(ViewerCommand::GoToPage(*page));
+                                    }
+                                }
+                            }
+                        });
                     }
                 });
             });
@@ -1333,38 +1367,6 @@ fn canvas_to_content(canvas: egui::Rect, screen_position: egui::Pos2, scroll: Ve
     )
 }
 
-/// 递归画大纲节点；点击时跳到目标页。
-fn draw_outline_node(
-    ui: &mut egui::Ui,
-    node: &OutlineNode,
-    depth: usize,
-    commands: &mut Vec<ViewerCommand>,
-    session: &DocumentSession,
-) {
-    ui.horizontal(|ui| {
-        ui.add_space(depth as f32 * 12.0);
-        let clickable = node.destination.is_some();
-        let label = if clickable {
-            RichText::new(&node.title).strong()
-        } else {
-            RichText::new(&node.title)
-        };
-        if ui
-            .add_enabled(clickable, egui::Button::new(label).frame(false))
-            .clicked()
-        {
-            if let Some(Destination::Page { page, .. }) = &node.destination {
-                let page = *page;
-                if page.get() < session.page_count() {
-                    commands.push(ViewerCommand::GoToPage(page));
-                }
-            }
-        }
-    });
-    for child in &node.children {
-        draw_outline_node(ui, child, depth + 1, commands, session);
-    }
-}
 
 /// 让 `Align2` 与 `FontId` 在需要时可用（保持导入稳定）。
 #[allow(dead_code)]
