@@ -295,7 +295,8 @@ fn search_and_outline_come_from_the_backend() {
     assert_eq!(navigation.links_on(PageIndex::new(0)).len(), 1);
     assert_eq!(
         navigation.links_on(PageIndex::new(0))[0].destination,
-        Destination::Page { page: PageIndex::new(1), offset: None }
+        Destination::Page { page: PageIndex::new(1), offset: Some(Point::new(36.0, 20.0)) },
+        "演示文档的链接带具体落点（用于验证链接跳转居中）"
     );
     assert!(navigation.links_on(PageIndex::new(2)).is_empty(), "最后一页没有下一页链接");
     assert!(navigation.links_on(PageIndex::new(99)).is_empty(), "越界页应返回空切片而不是 panic");
@@ -576,4 +577,31 @@ fn zooming_cancels_in_flight_renders_at_the_old_scale() {
     );
     assert!(rendered.contains(&new), "新比例必须渲染：{rendered:?}");
     assert!(session.image_for(PageIndex::FIRST).is_some(), "新比例的位图应已入缓存");
+}
+
+/// 链接命中测试（用户需求：链接目的地有具体坐标时，跳转要把该坐标放到视口中心）。
+///
+/// 核心层负责"点在哪个热区里"，UI 负责把 `offset` 变成居中命令 —— 两边都有测试。
+#[test]
+fn link_hit_testing_returns_the_destination_with_its_offset() {
+    let mut session = assemble();
+    let mut events = Vec::new();
+    session.handle(ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)), &mut events);
+
+    // 演示文档每页有一条"跳到下一页"的热区：左留白起、页面顶部往下 24pt 处、160×18
+    let placement = *session.placement(PageIndex::FIRST).expect("第 1 页布局");
+    let page_size = placement.page_size;
+    let inside = Point::new(40.0, page_size.height - 12.0);
+    let destination = session.link_at(PageIndex::FIRST, inside).expect("应命中链接");
+    assert_eq!(
+        destination,
+        Destination::Page { page: PageIndex::new(1), offset: Some(Point::new(36.0, 20.0)) },
+        "链接目标应带具体落点"
+    );
+
+    // 热区之外不命中
+    assert_eq!(session.link_at(PageIndex::FIRST, Point::new(40.0, 20.0)), None);
+    // 最后一页没有链接
+    let last = session.page_count() - 1;
+    assert_eq!(session.link_at(PageIndex::new(last), inside), None);
 }

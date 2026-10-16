@@ -277,9 +277,10 @@ impl MemoryDocument {
                 vec![Link {
                     // 覆盖第一行文本上方的一条热区（PDF 页面空间）
                     rect: Rect::new(LEFT_MARGIN, page.size.height - 24.0, 160.0, 18.0),
+                    // 带**具体落点**：用于验证"链接跳转把目的地放到视口中心"
                     destination: Destination::Page {
                         page: PageIndex::new(index as u32 + 1),
-                        offset: None,
+                        offset: Some(Point::new(LEFT_MARGIN, 20.0)),
                     },
                 }]
             })

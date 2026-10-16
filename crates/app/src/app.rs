@@ -24,8 +24,9 @@ use egui::{
 use pdfcore::prelude::*;
 
 use crate::view::{
-    canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta, tile_view_rect,
-    tile_view_rect_scaled, view_rect_for, view_to_content, KeyedStore,
+    canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
+    commands_for_destination, link_overlay_visible, tile_view_rect, tile_view_rect_scaled,
+    view_rect_for, view_to_content, KeyedStore,
 };
 
 /// 纹理缓存容量（条目数）。真正的淘汰依据是"是否可见"，容量只是兜底。
@@ -36,6 +37,11 @@ const SIDEBAR_MIN_WIDTH: f32 = 160.0;
 const SIDEBAR_MAX_WIDTH: f32 = 640.0;
 /// 侧栏拖拽条的宽度（由 app 自己处理拖拽，见 `draw_sidebar` 的说明）。
 const SIDEBAR_HANDLE_WIDTH: f32 = 5.0;
+
+/// 显示链接热区框所需的最低缩放：更小的时候热区框会糊成一片，反而干扰阅读（用户要求）。
+const LINK_OVERLAY_MIN_ZOOM: f32 = 0.75;
+/// 链接热区框的颜色（空心红线，用户指定）。
+const LINK_OVERLAY_COLOR: Color32 = Color32::from_rgb(220, 40, 40);
 
 /// 每帧最多上传几张纹理。
 ///
@@ -89,6 +95,8 @@ pub struct PdfReaderApp {
     drag: Option<DragMode>,
     /// 拖拽语义（工具栏可切换）。
     tool: Tool,
+    /// 是否画出链接热区框（工具栏 checkbox，默认关闭）。
+    show_links: bool,
     /// 侧栏宽度：**由 app 自己保存**。
     ///
     /// egui 的面板尺寸以 `parent_ui.scope_id().with_salt(...)` 为键持久化，
@@ -145,6 +153,7 @@ impl PdfReaderApp {
             visible: Vec::new(),
             drag: None,
             tool: Tool::default(),
+            show_links: false,
             sidebar_width: 260.0,
             password_for: None,
             password_input: String::new(),
@@ -484,6 +493,8 @@ impl PdfReaderApp {
                     self.commands.push(ViewerCommand::CopySelection);
                 }
                 ui.toggle_value(&mut self.show_outline, "目录");
+                // 链接热区框（用户需求）：勾选后用红色空心框显示链接 bbox
+                ui.checkbox(&mut self.show_links, "链接框");
 
                 // 搜索（同步接口：大文档可能短暂卡顿，见 decision-log D-03/D-07）
                 ui.separator();
@@ -836,6 +847,31 @@ impl PdfReaderApp {
                 paint_highlight(&painter, session, &highlight, scroll, canvas.min);
             }
 
+            // 2b) 链接热区框（可开关；缩放过小时不画）
+            if link_overlay_visible(self.show_links, session.state().zoom, LINK_OVERLAY_MIN_ZOOM)
+            {
+                if let Some(navigation) = &self.navigation {
+                    for page in self.visible.clone() {
+                        let Some(placement) = session.placement(page).copied() else { continue };
+                        for link in navigation.links_on(page) {
+                            // 与高亮同一条换算链：PDF 页面空间 → 内容空间 → 视图空间
+                            let content = placement.rect_to_content(link.rect);
+                            let screen = egui::Rect::from_min_size(
+                                canvas.min
+                                    + EVec2::new(content.x - scroll.x, content.y - scroll.y),
+                                EVec2::new(content.width, content.height),
+                            );
+                            painter.rect_stroke(
+                                screen,
+                                CornerRadius::ZERO,
+                                Stroke::new(1.5, LINK_OVERLAY_COLOR),
+                                StrokeKind::Outside,
+                            );
+                        }
+                    }
+                }
+            }
+
             // 3) 交互
             //
             // 在画布上按下时主动结束文本输入：否则工具栏的搜索框仍持有焦点，
@@ -903,24 +939,54 @@ impl PdfReaderApp {
                         self.commands.push(ViewerCommand::SelectBegin(text_position));
                     }
                 }
-            } else if response.clicked() && select_tool {
-                // 选字工具下：点空白处清空选择，点到文字则重新落点。
-                // v1 无条件清空，于是"选完随手点一下"就会把选区清掉、复制扑空。
-                // 平移工具下单击什么都不做 —— 避免误点把辛苦选好的内容清掉。
+            } else if response.clicked() {
                 if let Some(position) = response.interact_pointer_pos() {
                     let content = canvas_to_content(canvas, position, scroll);
-                    match session.text_position_at(content) {
-                        Some(text_position) => {
-                            self.commands.push(ViewerCommand::SetSelectionGranularity(
-                                SelectionGranularity::Char,
-                            ));
-                            self.commands.push(ViewerCommand::SelectBegin(text_position));
+                    // 链接优先：命中热区就跳转（不论当前工具）—— 目的地有坐标时居中（用户要求）
+                    if !self.follow_link(session, content) && select_tool {
+                        // 选字工具下：点空白处清空选择，点到文字则重新落点。
+                        // v1 无条件清空，于是"选完随手点一下"就会把选区清掉、复制扑空。
+                        match session.text_position_at(content) {
+                            Some(text_position) => {
+                                self.commands.push(ViewerCommand::SetSelectionGranularity(
+                                    SelectionGranularity::Char,
+                                ));
+                                self.commands.push(ViewerCommand::SelectBegin(text_position));
+                            }
+                            None => self.commands.push(ViewerCommand::SelectClear),
                         }
-                        None => self.commands.push(ViewerCommand::SelectClear),
                     }
                 }
             }
         });
+    }
+
+    /// 命中当前页的链接热区则发出跳转命令，返回是否命中。
+    ///
+    /// 热区判断（点在哪个链接里）在核心层：[`DocumentSession::link_at`]；
+    /// 这里只负责"把内容空间的点交给它"，以及把结果翻译成命令
+    /// （[`crate::view::commands_for_destination`]：有落点 → 居中，无落点 → 顶部对齐）。
+    fn follow_link(&mut self, session: &DocumentSession, content: Point) -> bool {
+        for page in self.visible.clone() {
+            let Some(placement) = session.placement(page).copied() else { continue };
+            if !placement.rect.contains(content) {
+                continue;
+            }
+            let page_point = placement.content_to_page(content);
+            if let Some(destination) = session.link_at(page, page_point) {
+                match &destination {
+                    Destination::Uri(uri) => {
+                        self.message = format!("外部链接：{uri}（打开浏览器暂未实现）");
+                    }
+                    Destination::Page { .. } => {
+                        self.commands.extend(commands_for_destination(&destination));
+                    }
+                }
+                return true;
+            }
+            return false; // 点在页面上但没有链接
+        }
+        false
     }
 
     /// 加密文档的密码输入框（用模态窗口阻断背后交互）。

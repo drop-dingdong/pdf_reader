@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::document::{Capabilities, NavigationIndex, OpenedDocument};
+use crate::document::{Capabilities, Destination, NavigationIndex, OpenedDocument};
 use crate::error::{CoreError, Result};
 use crate::geometry::{Insets, Point, Rect, Rotation, Size, Vec2};
 use crate::ids::{JobId, PageIndex};
@@ -328,6 +328,20 @@ impl DocumentSession {
         }
         let key = RenderKey::new(page, placement.scale, placement.rotation);
         self.cache.get(&key)
+    }
+
+    /// 命中某页上的超链接：把 **PDF 页面空间**的点交给链接热区判断。
+    ///
+    /// 返回的目标**总是已解析**（D-08 在 `open` 时就把命名目标解析完了），
+    /// 因此 UI 点击时不会遇到"点了没反应"的中间状态。
+    /// 有落点（`offset`）的目标应居中显示（用户要求），只有页的目标顶部对齐（D-11）。
+    pub fn link_at(&self, page: PageIndex, page_point: Point) -> Option<Destination> {
+        let navigation = self.opened.document.navigation().ok()?;
+        navigation
+            .links_on(page)
+            .iter()
+            .find(|link| link.rect.contains(page_point))
+            .map(|link| link.destination.clone())
     }
 
     /// 该页当前缩放下的全部**已在缓存中**的瓦片，供 UI 按 `TileSpec::pixel_rect` 拼接绘制。

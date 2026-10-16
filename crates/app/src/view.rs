@@ -138,6 +138,31 @@ pub fn canvas_rect_for(full: egui::Rect, handle_width: f32) -> egui::Rect {
     egui::Rect::from_min_max(egui::pos2(full.min.x + handle, full.min.y), full.max)
 }
 
+/// 链接框在这些条件下可见：开关打开、且缩放不低于阈值。
+///
+/// 缩放过小时热区框会糊成一片、反而干扰阅读，因此低于阈值直接不画（用户要求）。
+pub fn link_overlay_visible(enabled: bool, zoom: f32, min_zoom: f32) -> bool {
+    enabled && zoom.is_finite() && zoom >= min_zoom
+}
+
+/// 链接跳转要发出的命令序列。
+///
+/// 用户要求：**链接目的地若带具体坐标，就把该坐标放到视口中心**（`CenterOnPagePoint`）；
+/// 只有页、没有坐标时退化为顶部对齐（D-11 的跳页语义）。
+/// 外部 URI 目前只提示、不打开浏览器（未实现的平台能力）。
+pub fn commands_for_destination(destination: &Destination) -> Vec<ViewerCommand> {
+    match destination {
+        Destination::Page { page, offset } => {
+            let mut commands = vec![ViewerCommand::GoToPage(*page)];
+            if let Some(point) = offset {
+                commands.push(ViewerCommand::CenterOnPagePoint { page: *page, point: *point });
+            }
+            commands
+        }
+        Destination::Uri(_) => Vec::new(),
+    }
+}
+
 /// 一个带容量上限的键值存储（用于 `RenderKey` → 纹理）。
 ///
 /// 与 LRU 位图缓存的区别：这里存的是 GPU 纹理句柄（`egui::TextureHandle`），
@@ -602,6 +627,44 @@ mod tests {
             .iter()
             .any(|(tile, value)| *tile == TileSpec::new(0, 0) && **value == "old-a"));
         assert_eq!(store.tiles_at(PageIndex::new(0), Rotation::None, 2000).len(), 1);
+    }
+
+    /// 链接跳转语义：有落点 → 先跳页再居中；无落点 → 只跳页（顶部对齐）。
+    #[test]
+    fn commands_for_destination_centers_when_an_offset_exists() {
+        let with_offset = Destination::Page {
+            page: PageIndex::new(3),
+            offset: Some(Point::new(120.0, 700.0)),
+        };
+        assert_eq!(
+            commands_for_destination(&with_offset),
+            vec![
+                ViewerCommand::GoToPage(PageIndex::new(3)),
+                ViewerCommand::CenterOnPagePoint {
+                    page: PageIndex::new(3),
+                    point: Point::new(120.0, 700.0),
+                },
+            ]
+        );
+
+        let page_only = Destination::Page { page: PageIndex::new(1), offset: None };
+        assert_eq!(
+            commands_for_destination(&page_only),
+            vec![ViewerCommand::GoToPage(PageIndex::new(1))],
+            "没有落点就只跳页，不做居中"
+        );
+
+        assert!(commands_for_destination(&Destination::Uri("https://x".into())).is_empty());
+    }
+
+    /// 链接框的显示条件：开关 + 缩放阈值。
+    #[test]
+    fn link_overlay_visibility_respects_the_switch_and_zoom_threshold() {
+        assert!(!link_overlay_visible(false, 2.0, 0.75), "开关关闭时不画");
+        assert!(!link_overlay_visible(true, 0.5, 0.75), "缩放低于阈值时不画");
+        assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
+        assert!(link_overlay_visible(true, 3.0, 0.75));
+        assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
     }
 
     /// 回归：画布必须保留**全部剩余高度**。
