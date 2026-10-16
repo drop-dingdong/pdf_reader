@@ -15,7 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::document::{
-    Capabilities, Document, DocumentInfo, Link, OpenedDocument, OutlineNode, PdfBackend, Source,
+    Capabilities, Destination, Document, DocumentInfo, Link, NavigationIndex, OpenedDocument,
+    OutlineNode, PdfBackend, Source,
 };
 use crate::error::{CoreError, Result};
 use crate::geometry::{Point, Rect, Rotation, Size};
@@ -217,26 +218,92 @@ impl MemoryPage {
 
 /// [`Document`] 的内存实现。
 ///
-/// 这里**只实现 `page_geometries()`**（v3 的批量接口），`page_size` / `page_rotation`
-/// 完全依赖 trait 的默认实现 —— 因此这个类型同时充当"批量表被正确用于单页查询"的验证载体。
+/// 这里**只实现 `page_geometries()` 与 `navigation()`**（v3 的批量/预解析接口），
+/// `page_size` / `page_rotation` 完全依赖 trait 的默认实现 —— 因此这个类型同时充当
+/// "批量表被正确用于单页查询"的验证载体。
+///
+/// `navigation()` 的数据在构造时一次性备好，并模拟真实后端的解析过程：
+/// 一个页号越界的命名目标会进入 `unresolved`，而不是变成"点了没反应"的链接。
 #[derive(Debug)]
 pub struct MemoryDocument {
     info: DocumentInfo,
-    pages: Arc<Vec<MemoryPage>>,
     geometries: Arc<[PageGeometry]>,
+    navigation: Arc<NavigationIndex>,
 }
 
+/// 假后端里"原始"的命名目标表：`(名称, 页号)`。其中 `chapter-broken` 指向越界页，
+/// 用来验证预解析会把失败项归入 `NavigationIndex::unresolved`。
+const RAW_NAMED_DESTINATIONS: [(&str, u32); 3] =
+    [("chapter-1", 0), ("chapter-2", 1), ("chapter-broken", 99)];
+
 impl MemoryDocument {
-    /// 由页面清单构建（几何表在此一次性算好，模拟"打开时备好"）。
+    /// 由页面清单构建（几何表与导航索引在此一次性算好，模拟"打开时备好"）。
     fn new(info: DocumentInfo, pages: Arc<Vec<MemoryPage>>) -> Self {
         let geometries: Arc<[PageGeometry]> = pages
             .iter()
             .map(|page| PageGeometry::new(page.size, page.rotation))
             .collect::<Vec<_>>()
             .into();
-        Self { info, pages, geometries }
+
+        // 大纲：每页一个节点，目标已解析成具体页
+        let outline = pages
+            .iter()
+            .enumerate()
+            .map(|(index, page)| OutlineNode {
+                title: page.lines.first().cloned().unwrap_or_else(|| format!("Page {}", index + 1)),
+                destination: Some(Destination::Page {
+                    page: PageIndex::new(index as u32),
+                    offset: None,
+                }),
+                children: Vec::new(),
+            })
+            .collect();
+
+        // 页内链接：每页一个"跳到下一页"的热区（最后一页没有）
+        let links_by_page = (0..pages.len())
+            .map(|index| {
+                if index + 1 >= pages.len() {
+                    return Vec::new();
+                }
+                let page = &pages[index];
+                vec![Link {
+                    // 覆盖第一行文本上方的一条热区（PDF 页面空间）
+                    rect: Rect::new(LEFT_MARGIN, page.size.height - 24.0, 160.0, 18.0),
+                    destination: Destination::Page {
+                        page: PageIndex::new(index as u32 + 1),
+                        offset: None,
+                    },
+                }]
+            })
+            .collect();
+
+        // 命名目标：能解析的进表，解析失败的进 unresolved
+        let mut named_destinations = HashMap::new();
+        let mut unresolved = Vec::new();
+        for (name, page) in RAW_NAMED_DESTINATIONS {
+            if (page as usize) < pages.len() {
+                named_destinations.insert(
+                    name.to_string(),
+                    Destination::Page { page: PageIndex::new(page), offset: None },
+                );
+            } else {
+                unresolved.push(name.to_string());
+            }
+        }
+
+        let navigation = Arc::new(NavigationIndex {
+            outline,
+            links_by_page,
+            named_destinations,
+            unresolved,
+        });
+
+        Self { info, geometries, navigation }
     }
 }
+
+/// 假文档文本与链接热区的左边距（与 [`build_page_text`] 保持一致）。
+const LEFT_MARGIN: f32 = 36.0;
 
 impl Document for MemoryDocument {
     fn info(&self) -> &DocumentInfo {
@@ -247,25 +314,8 @@ impl Document for MemoryDocument {
         Ok(self.geometries.clone())
     }
 
-    fn outline(&self) -> Result<Vec<OutlineNode>> {
-        // 假后端演示"有目录但能力声明为 false"之外的另一种情况：直接返回一个两级大纲。
-        Ok(self
-            .pages
-            .iter()
-            .enumerate()
-            .map(|(index, page)| OutlineNode {
-                title: page.lines.first().cloned().unwrap_or_else(|| format!("Page {}", index + 1)),
-                destination: Some(crate::document::Destination::Page {
-                    page: PageIndex::new(index as u32),
-                    offset: None,
-                }),
-                children: Vec::new(),
-            })
-            .collect())
-    }
-
-    fn links(&self, _page: PageIndex) -> Result<Vec<Link>> {
-        Ok(Vec::new())
+    fn navigation(&self) -> Result<Arc<NavigationIndex>> {
+        Ok(self.navigation.clone())
     }
 }
 
@@ -419,7 +469,8 @@ pub fn build_page_text(page: PageIndex, page_size: Size, lines: &[String]) -> Pa
     const CHAR_WIDTH: f32 = 6.0;
     const CHAR_HEIGHT: f32 = 10.0;
     const LINE_HEIGHT: f32 = 14.0;
-    const LEFT: f32 = 36.0;
+    // 与页内链接热区共用同一个左边距常量，避免两处漂移
+    const LEFT: f32 = LEFT_MARGIN;
 
     let mut text = String::new();
     let mut chars = Vec::new();
@@ -677,5 +728,29 @@ mod tests {
             .render(&RenderRequest::new(PageIndex::new(0), Scale::IDENTITY, Rotation::None))
             .unwrap();
         assert_eq!((whole.width, whole.height), (612, 792));
+    }
+
+    /// D-08：导航索引在打开时就已解析完毕（命名目标、逐页链接、失败项诊断）。
+    #[test]
+    fn navigation_index_is_pre_resolved() {
+        let backend = MemoryBackend::demo();
+        let opened = backend.open(Source::Bytes(b"%PDF-fake"), None).unwrap();
+        let navigation = opened.document.navigation().unwrap();
+
+        assert_eq!(navigation.links_by_page.len(), 3, "每页一个槽位（下标 = 页号）");
+        assert_eq!(navigation.outline.len(), 3);
+        assert!(navigation.named_destinations.contains_key("chapter-1"));
+        assert_eq!(navigation.unresolved, vec!["chapter-broken".to_string()]);
+        assert!(!navigation.is_empty());
+
+        // 大纲目标全部已解析成具体页（不存在"待解析"状态）
+        for node in &navigation.outline {
+            assert!(matches!(node.destination, Some(Destination::Page { .. })));
+        }
+
+        // 不支持导航的后端返回空索引而不是错误
+        let empty = NavigationIndex::empty();
+        assert!(empty.is_empty());
+        assert!(empty.links_on(PageIndex::new(0)).is_empty());
     }
 }

@@ -294,8 +294,8 @@ PDF 页面坐标
 
 - **MVP 功能边界是否要增删？** —— 少一项会让 M2 返工，多一项会拖慢首发。
 
-下一步（详见 [decision-log.md](decision-log.md) §3 代码同步清单 / §4 开工顺序）：
+下一步（**v3 接口层与内存假后端已完成并测试通过**，见 [decision-log.md](decision-log.md) §3/§4）：
 
-1. 装/续装 Rust 工具链，先让**现有** `crates/pdfcore` 的测试跑通（证明 v1/v2 代码自洽）；
-2. 按 **D-01 / D-02 / D-05 / D-08** 逐项改造为 v3，**每项带测试**（agent.md 规则 1）；
-3. 全部测试通过后提交（agent.md 规则 3），再进入 `backend-pdfium` 适配层（M1）。
+1. ✅ 工具链就绪，`cargo test` 全绿：50 单元 + 14 集成 + 1 doctest = **65 passed, 0 failed, 0 warnings**；
+2. ✅ **D-01 / D-02 / D-05 / D-08** 已逐项改造完成，每项都带测试；
+3. ⏭ 进入 M1：新建 `crates/backend-pdfium`（真实后端），再做 `app`（egui 壳）与打包。

@@ -34,8 +34,9 @@
 
 ## 3. 代码同步清单（`crates/pdfcore` 目前落后于 v3）
 
-> 按 `agent.md` 规则 1，下列每一项都必须**带测试**落地；规则 3 要求提交前跑通全部测试。
-> 当前状态：代码与 v1/v2 对齐，**未编译验证**（本机无工具链），因此第 4 节是下一轮的第一件事。
+> ✅ **全部完成**：上述 6 项改动连同测试已落地，`cargo test` 结果为
+> **50 单元 + 14 集成 + 1 doctest = 65 passed, 0 failed, 0 warnings**。
+> 相关提交：工具链验证检查点 `4f466fd`、D-01 `c1bfc77`、D-02 `82aed7f`、D-05 `f834648`、D-08（本次）。
 
 | # | 文件 | 需要的改动 | 必须新增/更新的测试 |
 | --- | --- | --- | --- |
@@ -46,9 +47,15 @@
 | 5 | `testkit.rs` | 内存后端实现批量表与 `NavigationIndex`；`MemoryRaster` 支持按瓦片渲染（便于断言"只渲染了该区域"） | 瓦片尺寸断言（最后一列/行更小）；`NavigationIndex` 内容断言 |
 | 6 | `tests/assemble.rs` | 适配新 API；新增锚点与分块两条端到端链路 | 见上 |
 
-## 4. 下一轮开工顺序（建议）
+## 4. 下一步（M1：接入真实后端）
 
-1. 装/续装 Rust 工具链（`/tmp` 内，不污染仓库）→ `cargo test` 跑通**现有**测试（先证明 v2 代码自洽）；
-2. 按第 3 节清单逐项改造为 v3，每项带测试；
-3. 全绿后 `cargo clippy`（可选）+ 提交；
-4. 之后再进入 `backend-pdfium` 适配层（M1）。
+v3 接口层与内存假后端已全部就绪并测试通过，接下来按 [architecture.md](architecture.md) §9 进入 M1：
+
+1. 新建 `crates/backend-pdfium`：实现 `PdfBackend` / `Document`（含 `page_geometries()` 批量表与
+   `navigation()` 预解析）/ `PageRaster`（整页 + `set_origin()` 分块）/ `TextLayer`；
+2. 用真实 PDF 采样集做冒烟测试（旋转页、CJK、加密文档、带大纲与链接的文档）；
+3. `app`（egui 壳）：`ViewerCommand` / `SessionEvent` ↔ 界面、白底页框占位、剪贴板；
+4. 打包（三平台 CI、动态库随包 + rpath 校验）。
+
+> 按 [agent.md](agent.md)：逻辑层测试随代码提交；**需要真实窗口/GPU 的验收项交给你**，
+> 我会在交付时说明"看什么、怎么看"。

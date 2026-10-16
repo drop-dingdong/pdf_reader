@@ -78,8 +78,8 @@ pub mod text;
 /// 常用类型的一次性导入。
 pub mod prelude {
     pub use crate::document::{
-        Capabilities, Destination, Document, DocumentInfo, Link, OpenedDocument, OutlineNode,
-        PdfBackend, Permissions, Source,
+        Capabilities, Destination, Document, DocumentInfo, Link, NavigationIndex, OpenedDocument,
+        OutlineNode, PdfBackend, Permissions, Source,
     };
     pub use crate::error::{CoreError, Result};
     pub use crate::geometry::{Insets, Point, Rect, Rotation, Size, Vec2};

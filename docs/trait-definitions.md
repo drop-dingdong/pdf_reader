@@ -822,6 +822,9 @@ impl DocumentSession {
     /// ▲v3 当前分块策略（UI 可据此决定走 `image_for` 还是 `tiles_for`）。
     pub fn tiling_policy(&self) -> TilingPolicy;
 
+    /// ▲v3 切换分块策略（会作废在飞任务；缓存键含义随之变化）。
+    pub fn set_tiling_policy(&mut self, policy: TilingPolicy);
+
     /// ▲v3 捕获/恢复视野中心锚点（会话在重算布局的操作内部自动使用）。
     pub fn capture_anchor(&self) -> Option<ScrollAnchor>;
     pub fn restore_anchor(&mut self, anchor: ScrollAnchor);

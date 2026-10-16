@@ -3,6 +3,7 @@
 //! 这一层对应 PDF 里"不变的那部分"：页数、页尺寸、`/Rotate`、元数据、书签树、超链接。
 //! 页面**像素**由 [`crate::render::PageRaster`] 负责，页面**文字**由 [`crate::text::TextLayer`] 负责。
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
@@ -89,6 +90,10 @@ impl fmt::Display for DocumentInfo {
 }
 
 /// 跳转目标：大纲项与超链接共用。
+///
+/// **总是已解析**：后端在 `open` 时把 PDF 的命名目标（`/Named`、`/Dests` 字典里的名称）
+/// 统一解析成具体页，因此这里没有"待解析"变体 —— UI 点击链接时不需要再访问后端，
+/// 也不会遇到"点了没反应"的中间状态（解析失败的名称见 [`NavigationIndex::unresolved`]）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Destination {
     /// 跳到某页（可选页内偏移，坐标系为 PDF 页面空间）。
@@ -98,8 +103,6 @@ pub enum Destination {
         /// 页内落点（通常是大纲项指向的纵坐标）。
         offset: Option<Point>,
     },
-    /// 命名目标（PDF 的 `/Named` 目标，需要后端再解析一次）。
-    Named(String),
     /// 外部 URI。
     Uri(String),
 }
@@ -122,6 +125,44 @@ pub struct OutlineNode {
     pub destination: Option<Destination>,
     /// 子节点。
     pub children: Vec<OutlineNode>,
+}
+
+/// 导航索引：打开时**一次性解析并合并存储**的全部导航数据。
+///
+/// ## 为什么合并成一个结构
+/// * 点击链接/大纲时不再访问后端（纯内存查找，O(1)）；
+/// * 页内链接可以随页面一起预取，缩略图侧边栏也能一次拿到；
+/// * 命名目标解析失败时不会被静默丢弃，而是记进 [`NavigationIndex::unresolved`] 供诊断。
+///
+/// 代价是打开时要遍历大纲树、每页 `/Annots` 与 `/Dests`。若实测拖慢打开，
+/// 后端可以把构建改成 `OnceLock` 惰性执行 —— **接口签名不变**。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NavigationIndex {
+    /// 大纲树（`destination` 已解析）。
+    pub outline: Vec<OutlineNode>,
+    /// 逐页链接热区；下标 = 页号，越界即该页无链接。
+    pub links_by_page: Vec<Vec<Link>>,
+    /// 名称 → 目标（PDF 交叉引用、命名目标）。
+    pub named_destinations: HashMap<String, Destination>,
+    /// 无法解析的名称；仅用于诊断（UI 可忽略）。
+    pub unresolved: Vec<String>,
+}
+
+impl NavigationIndex {
+    /// 空索引（无大纲、无链接）—— 给不支持导航的后端用。
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// 某页的链接热区；越界返回空切片（UI 不必自己判边界）。
+    pub fn links_on(&self, page: PageIndex) -> &[Link] {
+        self.links_by_page.get(page.get() as usize).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// 是否没有任何导航数据。
+    pub fn is_empty(&self) -> bool {
+        self.outline.is_empty() && self.links_by_page.iter().all(Vec::is_empty)
+    }
 }
 
 /// 后端能力声明。
@@ -213,7 +254,7 @@ pub trait PdfBackend: Send + Sync {
 /// * **`page_geometries()` 必须在打开时备好**并缓存（O(1) 返回 `Arc` 克隆）；
 ///   布局要一次性拿到全部页尺寸才能算出内容总高度与滚动范围。
 /// * `PageGeometry` 里的尺寸与旋转都是**未旋转**的 PDF 原始值；旋转由调用方叠加。
-/// * 大纲与链接属于"可选能力"：不支持时返回空 `Vec` 而不是错误，只有真正的解析失败才报错。
+/// * 导航属于"可选能力"：不支持时返回 [`NavigationIndex::empty`]，只有真正的解析失败才报错。
 pub trait Document: Send + Sync {
     /// 元数据与页数（必须 O(1) 返回，通常在打开时已经解析完毕）。
     fn info(&self) -> &DocumentInfo;
@@ -244,14 +285,12 @@ pub trait Document: Send + Sync {
             .ok_or(CoreError::PageOutOfRange { page, page_count: geometries.len() as u32 })
     }
 
-    /// 大纲（书签）树。默认返回空。
-    fn outline(&self) -> Result<Vec<OutlineNode>> {
-        Ok(Vec::new())
-    }
-
-    /// 某页的超链接。默认返回空。
-    fn links(&self, _page: PageIndex) -> Result<Vec<Link>> {
-        Ok(Vec::new())
+    /// 导航索引：大纲 + 逐页链接 + 命名目标，**打开时一次性解析并合并存储**。O(1) 返回。
+    ///
+    /// 取代了早期设计里的 `outline()` 与 `links(page)`：点击链接/大纲时不再访问后端。
+    /// 不支持导航的后端返回 [`NavigationIndex::empty`] 即可（不要报错）。
+    fn navigation(&self) -> Result<Arc<NavigationIndex>> {
+        Ok(Arc::new(NavigationIndex::empty()))
     }
 }
 

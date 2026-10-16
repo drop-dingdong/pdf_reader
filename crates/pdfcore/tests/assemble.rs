@@ -218,9 +218,30 @@ fn search_and_outline_come_from_the_backend() {
     assert_eq!(highlighted[0].kind, HighlightKind::ActiveSearchMatch);
     assert_eq!(highlighted[1].kind, HighlightKind::SearchMatch);
 
-    let outline = session.outline().expect("假后端提供大纲");
-    assert_eq!(outline.len(), 3);
-    assert_eq!(outline[0].destination, Some(Destination::Page { page: PageIndex::FIRST, offset: None }));
+    let navigation = session.navigation().expect("假后端提供导航索引");
+    assert_eq!(navigation.outline.len(), 3);
+    assert_eq!(
+        navigation.outline[0].destination,
+        Some(Destination::Page { page: PageIndex::FIRST, offset: None })
+    );
+
+    // D-08：页内链接与命名目标都在打开时解析完毕，点击时 0 次后端调用
+    assert_eq!(navigation.links_on(PageIndex::new(0)).len(), 1);
+    assert_eq!(
+        navigation.links_on(PageIndex::new(0))[0].destination,
+        Destination::Page { page: PageIndex::new(1), offset: None }
+    );
+    assert!(navigation.links_on(PageIndex::new(2)).is_empty(), "最后一页没有下一页链接");
+    assert!(navigation.links_on(PageIndex::new(99)).is_empty(), "越界页应返回空切片而不是 panic");
+    assert_eq!(
+        navigation.named_destinations.get("chapter-2"),
+        Some(&Destination::Page { page: PageIndex::new(1), offset: None })
+    );
+    assert_eq!(
+        navigation.unresolved,
+        vec!["chapter-broken".to_string()],
+        "解析失败的命名目标进 unresolved，而不是变成点了没反应的链接"
+    );
 }
 
 #[test]

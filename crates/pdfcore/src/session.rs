@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::document::{Capabilities, Link, OpenedDocument, OutlineNode};
+use crate::document::{Capabilities, NavigationIndex, OpenedDocument};
 use crate::error::{CoreError, Result};
 use crate::geometry::{Insets, Point, Rect, Rotation, Size, Vec2};
 use crate::ids::{JobId, PageIndex};
@@ -397,14 +397,11 @@ impl DocumentSession {
             .collect()
     }
 
-    /// 文档大纲（无大纲时返回空列表）。
-    pub fn outline(&self) -> Result<Vec<OutlineNode>> {
-        self.opened.document.outline()
-    }
-
-    /// 某页的链接。
-    pub fn links(&self, page: PageIndex) -> Result<Vec<Link>> {
-        self.opened.document.links(page)
+    /// 导航索引（大纲 + 逐页链接 + 命名目标，打开时已解析并合并存储）；O(1) 克隆。
+    ///
+    /// 取代了早期的 `outline()` 与 `links(page)`：点击链接/大纲时 **0 次后端调用**。
+    pub fn navigation(&self) -> Result<Arc<NavigationIndex>> {
+        self.opened.document.navigation()
     }
 
     /// 全文搜索（后端不支持时返回 [`CoreError::Unsupported`]）。
