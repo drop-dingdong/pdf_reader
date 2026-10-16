@@ -345,10 +345,26 @@ pub trait PageLayout: Send + Sync {
         )
     }
 
-    /// 把滚动偏移夹取到合法范围内（避免滚出内容区、出现空白页）。
+    /// 把滚动偏移规整到合法范围：**内容比视口小的方向上一律居中**，否则夹取到 `[0, max]`。
+    ///
+    /// "居中"这一条来自人工验收发现的缺陷修复（见 docs/feedback-round-1.md）：缩小时内容
+    /// （页 + 留白）可能比视口窄/矮，若仍把偏移夹到 0，页面就被钉在左上角 ——
+    /// 视觉上表现为"缩放时页面中心一直往左上漂"。允许负偏移（内容整体右/下移）即可居中。
     fn clamp_scroll(&self, layout: &DocumentLayout, viewport_size: Size, scroll: Vec2) -> Vec2 {
-        let max = self.max_scroll(layout, viewport_size);
-        Vec2::new(scroll.x.clamp(0.0, max.x), scroll.y.clamp(0.0, max.y))
+        Vec2::new(
+            center_or_clamp(layout.content_size.width, viewport_size.width, scroll.x),
+            center_or_clamp(layout.content_size.height, viewport_size.height, scroll.y),
+        )
+    }
+}
+
+/// 单轴滚动规整：内容小于视口 → 居中（可能为负）；否则夹取到 `[0, 内容 − 视口]`。
+fn center_or_clamp(content: f32, viewport: f32, offset: f32) -> f32 {
+    let slack = viewport - content;
+    if slack > 0.0 {
+        -slack * 0.5
+    } else {
+        offset.clamp(0.0, (content - viewport).max(0.0))
     }
 }
 
@@ -489,7 +505,8 @@ mod tests {
         assert_eq!(max, Vec2::new(0.0, 630.0 - 150.0));
 
         let clamped = VerticalLayout.clamp_scroll(&layout, viewport_size, Vec2::new(999.0, -20.0));
-        assert_eq!(clamped, Vec2::new(max.x, 0.0));
+        // x 轴：内容宽 110 < 视口宽 120 → 居中（偏移为负）；y 轴：内容更高 → 夹取到 [0, max]
+        assert_eq!(clamped, Vec2::new(-(120.0 - 110.0) * 0.5, 0.0));
 
         // 跳页后该页应居中（再被夹取到合法范围）
         let scroll = VerticalLayout.scroll_to_page(&layout, PageIndex::new(2), viewport_size);
@@ -610,5 +627,39 @@ mod tests {
             ),
             Vec2::ZERO
         );
+    }
+
+    /// 人工验收缺陷修复：内容比视口小的方向必须**居中**，而不是钉在左上角。
+    ///
+    /// 这正是"缩小时页面中心一直往左上漂"的根因。
+    #[test]
+    fn content_smaller_than_viewport_is_centered() {
+        let layout = VerticalLayout.compute(&vec![PageGeometry::new(Size::new(100.0, 200.0), Rotation::None)], &params(1.0));
+        // 单页 + 留白 5：内容 (110, 210)
+        assert_eq!(layout.content_size, Size::new(110.0, 210.0));
+
+        let viewport = Size::new(300.0, 500.0);
+        let scroll = VerticalLayout.clamp_scroll(&layout, viewport, Vec2::ZERO);
+        assert!((scroll.x - (300.0 - 110.0) * -0.5).abs() < 1e-3, "got {scroll:?}");
+        assert!((scroll.y - (500.0 - 210.0) * -0.5).abs() < 1e-3, "got {scroll:?}");
+
+        // 页中心应正好落在视口中心
+        let page = layout.placement(PageIndex::new(0)).expect("第 1 页");
+        let page_center = page.rect.center();
+        let view_center = Point::new(page_center.x - scroll.x, page_center.y - scroll.y);
+        assert!(
+            (view_center.x - viewport.width * 0.5).abs() < 1e-3
+                && (view_center.y - viewport.height * 0.5).abs() < 1e-3,
+            "页中心应处于视口中心，实际 {view_center:?}"
+        );
+
+        // 两个轴**独立**判断：内容超过视口的轴回到"夹取"语义，另一轴仍居中
+        let layout = VerticalLayout.compute(&small_pages(3), &params(1.0));
+        let scroll = VerticalLayout.clamp_scroll(&layout, viewport, Vec2::new(-50.0, -50.0));
+        assert!(
+            (scroll.x - (300.0 - 110.0) * -0.5).abs() < 1e-3,
+            "x 轴内容仍小于视口 → 仍居中，实际 {scroll:?}"
+        );
+        assert_eq!(scroll.y, 0.0, "y 轴内容更高 → 夹取到 0，偏移不得为负");
     }
 }

@@ -19,6 +19,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "PDF Reader",
         options,
-        Box::new(move |_cc| Ok(Box::new(PdfReaderApp::new(initial.clone())))),
+        Box::new(move |cc| Ok(Box::new(PdfReaderApp::new(cc, initial.clone())))),
     )
 }

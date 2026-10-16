@@ -23,10 +23,17 @@ use egui::{
 };
 use pdfcore::prelude::*;
 
-use crate::view::{command_for_key, command_for_scroll, view_rect_for, view_to_content, KeyedStore};
+use crate::view::{
+    command_for_key, command_for_scroll, command_for_zoom_delta, view_rect_for, view_to_content,
+    KeyedStore,
+};
 
 /// 纹理缓存容量（条目数）。真正的淘汰依据是"是否可见"，容量只是兜底。
 const TEXTURE_CAPACITY: usize = 64;
+
+/// 侧栏宽度范围（内容空间像素）。宽度由 app 自己保存 —— 见 `sidebar_width` 的说明。
+const SIDEBAR_MIN_WIDTH: f32 = 160.0;
+const SIDEBAR_MAX_WIDTH: f32 = 640.0;
 
 /// 拖拽中：区分"平移画面"与"选择文字"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +42,28 @@ enum DragMode {
     Pan,
     /// 拖选文字（起点命中了字符）。
     Select,
+}
+
+/// 鼠标拖拽的语义（人工验收反馈：应能显式指定，而不是只靠"是否点到文字"猜）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Tool {
+    /// 自动：拖到文字上就选字，否则平移画面。
+    #[default]
+    Auto,
+    /// 总是平移画面。
+    Pan,
+    /// 总是选字（拖到空白处则不选择）。
+    Select,
+}
+
+impl Tool {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "自动",
+            Self::Pan => "平移",
+            Self::Select => "选字",
+        }
+    }
 }
 
 /// 应用状态。
@@ -47,6 +76,15 @@ pub struct PdfReaderApp {
     events: Vec<SessionEvent>,
     visible: Vec<PageIndex>,
     drag: Option<DragMode>,
+    /// 拖拽语义（工具栏可切换）。
+    tool: Tool,
+    /// 侧栏宽度：**由 app 自己保存**。
+    ///
+    /// egui 的面板尺寸以 `parent_ui.scope_id().with_salt(...)` 为键持久化，
+    /// 而 eframe 每帧给的是一个新的根 `Ui`，于是 egui 侧的持久化读不回来 ——
+    /// 人工验收看到的"拖动边框、松手回弹"就是这个原因。改为每帧把上次观察到的宽度
+    /// 作为 `default_size` 回填，尺寸便由我们自己保住。
+    sidebar_width: f32,
     /// 待输入的密码（文档加密时）。
     password_for: Option<PathBuf>,
     password_input: String,
@@ -61,7 +99,13 @@ pub struct PdfReaderApp {
 
 impl PdfReaderApp {
     /// 构造；`initial` 为命令行传入的文件路径。
-    pub fn new(initial: Option<PathBuf>) -> Self {
+    ///
+    /// 这里顺手关掉 egui 内建的"Ctrl/⌘ + `+`/`-`/`0` 缩放整个界面"快捷键
+    /// （`Options::zoom_with_keyboard`）：否则按 `Ctrl`+`+` 会**同时**放大 UI 与文档页面
+    /// （人工验收反馈的现象）。关掉之后这些键由本应用统一解释为**文档缩放**。
+    pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
+        cc.egui_ctx.options_mut(|options| options.zoom_with_keyboard = false);
+
         let mut app = Self {
             session: None,
             navigation: None,
@@ -70,6 +114,8 @@ impl PdfReaderApp {
             events: Vec::new(),
             visible: Vec::new(),
             drag: None,
+            tool: Tool::default(),
+            sidebar_width: 260.0,
             password_for: None,
             password_input: String::new(),
             search_input: String::new(),
@@ -155,14 +201,26 @@ impl PdfReaderApp {
 
         // 滚轮（Ctrl/Cmd 时缩放）。egui 0.37 的 `smooth_scroll_delta` 语义是"内容应移动的方向"，
         // 与 `Viewport::scroll`（视口在内容中的位置）方向相反，因此映射里取负号。
-        let (scroll, modifiers) = ctx.input(|input| (input.smooth_scroll_delta, input.modifiers));
+        let (scroll, zoom_delta, modifiers) = ctx.input(|input| {
+            (input.smooth_scroll_delta, input.zoom_delta(), input.modifiers)
+        });
         if let Some(command) =
             command_for_scroll(scroll, modifiers.ctrl || modifiers.command, session.state().zoom)
         {
             self.commands.push(command);
         }
+        // Ctrl+滚轮 / 触控板捏合：egui 会把它识别成**缩放**（`zoom_delta`），滚动增量为 0，
+        // 因此必须单独处理这条路径（v1 遗漏 → 人工验收反馈"Ctrl+滚轮不生效"）。
+        if let Some(command) = command_for_zoom_delta(zoom_delta, session.state().zoom) {
+            self.commands.push(command);
+        }
+    }
 
-        // 拖入文件
+    /// 处理"把文件拖进窗口"。
+    ///
+    /// **必须在没有文档时也执行**：v1 把它放在"已有会话"的分支里，
+    /// 导致启动后（空状态）拖入 PDF 毫无反应 —— 人工验收反馈的缺陷之一。
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|input| {
             input
                 .raw
@@ -275,6 +333,16 @@ impl PdfReaderApp {
                     self.commands.push(ViewerCommand::RotateClockwise);
                 }
                 ui.separator();
+                // 拖拽语义：人工验收反馈要求"平移"与"选字"能显式指定，而不是只靠猜
+                ui.label("拖拽：");
+                for tool in [Tool::Auto, Tool::Pan, Tool::Select] {
+                    ui.selectable_value(&mut self.tool, tool, tool.label());
+                }
+                ui.separator();
+                // 复制：除了 Ctrl+C，也提供一个可见入口，便于确认选区内容
+                if ui.button("复制").clicked() {
+                    self.commands.push(ViewerCommand::CopySelection);
+                }
                 ui.toggle_value(&mut self.show_outline, "目录");
 
                 // 搜索（同步接口：大文档可能短暂卡顿，见 decision-log D-03/D-07）
@@ -289,7 +357,15 @@ impl PdfReaderApp {
                 if (submitted || ui.button("查找").clicked()) && !self.search_input.is_empty() {
                     match session.search(&SearchQuery::new(self.search_input.clone())) {
                         Ok(hits) => {
-                            self.message = format!("找到 {} 处", hits.len());
+                            // 0 命中往往意味着"扫描件没有文本层"，而不是搜索坏了 —— 说清楚
+                            self.message = if hits.is_empty() {
+                                format!(
+                                    "未找到“{}”（若 PDF 是扫描件则没有文本层，无法搜索）",
+                                    self.search_input
+                                )
+                            } else {
+                                format!("找到 {} 处", hits.len())
+                            };
                             self.hits = hits;
                             self.active_hit = if self.hits.is_empty() { None } else { Some(0) };
                             if let Some(first) = self.hits.first().map(|hit| hit.page) {
@@ -324,9 +400,11 @@ impl PdfReaderApp {
             return;
         }
         let navigation = self.navigation.clone();
-        egui::Panel::left("outline")
+        let width = self.sidebar_width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        let response = egui::Panel::left("outline")
             .resizable(true)
-            .default_size(260.0)
+            .default_size(width)
+            .size_range(SIDEBAR_MIN_WIDTH..=SIDEBAR_MAX_WIDTH)
             .show(ui, |ui| {
                 ui.heading("目录");
                 ui.separator();
@@ -344,6 +422,9 @@ impl PdfReaderApp {
                     }
                 });
             });
+        // 记住这一帧的实际宽度：egui 的面板状态以父 Ui 的 id 为键，
+        // 而 eframe 每帧给的是新的根 Ui，因此持久化读不回来 —— 由我们自己回填。
+        self.sidebar_width = response.response.rect.width();
     }
 
     fn draw_status(&self, ui: &mut egui::Ui, session: &DocumentSession) {
@@ -443,18 +524,29 @@ impl PdfReaderApp {
             }
 
             // 3) 交互
+            //
+            // 在画布上按下时主动结束文本输入：否则工具栏的搜索框仍持有焦点，
+            // `Ctrl+C` 会被它吃掉，用户看到的现象是"选中了却复制不出来"（人工验收反馈）。
+            if response.drag_started() || response.clicked() || response.double_clicked() {
+                ui.memory_mut(|memory| memory.stop_text_input());
+            }
+
             if response.drag_started() {
                 if let Some(position) = response.interact_pointer_pos() {
                     let content = canvas_to_content(canvas, position, scroll);
-                    match session.text_position_at(content) {
-                        Some(text_position) => {
+                    let hit = session.text_position_at(content);
+                    // 工具决定语义："平移"永远拖画面，"选字"只在命中文字时选中，
+                    // "自动"沿用"命中文字就选字"的启发式。
+                    match (self.tool, hit) {
+                        (Tool::Select, Some(text_position))
+                        | (Tool::Auto, Some(text_position)) => {
                             self.drag = Some(DragMode::Select);
                             self.commands.push(ViewerCommand::SetSelectionGranularity(
                                 SelectionGranularity::Char,
                             ));
                             self.commands.push(ViewerCommand::SelectBegin(text_position));
                         }
-                        None => self.drag = Some(DragMode::Pan),
+                        _ => self.drag = Some(DragMode::Pan),
                     }
                 }
             }
@@ -490,7 +582,20 @@ impl PdfReaderApp {
                     }
                 }
             } else if response.clicked() {
-                self.commands.push(ViewerCommand::SelectClear);
+                // 点空白处清空选择；点到文字则重新落点。
+                // v1 无条件清空，于是"选完随手点一下"就会把选区清掉、复制扑空。
+                if let Some(position) = response.interact_pointer_pos() {
+                    let content = canvas_to_content(canvas, position, scroll);
+                    match session.text_position_at(content) {
+                        Some(text_position) => {
+                            self.commands.push(ViewerCommand::SetSelectionGranularity(
+                                SelectionGranularity::Char,
+                            ));
+                            self.commands.push(ViewerCommand::SelectBegin(text_position));
+                        }
+                        None => self.commands.push(ViewerCommand::SelectClear),
+                    }
+                }
             }
         });
     }
@@ -525,6 +630,9 @@ impl PdfReaderApp {
 impl eframe::App for PdfReaderApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // 拖放打开：**空状态下也必须处理**（v1 只在已有会话时读取，导致启动后拖入无反应）
+        self.handle_dropped_files(&ctx);
 
         // 把会话临时取出，避免与 `self` 的其它字段发生借用冲突
         let Some(mut session) = self.session.take() else {

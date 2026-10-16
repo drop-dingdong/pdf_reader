@@ -73,6 +73,18 @@ pub fn command_for_scroll(
     }
 }
 
+/// 触控板/Ctrl+滚轮产生的**缩放增量** → 命令。
+///
+/// egui 会把 `Ctrl`+滚轮识别成缩放而不是滚动（见 `InputOptions::zoom_modifier`）：
+/// 此时 `smooth_scroll_delta` 为 0，而 `InputState::zoom_delta()` 给出倍率。
+/// 人工验收反馈的"Ctrl+滚轮不生效"根因就在这里 —— v1 只看滚动增量。
+pub fn command_for_zoom_delta(zoom_delta: f32, current_zoom: f32) -> Option<ViewerCommand> {
+    if !zoom_delta.is_finite() || (zoom_delta - 1.0).abs() < 1e-3 {
+        return None;
+    }
+    Some(ViewerCommand::SetZoom(current_zoom * zoom_delta))
+}
+
 /// 一个带容量上限的键值存储（用于 `RenderKey` → 纹理）。
 ///
 /// 与 LRU 位图缓存的区别：这里存的是 GPU 纹理句柄（`egui::TextureHandle`），
@@ -222,6 +234,22 @@ mod tests {
         // 无输入 → 无命令
         assert_eq!(command_for_scroll(EguiVec2::ZERO, false, 1.0), None);
         assert_eq!(command_for_scroll(EguiVec2::new(0.0, 0.1), true, 1.0), None);
+    }
+
+    /// Ctrl+滚轮 / 触控板捏合的缩放增量必须被翻译成文档缩放（v1 遗漏了这条路径）。
+    #[test]
+    fn zoom_delta_maps_ctrl_wheel_and_pinch() {
+        assert_eq!(command_for_zoom_delta(1.0, 2.0), None, "无缩放时不产生命令");
+        assert_eq!(command_for_zoom_delta(f32::NAN, 2.0), None, "异常值必须被忽略");
+
+        match command_for_zoom_delta(1.1, 2.0) {
+            Some(ViewerCommand::SetZoom(zoom)) => assert!((zoom - 2.2).abs() < 1e-4),
+            other => panic!("期望 SetZoom，实际 {other:?}"),
+        }
+        match command_for_zoom_delta(0.5, 2.0) {
+            Some(ViewerCommand::SetZoom(zoom)) => assert!((zoom - 1.0).abs() < 1e-4),
+            other => panic!("期望 SetZoom，实际 {other:?}"),
+        }
     }
 
     #[test]

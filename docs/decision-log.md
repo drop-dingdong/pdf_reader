@@ -31,6 +31,8 @@
 | D-00d | `PageLayout::compute` 收 `&[PageGeometry]`（逐页 `/Rotate`），`LayoutParams.user_rotation` 叠加 | architecture §6.3 |
 | D-00e | 坐标系：后端只给 PDF 页面空间坐标；`PagePlacement` 独占换算；旋转先于缩放 | architecture §5 |
 | D-00f | 缩放量化 1/8 作为缓存键；`invalidate_render` 同时清"在飞"集合 | architecture §7、data-flow 场景 4 |
+| **D-09** | 滚动规整**逐轴**判断：内容比视口小的方向上让内容**居中**（偏移可为负），否则夹取到 `[0, max]` | 首轮人工验收"缩小时页面中心往左上漂"（[feedback-round-1.md](feedback-round-1.md) §2.3）；落地 `layout::center_or_clamp` |
+| **D-10** | UI 缩放与文档缩放**不得共用快捷键**：关闭 egui 内建 `Options::zoom_with_keyboard`；`Ctrl`+`+`/`-`/`0` 与 `Ctrl`+滚轮统一解释为**文档**缩放 | 同上 §2.1/§2.2：原先 `Ctrl`+`+` 会同时放大界面与页面，而 `Ctrl`+滚轮被 egui 当成 UI 缩放、文档完全没反应 |
 
 ## 3. 代码同步清单（`crates/pdfcore` 目前落后于 v3）
 
