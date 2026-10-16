@@ -27,7 +27,7 @@ use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
     destination_points, find_dest_index, fit_inside, compose_snapshot, page_rect_to_screen,
-    screen_rect_to_content, veil_bands, view_rect_to_page_rect, SnapshotPage,
+    screen_rect_to_content, tip_rect_for, veil_bands, view_rect_to_page_rect, SnapshotPage,
     flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
@@ -180,6 +180,14 @@ pub struct PdfReaderApp {
     capture: Option<CaptureState>,
     /// 悬停预览浮窗（鼠标在页内链接上时出现）。
     hover_tip: Option<HoverTip>,
+    /// 上一帧鼠标所在链接框的尺寸（仅用于计算临时浮窗位置）
+    hover_link_size: egui::Vec2,
+    /// **链接 → 被引用点** 的登记表（与 `navigation.links_by_page` 同构）：
+    /// 下标与 `links_on(page)` 一一对应。打开文档时解析一次，
+    /// 之后悬停与跳转都直接用它（用户建议：记住索引，而不是每次按位置查）。
+    ///
+    /// 前提：打开后 PDF 内容不再变化（不会插入新链接）—— 用户已确认该假设成立。
+    link_marks: Vec<Vec<Option<(PageIndex, usize)>>>,
     /// 本帧累计的"像素格式转换"与"load_texture"耗时（诊断用，定位 150ms 到底在哪一段）。
     last_convert_ms: f64,
     last_upload_ms: f64,
@@ -255,6 +263,8 @@ impl PdfReaderApp {
             dest_marks: Vec::new(),
             capture: None,
             hover_tip: None,
+            hover_link_size: EVec2::new(160.0, 20.0),
+            link_marks: Vec::new(),
             last_convert_ms: 0.0,
             last_upload_ms: 0.0,
             sidebar_width: 260.0,
@@ -344,6 +354,39 @@ impl PdfReaderApp {
                                         .collect()
                                 })
                                 .collect()
+                            })
+                            .unwrap_or_default();
+                        // 链接 → 被引用点：建表时解析一次并**记住索引**。
+                        // 之后悬停预览与"跳转到矩形中心"都用它，不再按位置临时查询。
+                        self.link_marks = self
+                            .navigation
+                            .as_ref()
+                            .map(|navigation| {
+                                navigation
+                                    .links_by_page
+                                    .iter()
+                                    .map(|links| {
+                                        links
+                                            .iter()
+                                            .map(|link| {
+                                                let Destination::Page {
+                                                    page,
+                                                    offset: Some(point),
+                                                } = &link.destination
+                                                else {
+                                                    return None;
+                                                };
+                                                let marks = self
+                                                    .dest_marks
+                                                    .get(page.get() as usize)?;
+                                                let positions: Vec<Point> =
+                                                    marks.iter().map(|mark| mark.point).collect();
+                                                find_dest_index(&positions, *point)
+                                                    .map(|index| (*page, index))
+                                            })
+                                            .collect()
+                                    })
+                                    .collect()
                             })
                             .unwrap_or_default();
                         self.floats.clear();
@@ -1426,13 +1469,10 @@ impl PdfReaderApp {
         if let (Some(pointer), Some(navigation)) = (pointer, self.navigation.clone()) {
             'outer: for page in self.visible.clone() {
                 let Some(placement) = session.placement(page).copied() else { continue };
-                for link in navigation.links_on(page) {
-                    // 只在页内跳转（带具体坐标）的链接上响应
-                    let Destination::Page { page: target_page, offset: Some(point) } =
-                        &link.destination
-                    else {
-                        continue;
-                    };
+                let Some(registered) = self.link_marks.get(page.get() as usize) else { continue };
+                for (index, link) in navigation.links_on(page).iter().enumerate() {
+                    // 链接 → 被引用点：**直接取登记表**（建表时已解析）
+                    let Some(Some(target)) = registered.get(index).copied() else { continue };
                     let content = placement.rect_to_content(link.rect);
                     let screen = egui::Rect::from_min_size(
                         canvas.min + EVec2::new(content.x - scroll.x, content.y - scroll.y),
@@ -1441,15 +1481,11 @@ impl PdfReaderApp {
                     if !screen.contains(pointer) {
                         continue;
                     }
-                    // 链接 → 被引用点：用与建表相同的量化规则查找
-                    let Some(marks) = self.dest_marks.get(target_page.get() as usize) else {
-                        continue;
-                    };
-                    let positions: Vec<Point> = marks.iter().map(|mark| mark.point).collect();
-                    if let Some(index) = find_dest_index(&positions, *point) {
-                        found = Some((( *target_page, index), screen.left_bottom()));
-                        break 'outer;
-                    }
+                    // 锚点 = 链接框中心（浮窗左上角放这里，保证与链接框重叠）
+                    found = Some((target, screen.center()));
+                    // 记录链接框尺寸，供 tip_rect_for 计算（只需宽高）
+                    self.hover_link_size = screen.size();
+                    break 'outer;
                 }
             }
         }
@@ -1520,11 +1556,9 @@ impl PdfReaderApp {
             size.x.clamp(120.0, 420.0),
             size.y.clamp(80.0, 320.0) + FLOAT_TITLE_HEIGHT,
         );
-        let rect = clamp_float_rect(
-            egui::Rect::from_min_size(anchor + EVec2::new(12.0, 8.0), wanted),
-            canvas,
-            EVec2::new(120.0, 80.0),
-        );
+        // 锚点 anchor = 链接框中心；把它当作链接框中心传进去（尺寸用上一帧记录的链接框尺寸）
+        let link_rect = egui::Rect::from_center_size(anchor, self.hover_link_size);
+        let rect = tip_rect_for(link_rect, wanted, canvas);
         let response = ui.interact(rect, Id::unique("hover-tip"), Sense::click());
         let painter = ui.painter();
         painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(30, 32, 36));
@@ -1971,18 +2005,46 @@ impl PdfReaderApp {
                 continue;
             }
             let page_point = placement.content_to_page(content);
-            if let Some(destination) = session.link_at(page, page_point) {
-                match &destination {
-                    Destination::Uri(uri) => {
-                        self.message = format!("外部链接：{uri}（打开浏览器暂未实现）");
-                    }
-                    Destination::Page { .. } => {
-                        self.commands.extend(commands_for_destination(&destination));
+            // 找出命中的链接下标（登记表与 links_on 同构，因此能直接查）
+            let Some(navigation) = self.navigation.clone() else { return false };
+            let hit = navigation
+                .links_on(page)
+                .iter()
+                .position(|link| link.rect.contains(page_point));
+            let Some(index) = hit else { return false };
+            let destination = navigation.links_on(page)[index].destination.clone();
+            match &destination {
+                Destination::Uri(uri) => {
+                    self.message = format!("外部链接：{uri}（打开浏览器暂未实现）");
+                }
+                Destination::Page { .. } => {
+                    // 优先：跳到**被引用点矩形的中心**（用户要求；登记表在打开时解析）
+                    let target = self
+                        .link_marks
+                        .get(page.get() as usize)
+                        .and_then(|registered| registered.get(index))
+                        .copied()
+                        .flatten();
+                    let mark_center = target.and_then(|(mark_page, mark_index)| {
+                        self.dest_marks
+                            .get(mark_page.get() as usize)?
+                            .get(mark_index)
+                            .map(|mark| (mark_page, mark.rect.center()))
+                    });
+                    match mark_center {
+                        Some((mark_page, center)) => {
+                            self.commands.push(ViewerCommand::GoToPage(mark_page));
+                            self.commands.push(ViewerCommand::CenterOnPagePoint {
+                                page: mark_page,
+                                point: center,
+                            });
+                        }
+                        // 没有登记被引用点（例如仅 /Fit 的目标）→ 退回原有语义
+                        None => self.commands.extend(commands_for_destination(&destination)),
                     }
                 }
-                return true;
             }
-            return false; // 点在页面上但没有链接
+            return true;
         }
         false
     }

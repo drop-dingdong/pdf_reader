@@ -317,6 +317,19 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 临时预览浮窗的位置：**左上角放在链接框中心**（用户要求）。
+///
+/// 这样浮窗与链接框**必然重叠**，鼠标从链接移向浮窗的路径是连续的，
+/// 不会出现"刚离开链接框，预览就消失了"。
+/// 仍会夹取到视图区域内；若因此与链接框不再重叠，那是区域边界的极端情形（用户已说明可接受）。
+pub fn tip_rect_for(link_rect: egui::Rect, size: egui::Vec2, canvas: egui::Rect) -> egui::Rect {
+    clamp_float_rect(
+        egui::Rect::from_min_size(link_rect.center(), size),
+        canvas,
+        egui::Vec2::new(120.0, 80.0),
+    )
+}
+
 /// 被引用点**初始的矩形**：以该点为中心的一小块区域（PDF 页面空间）。
 ///
 /// 初始化时只为"以后可能被截取"预留一个可编辑的框；**不会**因此触发任何渲染 ——
@@ -1106,6 +1119,24 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 临时预览浮窗：左上角放在链接框中心（保证与链接框重叠，鼠标移动路径连续）。
+    #[test]
+    fn tip_rect_starts_at_the_link_center_so_it_overlaps() {
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 800.0));
+        let link = egui::Rect::from_min_size(egui::pos2(300.0, 200.0), egui::vec2(180.0, 24.0));
+        let size = egui::vec2(360.0, 260.0);
+
+        let tip = tip_rect_for(link, size, canvas);
+        assert_eq!(tip.min, link.center(), "左上角 = 链接框中心");
+        assert!(tip.intersects(link), "必须与链接框重叠（否则鼠标一移开预览就消失）");
+        assert!(link.contains(tip.min), "锚点落在链接框内");
+
+        // 靠近右下边界时会夹取回区域内
+        let edge_link = egui::Rect::from_min_size(egui::pos2(900.0, 760.0), egui::vec2(80.0, 24.0));
+        let tip = tip_rect_for(edge_link, size, canvas);
+        assert!(tip.max.x <= canvas.max.x + 1e-3 && tip.max.y <= canvas.max.y + 1e-3);
     }
 
     /// 建表与查询必须走同一个量化：链接 → 被引用点 的查找才不会落空。
