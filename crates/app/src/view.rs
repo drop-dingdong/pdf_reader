@@ -177,6 +177,15 @@ pub fn link_rect_in_page_bounds(rect: Rect, page_size: Size) -> bool {
         && rect.bottom() <= page_size.height + slack
 }
 
+/// 滚轮是否应作用于**文档视图**（而不是侧栏、工具栏等区域）。
+///
+/// 实测缺陷：在侧栏里滚动时文档也跟着滚 —— egui 的 `ScrollArea` 会消费滚动增量，
+/// 但 app 原先在**面板绘制之前**读取 `smooth_scroll_delta`，读到的仍是未消费的值。
+/// 修法有两层：读取时机移到面板之后 + 用本函数做指针位置的显式判据。
+pub fn wheel_targets_canvas(pointer_over_canvas: bool) -> bool {
+    pointer_over_canvas
+}
+
 /// 把位图**一遍**转成 egui 的 `ColorImage`。
 ///
 /// 为什么不用 `RasterImage::to_rgba8()` + `ColorImage::from_rgba_unmultiplied()`：
@@ -788,6 +797,13 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 回归：指针不在画布上（例如在侧栏里滚动）时，滚轮**不得**作用于文档视图。
+    #[test]
+    fn wheel_targets_canvas_only_when_the_pointer_is_over_it() {
+        assert!(wheel_targets_canvas(true), "指针在画布上 → 滚动文档");
+        assert!(!wheel_targets_canvas(false), "指针在侧栏/工具栏上 → 不滚动文档");
     }
 
     /// 位图 → ColorImage：一遍完成、通道顺序正确、尺寸匹配。

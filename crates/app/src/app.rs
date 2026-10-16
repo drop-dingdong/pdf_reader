@@ -26,7 +26,7 @@ use pdfcore::prelude::*;
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     color_image, commands_for_destination, flatten_outline, link_overlay_visible,
-    link_rect_in_page_bounds, outline_node_count, texture_pages,
+    link_rect_in_page_bounds, outline_node_count, texture_pages, wheel_targets_canvas,
     tile_view_rect, tile_view_rect_scaled,
     view_rect_for, view_to_content, KeyedStore,
 };
@@ -300,21 +300,9 @@ impl PdfReaderApp {
             }
         }
 
-        // 滚轮（Ctrl/Cmd 时缩放）。egui 0.37 的 `smooth_scroll_delta` 语义是"内容应移动的方向"，
-        // 与 `Viewport::scroll`（视口在内容中的位置）方向相反，因此映射里取负号。
-        let (scroll, zoom_delta, modifiers) = ctx.input(|input| {
-            (input.smooth_scroll_delta, input.zoom_delta(), input.modifiers)
-        });
-        if let Some(command) =
-            command_for_scroll(scroll, modifiers.ctrl || modifiers.command, session.state().zoom)
-        {
-            self.commands.push(command);
-        }
-        // Ctrl+滚轮 / 触控板捏合：egui 会把它识别成**缩放**（`zoom_delta`），滚动增量为 0，
-        // 因此必须单独处理这条路径（v1 遗漏 → 人工验收反馈"Ctrl+滚轮不生效"）。
-        if let Some(command) = command_for_zoom_delta(zoom_delta, session.state().zoom) {
-            self.commands.push(command);
-        }
+        // 滚轮与 Ctrl+滚轮的处理**不在这里**：它必须等侧栏等面板绘制完再读
+        // （egui 的 ScrollArea 会消费滚动增量），并只在指针位于画布上时生效 ——
+        // 否则"在侧栏里滚动，文档也跟着动"。见 `draw_canvas` 里的"滚轮"段。
     }
 
     /// 处理"把文件拖进窗口"。
@@ -701,6 +689,33 @@ impl PdfReaderApp {
             let response = ui.interact(canvas, Id::unique("pdf-canvas"), Sense::click_and_drag());
             let painter = ui.painter_at(canvas);
 
+            // ---- 滚轮（在面板绘制之后读，且仅当指针在画布上）----
+            //
+            // 1. **必须等侧栏/工具栏绘制完再读**：egui 的 `ScrollArea` 会消费滚动增量，
+            //    消费后 `smooth_scroll_delta` 归零；此前在面板绘制前读取，于是"侧栏滚动时文档也动"。
+            // 2. 加指针位置判据，双保险（且行为可预期）。
+            // 3. 当帧直接执行，滚轮少延迟一帧。
+            let pointer_over_canvas = ui
+                .ctx()
+                .pointer_hover_pos()
+                .map_or(false, |position| canvas.contains(position));
+            if wheel_targets_canvas(pointer_over_canvas) {
+                let (scroll_delta, zoom_delta, modifiers) = ui.input(|input| {
+                    (input.smooth_scroll_delta, input.zoom_delta(), input.modifiers)
+                });
+                if let Some(command) = command_for_scroll(
+                    scroll_delta,
+                    modifiers.ctrl || modifiers.command,
+                    session.state().zoom,
+                ) {
+                    session.handle(command, &mut self.events);
+                }
+                if let Some(command) = command_for_zoom_delta(zoom_delta, session.state().zoom) {
+                    session.handle(command, &mut self.events);
+                }
+                ui.ctx().request_repaint();
+            }
+
             // ---- 拖动**当帧生效** ----
             //
             // 拖动命令原先要等下一帧 `apply_and_pump` 才执行，于是画面永远落后指针一帧；
@@ -945,14 +960,15 @@ impl PdfReaderApp {
                                         ready += 1;
                                         paint_image(&painter, texture, tile_screen);
                                     }
-                                    None => paint_placeholder(&painter, tile_screen),
+                                    None => paint_blank(&painter, tile_screen),
                                 }
                             }
                         }
                         ("瓦片", ready, total)
                     }
                     Plan::Blank => {
-                        paint_placeholder(&painter, screen);
+                        // 纸张（白底 + 页框）在循环开头已经铺好，这里无需再画任何东西 ——
+                        // 尤其不要画瓦片边框（那会变成满屏网格线）。
                         ("白底页框", 0, 0)
                     }
                 };
@@ -1360,6 +1376,14 @@ fn paint_placeholder(painter: &egui::Painter, rect: egui::Rect) {
         Stroke::new(1.0, Color32::from_gray(180)),
         StrokeKind::Inside,
     );
+}
+
+/// 只铺白色、**不画任何边框**。
+///
+/// 用于"尚未就绪的瓦片"：整页已经铺过纸张（`paint_placeholder`），若每块缺失瓦片再描一圈灰边，
+/// 用户就会看到满屏网格线（第四轮验收反馈）。
+fn paint_blank(painter: &egui::Painter, rect: egui::Rect) {
+    painter.rect_filled(rect, CornerRadius::ZERO, Color32::WHITE);
 }
 
 /// 画一块高亮：PDF 页面空间 → 内容空间 → 视图空间。
