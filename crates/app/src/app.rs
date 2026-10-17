@@ -27,7 +27,7 @@ use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
     destination_points, drag_float_rect, find_dest_index, find_float_for_custom, float_rect_at_row,
-    overflow_layout, single_click_deferred, DOUBLE_CLICK_WINDOW,
+    overflow_layout,
     CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT,
     pin_exits_on_mode_change,
     zero_rect_at,
@@ -296,9 +296,6 @@ pub struct PdfReaderApp {
     sidebar_tab: SidebarTab,
     /// Pin 条目悬浮响应开关（勾选 = 悬浮时显示临时预览/高亮旧浮窗）。
     pin_hover_enabled: bool,
-    /// 延迟执行的"单击 Pin 条目"（下标、行矩形、发生时刻）：
-    /// 等一个双击窗口再执行，期间若来了双击就取消（双击只跳转）。
-    pending_pin_click: Option<(usize, egui::Rect, std::time::Instant)>,
     /// 侧栏 Pin 列表里正在被悬浮的条目（下标 + 该行的屏幕矩形，用于定位临时浮窗）。
     custom_hover: Option<(usize, egui::Rect)>,
     /// 上一帧主视图（画布）的矩形：侧栏先于画布绘制，用它给浮窗定位。
@@ -380,7 +377,6 @@ impl PdfReaderApp {
             show_outline: true,
             sidebar_tab: SidebarTab::Outline,
             pin_hover_enabled: true,
-            pending_pin_click: None,
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
             click_highlight: None,
@@ -955,13 +951,6 @@ impl PdfReaderApp {
             ui.label("（还没有自定义preview）");
             return;
         }
-        // 到点的挂起单击 → 现在执行（双击窗口内没等到第二下）
-        if let Some((index, rect, at)) = self.pending_pin_click {
-            if single_click_deferred(at.elapsed()) {
-                self.pending_pin_click = None;
-                self.activate_custom_preview(index, rect);
-            }
-        }
         let row_height = OUTLINE_ROW_HEIGHT;
         let mut hovered: Option<(usize, egui::Rect)> = None;
         let count = self.custom_previews.len();
@@ -1013,7 +1002,8 @@ impl PdfReaderApp {
                 }
                 let painter = ui.painter();
                 let page_width = 64.0;
-                let title_width = (rect.width() - page_width - 8.0).max(24.0);
+                let go_width = 24.0;
+                let title_width = (rect.width() - page_width - go_width - 8.0).max(24.0);
                 let job = overflow_layout(
                     &title,
                     egui::FontId::proportional(13.0),
@@ -1028,16 +1018,28 @@ impl PdfReaderApp {
                     ui.visuals().text_color(),
                 );
                 painter.text(
-                    egui::pos2(rect.max.x, rect.center().y),
+                    egui::pos2(rect.max.x - go_width, rect.center().y),
                     Align2::RIGHT_CENTER,
                     &page_label,
                     egui::FontId::proportional(11.0),
                     ui.visuals().weak_text_color(),
                 );
 
-                if response.double_clicked() {
-                    // 双击：**取消**挂起的单击动作，只做跳转（用户要求）
-                    self.pending_pin_click = None;
+                if response.clicked() {
+                    // 单击立即生成/唤出浮窗（不再延迟：跳转改由右侧 → 按钮触发）
+                    self.activate_custom_preview(index, rect);
+                }
+
+                // 行右侧的 go 按钮（→）：点击跳转到该条目记录的页与页内坐标。
+                // 它在行交互**之后**注册，因此点击优先落到按钮上，不会同时生成浮窗。
+                let go_rect = egui::Rect::from_center_size(
+                    egui::pos2(rect.max.x - 10.0, rect.center().y),
+                    EVec2::new(20.0, row_height),
+                );
+                if ui
+                    .put(go_rect, egui::Button::new("\u{2192}").frame(false))
+                    .clicked()
+                {
                     if let Some(preview) = self.custom_previews.get(index) {
                         self.commands.push(ViewerCommand::GoToPage(preview.page));
                         self.commands.push(ViewerCommand::CenterOnPagePoint {
@@ -1045,10 +1047,6 @@ impl PdfReaderApp {
                             point: preview.point,
                         });
                     }
-                } else if response.clicked() {
-                    // 单击：先挂起，等双击窗口过去再执行（否则双击的第一下就会生成浮窗）
-                    self.pending_pin_click = Some((index, rect, std::time::Instant::now()));
-                    ui.ctx().request_repaint_after(DOUBLE_CLICK_WINDOW);
                 }
             }
         });

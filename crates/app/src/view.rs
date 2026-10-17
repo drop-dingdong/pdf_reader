@@ -337,18 +337,6 @@ pub fn float_rect_at_row(
     clamp_float_rect(wanted, canvas, min_size)
 }
 
-/// 侧栏条目的"单击延迟"窗口：与 egui 的双击判定时间一致。
-///
-/// 背景：egui 在双击的**第一下**就会给出 `clicked()`，所以"单击生成浮窗 + 双击跳转"
-/// 会同时触发。做法是把单击动作**延迟一个双击窗口**再执行；窗口内若收到双击，
-/// 就取消那一次单击（用户要求：双击只跳转）。
-pub const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
-
-/// 延迟的单击是否已到执行时刻（`elapsed` 为从点击发生到现在的时间）。
-pub fn single_click_deferred(elapsed: std::time::Duration) -> bool {
-    elapsed >= DOUBLE_CLICK_WINDOW
-}
-
 /// 侧栏 Pin 列表行首的**类型符号**：文字 / 截图（用户指定的 unicode）。
 ///
 /// 用 Rust 的 `\u{...}` 转义写出，确保码点与用户要求一致：
@@ -1266,16 +1254,6 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
-    }
-
-    /// 单击延迟：窗口内不执行（给双击留机会），到点才执行。
-    #[test]
-    fn single_click_waits_out_the_double_click_window() {
-        assert!(!single_click_deferred(std::time::Duration::from_millis(0)));
-        assert!(!single_click_deferred(std::time::Duration::from_millis(299)));
-        assert!(single_click_deferred(DOUBLE_CLICK_WINDOW));
-        assert!(single_click_deferred(std::time::Duration::from_millis(1000)));
-        assert_eq!(DOUBLE_CLICK_WINDOW, std::time::Duration::from_millis(300));
     }
 
     /// 侧栏条目触发的浮窗：贴左缘、与该行居中、夹取在视图内。
