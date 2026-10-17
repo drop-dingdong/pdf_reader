@@ -2168,7 +2168,9 @@ impl PdfReaderApp {
         }
     }
 
-    /// 把截图结果存进某个**自定义图片预览**，并以固定浮窗显示。
+    /// 把截图结果存进某个**自定义图片预览**。
+    ///
+    /// **不再**自动生成浮窗（用户要求）：浮窗只在用户从侧栏悬浮/点击该条目时出现。
     fn commit_custom_image(
         &mut self,
         ui: &mut egui::Ui,
@@ -2180,38 +2182,16 @@ impl PdfReaderApp {
             self.message = "该区域还没有已渲染的像素（请稍候再试）".to_string();
             return;
         };
-        let id = self.next_float_id;
-        self.next_float_id += 1;
         let texture = ui.ctx().load_texture(
             format!("custom-image-{index}"),
             snapshot,
             egui::TextureOptions::LINEAR,
         );
         let Some(preview) = self.custom_previews.get_mut(index) else { return };
-        preview.snapshot = Some(texture.clone());
-        let title = preview.title.clone();
-        let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
-        // 只显示标题带 "(delete)" 的副本；正式副本由侧栏条目按需生成（用户要求）
-        let display_title = if title.is_empty() {
-            "图片预览".to_string()
-        } else {
-            title.clone()
-        };
-        self.floats.push(Float {
-            id,
-            title: format!("(delete) {display_title}"),
-            content: FloatContent::Image(texture),
-            rect: egui::Rect::from_min_size(
-                egui::pos2(24.0 + cascade, 24.0 + cascade),
-                EVec2::new(
-                    content_rect.width.clamp(FLOAT_MIN_SIZE.x, 640.0),
-                    content_rect.height.clamp(FLOAT_MIN_SIZE.y, 640.0) + FLOAT_TITLE_HEIGHT,
-                ),
-            ),
-            custom: None,
-            origin: None,
-        });
-        self.message = "已保存图片预览（用侧栏「自定义preview」唤出正式浮窗）".to_string();
+        preview.snapshot = Some(texture);
+        // 正文尺寸初始化 = 截图选区在**当时缩放比例**下的显示尺寸（用户要求）
+        preview.body_size = egui::vec2(content_rect.width, content_rect.height);
+        self.message = "已保存图片预览（从侧栏「自定义preview」唤出）".to_string();
     }
 
     /// 进入 Pin 状态：**预览模式回到平移**、退出截图模式（用户要求）。
@@ -2318,14 +2298,8 @@ impl PdfReaderApp {
                     snapshot: None,
                     body_size,
                 });
-                // 保存后直接以固定浮窗显示（原先的 "(delete)" 对照副本已去掉）
-                let index = self.custom_previews.len() - 1;
-                let size = float_size_for_body(body_size, FLOAT_TITLE_HEIGHT);
-                let anchor_row =
-                    egui::Rect::from_min_size(egui::pos2(0.0, 0.0), EVec2::new(1.0, 1.0));
-                let rect = self.float_rect_at_row(anchor_row, size);
-                self.spawn_custom_float(index, rect);
-                self.message = "已保存文字预览".to_string();
+                // **不**自动生成浮窗（用户要求）：只在从侧栏悬浮/点击该条目时出现
+                self.message = "已保存文字预览（从侧栏「自定义preview」唤出）".to_string();
             }
         } else if shoot {
             if let Some(dialog) = self.custom_dialog.take() {
@@ -2510,11 +2484,11 @@ impl PdfReaderApp {
             self.message = "该区域还没有已渲染的像素（请稍候再试）".to_string();
             return;
         };
-        let id = self.next_float_id;
-        self.next_float_id += 1;
-        let texture =
-            ui.ctx()
-                .load_texture(format!("dest-{}-{}", page.get(), index), snapshot, egui::TextureOptions::LINEAR);
+        let texture = ui.ctx().load_texture(
+            format!("dest-{}-{}", page.get(), index),
+            snapshot,
+            egui::TextureOptions::LINEAR,
+        );
 
         // 回写：矩形 + 截图 + **正文尺寸**（= 该选区在**当时缩放比例**下的显示尺寸，用户要求）
         let mut rect_saved = false;
@@ -2533,22 +2507,7 @@ impl PdfReaderApp {
             return;
         }
 
-        // 用浮窗展示新构建的图像（用户要求）
-        let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
-        self.floats.push(Float {
-            id,
-            title: format!("引用点截图 #{} · 第 {} 页", index + 1, page.display_number()),
-            content: FloatContent::Image(texture),
-            origin: None,
-            custom: None,
-            rect: egui::Rect::from_min_size(
-                egui::pos2(32.0 + cascade, 32.0 + cascade),
-                EVec2::new(
-                    overlap.width.clamp(FLOAT_MIN_SIZE.x, 640.0),
-                    overlap.height.clamp(FLOAT_MIN_SIZE.y, 640.0) + FLOAT_TITLE_HEIGHT,
-                ),
-            ),
-        });
+        // **不**自动生成浮窗（用户要求）：截图只写回数据，浮窗由悬停链接或点击标识按需出现
         self.message = format!(
             "已保存第 {} 页被引用点 #{} 的截图（矩形 {:.0}×{:.0} pt）",
             page.display_number(),
