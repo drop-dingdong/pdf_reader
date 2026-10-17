@@ -317,6 +317,35 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 生成"**自动换行 + 行数上限 + 溢出省略号**"的文本排版。
+///
+/// 用于浮窗里的文字：
+/// * 单行长文本 → 在浮窗宽度内自动换行（不再横向溢出）；
+/// * 行数超过上限（浮窗高度放不下）→ 截断并显示 `…`；
+/// * `max_rows = 1` 用于标题栏 → 长标题被截断，不会压到关闭按钮上。
+///
+/// 注：自动换行产生的行距与显式换行符的行距目前一致（都用同一个字体度量），
+/// 用户已说明"现阶段相对即可"，更精细的行距留待以后。
+pub fn overflow_layout(
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+    max_width: f32,
+    max_rows: usize,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat { font_id: font, color, ..Default::default() },
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: max_width.max(0.0),
+        max_rows,
+        break_anywhere: false,
+        overflow_character: Some('…'),
+    };
+    job
+}
+
 /// 以某点为**中心**、大小为零的矩形。
 ///
 /// 自定义 preview 需要"与被引用点对应"的位置信息：位置就是 Pin 结束时点击的页内坐标，
@@ -1188,6 +1217,30 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 浮窗文本排版：自动换行、行数上限、溢出省略号。
+    #[test]
+    fn overflow_layout_wraps_limits_rows_and_ellipsizes() {
+        let font = egui::FontId::proportional(13.0);
+        let color = egui::Color32::WHITE;
+
+        // 正文：宽度受限（自动换行）+ 行数上限
+        let job = overflow_layout("很长的单行文本", font.clone(), color, 200.0, 6);
+        assert_eq!(job.wrap.max_width, 200.0, "宽度受限 → 自动换行");
+        assert_eq!(job.wrap.max_rows, 6);
+        assert_eq!(job.wrap.overflow_character, Some('…'), "超出要显示省略号");
+        assert_eq!(job.text, "很长的单行文本");
+        assert_eq!(job.sections.len(), 1);
+        assert_eq!(job.sections[0].format.font_id, font);
+
+        // 标题：只允许一行
+        let job = overflow_layout("一个非常非常长的标题", font.clone(), color, 120.0, 1);
+        assert_eq!(job.wrap.max_rows, 1, "标题只保留一行（超出截断）");
+
+        // 负数宽度不应 panic，按 0 处理
+        let job = overflow_layout("x", font, color, -10.0, 1);
+        assert_eq!(job.wrap.max_width, 0.0);
     }
 
     /// 自定义 preview 的配套小工具：零尺寸矩形 + 退出 Pin 的唯一条件。

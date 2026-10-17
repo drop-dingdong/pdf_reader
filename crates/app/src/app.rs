@@ -26,7 +26,8 @@ use pdfcore::prelude::*;
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
-    destination_points, drag_float_rect, find_dest_index, pin_exits_on_mode_change,
+    destination_points, drag_float_rect, find_dest_index, overflow_layout,
+    pin_exits_on_mode_change,
     zero_rect_at,
     find_float_for_target, fit_inside,
     compose_snapshot, hover_preview_allowed, move_to_last,
@@ -1752,11 +1753,21 @@ impl PdfReaderApp {
         let title_rect =
             egui::Rect::from_min_size(rect.min, EVec2::new(rect.width(), FLOAT_TITLE_HEIGHT));
         painter.rect_filled(title_rect, CornerRadius::same(4), Color32::from_rgb(54, 58, 66));
-        painter.text(
-            title_rect.left_center() + EVec2::new(8.0, 0.0),
-            Align2::LEFT_CENTER,
-            format!("引用点预览 · 第 {} 页（点击固定）", page.display_number()),
+        let tip_title = format!("引用点预览 · 第 {} 页（点击固定）", page.display_number());
+        let tip_job = overflow_layout(
+            &tip_title,
             egui::FontId::proportional(12.0),
+            Color32::WHITE,
+            title_rect.width() - 12.0,
+            1,
+        );
+        let tip_galley = painter.layout_job(tip_job);
+        painter.galley(
+            egui::pos2(
+                title_rect.min.x + 8.0,
+                title_rect.center().y - tip_galley.size().y * 0.5,
+            ),
+            tip_galley,
             Color32::WHITE,
         );
         let body = egui::Rect::from_min_max(
@@ -2356,24 +2367,50 @@ impl PdfReaderApp {
                 StrokeKind::Inside,
             );
             painter.rect_filled(title_rect, CornerRadius::same(4), title_color);
-            painter.text(
-                title_rect.left_center() + EVec2::new(8.0, 0.0),
-                Align2::LEFT_CENTER,
+            // 标题：**单行截断**（长标题不再压到关闭按钮上）
+            let title_font = egui::FontId::proportional(13.0);
+            let title_job = overflow_layout(
                 &self.floats[index].title,
-                egui::FontId::proportional(13.0),
+                title_font,
+                Color32::WHITE,
+                title_rect.width() - 30.0,
+                1,
+            );
+            let title_galley = painter.layout_job(title_job);
+            painter.galley(
+                egui::pos2(
+                    title_rect.min.x + 8.0,
+                    title_rect.center().y - title_galley.size().y * 0.5,
+                ),
+                title_galley,
                 Color32::WHITE,
             );
             // 缩放手柄示意
             painter.rect_filled(handle_rect.shrink(5.0), CornerRadius::ZERO, Color32::from_gray(120));
             match &self.floats[index].content {
                 FloatContent::Text(text) => {
-                    painter.text(
-                        rect.min + EVec2::new(10.0, FLOAT_TITLE_HEIGHT + 8.0),
-                        Align2::LEFT_TOP,
-                        text,
-                        egui::FontId::proportional(13.0),
-                        Color32::from_gray(225),
-                    );
+                    // 正文：**自动换行 + 行数上限（放不下就截断并显示 …）**
+                    let body_origin = rect.min + EVec2::new(10.0, FLOAT_TITLE_HEIGHT + 8.0);
+                    let body_area =
+                        egui::Rect::from_min_max(body_origin, rect.max - EVec2::new(10.0, 8.0));
+                    if body_area.width() > 0.0 && body_area.height() > 0.0 {
+                        // 行高按字体 1.3 倍估算；至少保留 1 行
+                        let row_height = 13.0 * 1.3;
+                        let rows = ((body_area.height() / row_height).floor() as usize).max(1);
+                        let job = overflow_layout(
+                            text,
+                            egui::FontId::proportional(13.0),
+                            Color32::from_gray(225),
+                            body_area.width(),
+                            rows,
+                        );
+                        let galley = painter.layout_job(job);
+                        painter.with_clip_rect(body_area).galley(
+                            body_area.min,
+                            galley,
+                            Color32::from_gray(225),
+                        );
+                    }
                 }
                 FloatContent::Image(texture) => {
                     // 正文区域：按**保持长宽比**放进窗口（居中、不拉伸变形）；
