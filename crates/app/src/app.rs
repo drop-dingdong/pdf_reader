@@ -27,7 +27,7 @@ use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
     destination_points, drag_float_rect, find_dest_index, find_float_for_custom, float_rect_at_row,
-    overflow_layout,
+    overflow_layout, single_click_deferred, DOUBLE_CLICK_WINDOW,
     CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT,
     pin_exits_on_mode_change,
     zero_rect_at,
@@ -296,6 +296,9 @@ pub struct PdfReaderApp {
     sidebar_tab: SidebarTab,
     /// Pin 条目悬浮响应开关（勾选 = 悬浮时显示临时预览/高亮旧浮窗）。
     pin_hover_enabled: bool,
+    /// 延迟执行的"单击 Pin 条目"（下标、行矩形、发生时刻）：
+    /// 等一个双击窗口再执行，期间若来了双击就取消（双击只跳转）。
+    pending_pin_click: Option<(usize, egui::Rect, std::time::Instant)>,
     /// 侧栏 Pin 列表里正在被悬浮的条目（下标 + 该行的屏幕矩形，用于定位临时浮窗）。
     custom_hover: Option<(usize, egui::Rect)>,
     /// 上一帧主视图（画布）的矩形：侧栏先于画布绘制，用它给浮窗定位。
@@ -377,6 +380,7 @@ impl PdfReaderApp {
             show_outline: true,
             sidebar_tab: SidebarTab::Outline,
             pin_hover_enabled: true,
+            pending_pin_click: None,
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
             click_highlight: None,
@@ -951,6 +955,13 @@ impl PdfReaderApp {
             ui.label("（还没有自定义preview）");
             return;
         }
+        // 到点的挂起单击 → 现在执行（双击窗口内没等到第二下）
+        if let Some((index, rect, at)) = self.pending_pin_click {
+            if single_click_deferred(at.elapsed()) {
+                self.pending_pin_click = None;
+                self.activate_custom_preview(index, rect);
+            }
+        }
         let row_height = OUTLINE_ROW_HEIGHT;
         let mut hovered: Option<(usize, egui::Rect)> = None;
         let count = self.custom_previews.len();
@@ -1025,6 +1036,8 @@ impl PdfReaderApp {
                 );
 
                 if response.double_clicked() {
+                    // 双击：**取消**挂起的单击动作，只做跳转（用户要求）
+                    self.pending_pin_click = None;
                     if let Some(preview) = self.custom_previews.get(index) {
                         self.commands.push(ViewerCommand::GoToPage(preview.page));
                         self.commands.push(ViewerCommand::CenterOnPagePoint {
@@ -1033,7 +1046,9 @@ impl PdfReaderApp {
                         });
                     }
                 } else if response.clicked() {
-                    self.activate_custom_preview(index, rect);
+                    // 单击：先挂起，等双击窗口过去再执行（否则双击的第一下就会生成浮窗）
+                    self.pending_pin_click = Some((index, rect, std::time::Instant::now()));
+                    ui.ctx().request_repaint_after(DOUBLE_CLICK_WINDOW);
                 }
             }
         });
