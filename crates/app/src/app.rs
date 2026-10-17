@@ -882,19 +882,27 @@ impl PdfReaderApp {
                 let (scroll_delta, zoom_delta, modifiers) = ui.input(|input| {
                     (input.smooth_scroll_delta, input.zoom_delta(), input.modifiers)
                 });
+                // 注意：**只有真的产生了滚动/缩放命令**才开启静默窗口。
+                // 曾经把开窗写在"指针在画布上"的分支里，结果静止悬停时也每帧刷新，
+                // 静默窗口永不结束 → 正常悬停也看不到预览。
+                let mut view_changed = false;
                 if let Some(command) = command_for_scroll(
                     scroll_delta,
                     modifiers.ctrl || modifiers.command,
                     session.state().zoom,
                 ) {
                     session.handle(command, &mut self.events);
+                    view_changed = true;
                 }
                 if let Some(command) = command_for_zoom_delta(zoom_delta, session.state().zoom) {
                     session.handle(command, &mut self.events);
+                    view_changed = true;
                 }
-                // 视图刚被滚动/缩放 → 静默一段时间，期间不显示悬停预览（用户要求）
-                self.scroll_quiet_until = Some(std::time::Instant::now() + HOVER_SCROLL_QUIET);
-                ui.ctx().request_repaint();
+                if view_changed {
+                    // 视图刚被滚动/缩放 → 静默一段时间，期间不显示悬停预览（用户要求）
+                    self.scroll_quiet_until = Some(std::time::Instant::now() + HOVER_SCROLL_QUIET);
+                    ui.ctx().request_repaint();
+                }
             }
 
             // ---- 拖动**当帧生效** ----
