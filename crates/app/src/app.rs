@@ -623,6 +623,16 @@ impl PdfReaderApp {
                                 }
                             }
                         }
+                        // 换文件：先清空上一份文档的自定义数据，再按需从存档恢复
+                        // （否则打开没有存档的文件时，上一份的 preview 会残留）
+                        self.custom_previews.clear();
+                        self.custom_pin = None;
+                        self.custom_dialog = None;
+                        self.custom_hover = None;
+                        self.editing_title = None;
+                        self.editing_body = None;
+                        self.click_highlight = None;
+                        self.hover_tip = None;
                         self.floats.clear();
                         self.next_float_id = 1;
                         self.capture = None;
@@ -3050,6 +3060,13 @@ impl PdfReaderApp {
                     if let Some(fresh) = fresh {
                         self.floats[index].content = fresh;
                     }
+                    // 题目也要同步：否则从 ✎ 改完题目，已有浮窗仍显示旧标题
+                    let title = if preview.title.is_empty() {
+                        "自定义preview".to_string()
+                    } else {
+                        preview.title.clone()
+                    };
+                    self.floats[index].title = title;
                 }
             }
             // 文字预览的自定义浮窗：双击正文区域进入编辑模式（用户要求）
