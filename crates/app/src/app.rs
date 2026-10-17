@@ -1939,11 +1939,8 @@ impl PdfReaderApp {
                 let id = self.next_float_id;
                 self.next_float_id += 1;
                 let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
-                let body = if dialog.title.is_empty() {
-                    dialog.content
-                } else {
-                    format!("{}\n\n{}", dialog.title, dialog.content)
-                };
+                // 正文只放"内容"：题目只出现在标题栏（用户要求，避免重复）
+                let body = dialog.content;
                 self.floats.push(Float {
                     id,
                     title: if dialog.title.is_empty() {
