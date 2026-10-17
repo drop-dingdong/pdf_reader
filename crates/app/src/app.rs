@@ -2040,6 +2040,9 @@ impl PdfReaderApp {
             // 固定浮窗：绘制与注册都在此；后加入的在更上层（见 draw_floats）
             if self.capture.is_none() && self.custom_pin.is_none() {
                 self.draw_floats(ui, canvas);
+                // 正文原位编辑：先检测双击，再绘制编辑框（两者都在浮窗之后，层级正确）
+                self.detect_body_double_click(ui);
+                self.draw_float_body_editing(ui);
                 // 临时预览**最后**绘制 → 真正位于最上层（用户要求）
                 self.draw_hover_preview(ui, canvas);
                 // 侧栏条目悬浮 → 主视图右侧的临时浮窗
@@ -2387,6 +2390,80 @@ impl PdfReaderApp {
         }
     }
 
+    /// 文字 preview 浮窗的**正文原位编辑**：双击进入，输入框失焦即写回并回到阅览模式。
+    ///
+    /// 单独成一个 pass（在 `draw_floats` 之后调用），是为了避免与 `draw_floats` 里的
+    /// `painter` 借用冲突 —— 那里只负责"编辑中跳过正文绘制"。
+    fn draw_float_body_editing(&mut self, ui: &mut egui::Ui) {
+        // 找到正在编辑的那条记录 + 它对应的浮窗
+        let Some((editing_index, _)) = self.editing_body.clone() else {
+            return;
+        };
+        let Some(window) = self
+            .floats
+            .iter()
+            .find(|window| window.custom == Some(editing_index))
+        else {
+            self.editing_body = None;
+            return;
+        };
+        let body_rect = egui::Rect::from_min_max(
+            window.rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 4.0),
+            window.rect.max - EVec2::new(8.0, 8.0),
+        );
+        let Some((_, draft)) = self.editing_body.take() else { return };
+        let mut text = draft;
+        let response = ui.put(
+            body_rect,
+            egui::TextEdit::multiline(&mut text)
+                .desired_width(body_rect.width())
+                .desired_rows(6),
+        );
+        if response.lost_focus() {
+            if let Some(preview) = self.custom_previews.get_mut(editing_index) {
+                preview.text = Some(text);
+            }
+            self.editing_body = None;
+            self.message = "已更新内容".to_string();
+        } else {
+            self.editing_body = Some((editing_index, text));
+        }
+    }
+
+    /// 双击文字 preview 浮窗的正文 → 进入原位编辑。
+    fn detect_body_double_click(&mut self, ui: &mut egui::Ui) {
+        if self.editing_body.is_some() {
+            return;
+        }
+        let targets: Vec<(u64, usize, egui::Rect)> = self
+            .floats
+            .iter()
+            .filter_map(|window| {
+                let custom = window.custom?;
+                let preview = self.custom_previews.get(custom)?;
+                (preview.kind == CustomKind::Text).then_some((window.id, custom, window.rect))
+            })
+            .collect();
+        for (id, custom, rect) in targets {
+            let body_rect = egui::Rect::from_min_max(
+                rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 4.0),
+                rect.max - EVec2::new(8.0, 8.0),
+            );
+            let hit = ui.interact(
+                body_rect,
+                Id::unique(("float-body-edit", id)),
+                Sense::click(),
+            );
+            if hit.double_clicked() {
+                if let Some(preview) = self.custom_previews.get(custom) {
+                    self.editing_body = Some((custom, preview.text.clone().unwrap_or_default()));
+                    ui.ctx().request_repaint();
+                }
+                return;
+            }
+        }
+    }
+
     /// 编辑题目 / 正文的对话框（✎ 按钮与"固定浮窗内双击文字"共用）。
     fn draw_edit_dialogs(&mut self, ctx: &egui::Context) {
         // ---- 题目 ----
@@ -2422,38 +2499,6 @@ impl PdfReaderApp {
             }
         }
 
-        // ---- 正文（仅文字预览；固定浮窗内双击进入） ----
-        if let Some((index, draft)) = self.editing_body.clone() {
-            let mut text = draft;
-            let mut close = false;
-            egui::Modal::new(Id::unique("edit-body")).show(ctx, |ui| {
-                ui.set_width(420.0);
-                ui.heading("修改内容");
-                let response = ui.add(
-                    egui::TextEdit::multiline(&mut text)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(10),
-                );
-                // 失焦即回到阅览模式（用户要求）
-                if response.lost_focus() {
-                    close = true;
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("完成").clicked() {
-                        close = true;
-                    }
-                });
-            });
-            self.editing_body = Some((index, text.clone()));
-            if close {
-                if let Some(preview) = self.custom_previews.get_mut(index) {
-                    preview.text = Some(text);
-                }
-                self.editing_body = None;
-                self.message = "已更新内容".to_string();
-            }
-        }
     }
 
     /// 把截图结果存进某个**自定义图片预览**。
@@ -3075,29 +3120,16 @@ impl PdfReaderApp {
                     self.floats[index].title = title;
                 }
             }
-            // 文字预览的自定义浮窗：双击正文区域进入编辑模式（用户要求）
-            if let Some(custom_index) = self.floats[index].custom {
-                let is_text = self
-                    .custom_previews
+            // 文字预览的浮窗：正在原位编辑时跳过正文绘制（编辑框由
+            // `draw_float_body_editing` 单独绘制，见下）
+            let editing_inline = self.floats[index].custom.map_or(false, |custom_index| {
+                self.custom_previews
                     .get(custom_index)
-                    .map_or(false, |preview| preview.kind == CustomKind::Text);
-                if is_text {
-                    let body_rect = egui::Rect::from_min_max(
-                        rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 4.0),
-                        rect.max - EVec2::new(8.0, 8.0),
-                    );
-                    let hit = ui.interact(
-                        body_rect,
-                        Id::unique(("float-body-edit", id)),
-                        Sense::click(),
-                    );
-                    if hit.double_clicked() {
-                        if let Some(preview) = self.custom_previews.get(custom_index) {
-                            self.editing_body =
-                                Some((custom_index, preview.text.clone().unwrap_or_default()));
-                        }
-                    }
-                }
+                    .map_or(false, |preview| preview.kind == CustomKind::Text)
+                    && self.editing_body.as_ref().map(|(editing, _)| *editing) == Some(custom_index)
+            });
+            if editing_inline {
+                continue;
             }
             match &self.floats[index].content {
                 FloatContent::Text(text) => {
