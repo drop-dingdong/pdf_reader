@@ -1027,7 +1027,7 @@ impl PdfReaderApp {
                 });
                 ui.separator();
                 if self.sidebar_tab == SidebarTab::Pins {
-                    self.draw_pin_list(ui);
+                    self.draw_pin_list(ui, session);
                     return;
                 }
                 let Some(navigation) = navigation else {
@@ -1072,7 +1072,7 @@ impl PdfReaderApp {
     /// 侧栏的"自定义preview（Pin）"列表：
     /// 标题左对齐、页码右对齐、过长标题截断；双击跳转；悬浮显示临时浮窗；
     /// 单击生成/唤出持久浮窗（已有则高亮并置顶，一次性高亮有时限）。
-    fn draw_pin_list(&mut self, ui: &mut egui::Ui) {
+    fn draw_pin_list(&mut self, ui: &mut egui::Ui, session: &DocumentSession) {
         if self.custom_previews.is_empty() {
             ui.label("（还没有自定义preview）");
             return;
@@ -1153,6 +1153,7 @@ impl PdfReaderApp {
 
                 if response.clicked() {
                     // 单击立即生成/唤出浮窗（不再延迟：跳转改由右侧 → 按钮触发）
+                    self.ensure_custom_snapshot(ui, session, index);
                     self.activate_custom_preview(index, rect);
                 }
 
@@ -1183,6 +1184,34 @@ impl PdfReaderApp {
     /// 由"侧栏行的屏幕矩形"决定浮窗位置（委托给已测试的 `view::float_rect_at_row`）。
     fn float_rect_at_row(&self, row: egui::Rect, size: egui::Vec2) -> egui::Rect {
         float_rect_at_row(self.canvas_rect, row, size, FLOAT_MIN_SIZE)
+    }
+
+    /// 确保某个自定义**图片** preview 有可用截图（缺则按**当前缩放**重新合成）。
+    fn ensure_custom_snapshot(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &DocumentSession,
+        index: usize,
+    ) {
+        let Some(preview) = self.custom_previews.get(index) else { return };
+        if preview.kind != CustomKind::Image || preview.snapshot.is_some() {
+            return;
+        }
+        let (page, page_rect) = (preview.page, preview.rect);
+        if page_rect.width <= 0.0 || page_rect.height <= 0.0 {
+            return;
+        }
+        let Some(placement) = session.placement(page).copied() else { return };
+        let content = placement.rect_to_content(page_rect);
+        let Some(image) = self.snapshot_for(ui, session, content) else { return };
+        let texture = ui.ctx().load_texture(
+            format!("custom-image-{index}"),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
+        if let Some(preview) = self.custom_previews.get_mut(index) {
+            preview.snapshot = Some(texture);
+        }
     }
 
     /// 按某个自定义 preview 的数据生成它的**正式浮窗**（正文尺寸取 `body_size`）。
