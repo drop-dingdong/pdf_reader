@@ -28,7 +28,7 @@ use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
     body_size_of, destination_points, drag_float_rect, find_dest_index, find_float_for_custom,
-    float_rect_at_row, float_size_for_body, largest_overlap_page, overflow_layout,
+    float_rect_at_row, float_size_for_body, overflow_layout,
     pages_intersecting,
     CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT,
     pin_exits_on_mode_change,
@@ -1122,6 +1122,8 @@ impl PdfReaderApp {
                         // 该条目已有正式浮窗 → **只**高亮并置顶那个浮窗，不再显示临时预览；
                         // 没有正式浮窗时才显示临时预览浮窗。
                         if self.highlight_existing_custom_float(index).is_none() {
+                            // 缺图（例如刚从存档恢复）→ 现在按当前缩放合成；未就绪则下帧自动重试
+                            self.ensure_custom_snapshot(ui, session, index);
                             hovered = Some((index, rect));
                         }
                     }
@@ -2327,11 +2329,28 @@ impl PdfReaderApp {
                 session.placement(page).map(|placement| (page_index, placement.rect))
             })
             .collect();
-        let Some((page_index, overlap)) = largest_overlap_page(all_pages, content_rect) else {
-            self.message = "截图区域没有与任何页面重叠".to_string();
+        // 必须与本 preview **自己所在的页**求交：否则 rect 与 page 不匹配，
+        // 重新加载后会去错误的页取图（用户要求强限制）
+        let Some(preview_page) = self.custom_previews.get(index).map(|preview| preview.page) else {
             return;
         };
-        let page = PageIndex::new(page_index as u32);
+        let Some((_, page_rect)) = all_pages
+            .iter()
+            .find(|(page_index, _)| *page_index == preview_page.get() as usize)
+            .copied()
+        else {
+            self.message = "找不到该 preview 所在页".to_string();
+            return;
+        };
+        let Some(overlap) = page_rect.intersection(content_rect) else {
+            self.message = "截图区域与该 preview 所在页没有重叠，未保存".to_string();
+            return;
+        };
+        if overlap.width <= 0.0 || overlap.height <= 0.0 {
+            self.message = "截图区域与该 preview 所在页没有重叠，未保存".to_string();
+            return;
+        }
+        let page = preview_page;
         let Some(snapshot) = self.snapshot_for(ui, session, overlap) else {
             self.message = "该区域还没有已渲染的像素（请稍候再试）".to_string();
             return;
@@ -2890,6 +2909,21 @@ impl PdfReaderApp {
             );
             // 缩放手柄示意
             painter.rect_filled(handle_rect.shrink(5.0), CornerRadius::ZERO, Color32::from_gray(120));
+            // 自定义 preview 的浮窗：内容从记录里**每帧刷新**，这样"快照迟到"也能自动补上
+            if let Some(custom_index) = self.floats[index].custom {
+                if let Some(preview) = self.custom_previews.get(custom_index) {
+                    let fresh = match (preview.kind, preview.snapshot.clone()) {
+                        (CustomKind::Image, Some(texture)) => Some(FloatContent::Image(texture)),
+                        (CustomKind::Text, _) => Some(FloatContent::Text(
+                            preview.text.clone().unwrap_or_default(),
+                        )),
+                        _ => None,
+                    };
+                    if let Some(fresh) = fresh {
+                        self.floats[index].content = fresh;
+                    }
+                }
+            }
             match &self.floats[index].content {
                 FloatContent::Text(text) => {
                     // 正文：**自动换行 + 行数上限（放不下就截断并显示 …）**
