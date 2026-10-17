@@ -317,6 +317,29 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 在若干页里选出与 `content_rect` **重叠面积最大**的那一页，并返回其交叠矩形。
+///
+/// 用途：自定义**图片** preview 的截图只保留一页 —— 若框选跨越 a/b 两页，
+/// 则取重叠更多的那一页，只截该页内的部分（并记录这块矩形的尺寸）。
+/// 面积并列时取**先出现**的页（页面顺序），行为确定。
+pub fn largest_overlap_page(
+    pages: impl IntoIterator<Item = (usize, Rect)>,
+    content_rect: Rect,
+) -> Option<(usize, Rect)> {
+    let mut best: Option<(usize, Rect, f32)> = None;
+    for (index, page_rect) in pages {
+        let Some(overlap) = page_rect.intersection(content_rect) else { continue };
+        if overlap.width <= 0.0 || overlap.height <= 0.0 {
+            continue;
+        }
+        let area = overlap.width * overlap.height;
+        if best.map_or(true, |(_, _, best_area)| area > best_area) {
+            best = Some((index, overlap, area));
+        }
+    }
+    best.map(|(index, overlap, _)| (index, overlap))
+}
+
 /// 找出所有与 `content_rect` 相交的页（下标 + 该页内容空间矩形）。
 ///
 /// 截图要**允许跨页**：不能只取"重叠面积最大的那一页"，也不能依赖当前可见页集合
@@ -1291,6 +1314,37 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 自定义图片 preview：跨页框选时只保留**重叠面积最大**的那一页及其交叠矩形。
+    #[test]
+    fn largest_overlap_page_picks_the_dominant_page() {
+        let page_a = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let page_b = Rect::new(0.0, 110.0, 100.0, 100.0);
+        let pages = vec![(0usize, page_a), (1usize, page_b)];
+
+        // 选区内 A 占 60 高、B 占 20 高 → 取 A
+        let selection = Rect::new(0.0, 40.0, 100.0, 90.0);
+        let (index, overlap) = largest_overlap_page(pages.iter().copied(), selection).expect("应命中");
+        assert_eq!(index, 0, "取重叠更大的 A 页");
+        assert_eq!(overlap, Rect::new(0.0, 40.0, 100.0, 60.0), "只保留交叠部分");
+
+        // 反过来：B 占得多 → 取 B
+        let selection = Rect::new(0.0, 90.0, 100.0, 60.0);
+        let (index, overlap) = largest_overlap_page(pages.iter().copied(), selection).expect("应命中");
+        assert_eq!(index, 1);
+        assert_eq!(overlap, Rect::new(0.0, 110.0, 100.0, 40.0));
+
+        // 完全落在页间距 → 没有页
+        assert!(largest_overlap_page(pages.iter().copied(), Rect::new(0.0, 104.0, 100.0, 4.0)).is_none());
+
+        // 面积并列时取先出现者（页面顺序），结果确定
+        let tie = vec![
+            (0usize, Rect::new(0.0, 0.0, 100.0, 50.0)),
+            (1usize, Rect::new(0.0, 50.0, 100.0, 50.0)),
+        ];
+        let (index, _) = largest_overlap_page(tie, Rect::new(0.0, 0.0, 100.0, 100.0)).expect("应命中");
+        assert_eq!(index, 0);
     }
 
     /// 跨页截图：所有与选区相交的页都要参与（含页间距留白，不能只留最大重叠那一页）。

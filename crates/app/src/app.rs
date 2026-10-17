@@ -27,7 +27,8 @@ use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
     body_size_of, destination_points, drag_float_rect, find_dest_index, find_float_for_custom,
-    float_rect_at_row, float_size_for_body, overflow_layout, pages_intersecting,
+    float_rect_at_row, float_size_for_body, largest_overlap_page, overflow_layout,
+    pages_intersecting,
     CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT,
     pin_exits_on_mode_change,
     zero_rect_at,
@@ -2178,7 +2179,19 @@ impl PdfReaderApp {
         index: usize,
         content_rect: Rect,
     ) {
-        let Some(snapshot) = self.snapshot_for(ui, session, content_rect) else {
+        // **只保留重叠面积最大的那一页**（用户要求：跨 a-b 两页时取交叠更多的页）
+        let all_pages: Vec<(usize, Rect)> = (0..session.page_count() as usize)
+            .filter_map(|page_index| {
+                let page = PageIndex::new(page_index as u32);
+                session.placement(page).map(|placement| (page_index, placement.rect))
+            })
+            .collect();
+        let Some((page_index, overlap)) = largest_overlap_page(all_pages, content_rect) else {
+            self.message = "截图区域没有与任何页面重叠".to_string();
+            return;
+        };
+        let page = PageIndex::new(page_index as u32);
+        let Some(snapshot) = self.snapshot_for(ui, session, overlap) else {
             self.message = "该区域还没有已渲染的像素（请稍候再试）".to_string();
             return;
         };
@@ -2187,11 +2200,29 @@ impl PdfReaderApp {
             snapshot,
             egui::TextureOptions::LINEAR,
         );
+        // 记录交叠部分的矩形（页面空间）与它在**当前缩放比**下的显示尺寸
+        let page_rect = session
+            .placement(page)
+            .and_then(|placement| view_rect_to_page_rect(placement, overlap, Vec2::ZERO))
+            .map(|rect| {
+                Rect::new(
+                    rect.x.round(),
+                    rect.y.round(),
+                    rect.width.round(),
+                    rect.height.round(),
+                )
+            })
+            .unwrap_or(overlap);
         let Some(preview) = self.custom_previews.get_mut(index) else { return };
         preview.snapshot = Some(texture);
-        // 正文尺寸初始化 = 截图选区在**当时缩放比例**下的显示尺寸（用户要求）
-        preview.body_size = egui::vec2(content_rect.width, content_rect.height);
-        self.message = "已保存图片预览（从侧栏「自定义preview」唤出）".to_string();
+        preview.rect = page_rect;
+        preview.body_size = egui::vec2(overlap.width, overlap.height);
+        self.message = format!(
+            "已保存图片预览（取第 {} 页，交叠 {:.0}×{:.0}）",
+            page.display_number(),
+            overlap.width,
+            overlap.height
+        );
     }
 
     /// 进入 Pin 状态：**预览模式回到平移**、退出截图模式（用户要求）。
