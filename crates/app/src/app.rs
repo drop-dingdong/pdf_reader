@@ -26,8 +26,8 @@ use pdfcore::prelude::*;
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
-    destination_points, drag_float_rect, find_dest_index, find_float_for_custom, float_rect_at_row,
-    overflow_layout,
+    body_size_of, destination_points, drag_float_rect, find_dest_index, find_float_for_custom,
+    float_rect_at_row, float_size_for_body, overflow_layout,
     CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT,
     pin_exits_on_mode_change,
     zero_rect_at,
@@ -52,6 +52,9 @@ const SIDEBAR_HANDLE_WIDTH: f32 = 5.0;
 
 /// 显示链接热区框所需的最低缩放：更小的时候热区框会糊成一片，反而干扰阅读（用户要求）。
 const LINK_OVERLAY_MIN_ZOOM: f32 = 0.75;
+/// 自定义**文字** preview 的默认正文尺寸（用户要求：初始化为一个默认值）。
+const DEFAULT_CUSTOM_TEXT_BODY: egui::Vec2 = egui::Vec2::new(300.0, 170.0);
+
 /// 侧栏条目被点击后，浮窗高亮的持续时间（一次性动作需要一个有限时长）。
 const CLICK_HIGHLIGHT: std::time::Duration = std::time::Duration::from_millis(700);
 /// 滚动/缩放之后多久内不显示悬停预览（避免滚动时预览不断闪现）。
@@ -146,6 +149,8 @@ struct CustomPreview {
     text: Option<String>,
     /// 截图预览的图像
     snapshot: Option<egui::TextureHandle>,
+    /// **浮窗正文尺寸**（egui 单位），语义同 `DestMark::body_size`。
+    body_size: egui::Vec2,
 }
 
 /// 截图模式产出的去向。
@@ -184,6 +189,9 @@ struct DestMark {
     rect: Rect,
     /// 已构建的截图（自包含纹理）。
     snapshot: Option<egui::TextureHandle>,
+    /// **浮窗正文尺寸**（egui 单位）：生成浮窗时正文按它显示；
+    /// 用户改浮窗大小后回写。
+    body_size: egui::Vec2,
 }
 
 /// 截图模式的状态。
@@ -451,10 +459,15 @@ impl PdfReaderApp {
                                 .map(|points| {
                                     points
                                         .into_iter()
-                                        .map(|point| DestMark {
-                                            point,
-                                            rect: default_dest_rect(point),
-                                            snapshot: None,
+                                        .map(|point| {
+                                            let rect = default_dest_rect(point);
+                                            // 初始尺寸：该 rect 按 100% 缩放比（页面单位==像素）
+                                            DestMark {
+                                                point,
+                                                rect,
+                                                snapshot: None,
+                                                body_size: egui::vec2(rect.width, rect.height),
+                                            }
                                         })
                                         .collect()
                                 })
@@ -1059,6 +1072,31 @@ impl PdfReaderApp {
         float_rect_at_row(self.canvas_rect, row, size, FLOAT_MIN_SIZE)
     }
 
+    /// 按某个自定义 preview 的数据生成它的**正式浮窗**（正文尺寸取 `body_size`）。
+    fn spawn_custom_float(&mut self, index: usize, rect: egui::Rect) {
+        let Some(preview) = self.custom_previews.get(index) else { return };
+        let id = self.next_float_id;
+        self.next_float_id += 1;
+        let content = match (preview.kind, preview.snapshot.clone()) {
+            (CustomKind::Image, Some(texture)) => FloatContent::Image(texture),
+            _ => FloatContent::Text(preview.text.clone().unwrap_or_default()),
+        };
+        let title = if preview.title.is_empty() {
+            "自定义preview".to_string()
+        } else {
+            preview.title.clone()
+        };
+        self.floats.push(Float {
+            id,
+            title,
+            content,
+            rect,
+            custom: Some(index),
+            origin: None,
+        });
+        self.highlight_float = Some(id);
+    }
+
     /// 若某个自定义 preview 已有**正式浮窗**，把它高亮并置顶（侧栏悬浮/点击共用）。
     fn highlight_existing_custom_float(&mut self, index: usize) -> Option<u64> {
         let customs: Vec<Option<usize>> = self.floats.iter().map(|f| f.custom).collect();
@@ -1086,24 +1124,10 @@ impl PdfReaderApp {
         let Some(preview) = self.custom_previews.get(index) else { return };
         let id = self.next_float_id;
         self.next_float_id += 1;
-        let rect = self.float_rect_at_row(row, EVec2::new(320.0, 200.0));
-        let content = match (preview.kind, preview.snapshot.clone()) {
-            (CustomKind::Image, Some(texture)) => FloatContent::Image(texture),
-            _ => FloatContent::Text(preview.text.clone().unwrap_or_default()),
-        };
-        let title = if preview.title.is_empty() {
-            "自定义preview".to_string()
-        } else {
-            preview.title.clone()
-        };
-        self.floats.push(Float {
-            id,
-            title,
-            content,
-            rect,
-            custom: Some(index),
-            origin: None,
-        });
+        // 正文尺寸使用该条目**储存的 body_size**（用户要求）
+        let size = float_size_for_body(preview.body_size, FLOAT_TITLE_HEIGHT);
+        let rect = self.float_rect_at_row(row, size);
+        self.spawn_custom_float(index, rect);
         self.click_highlight = Some((id, std::time::Instant::now() + CLICK_HIGHLIGHT));
         self.message = "已生成该自定义preview浮窗".to_string();
     }
@@ -1774,6 +1798,26 @@ impl PdfReaderApp {
                 self.update_hover_preview(ui, session, canvas, scroll);
             }
 
+            // 浮窗尺寸变化 → 回写正文尺寸到来源数据（用户要求：改大小即记住正文面积）
+            for window in std::mem::take(&mut self.floats) {
+                let body = body_size_of(window.rect, FLOAT_TITLE_HEIGHT);
+                if let Some((page, index)) = window.origin {
+                    if let Some(mark) = self
+                        .dest_marks
+                        .get_mut(page.get() as usize)
+                        .and_then(|marks| marks.get_mut(index))
+                    {
+                        mark.body_size = body;
+                    }
+                }
+                if let Some(index) = window.custom {
+                    if let Some(preview) = self.custom_previews.get_mut(index) {
+                        preview.body_size = body;
+                    }
+                }
+                self.floats.push(window);
+            }
+
             // 固定浮窗：绘制与注册都在此；后加入的在更上层（见 draw_floats）
             if self.capture.is_none() && self.custom_pin.is_none() {
                 self.draw_floats(ui, canvas);
@@ -1950,11 +1994,14 @@ impl PdfReaderApp {
             self.message = "该被引用点还没有可用的截图（稍后重试）".to_string();
             return;
         };
-        let size = texture.size_vec2();
-        let wanted = EVec2::new(
-            size.x.clamp(120.0, 420.0),
-            size.y.clamp(80.0, 320.0) + FLOAT_TITLE_HEIGHT,
-        );
+        // 正文尺寸取该被引用点储存的 body_size（用户要求）
+        let body = self
+            .dest_marks
+            .get(page.get() as usize)
+            .and_then(|marks| marks.get(index))
+            .map(|mark| mark.body_size)
+            .unwrap_or_else(|| texture.size_vec2());
+        let wanted = float_size_for_body(body, FLOAT_TITLE_HEIGHT);
         // 锚点 anchor = 链接框中心；把它当作链接框中心传进去（尺寸用上一帧记录的链接框尺寸）
         let link_rect = egui::Rect::from_center_size(anchor, self.hover_link_size);
         let rect = tip_rect_for(link_rect, wanted, canvas);
@@ -1998,7 +2045,7 @@ impl PdfReaderApp {
         );
         painter.image(
             texture.id(),
-            fit_inside(size, body),
+            fit_inside(texture.size_vec2(), body),
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             Color32::WHITE,
         );
@@ -2041,8 +2088,9 @@ impl PdfReaderApp {
         };
         let text = preview.text.clone();
         let texture = preview.snapshot.clone();
-        // 与"点击生成的固定浮窗"用同一套定位：紧贴侧边栏、与条目行垂直对齐（用户要求）
-        let size = EVec2::new(320.0, 240.0);
+        // 与"点击生成的固定浮窗"用同一套定位：紧贴侧边栏、与条目行垂直对齐；
+        // 正文尺寸同样取该条目的 body_size（用户要求）
+        let size = float_size_for_body(preview.body_size, FLOAT_TITLE_HEIGHT);
         let rect = clamp_float_rect(
             egui::Rect::from_min_size(
                 egui::pos2(canvas.min.x + 16.0, row.center().y - size.y * 0.5),
@@ -2259,42 +2307,25 @@ impl PdfReaderApp {
 
         if save {
             if let Some(dialog) = self.custom_dialog.take() {
-                let rect = zero_rect_at(dialog.point);
+                let body_size = DEFAULT_CUSTOM_TEXT_BODY;
                 self.custom_previews.push(CustomPreview {
                     page: dialog.page,
                     point: dialog.point,
-                    rect,
+                    rect: zero_rect_at(dialog.point),
                     kind: CustomKind::Text,
                     title: dialog.title.clone(),
                     text: Some(dialog.content.clone()),
                     snapshot: None,
+                    body_size,
                 });
-                // 下一个版本之前：保存后直接以固定浮窗显示
-                let id = self.next_float_id;
-                self.next_float_id += 1;
-                let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
-                // 正文只放"内容"：题目只出现在标题栏（用户要求，避免重复）
-                let body = dialog.content;
-                let display_title = if dialog.title.is_empty() {
-                    "文字预览".to_string()
-                } else {
-                    dialog.title.clone()
-                };
-                // 测试需要：同时生成两份浮窗 ——
-                // 一份标题带 "(delete)"（可手动删掉），一份是侧栏响应的**正式**浮窗
-                self.floats.push(Float {
-                    id,
-                    title: format!("(delete) {display_title}"),
-                    content: FloatContent::Text(body.clone()),
-                    rect: egui::Rect::from_min_size(
-                        egui::pos2(24.0 + cascade, 24.0 + cascade),
-                        EVec2::new(320.0, 200.0),
-                    ),
-                    origin: None,
-                    custom: None,
-                });
-                // 正式副本**不**立即显示：由侧栏条目按需生成（用户要求）
-                self.message = "已保存文字预览（用侧栏「自定义preview」唤出正式浮窗）".to_string();
+                // 保存后直接以固定浮窗显示（原先的 "(delete)" 对照副本已去掉）
+                let index = self.custom_previews.len() - 1;
+                let size = float_size_for_body(body_size, FLOAT_TITLE_HEIGHT);
+                let anchor_row =
+                    egui::Rect::from_min_size(egui::pos2(0.0, 0.0), EVec2::new(1.0, 1.0));
+                let rect = self.float_rect_at_row(anchor_row, size);
+                self.spawn_custom_float(index, rect);
+                self.message = "已保存文字预览".to_string();
             }
         } else if shoot {
             if let Some(dialog) = self.custom_dialog.take() {
@@ -2307,6 +2338,8 @@ impl PdfReaderApp {
                     title: dialog.title,
                     text: None,
                     snapshot: None,
+                    // 占位：截图完成时按"选区在当时缩放下的显示尺寸"覆盖
+                    body_size: DEFAULT_CUSTOM_TEXT_BODY,
                 });
                 // 进入截图模式：结果回写到这条自定义记录
                 self.capture = Some(CaptureState {
@@ -2483,7 +2516,7 @@ impl PdfReaderApp {
             ui.ctx()
                 .load_texture(format!("dest-{}-{}", page.get(), index), snapshot, egui::TextureOptions::LINEAR);
 
-        // 回写：矩形 + 截图（初始为 None，只有走到这里才变成 Some）
+        // 回写：矩形 + 截图 + **正文尺寸**（= 该选区在**当时缩放比例**下的显示尺寸，用户要求）
         let mut rect_saved = false;
         if let Some(mark) = self
             .dest_marks
@@ -2492,6 +2525,7 @@ impl PdfReaderApp {
         {
             mark.rect = page_rect;
             mark.snapshot = Some(texture.clone());
+            mark.body_size = egui::vec2(overlap.width, overlap.height);
             rect_saved = true;
         }
         if !rect_saved {

@@ -317,6 +317,26 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 浮窗正文区在"浮窗尺寸"里的边距（左右、上下各 8）。
+pub const FLOAT_BODY_PADDING: f32 = 8.0;
+
+/// 由**正文尺寸**换算浮窗整体尺寸（加标题栏与内边距）。
+pub fn float_size_for_body(body: egui::Vec2, title_height: f32) -> egui::Vec2 {
+    egui::vec2(
+        body.x + FLOAT_BODY_PADDING * 2.0,
+        body.y + title_height + FLOAT_BODY_PADDING * 2.0,
+    )
+}
+
+/// 由浮窗整体尺寸反推**正文尺寸**（与 [`float_size_for_body`] 必须互为逆运算，
+/// 否则"生成浮窗 → 写回尺寸"的循环会让尺寸逐帧漂移）。
+pub fn body_size_of(rect: egui::Rect, title_height: f32) -> egui::Vec2 {
+    egui::vec2(
+        (rect.width() - FLOAT_BODY_PADDING * 2.0).max(1.0),
+        (rect.height() - title_height - FLOAT_BODY_PADDING * 2.0).max(1.0),
+    )
+}
+
 /// 侧栏条目触发的浮窗位置：**紧贴主视图左缘（侧边栏）**、与该行垂直居中，再夹取回视图内。
 ///
 /// 临时预览与"首次点击生成的固定浮窗"都用它，因此两者位置一致（用户要求）；
@@ -1254,6 +1274,22 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 正文尺寸 ↔ 浮窗尺寸必须互逆（否则每帧写回会让尺寸漂移）。
+    #[test]
+    fn body_size_and_float_size_are_inverse() {
+        let title = 22.0;
+        let body = egui::vec2(300.0, 170.0);
+        let size = float_size_for_body(body, title);
+        assert_eq!(size, egui::vec2(316.0, 208.0), "两侧 8px + 标题 22px");
+
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), size);
+        assert_eq!(body_size_of(rect, title), body, "往返必须回到原值");
+
+        let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(2.0, 2.0));
+        let back = body_size_of(tiny, title);
+        assert!(back.x >= 1.0 && back.y >= 1.0, "退化尺寸不给 0/负值");
     }
 
     /// 侧栏条目触发的浮窗：贴左缘、与该行居中、夹取在视图内。
