@@ -26,7 +26,7 @@ use pdfcore::prelude::*;
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
-    command_allowed_while_pinning, destination_points, drag_float_rect, find_dest_index,
+    destination_points, drag_float_rect, find_dest_index, pin_exits_on_mode_change,
     zero_rect_at,
     find_float_for_target, fit_inside,
     compose_snapshot, hover_preview_allowed, move_to_last,
@@ -737,7 +737,13 @@ impl PdfReaderApp {
                 // 拖拽语义：平移 / 选字 两档（"自动"模式不可靠，已按反馈移除）
                 ui.label("拖拽：");
                 for tool in [Tool::Pan, Tool::Select] {
-                    ui.selectable_value(&mut self.tool, tool, tool.label());
+                    if ui.selectable_label(self.tool == tool, tool.label()).clicked() {
+                        self.tool = tool;
+                        // 切到"选字"= 切换预览模式 → 退出 Pin（用户最终要求）
+                        if pin_exits_on_mode_change(tool == Tool::Select, false) {
+                            self.custom_pin = None;
+                        }
+                    }
                 }
                 ui.separator();
                 // 复制：除了 Ctrl+C，也提供一个可见入口，便于确认选区内容
@@ -754,12 +760,10 @@ impl PdfReaderApp {
                 }
                 ui.separator();
                 if ui.button("＋文字预览").clicked() {
-                    self.custom_pin = Some(CustomKind::Text);
-                    self.message = "当前自定义preview：点击页面确定位置（Esc 取消）".to_string();
+                    self.enter_pin(CustomKind::Text);
                 }
                 if ui.button("＋图片预览").clicked() {
-                    self.custom_pin = Some(CustomKind::Image);
-                    self.message = "当前自定义preview：点击页面确定位置（Esc 取消）".to_string();
+                    self.enter_pin(CustomKind::Image);
                 }
                 // 截图模式：进入后主视图只用于框选区域
                 // 截图模式**不可相互覆盖**：已在截图（普通截图或编辑被引用点）时按钮无响应，
@@ -768,6 +772,10 @@ impl PdfReaderApp {
                     .add_enabled(self.capture.is_none(), egui::Button::new("截图"))
                     .clicked()
                 {
+                    // 切到"截图"= 切换预览模式 → 退出 Pin（用户最终要求）
+                    if pin_exits_on_mode_change(false, true) {
+                        self.custom_pin = None;
+                    }
                     self.capture = Some(CaptureState::default());
                     self.message = "截图模式：拖动框选区域，Enter 保存并退出，Esc 退出".to_string();
                 }
@@ -1824,6 +1832,14 @@ impl PdfReaderApp {
         self.message = "自定义图片预览已保存".to_string();
     }
 
+    /// 进入 Pin 状态：**预览模式回到平移**、退出截图模式（用户要求）。
+    fn enter_pin(&mut self, kind: CustomKind) {
+        self.tool = Tool::Pan;
+        self.capture = None;
+        self.custom_pin = Some(kind);
+        self.message = "当前自定义preview：点击页面确定位置（Esc 取消）".to_string();
+    }
+
     /// Pin 状态：在页面某处点击 → 结束选点并弹出对应的输入对话框。
     fn finish_pin(&mut self, session: &DocumentSession, canvas: egui::Rect, scroll: Vec2, pointer: egui::Pos2) {
         let Some(kind) = self.custom_pin else { return };
@@ -2497,17 +2513,9 @@ impl eframe::App for PdfReaderApp {
             // 注意仍然要跑 `apply_and_pump` —— 它负责 `pump`，瓦片加载得以继续。
             self.commands.clear();
         }
-        // Pin 状态（自定义 preview 选点）：只放行上下页与放大缩小；
-        // 其余命令意味着用户点了别的工具栏按钮 → 退回正常模式，**并照常执行该命令**。
-        if self.custom_pin.is_some()
-            && self
-                .commands
-                .iter()
-                .any(|command| !command_allowed_while_pinning(command))
-        {
-            self.custom_pin = None;
-            self.message = "已退出自定义preview".to_string();
-        }
+        // 注意：**不再**按命令白名单退出 Pin。用户最终要求是"只有切到选字/截图模式才退出"；
+        // 缩放（含适应宽度、100%）、翻页、侧栏开关、checkbox 都不影响 Pin。
+        // Pin 的退出由工具切换与截图按钮显式触发（见 draw_toolbar）。
         self.apply_and_pump(&ctx, &mut session);
         let after_input = frame_start.elapsed();
 
