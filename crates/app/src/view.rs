@@ -317,6 +317,29 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 以某点为**中心**、大小为零的矩形。
+///
+/// 自定义 preview 需要"与被引用点对应"的位置信息：位置就是 Pin 结束时点击的页内坐标，
+/// 同时另存一份以该点为中心、**零尺寸**的矩形（用户要求；以后若要给它截图/延伸，
+/// 直接在这块矩形上扩即可，而不必再回头找位置）。
+pub fn zero_rect_at(point: Point) -> Rect {
+    Rect::new(point.x, point.y, 0.0, 0.0)
+}
+
+/// Pin（自定义 preview 选点）状态下，哪些命令**允许**生效。
+///
+/// 用户要求：该状态可以滚动/拖动/缩放，但点击工具栏里"除上下页、放大缩小之外"的按钮时
+/// 要退回正常模式并响应该动作。因此这里只放行这四类命令；其余命令会让 Pin 状态退出。
+pub fn command_allowed_while_pinning(command: &ViewerCommand) -> bool {
+    matches!(
+        command,
+        ViewerCommand::PrevPage
+            | ViewerCommand::NextPage
+            | ViewerCommand::ZoomIn
+            | ViewerCommand::ZoomOut
+    )
+}
+
 /// 浮窗被拖动后的新矩形：先按位移平移，再夹取回视图区域内（且不小于最小尺寸）。
 ///
 /// 抽成函数是因为"拖动浮窗"有三个入口（标题栏、正文/截图区、临时预览被拖动后固定），
@@ -1170,6 +1193,36 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 自定义 preview 的配套小工具：零尺寸矩形 + Pin 状态允许的命令集合。
+    #[test]
+    fn zero_rect_and_pinning_command_whitelist() {
+        let point = Point::new(120.0, 340.0);
+        let rect = zero_rect_at(point);
+        assert_eq!(rect, Rect::new(120.0, 340.0, 0.0, 0.0));
+        assert_eq!(rect.width, 0.0, "大小为零（用户要求）");
+        assert_eq!(rect.center(), point, "以该点为中心");
+
+        // 允许：上下页与放大缩小
+        for command in [
+            ViewerCommand::PrevPage,
+            ViewerCommand::NextPage,
+            ViewerCommand::ZoomIn,
+            ViewerCommand::ZoomOut,
+        ] {
+            assert!(command_allowed_while_pinning(&command), "{command:?} 应放行");
+        }
+        // 其余一律退出 Pin 状态
+        for command in [
+            ViewerCommand::SetZoom(2.0),
+            ViewerCommand::FitWidth,
+            ViewerCommand::GoToPage(PageIndex::FIRST),
+            ViewerCommand::RotateClockwise,
+            ViewerCommand::CopySelection,
+        ] {
+            assert!(!command_allowed_while_pinning(&command), "{command:?} 应退出 Pin");
+        }
     }
 
     /// 拖动浮窗：平移后仍被夹在视图区域内（三个拖动入口共用同一规则）。

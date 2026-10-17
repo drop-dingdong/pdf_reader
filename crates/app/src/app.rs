@@ -26,7 +26,9 @@ use pdfcore::prelude::*;
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
-    destination_points, drag_float_rect, find_dest_index, find_float_for_target, fit_inside,
+    command_allowed_while_pinning, destination_points, drag_float_rect, find_dest_index,
+    zero_rect_at,
+    find_float_for_target, fit_inside,
     compose_snapshot, hover_preview_allowed, move_to_last,
     page_rect_to_screen, pointer_over_any,
     screen_rect_to_content, tip_rect_for, veil_bands, view_rect_to_page_rect, SnapshotPage,
@@ -94,6 +96,56 @@ impl Tool {
     }
 }
 
+/// 自定义 preview 的两种类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CustomKind {
+    /// 文字预览（题目 + 内容）
+    Text,
+    /// 截图预览（题目 + 截图）
+    Image,
+}
+
+/// 自定义 preview 的输入对话框（Pin 结束、点击页面后弹出）。
+struct CustomDialog {
+    kind: CustomKind,
+    /// Pin 结束时点击的页号与页内坐标（PDF 页面空间）
+    page: PageIndex,
+    point: Point,
+    title: String,
+    content: String,
+}
+
+/// 已保存的自定义 preview。
+///
+/// 按用户要求记录：Pin 结束时的**页号 + 页内坐标**、以该坐标为中心的**零尺寸矩形**
+/// （与链接对应）、以及题目/内容或截图。位置类字段暂时只被"保存"而未被读取 ——
+/// 它们是给"自定义 preview 与链接/被引用点挂接"的下一版准备的。
+#[allow(dead_code)]
+struct CustomPreview {
+    page: PageIndex,
+    point: Point,
+    /// 以 `point` 为中心、**零尺寸**的矩形（与链接对应用）
+    rect: Rect,
+    kind: CustomKind,
+    title: String,
+    /// 文字预览的内容
+    text: Option<String>,
+    /// 截图预览的图像
+    snapshot: Option<egui::TextureHandle>,
+}
+
+/// 截图模式产出的去向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum CaptureTarget {
+    /// 普通截图：只放进新浮窗
+    #[default]
+    Plain,
+    /// 回写到某个被引用点
+    DestMark(PageIndex, usize),
+    /// 回写到某个自定义 preview（下标）
+    Custom(usize),
+}
+
 /// 悬停预览浮窗：鼠标在页内链接上时出现，显示该链接目标的被引用点截图。
 ///
 /// 只要指针还在**链接**或**这个浮窗**上就持续存在；点击它则转为永久浮窗（不受鼠标影响）。
@@ -131,9 +183,8 @@ struct CaptureState {
     rect: Option<egui::Rect>,
     /// 正在拖拽的起点（屏幕空间）
     anchor: Option<egui::Pos2>,
-    /// 由"点击被引用点标识"进入时记录的目标 `(页号, 该页内下标)`；
-    /// `None` = 普通截图（结果只放进浮窗，不回写被引用点）。
-    target: Option<(PageIndex, usize)>,
+    /// 这次截图的结果要回写到哪儿。
+    target: CaptureTarget,
 }
 
 /// 浮窗内容：纯文字，或一张**自包含的截图**。
@@ -193,6 +244,12 @@ pub struct PdfReaderApp {
     scroll_quiet_until: Option<std::time::Instant>,
     /// 本帧需要**高亮**的浮窗 id（悬停到已固定的同一目的地时设置，仅维持一帧）。
     highlight_float: Option<u64>,
+    /// 自定义 preview 的 Pin 状态（`Some` = 正在选点；此时不显示浮窗、不响应链接点击）。
+    custom_pin: Option<CustomKind>,
+    /// 自定义 preview 的输入对话框。
+    custom_dialog: Option<CustomDialog>,
+    /// 已保存的自定义 preview。
+    custom_previews: Vec<CustomPreview>,
     /// **链接 → 被引用点** 的登记表（与 `navigation.links_by_page` 同构）：
     /// 下标与 `links_on(page)` 一一对应。打开文档时解析一次，
     /// 之后悬停与跳转都直接用它（用户建议：记住索引，而不是每次按位置查）。
@@ -277,6 +334,9 @@ impl PdfReaderApp {
             hover_link_size: EVec2::new(160.0, 20.0),
             scroll_quiet_until: None,
             highlight_float: None,
+            custom_pin: None,
+            custom_dialog: None,
+            custom_previews: Vec::new(),
             link_marks: Vec::new(),
             last_convert_ms: 0.0,
             last_upload_ms: 0.0,
@@ -692,6 +752,15 @@ impl PdfReaderApp {
                 if ui.button("添加测试浮窗").clicked() {
                     self.add_test_float();
                 }
+                ui.separator();
+                if ui.button("＋文字预览").clicked() {
+                    self.custom_pin = Some(CustomKind::Text);
+                    self.message = "当前自定义preview：点击页面确定位置（Esc 取消）".to_string();
+                }
+                if ui.button("＋图片预览").clicked() {
+                    self.custom_pin = Some(CustomKind::Image);
+                    self.message = "当前自定义preview：点击页面确定位置（Esc 取消）".to_string();
+                }
                 // 截图模式：进入后主视图只用于框选区域
                 // 截图模式**不可相互覆盖**：已在截图（普通截图或编辑被引用点）时按钮无响应，
                 // 直到回到正常阅读模式（Esc / Enter 退出）。
@@ -826,6 +895,16 @@ impl PdfReaderApp {
                 ui.label(format!("缩放 {:.0}%", session.state().zoom * 100.0));
                 ui.separator();
                 ui.label(format!("纹理 {} 个", self.textures.len()));
+                if let Some(kind) = self.custom_pin {
+                    ui.separator();
+                    ui.colored_label(
+                        Color32::from_rgb(230, 180, 60),
+                        match kind {
+                            CustomKind::Text => "当前自定义preview：文字（点击页面确定位置）",
+                            CustomKind::Image => "当前自定义preview：图片（点击页面确定位置）",
+                        },
+                    );
+                }
                 if !self.message.is_empty() {
                     ui.separator();
                     ui.label(&self.message);
@@ -885,6 +964,16 @@ impl PdfReaderApp {
                 .ctx()
                 .pointer_hover_pos()
                 .map_or(false, |position| canvas.contains(position));
+            // Pin 状态（自定义 preview 选点）：十字光标 + 状态栏提示
+            if self.custom_pin.is_some() {
+                if pointer_over_canvas {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                }
+                if ui.ctx().input(|input| input.key_pressed(egui::Key::Escape)) {
+                    self.custom_pin = None;
+                    self.message = "已退出自定义preview".to_string();
+                }
+            }
             if self.capture.is_none() && wheel_targets_canvas(pointer_over_canvas) {
                 let (scroll_delta, zoom_delta, modifiers) = ui.input(|input| {
                     (input.smooth_scroll_delta, input.zoom_delta(), input.modifiers)
@@ -1246,6 +1335,7 @@ impl PdfReaderApp {
 
             // 2b) 链接热区框（可开关；缩放过小时不画）
             if self.capture.is_none()
+                && self.custom_pin.is_none()
                 && link_overlay_visible(self.show_links, session.state().zoom, LINK_OVERLAY_MIN_ZOOM)
             {
                 if let Some(navigation) = &self.navigation {
@@ -1273,6 +1363,7 @@ impl PdfReaderApp {
             // 2c) 被引用的点（链接跳转目的地）：按位置去重后画记号；
             //     与链接框同样在缩放过小时不显示（用户要求）。
             if self.capture.is_none()
+                && self.custom_pin.is_none()
                 && link_overlay_visible(
                     self.show_dest_points,
                     session.state().zoom,
@@ -1328,7 +1419,7 @@ impl PdfReaderApp {
                     self.capture = Some(CaptureState {
                         rect: selection,
                         anchor: None,
-                        target: Some(target),
+                        target: CaptureTarget::DestMark(target.0, target.1),
                     });
                     self.message = format!(
                         "编辑被引用点（第 {} 页）：可拖动调整选区，Enter 保存截图，Esc 取消",
@@ -1425,6 +1516,11 @@ impl PdfReaderApp {
                         self.commands.push(ViewerCommand::SelectBegin(text_position));
                     }
                 }
+            } else if self.capture.is_none() && self.custom_pin.is_some() && response.clicked() {
+                // Pin 状态：点击页面某处 → 结束选点，弹出输入对话框
+                if let Some(position) = response.interact_pointer_pos() {
+                    self.finish_pin(session, canvas, scroll, position);
+                }
             } else if self.capture.is_none() && response.clicked() {
                 if let Some(position) = response.interact_pointer_pos() {
                     let content = canvas_to_content(canvas, position, scroll);
@@ -1446,16 +1542,16 @@ impl PdfReaderApp {
             }
 
             // 悬停预览：**先只做检测与状态更新**（含"同一目的地已固定 → 高亮 + 置顶"）
-            if self.capture.is_none() {
+            if self.capture.is_none() && self.custom_pin.is_none() {
                 self.update_hover_preview(ui, session, canvas, scroll);
             }
 
             // 固定浮窗：绘制与注册都在此；后加入的在更上层（见 draw_floats）
-            if self.capture.is_none() {
+            if self.capture.is_none() && self.custom_pin.is_none() {
                 self.draw_floats(ui, canvas);
                 // 临时预览**最后**绘制 → 真正位于最上层（用户要求）
                 self.draw_hover_preview(ui, canvas);
-            } else {
+            } else if self.capture.is_some() {
                 self.draw_capture(ui, canvas, session, scroll);
             }
         });
@@ -1689,6 +1785,191 @@ impl PdfReaderApp {
         }
     }
 
+    /// 把截图结果存进某个**自定义图片预览**，并以固定浮窗显示。
+    fn commit_custom_image(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &DocumentSession,
+        index: usize,
+        content_rect: Rect,
+    ) {
+        let Some(snapshot) = self.snapshot_for(ui, session, content_rect) else {
+            self.message = "该区域还没有已渲染的像素（请稍候再试）".to_string();
+            return;
+        };
+        let id = self.next_float_id;
+        self.next_float_id += 1;
+        let texture = ui.ctx().load_texture(
+            format!("custom-image-{index}"),
+            snapshot,
+            egui::TextureOptions::LINEAR,
+        );
+        let Some(preview) = self.custom_previews.get_mut(index) else { return };
+        preview.snapshot = Some(texture.clone());
+        let title = preview.title.clone();
+        let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
+        self.floats.push(Float {
+            id,
+            title: if title.is_empty() { "自定义截图预览".to_string() } else { title },
+            content: FloatContent::Image(texture),
+            rect: egui::Rect::from_min_size(
+                egui::pos2(48.0 + cascade, 48.0 + cascade),
+                EVec2::new(
+                    content_rect.width.clamp(FLOAT_MIN_SIZE.x, 640.0),
+                    content_rect.height.clamp(FLOAT_MIN_SIZE.y, 640.0) + FLOAT_TITLE_HEIGHT,
+                ),
+            ),
+            origin: None,
+        });
+        self.message = "自定义图片预览已保存".to_string();
+    }
+
+    /// Pin 状态：在页面某处点击 → 结束选点并弹出对应的输入对话框。
+    fn finish_pin(&mut self, session: &DocumentSession, canvas: egui::Rect, scroll: Vec2, pointer: egui::Pos2) {
+        let Some(kind) = self.custom_pin else { return };
+        let content = canvas_to_content(canvas, pointer, scroll);
+        for page in self.visible.clone() {
+            let Some(placement) = session.placement(page).copied() else { continue };
+            if !placement.rect.contains(content) {
+                continue;
+            }
+            let point = placement.content_to_page(content);
+            self.custom_dialog = Some(CustomDialog {
+                kind,
+                page,
+                point,
+                title: String::new(),
+                content: String::new(),
+            });
+            self.custom_pin = None;
+            return;
+        }
+    }
+
+    /// 自定义 preview 的输入对话框（文字：题目+内容；图片：题目）。
+    fn draw_custom_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.custom_dialog.as_ref() else { return };
+        let kind = dialog.kind;
+        let page = dialog.page;
+        let point = dialog.point;
+        let mut title = dialog.title.clone();
+        let mut content = dialog.content.clone();
+        let mut save = false;
+        let mut cancel = false;
+        let mut shoot = false;
+        egui::Modal::new(Id::unique("custom-preview-dialog")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading(match kind {
+                CustomKind::Text => "文字预览",
+                CustomKind::Image => "图片预览",
+            });
+            ui.label(format!(
+                "位置：第 {} 页 ({:.1}, {:.1})",
+                page.display_number(),
+                point.x,
+                point.y
+            ));
+            ui.separator();
+            ui.label("题目");
+            ui.add(egui::TextEdit::singleline(&mut title).desired_width(f32::INFINITY));
+            if kind == CustomKind::Text {
+                ui.label("内容");
+                ui.add(
+                    egui::TextEdit::multiline(&mut content)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(6),
+                );
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                match kind {
+                    // 文字预览：关闭 与 save 都是保存（用户要求）
+                    CustomKind::Text => {
+                        if ui.button("关闭").clicked() || ui.button("save").clicked() {
+                            save = true;
+                        }
+                    }
+                    // 图片预览：关闭 与 截图 都进入截图阶段
+                    CustomKind::Image => {
+                        if ui.button("关闭").clicked() || ui.button("截图").clicked() {
+                            shoot = true;
+                        }
+                    }
+                }
+                if ui.button("cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+        if let Some(state) = self.custom_dialog.as_mut() {
+            state.title = title;
+            state.content = content;
+        }
+
+        if save {
+            if let Some(dialog) = self.custom_dialog.take() {
+                let rect = zero_rect_at(dialog.point);
+                self.custom_previews.push(CustomPreview {
+                    page: dialog.page,
+                    point: dialog.point,
+                    rect,
+                    kind: CustomKind::Text,
+                    title: dialog.title.clone(),
+                    text: Some(dialog.content.clone()),
+                    snapshot: None,
+                });
+                // 下一个版本之前：保存后直接以固定浮窗显示
+                let id = self.next_float_id;
+                self.next_float_id += 1;
+                let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
+                let body = if dialog.title.is_empty() {
+                    dialog.content
+                } else {
+                    format!("{}\n\n{}", dialog.title, dialog.content)
+                };
+                self.floats.push(Float {
+                    id,
+                    title: if dialog.title.is_empty() {
+                        "文字预览".to_string()
+                    } else {
+                        dialog.title
+                    },
+                    content: FloatContent::Text(body),
+                    rect: egui::Rect::from_min_size(
+                        egui::pos2(48.0 + cascade, 48.0 + cascade),
+                        EVec2::new(320.0, 200.0),
+                    ),
+                    origin: None,
+                });
+                self.message = format!("已保存文字预览 #{id}");
+            }
+        } else if shoot {
+            if let Some(dialog) = self.custom_dialog.take() {
+                let index = self.custom_previews.len();
+                self.custom_previews.push(CustomPreview {
+                    page: dialog.page,
+                    point: dialog.point,
+                    rect: zero_rect_at(dialog.point),
+                    kind: CustomKind::Image,
+                    title: dialog.title,
+                    text: None,
+                    snapshot: None,
+                });
+                // 进入截图模式：结果回写到这条自定义记录
+                self.capture = Some(CaptureState {
+                    rect: None,
+                    anchor: None,
+                    target: CaptureTarget::Custom(index),
+                });
+                self.message = "截图：拖动框选区域，Enter 保存，Esc 取消".to_string();
+            }
+        } else if cancel {
+            self.custom_dialog = None;
+            self.message = "已取消自定义preview".to_string();
+        }
+    }
+
     /// 截图模式：框选区域 + 半透明蒙层（矩形内透明）+ Enter/Esc 退出。
     ///
     /// * 蒙层用"绕开选区的四块"实现（egui 没有擦除混合，见 `view::veil_bands`）；
@@ -1746,13 +2027,17 @@ impl PdfReaderApp {
                     // 屏幕矩形 → 内容空间矩形（供快照与页面空间换算使用）
                     let selection_rect =
                         screen_rect_to_content(canvas.min, selection, scroll);
-                    match self.capture.as_ref().and_then(|state| state.target) {
+                    match self.capture.as_ref().map(|state| state.target) {
                         // 1a) 由被引用点标识进入：回写该点的矩形与截图，并用浮窗展示新图
-                        Some((page, index)) => {
+                        Some(CaptureTarget::DestMark(page, index)) => {
                             self.commit_dest_mark(ui, session, page, index, selection_rect);
                         }
+                        // 1c) 自定义图片预览：把截图存进该记录，并以固定浮窗显示
+                        Some(CaptureTarget::Custom(index)) => {
+                            self.commit_custom_image(ui, session, index, selection_rect);
+                        }
                         // 1b) 普通截图：只放进一个新浮窗
-                        None => self.capture_into_float(ui, session, selection_rect),
+                        _ => self.capture_into_float(ui, session, selection_rect),
                     }
                     let mut parts: Vec<String> = Vec::new();
                     for page in self.visible.clone() {
@@ -2212,6 +2497,17 @@ impl eframe::App for PdfReaderApp {
             // 注意仍然要跑 `apply_and_pump` —— 它负责 `pump`，瓦片加载得以继续。
             self.commands.clear();
         }
+        // Pin 状态（自定义 preview 选点）：只放行上下页与放大缩小；
+        // 其余命令意味着用户点了别的工具栏按钮 → 退回正常模式，**并照常执行该命令**。
+        if self.custom_pin.is_some()
+            && self
+                .commands
+                .iter()
+                .any(|command| !command_allowed_while_pinning(command))
+        {
+            self.custom_pin = None;
+            self.message = "已退出自定义preview".to_string();
+        }
         self.apply_and_pump(&ctx, &mut session);
         let after_input = frame_start.elapsed();
 
@@ -2287,6 +2583,7 @@ impl eframe::App for PdfReaderApp {
             ctx.request_repaint();
         }
         self.draw_password_prompt(&ctx);
+        self.draw_custom_dialog(&ctx);
     }
 }
 
