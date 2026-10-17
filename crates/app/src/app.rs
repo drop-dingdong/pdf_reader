@@ -30,7 +30,8 @@ use crate::view::{
     body_size_of, destination_points, drag_float_rect, find_dest_index, find_float_for_custom,
     float_rect_at_row, float_size_for_body, overflow_layout,
     pages_intersecting,
-    save_button_label, CUSTOM_SYMBOL_DELETE, CUSTOM_SYMBOL_EDIT, CUSTOM_SYMBOL_IMAGE,
+    body_size_changed, save_button_label, CUSTOM_SYMBOL_DELETE, CUSTOM_SYMBOL_EDIT,
+    CUSTOM_SYMBOL_IMAGE,
     CUSTOM_SYMBOL_TEXT,
     pin_exits_on_mode_change,
     zero_rect_at,
@@ -2035,7 +2036,7 @@ impl PdfReaderApp {
                         .get_mut(page.get() as usize)
                         .and_then(|marks| marks.get_mut(index))
                     {
-                        if mark.body_size != body {
+                        if body_size_changed(mark.body_size, body) {
                             mark.body_size = body;
                             self.data_dirty = true;
                         }
@@ -2043,7 +2044,7 @@ impl PdfReaderApp {
                 }
                 if let Some(index) = window.custom {
                     if let Some(preview) = self.custom_previews.get_mut(index) {
-                        if preview.body_size != body {
+                        if body_size_changed(preview.body_size, body) {
                             preview.body_size = body;
                             self.data_dirty = true;
                         }

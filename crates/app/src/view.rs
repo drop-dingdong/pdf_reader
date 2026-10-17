@@ -403,6 +403,15 @@ pub fn float_rect_at_row(
 /// 文字 `U+1F5B9`、截图 `U+1F5BB`。若渲染成方块，说明当前字体缺这两个字形
 /// （与码点无关，换个带符号的字体即可）。
 pub const CUSTOM_SYMBOL_TEXT: &str = "\u{1F5B9}";
+/// 浮窗正文尺寸是否**真的**变了（带容差）。
+///
+/// 尺寸在"正文 ↔ 浮窗"之间来回换算、还要经过夹取，必然带有亚像素误差；
+/// 用 `!=` 比较几乎永远为真 → 会把"仅移动浮窗"也误判成修改（用户实测）。
+/// 容差取 0.5px：小于半个像素的变化肉眼不可见，也不值得写盘。
+pub fn body_size_changed(stored: egui::Vec2, current: egui::Vec2) -> bool {
+    (stored.x - current.x).abs() > 0.5 || (stored.y - current.y).abs() > 0.5
+}
+
 /// "保存自定义数据"按钮的文案：存在未保存修改时加 `*` 前缀。
 pub fn save_button_label(dirty: bool) -> &'static str {
     if dirty {
@@ -1425,6 +1434,16 @@ mod tests {
         // 画布未知 → 退回固定位置，不 panic
         let rect = float_rect_at_row(egui::Rect::NOTHING, row, size, min);
         assert_eq!(rect.min, egui::pos2(48.0, 48.0));
+    }
+
+    /// 尺寸比较要带容差：亚像素误差不能算"修改"。
+    #[test]
+    fn body_size_changed_ignores_subpixel_noise() {
+        let stored = egui::vec2(320.0, 200.0);
+        assert!(!body_size_changed(stored, egui::vec2(320.0, 200.0)));
+        assert!(!body_size_changed(stored, egui::vec2(320.3, 199.8)), "亚像素误差不算修改");
+        assert!(body_size_changed(stored, egui::vec2(330.0, 200.0)), "明显变宽算修改");
+        assert!(body_size_changed(stored, egui::vec2(320.0, 190.0)), "明显变矮算修改");
     }
 
     /// 保存按钮文案随"是否有未保存修改"变化。
