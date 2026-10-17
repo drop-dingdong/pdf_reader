@@ -85,7 +85,7 @@
 | **D-61** | **任何"保存数据"的动作都不再自动生成浮窗**：点目的地标记重选 rect 并 Enter 后只写回数据（rect / body_size / snapshot）；保存自定义 preview（文字与图片）后也只写记录。浮窗只在"悬停链接 / 侧栏悬浮条目 / 点击条目 / 点击标识"这些**唤出动作**时出现 | 用户反馈："重选目的地与新建自定义 preview 后会直接冒出一个浮窗，不需要"。此决定**取代**早前"截图退出后用浮窗显示新图"的要求（D-42 那一条）|**测试总数：81 passed, 0 failed, 0 warnings**（pdfcore 65 + backend-pdfium 16）。
 | **D-62**（自定义图片 preview 部分已被 D-63 覆盖） | **跨页拼合**能力（普通截图用）：`snapshot_for` 不再只看 `self.visible` 里的页，而是用 `view::pages_intersecting` 枚举**所有与选区相交的页**参与拼合（页间距等空白保持白色）；`body_size` 取**整个选区**在当时的显示尺寸。与之相对，**链接目的地重选**仍按原语义只取与目标页重叠的部分 | 用户要求。原实现虽然 `compose_snapshot` 支持多页，但候选页来自 `visible` 集合 —— 选区越过可见集合边界时会漏掉页面，表现就像"只截到最大重叠的那一页" |
 | **D-63** | **自定义图片 preview 的截图只保留"重叠面积最大"的那一页**：跨 a-b 两页框选时，取交叠更多的一页，**只截该页内的交叠部分**，并把该交叠矩形（页面空间）与它在**当前缩放比下的尺寸**（`body_size`）记入该 preview。选择逻辑 `view::largest_overlap_page`（面积并列取先出现者，已测）| 用户澄清：上一条 D-62 只是让我确认"跨页拼合"这件事曾经是正常的；自定义图片 preview 需要的是"单页 + 最大交叠"语义。普通截图（截图按钮）仍保留跨页拼合 |### ✅ 已完成：运行期零件（`WorkerScheduler` + `LruCache`）
-
+| **D-64** | **自定义数据存档**（JSON，无第三方依赖）：`app/src/persist.rs` 手写序列化/解析 + 往返测试；内容 = 链接（矩形 + `Destination`）、被引用点（point/rect/body）、自定义图片 preview（page/point/rect/body/title）、自定义文字 preview（同上 + text）——**图片像素一律不入档**。工具栏「保存自定义数据」写入 `<pdf>.json`（`view::sidecar_path`）；打开文档时若有存档则载入并**替换**链接索引、覆盖被引用点的 rect/body、重建自定义 preview 列表（`snapshot: None`，需要时再合成）| 用户需求。可行性已确认：被引用点与自定义图片 preview 都保存了"页号 + 页面空间矩形"，载入后按当前缩放用 `snapshot_for` 重新合成即可，无需存像素 |
 放在 `pdfcore`（而不是 app）里的理由：它们是**纯 std** 实现，且只有放在这里才能被
 `cargo test` 完整覆盖（放 app 侧就只能通过 UI 验证，违背 agent.md 规则 2 的精神）。
 

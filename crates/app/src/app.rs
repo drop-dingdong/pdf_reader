@@ -23,6 +23,7 @@ use egui::{
 };
 use pdfcore::prelude::*;
 
+use crate::persist;
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
@@ -101,6 +102,19 @@ impl Tool {
         match self {
             Self::Pan => "平移",
             Self::Select => "选字",
+        }
+    }
+}
+
+/// 读取同目录存档（不存在或解析失败都返回 `None`，不打扰用户）。
+fn load_sidecar(pdf: &std::path::Path) -> Option<persist::SavedData> {
+    let target = persist::sidecar_path(pdf);
+    let text = std::fs::read_to_string(&target).ok()?;
+    match persist::SavedData::from_json(&text) {
+        Ok(data) => Some(data),
+        Err(error) => {
+            eprintln!("[存档] 解析失败（忽略）：{}：{error}", target.display());
+            None
         }
     }
 }
@@ -269,6 +283,8 @@ pub struct PdfReaderApp {
     scroll_quiet_until: Option<std::time::Instant>,
     /// 本帧需要**高亮**的浮窗 id（悬停到已固定的同一目的地时设置，仅维持一帧）。
     highlight_float: Option<u64>,
+    /// 当前文档的路径（用于保存/查找同目录的存档文件）。
+    document_path: Option<std::path::PathBuf>,
     /// 自定义 preview 的 Pin 状态（`Some` = 正在选点；此时不显示浮窗、不响应链接点击）。
     custom_pin: Option<CustomKind>,
     /// 自定义 preview 的输入对话框。
@@ -370,6 +386,7 @@ impl PdfReaderApp {
             hover_link_size: EVec2::new(160.0, 20.0),
             scroll_quiet_until: None,
             highlight_float: None,
+            document_path: None,
             custom_pin: None,
             custom_dialog: None,
             custom_previews: Vec::new(),
@@ -422,6 +439,55 @@ impl PdfReaderApp {
     }
 
     /// 打开文档（装配会话：LRU 缓存 + 后台调度器 + 纵向布局 + 选区模型）。
+    /// 保存自定义数据到 `<pdf>.json`（不含任何图片像素）。
+    fn save_custom_data(&mut self) {
+        let Some(path) = self.document_path.clone() else {
+            self.message = "没有打开的文档".to_string();
+            return;
+        };
+        let links = self
+            .navigation
+            .as_ref()
+            .map(|navigation| navigation.links_by_page.clone())
+            .unwrap_or_default();
+        let dest_marks = self
+            .dest_marks
+            .iter()
+            .map(|marks| {
+                marks
+                    .iter()
+                    .map(|mark| persist::SavedMark {
+                        point: mark.point,
+                        rect: mark.rect,
+                        body: [mark.body_size.x, mark.body_size.y],
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut custom_images = Vec::new();
+        let mut custom_texts = Vec::new();
+        for preview in &self.custom_previews {
+            let saved = persist::SavedCustom {
+                page: preview.page,
+                point: preview.point,
+                rect: preview.rect,
+                body: [preview.body_size.x, preview.body_size.y],
+                title: preview.title.clone(),
+                text: preview.text.clone(),
+            };
+            match preview.kind {
+                CustomKind::Image => custom_images.push(saved),
+                CustomKind::Text => custom_texts.push(saved),
+            }
+        }
+        let data = persist::SavedData { links, dest_marks, custom_images, custom_texts };
+        let target = persist::sidecar_path(&path);
+        match std::fs::write(&target, data.to_json()) {
+            Ok(()) => self.message = format!("已保存自定义数据：{}", target.display()),
+            Err(error) => self.message = format!("保存失败：{error}"),
+        }
+    }
+
     fn open(&mut self, path: &std::path::Path, password: Option<&str>) {
         let backend = PdfiumBackend::new();
         match backend.open(Source::Path(path), password) {
@@ -439,7 +505,19 @@ impl PdfReaderApp {
                     Box::new(RangeSelection::new()),
                 ) {
                     Ok(session) => {
+                        self.document_path = Some(path.to_path_buf());
+                        // 同目录若有存档（<pdf>.json），载入并**替换**链接与被引用点/自定义数据
+                        let saved = load_sidecar(path);
                         self.navigation = session.navigation().ok();
+                        // `NavigationIndex` 在会话里是共享只读的，因此这里**替换整个索引**
+                        // （克隆后换成存档里的链接），而不是原地改字段。
+                        if let (Some(saved), Some(navigation)) = (&saved, self.navigation.clone()) {
+                            if saved.links.len() == navigation.links_by_page.len() {
+                                let mut updated = (*navigation).clone();
+                                updated.links_by_page = saved.links.clone();
+                                self.navigation = Some(std::sync::Arc::new(updated));
+                            }
+                        }
                         // 摊平一次即可（虚拟化行渲染需要行列表）
                         self.outline_rows = self
                             .navigation
@@ -508,6 +586,37 @@ impl PdfReaderApp {
                                     .collect()
                             })
                             .unwrap_or_default();
+                        // 存档里的被引用点与自定义 preview 数据 → 覆盖/追加
+                        if let Some(saved) = &saved {
+                            for (page_index, page_marks) in saved.dest_marks.iter().enumerate() {
+                                let Some(marks) = self.dest_marks.get_mut(page_index) else { continue };
+                                for (index, saved_mark) in page_marks.iter().enumerate() {
+                                    if let Some(mark) = marks.get_mut(index) {
+                                        mark.rect = saved_mark.rect;
+                                        mark.body_size =
+                                            egui::vec2(saved_mark.body[0], saved_mark.body[1]);
+                                    }
+                                }
+                            }
+                            self.custom_previews.clear();
+                            for (kind, items) in [
+                                (CustomKind::Image, &saved.custom_images),
+                                (CustomKind::Text, &saved.custom_texts),
+                            ] {
+                                for item in items {
+                                    self.custom_previews.push(CustomPreview {
+                                        page: item.page,
+                                        point: item.point,
+                                        rect: item.rect,
+                                        kind,
+                                        title: item.title.clone(),
+                                        text: item.text.clone(),
+                                        snapshot: None,
+                                        body_size: egui::vec2(item.body[0], item.body[1]),
+                                    });
+                                }
+                            }
+                        }
                         self.floats.clear();
                         self.next_float_id = 1;
                         self.capture = None;
@@ -807,6 +916,9 @@ impl PdfReaderApp {
                     self.add_test_float();
                 }
                 ui.separator();
+                if ui.button("保存自定义数据").clicked() {
+                    self.save_custom_data();
+                }
                 if ui.button("＋文字预览").clicked() {
                     self.enter_pin(CustomKind::Text);
                 }

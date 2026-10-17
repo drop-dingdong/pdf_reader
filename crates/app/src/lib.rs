@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 pub mod app;
+pub mod persist;
 pub mod view;
 
 pub use app::PdfReaderApp;
