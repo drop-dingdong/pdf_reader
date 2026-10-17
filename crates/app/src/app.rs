@@ -664,6 +664,12 @@ impl PdfReaderApp {
 
     /// 采集输入 → 命令。
     fn collect_commands(&mut self, ctx: &egui::Context, session: &DocumentSession) {
+        // **文本输入获得焦点时，键盘归输入框**：否则在编辑框里敲空格/方向键会同时滚动页面
+        // （用户反馈）。`Memory::focused()` 在有 TextEdit 聚焦时返回其 Id，
+        // 覆盖搜索框、题目/正文编辑框等所有输入控件。
+        if ctx.memory(|memory| memory.focused().is_some()) {
+            return;
+        }
         // 截图模式下不采集任何"影响主视图显示内容"的命令（滚动/缩放/翻页/复制…）：
         // 键盘的 Enter/Esc 与框选都在 `draw_canvas` 里处理（那里才有画布矩形与滚动量）。
         if self.capture.is_some() {
