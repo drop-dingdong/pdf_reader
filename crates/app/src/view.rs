@@ -317,6 +317,15 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 侧栏 Pin 列表行首的**类型符号**：文字 / 截图（用户指定的 unicode）。
+///
+/// 用 Rust 的 `\u{...}` 转义写出，确保码点与用户要求一致：
+/// 文字 `U+1F5B9`、截图 `U+1F5BB`。若渲染成方块，说明当前字体缺这两个字形
+/// （与码点无关，换个带符号的字体即可）。
+pub const CUSTOM_SYMBOL_TEXT: &str = "\u{1F5B9}";
+/// 截图类型符号，见 [`CUSTOM_SYMBOL_TEXT`]。
+pub const CUSTOM_SYMBOL_IMAGE: &str = "\u{1F5BB}";
+
 /// 在"浮窗来源"列表里找**某个自定义 preview 的正式浮窗**（侧栏响应要用）。
 ///
 /// 与 `find_float_for_target` 同构：只有"由侧栏/保存逻辑正式生成"的浮窗才带 `custom` 下标，
@@ -1225,6 +1234,15 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 侧栏行首类型符号：码点必须与用户指定的完全一致。
+    #[test]
+    fn custom_preview_symbols_are_the_requested_codepoints() {
+        assert_eq!(CUSTOM_SYMBOL_TEXT.chars().next().map(u32::from), Some(0x1F5B9));
+        assert_eq!(CUSTOM_SYMBOL_IMAGE.chars().next().map(u32::from), Some(0x1F5BB));
+        assert_eq!(CUSTOM_SYMBOL_TEXT.chars().count(), 1);
+        assert_eq!(CUSTOM_SYMBOL_IMAGE.chars().count(), 1);
     }
 
     /// 侧栏 Pin 列表 → 正式浮窗的查找。
