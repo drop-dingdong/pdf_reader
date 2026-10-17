@@ -317,6 +317,14 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 在"浮窗来源"列表里找**某个自定义 preview 的正式浮窗**（侧栏响应要用）。
+///
+/// 与 `find_float_for_target` 同构：只有"由侧栏/保存逻辑正式生成"的浮窗才带 `custom` 下标，
+/// 测试用的 "(delete)" 副本等为 `None`。
+pub fn find_float_for_custom(customs: &[Option<usize>], index: usize) -> Option<usize> {
+    customs.iter().position(|custom| *custom == Some(index))
+}
+
 /// 生成"**自动换行 + 行数上限 + 溢出省略号**"的文本排版。
 ///
 /// 用于浮窗里的文字：
@@ -1217,6 +1225,16 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 侧栏 Pin 列表 → 正式浮窗的查找。
+    #[test]
+    fn find_float_for_custom_matches_only_the_official_float() {
+        let customs = vec![None, Some(0), None, Some(1)];
+        assert_eq!(find_float_for_custom(&customs, 0), Some(1));
+        assert_eq!(find_float_for_custom(&customs, 1), Some(3));
+        assert_eq!(find_float_for_custom(&customs, 2), None, "没有正式浮窗");
+        assert_eq!(find_float_for_custom(&[], 0), None);
     }
 
     /// 浮窗文本排版：自动换行、行数上限、溢出省略号。

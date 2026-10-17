@@ -26,7 +26,7 @@ use pdfcore::prelude::*;
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
-    destination_points, drag_float_rect, find_dest_index, overflow_layout,
+    destination_points, drag_float_rect, find_dest_index, find_float_for_custom, overflow_layout,
     pin_exits_on_mode_change,
     zero_rect_at,
     find_float_for_target, fit_inside,
@@ -50,6 +50,8 @@ const SIDEBAR_HANDLE_WIDTH: f32 = 5.0;
 
 /// 显示链接热区框所需的最低缩放：更小的时候热区框会糊成一片，反而干扰阅读（用户要求）。
 const LINK_OVERLAY_MIN_ZOOM: f32 = 0.75;
+/// 侧栏条目被点击后，浮窗高亮的持续时间（一次性动作需要一个有限时长）。
+const CLICK_HIGHLIGHT: std::time::Duration = std::time::Duration::from_millis(700);
 /// 滚动/缩放之后多久内不显示悬停预览（避免滚动时预览不断闪现）。
 const HOVER_SCROLL_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
 /// 大纲每行的固定高度（虚拟化行渲染要求等行高）。
@@ -95,6 +97,24 @@ impl Tool {
             Self::Select => "选字",
         }
     }
+}
+
+/// 刚 push 进去的自定义 preview 的下标（`custom_previews` 非空时取末尾）。
+fn index_of_last(previews: &[CustomPreview]) -> Option<usize> {
+    if previews.is_empty() {
+        None
+    } else {
+        Some(previews.len() - 1)
+    }
+}
+
+/// 侧栏的两个标签页。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarTab {
+    /// 目录（书签）
+    Outline,
+    /// 自定义 preview 列表（Pin）
+    Pins,
 }
 
 /// 自定义 preview 的两种类型。
@@ -206,6 +226,8 @@ struct Float {
     content: FloatContent,
     /// 在**视图区域**（画布）内的矩形；每帧会被夹取回区域内。
     rect: egui::Rect,
+    /// 若是某个自定义 preview 的**正式浮窗**，记录其在 `custom_previews` 中的下标。
+    custom: Option<usize>,
     /// 来源：由某个被引用点的悬停预览**固定**而来时记录 `(页号, 下标)`。
     /// 用于"同一目的地再次悬停时高亮并置顶这个浮窗，而不是再弹预览"。
     origin: Option<(PageIndex, usize)>,
@@ -275,7 +297,14 @@ pub struct PdfReaderApp {
     page_input: String,
     hits: Vec<SearchHit>,
     active_hit: Option<usize>,
+    /// 侧栏是否显示（原"目录"按钮，现在叫"侧栏"）。
     show_outline: bool,
+    /// 侧栏当前标签页。
+    sidebar_tab: SidebarTab,
+    /// 侧栏 Pin 列表里正在被悬浮的条目（Some = 显示临时浮窗，离开即关闭）。
+    custom_hover: Option<usize>,
+    /// 点击 Pin 条目后的一次性高亮（浮窗 id + 截止时刻）。
+    click_highlight: Option<(u64, std::time::Instant)>,
     /// 状态栏文本与错误提示。
     message: String,
     error: Option<String>,
@@ -349,6 +378,9 @@ impl PdfReaderApp {
             hits: Vec::new(),
             active_hit: None,
             show_outline: true,
+            sidebar_tab: SidebarTab::Outline,
+            custom_hover: None,
+            click_highlight: None,
             message: String::new(),
             error: None,
             diagnose: std::env::var_os("PDF_READER_DIAGNOSE").is_some(),
@@ -751,7 +783,7 @@ impl PdfReaderApp {
                 if ui.button("复制").clicked() {
                     self.commands.push(ViewerCommand::CopySelection);
                 }
-                ui.toggle_value(&mut self.show_outline, "目录");
+                ui.toggle_value(&mut self.show_outline, "侧栏");
                 // 链接热区框（用户需求）：勾选后用红色空心框显示链接 bbox
                 ui.checkbox(&mut self.show_links, "链接框");
                 // 被引用的点（链接目的地）：与链接框同样的缩放阈值（过小不显示）
@@ -851,8 +883,26 @@ impl PdfReaderApp {
             .resizable(false)
             .exact_size(width)
             .show(ui, |ui| {
-                ui.heading("目录");
+                // 两个标签页：目录 / 自定义preview（Pin）。同一时刻只显示一个。
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(self.sidebar_tab == SidebarTab::Outline, "目录")
+                        .clicked()
+                    {
+                        self.sidebar_tab = SidebarTab::Outline;
+                    }
+                    if ui
+                        .selectable_label(self.sidebar_tab == SidebarTab::Pins, "自定义preview")
+                        .clicked()
+                    {
+                        self.sidebar_tab = SidebarTab::Pins;
+                    }
+                });
                 ui.separator();
+                if self.sidebar_tab == SidebarTab::Pins {
+                    self.draw_pin_list(ui);
+                    return;
+                }
                 let Some(navigation) = navigation else {
                     ui.label("（无目录）");
                     return;
@@ -890,6 +940,135 @@ impl PdfReaderApp {
                     }
                 });
             });
+    }
+
+    /// 侧栏的"自定义preview（Pin）"列表：
+    /// 标题左对齐、页码右对齐、过长标题截断；双击跳转；悬浮显示临时浮窗；
+    /// 单击生成/唤出持久浮窗（已有则高亮并置顶，一次性高亮有时限）。
+    fn draw_pin_list(&mut self, ui: &mut egui::Ui) {
+        if self.custom_previews.is_empty() {
+            ui.label("（还没有自定义preview）");
+            return;
+        }
+        let row_height = OUTLINE_ROW_HEIGHT;
+        let mut hovered: Option<usize> = None;
+        let count = self.custom_previews.len();
+        egui::ScrollArea::vertical().show_rows(ui, row_height, count, |ui, range| {
+            for index in range {
+                let Some(preview) = self.custom_previews.get(index) else { continue };
+                let title = if preview.title.is_empty() {
+                    match preview.kind {
+                        CustomKind::Text => "（无题文字预览）".to_string(),
+                        CustomKind::Image => "（无题图片预览）".to_string(),
+                    }
+                } else {
+                    preview.title.clone()
+                };
+                let page_label = format!("第 {} 页", preview.page.display_number());
+                let row = ui.horizontal(|ui| {
+                    // 页码右对齐：先把页码画在右侧，再让标题占剩余宽度并截断
+                    let id = Id::unique(("pin-row", index));
+                    let response = ui
+                        .interact(
+                            ui.available_rect_before_wrap(),
+                            id,
+                            Sense::click_and_drag(),
+                        )
+                        .union(ui.response());
+                    let _ = response;
+                    ui.allocate_ui_with_layout(
+                        ui.available_size(),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            let page_width = 64.0;
+                            let title_width = (ui.available_width() - page_width - 8.0).max(24.0);
+                            let job = overflow_layout(
+                                &title,
+                                egui::FontId::proportional(13.0),
+                                ui.visuals().text_color(),
+                                title_width,
+                                1,
+                            );
+                            let galley = ui.painter().layout_job(job);
+                            let (rect, _) = ui.allocate_exact_size(
+                                EVec2::new(title_width, row_height),
+                                Sense::hover(),
+                            );
+                            ui.painter().galley(
+                                egui::pos2(rect.min.x, rect.center().y - galley.size().y * 0.5),
+                                galley,
+                                ui.visuals().text_color(),
+                            );
+                            ui.add_space(ui.available_width() - page_width);
+                            ui.add_sized(
+                                EVec2::new(page_width, row_height),
+                                egui::Label::new(
+                                    RichText::new(&page_label).small().weak(),
+                                ),
+                            );
+                        },
+                    );
+                });
+                let response = row.response;
+                if response.hovered() {
+                    hovered = Some(index);
+                }
+                // 双击 → 跳转到该条目记录的页与页内坐标
+                if response.double_clicked() {
+                    if let Some(preview) = self.custom_previews.get(index) {
+                        self.commands.push(ViewerCommand::GoToPage(preview.page));
+                        self.commands.push(ViewerCommand::CenterOnPagePoint {
+                            page: preview.page,
+                            point: preview.point,
+                        });
+                    }
+                } else if response.clicked() {
+                    self.activate_custom_preview(index);
+                }
+            }
+        });
+        // 悬浮条目 → 只显示临时浮窗（离开即关）
+        self.custom_hover = hovered;
+    }
+
+    /// 侧栏条目被点击：生成正式浮窗；若已存在则高亮 + 置顶（一次性高亮有时限）。
+    fn activate_custom_preview(&mut self, index: usize) {
+        let customs: Vec<Option<usize>> = self.floats.iter().map(|f| f.custom).collect();
+        if let Some(position) = find_float_for_custom(&customs, index) {
+            let window = self.floats.remove(position);
+            let id = window.id;
+            self.floats.push(window);
+            self.click_highlight = Some((id, std::time::Instant::now() + CLICK_HIGHLIGHT));
+            self.message = "已唤出该自定义preview浮窗".to_string();
+            return;
+        }
+        let Some(preview) = self.custom_previews.get(index) else { return };
+        let id = self.next_float_id;
+        self.next_float_id += 1;
+        let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(48.0 + cascade, 48.0 + cascade),
+            EVec2::new(320.0, 200.0),
+        );
+        let content = match (preview.kind, preview.snapshot.clone()) {
+            (CustomKind::Image, Some(texture)) => FloatContent::Image(texture),
+            _ => FloatContent::Text(preview.text.clone().unwrap_or_default()),
+        };
+        let title = if preview.title.is_empty() {
+            "自定义preview".to_string()
+        } else {
+            preview.title.clone()
+        };
+        self.floats.push(Float {
+            id,
+            title,
+            content,
+            rect,
+            custom: Some(index),
+            origin: None,
+        });
+        self.click_highlight = Some((id, std::time::Instant::now() + CLICK_HIGHLIGHT));
+        self.message = "已生成该自定义preview浮窗".to_string();
     }
 
     fn draw_status(&self, ui: &mut egui::Ui, session: &DocumentSession) {
@@ -1560,6 +1739,8 @@ impl PdfReaderApp {
                 self.draw_floats(ui, canvas);
                 // 临时预览**最后**绘制 → 真正位于最上层（用户要求）
                 self.draw_hover_preview(ui, canvas);
+                // 侧栏条目悬浮 → 主视图右侧的临时浮窗
+                self.draw_sidebar_hover_float(ui, canvas);
             } else if self.capture.is_some() {
                 self.draw_capture(ui, canvas, session, scroll);
             }
@@ -1582,6 +1763,7 @@ impl PdfReaderApp {
                 "这是第 {id} 个测试浮窗。\n目前只显示文字。\n\n可以拖动标题栏移动、\n拖右下角改变大小、\n点右上角 ✕ 关闭。"
             )),
             origin: None,
+            custom: None,
             rect,
         });
         self.message = format!("已添加测试浮窗 #{id}");
@@ -1793,6 +1975,7 @@ impl PdfReaderApp {
                 title: format!("引用点截图 · 第 {} 页", page.display_number()),
                 content: FloatContent::Image(texture),
                 origin: Some((page, index)),
+                custom: None,
                 rect: clamp_float_rect(
                     rect.translate(response.drag_delta()),
                     canvas,
@@ -1801,6 +1984,98 @@ impl PdfReaderApp {
             });
             self.hover_tip = None;
             self.message = format!("已固定为浮窗 #{id}");
+        }
+    }
+
+    /// 侧栏 Pin 条目被悬浮时，在主视图**右侧**显示该条目的临时浮窗（离开条目即关闭）。
+    fn draw_sidebar_hover_float(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
+        let Some(index) = self.custom_hover else { return };
+        let Some(preview) = self.custom_previews.get(index) else {
+            self.custom_hover = None;
+            return;
+        };
+        let title = if preview.title.is_empty() {
+            "自定义preview".to_string()
+        } else {
+            preview.title.clone()
+        };
+        let text = preview.text.clone();
+        let texture = preview.snapshot.clone();
+        let size = EVec2::new(320.0, 240.0);
+        let rect = clamp_float_rect(
+            egui::Rect::from_min_size(
+                egui::pos2(canvas.max.x - size.x - 16.0, canvas.min.y + 16.0),
+                size,
+            ),
+            canvas,
+            FLOAT_MIN_SIZE,
+        );
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(30, 32, 36));
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(4),
+            Stroke::new(1.0, Color32::from_gray(150)),
+            StrokeKind::Inside,
+        );
+        let title_rect =
+            egui::Rect::from_min_size(rect.min, EVec2::new(rect.width(), FLOAT_TITLE_HEIGHT));
+        painter.rect_filled(title_rect, CornerRadius::same(4), Color32::from_rgb(54, 58, 66));
+        let job = overflow_layout(
+            &title,
+            egui::FontId::proportional(13.0),
+            Color32::WHITE,
+            title_rect.width() - 12.0,
+            1,
+        );
+        let galley = painter.layout_job(job);
+        painter.galley(
+            egui::pos2(
+                title_rect.min.x + 8.0,
+                title_rect.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            Color32::WHITE,
+        );
+        let body = egui::Rect::from_min_max(
+            rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 6.0),
+            rect.max - EVec2::new(8.0, 6.0),
+        );
+        match (texture, text) {
+            (Some(texture), _) => {
+                painter.image(
+                    texture.id(),
+                    fit_inside(texture.size_vec2(), body),
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+            (None, Some(text)) => {
+                let row_height = 13.0 * 1.3;
+                let rows = ((body.height() / row_height).floor() as usize).max(1);
+                let job = overflow_layout(
+                    &text,
+                    egui::FontId::proportional(13.0),
+                    Color32::from_gray(225),
+                    body.width(),
+                    rows,
+                );
+                let galley = painter.layout_job(job);
+                painter.with_clip_rect(body).galley(
+                    body.min,
+                    galley,
+                    Color32::from_gray(225),
+                );
+            }
+            (None, None) => {
+                painter.text(
+                    body.min,
+                    Align2::LEFT_TOP,
+                    "（无内容）",
+                    egui::FontId::proportional(13.0),
+                    Color32::from_gray(160),
+                );
+            }
         }
     }
 
@@ -1827,10 +2102,15 @@ impl PdfReaderApp {
         preview.snapshot = Some(texture.clone());
         let title = preview.title.clone();
         let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
+        let display_title = if title.is_empty() {
+            "自定义截图预览".to_string()
+        } else {
+            title.clone()
+        };
         self.floats.push(Float {
             id,
-            title: if title.is_empty() { "自定义截图预览".to_string() } else { title },
-            content: FloatContent::Image(texture),
+            title: display_title,
+            content: FloatContent::Image(texture.clone()),
             rect: egui::Rect::from_min_size(
                 egui::pos2(48.0 + cascade, 48.0 + cascade),
                 EVec2::new(
@@ -1838,6 +2118,21 @@ impl PdfReaderApp {
                     content_rect.height.clamp(FLOAT_MIN_SIZE.y, 640.0) + FLOAT_TITLE_HEIGHT,
                 ),
             ),
+            origin: None,
+            custom: Some(index),
+        });
+        // 测试需要：再放一份标题带 "(delete)" 的副本
+        let delete_id = self.next_float_id;
+        self.next_float_id += 1;
+        self.floats.push(Float {
+            id: delete_id,
+            title: format!("(delete) {}", if title.is_empty() { "图片预览" } else { &title }),
+            content: FloatContent::Image(texture.clone()),
+            rect: egui::Rect::from_min_size(
+                egui::pos2(24.0 + cascade, 24.0 + cascade),
+                EVec2::new(320.0, 240.0),
+            ),
+            custom: None,
             origin: None,
         });
         self.message = "自定义图片预览已保存".to_string();
@@ -1952,21 +2247,38 @@ impl PdfReaderApp {
                 let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
                 // 正文只放"内容"：题目只出现在标题栏（用户要求，避免重复）
                 let body = dialog.content;
+                let display_title = if dialog.title.is_empty() {
+                    "文字预览".to_string()
+                } else {
+                    dialog.title.clone()
+                };
+                // 测试需要：同时生成两份浮窗 ——
+                // 一份标题带 "(delete)"（可手动删掉），一份是侧栏响应的**正式**浮窗
                 self.floats.push(Float {
                     id,
-                    title: if dialog.title.is_empty() {
-                        "文字预览".to_string()
-                    } else {
-                        dialog.title
-                    },
+                    title: format!("(delete) {display_title}"),
+                    content: FloatContent::Text(body.clone()),
+                    rect: egui::Rect::from_min_size(
+                        egui::pos2(24.0 + cascade, 24.0 + cascade),
+                        EVec2::new(320.0, 200.0),
+                    ),
+                    origin: None,
+                    custom: None,
+                });
+                let official_id = self.next_float_id;
+                self.next_float_id += 1;
+                self.floats.push(Float {
+                    id: official_id,
+                    title: display_title,
                     content: FloatContent::Text(body),
                     rect: egui::Rect::from_min_size(
                         egui::pos2(48.0 + cascade, 48.0 + cascade),
                         EVec2::new(320.0, 200.0),
                     ),
                     origin: None,
+                    custom: index_of_last(&self.custom_previews),
                 });
-                self.message = format!("已保存文字预览 #{id}");
+                self.message = format!("已保存文字预览（浮窗 #{official_id}，可用侧栏唤出）");
             }
         } else if shoot {
             if let Some(dialog) = self.custom_dialog.take() {
@@ -2178,6 +2490,7 @@ impl PdfReaderApp {
             title: format!("引用点截图 #{} · 第 {} 页", index + 1, page.display_number()),
             content: FloatContent::Image(texture),
             origin: None,
+            custom: None,
             rect: egui::Rect::from_min_size(
                 egui::pos2(32.0 + cascade, 32.0 + cascade),
                 EVec2::new(
@@ -2259,6 +2572,7 @@ impl PdfReaderApp {
             content: FloatContent::Image(texture),
             rect: egui::Rect::from_min_size(egui::pos2(32.0 + cascade, 32.0 + cascade), size),
             origin: None,
+            custom: None,
         });
         self.message = format!("已把截图放入浮窗 #{id}");
     }
