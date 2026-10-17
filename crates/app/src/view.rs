@@ -403,6 +403,15 @@ pub fn float_rect_at_row(
 /// 文字 `U+1F5B9`、截图 `U+1F5BB`。若渲染成方块，说明当前字体缺这两个字形
 /// （与码点无关，换个带符号的字体即可）。
 pub const CUSTOM_SYMBOL_TEXT: &str = "\u{1F5B9}";
+/// "保存自定义数据"按钮的文案：存在未保存修改时加 `*` 前缀。
+pub fn save_button_label(dirty: bool) -> &'static str {
+    if dirty {
+        "*保存自定义数据"
+    } else {
+        "保存自定义数据"
+    }
+}
+
 /// 编辑按钮符号（U+270E）。
 pub const CUSTOM_SYMBOL_EDIT: &str = "\u{270E}";
 /// 删除按钮符号（U+274E）。
@@ -1416,6 +1425,14 @@ mod tests {
         // 画布未知 → 退回固定位置，不 panic
         let rect = float_rect_at_row(egui::Rect::NOTHING, row, size, min);
         assert_eq!(rect.min, egui::pos2(48.0, 48.0));
+    }
+
+    /// 保存按钮文案随"是否有未保存修改"变化。
+    #[test]
+    fn save_button_label_marks_unsaved_changes() {
+        assert_eq!(save_button_label(false), "保存自定义数据");
+        assert_eq!(save_button_label(true), "*保存自定义数据");
+        assert!(save_button_label(true).starts_with('*'));
     }
 
     /// 侧栏行首类型符号：码点必须与用户指定的完全一致。

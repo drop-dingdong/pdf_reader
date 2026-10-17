@@ -30,7 +30,8 @@ use crate::view::{
     body_size_of, destination_points, drag_float_rect, find_dest_index, find_float_for_custom,
     float_rect_at_row, float_size_for_body, overflow_layout,
     pages_intersecting,
-    CUSTOM_SYMBOL_DELETE, CUSTOM_SYMBOL_EDIT, CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT,
+    save_button_label, CUSTOM_SYMBOL_DELETE, CUSTOM_SYMBOL_EDIT, CUSTOM_SYMBOL_IMAGE,
+    CUSTOM_SYMBOL_TEXT,
     pin_exits_on_mode_change,
     zero_rect_at,
     find_float_for_target, fit_inside,
@@ -291,6 +292,8 @@ pub struct PdfReaderApp {
     custom_dialog: Option<CustomDialog>,
     /// 已保存的自定义 preview。
     custom_previews: Vec<CustomPreview>,
+    /// 自定义数据是否有未保存的修改（影响保存按钮文案）。
+    data_dirty: bool,
     /// 正在编辑题目 `(下标, 草稿)`。
     editing_title: Option<(usize, String)>,
     /// 正在编辑正文 `(下标, 草稿)`（文字预览：固定浮窗内双击正文进入）。
@@ -394,6 +397,7 @@ impl PdfReaderApp {
             custom_pin: None,
             custom_dialog: None,
             custom_previews: Vec::new(),
+            data_dirty: false,
             editing_title: None,
             editing_body: None,
             link_marks: Vec::new(),
@@ -489,7 +493,10 @@ impl PdfReaderApp {
         let data = persist::SavedData { links, dest_marks, custom_images, custom_texts };
         let target = persist::sidecar_path(&path);
         match std::fs::write(&target, data.to_json()) {
-            Ok(()) => self.message = format!("已保存自定义数据：{}", target.display()),
+            Ok(()) => {
+                self.data_dirty = false;
+                self.message = format!("已保存自定义数据：{}", target.display());
+            }
             Err(error) => self.message = format!("保存失败：{error}"),
         }
     }
@@ -522,6 +529,7 @@ impl PdfReaderApp {
                         self.click_highlight = None;
                         self.hover_tip = None;
                         self.floats.clear();
+                        self.data_dirty = false;
                         self.document_path = Some(path.to_path_buf());
                         // 同目录若有存档（<pdf>.json），载入并**替换**链接与被引用点/自定义数据
                         let saved = load_sidecar(path);
@@ -938,7 +946,7 @@ impl PdfReaderApp {
                     self.add_test_float();
                 }
                 ui.separator();
-                if ui.button("保存自定义数据").clicked() {
+                if ui.button(save_button_label(self.data_dirty)).clicked() {
                     self.save_custom_data();
                 }
                 if ui.button("＋文字预览").clicked() {
@@ -1313,6 +1321,7 @@ impl PdfReaderApp {
         if self.editing_body.as_ref().map_or(false, |(editing, _)| *editing == index) {
             self.editing_body = None;
         }
+        self.data_dirty = true;
         self.message = "已删除该自定义preview".to_string();
     }
 
@@ -2026,12 +2035,18 @@ impl PdfReaderApp {
                         .get_mut(page.get() as usize)
                         .and_then(|marks| marks.get_mut(index))
                     {
-                        mark.body_size = body;
+                        if mark.body_size != body {
+                            mark.body_size = body;
+                            self.data_dirty = true;
+                        }
                     }
                 }
                 if let Some(index) = window.custom {
                     if let Some(preview) = self.custom_previews.get_mut(index) {
-                        preview.body_size = body;
+                        if preview.body_size != body {
+                            preview.body_size = body;
+                            self.data_dirty = true;
+                        }
                     }
                 }
                 self.floats.push(window);
@@ -2424,6 +2439,7 @@ impl PdfReaderApp {
                 preview.text = Some(text);
             }
             self.editing_body = None;
+            self.data_dirty = true;
             self.message = "已更新内容".to_string();
         } else {
             self.editing_body = Some((editing_index, text));
@@ -2495,6 +2511,7 @@ impl PdfReaderApp {
                     preview.title = text;
                 }
                 self.editing_title = None;
+                self.data_dirty = true;
                 self.message = "已更新题目".to_string();
             }
         }
@@ -2566,6 +2583,7 @@ impl PdfReaderApp {
         preview.snapshot = Some(texture);
         preview.rect = page_rect;
         preview.body_size = egui::vec2(overlap.width, overlap.height);
+        self.data_dirty = true;
         self.message = format!(
             "已保存图片预览（取第 {} 页，交叠 {:.0}×{:.0}）",
             page.display_number(),
@@ -2679,6 +2697,7 @@ impl PdfReaderApp {
                     body_size,
                 });
                 // **不**自动生成浮窗（用户要求）：只在从侧栏悬浮/点击该条目时出现
+                self.data_dirty = true;
                 self.message = "已保存文字预览（从侧栏「自定义preview」唤出）".to_string();
             }
         } else if shoot {
@@ -2880,6 +2899,7 @@ impl PdfReaderApp {
             mark.rect = page_rect;
             mark.snapshot = Some(texture.clone());
             mark.body_size = egui::vec2(overlap.width, overlap.height);
+            self.data_dirty = true;
             rect_saved = true;
         }
         if !rect_saved {
