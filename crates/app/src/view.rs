@@ -317,6 +317,19 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 浮窗被拖动后的新矩形：先按位移平移，再夹取回视图区域内（且不小于最小尺寸）。
+///
+/// 抽成函数是因为"拖动浮窗"有三个入口（标题栏、正文/截图区、临时预览被拖动后固定），
+/// 它们必须**用同一套夹取规则**，否则会出现"拖出去回不来""大小被改动"这类分歧。
+pub fn drag_float_rect(
+    rect: egui::Rect,
+    delta: egui::Vec2,
+    canvas: egui::Rect,
+    min_size: egui::Vec2,
+) -> egui::Rect {
+    clamp_float_rect(rect.translate(delta), canvas, min_size)
+}
+
 /// 把第 `index` 项移到末尾，**其余项相对顺序保持不变**。
 ///
 /// 用途：点击浮窗任意处 → 该浮窗置顶；因为绘制与交互都按顺序进行，
@@ -1157,6 +1170,27 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 拖动浮窗：平移后仍被夹在视图区域内（三个拖动入口共用同一规则）。
+    #[test]
+    fn drag_float_rect_translates_and_clamps() {
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let min = egui::vec2(160.0, 90.0);
+        let rect = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(300.0, 200.0));
+
+        // 正常平移
+        let moved = drag_float_rect(rect, egui::vec2(20.0, -30.0), canvas, min);
+        assert_eq!(moved.min, egui::pos2(120.0, 70.0));
+        assert_eq!(moved.size(), rect.size(), "拖动只改位置，不改尺寸");
+
+        // 拖出右下 → 拉回区域内
+        let moved = drag_float_rect(rect, egui::vec2(2000.0, 2000.0), canvas, min);
+        assert!(moved.max.x <= canvas.max.x + 1e-3 && moved.max.y <= canvas.max.y + 1e-3);
+
+        // 拖出左上 → 贴住左上角
+        let moved = drag_float_rect(rect, egui::vec2(-2000.0, -2000.0), canvas, min);
+        assert_eq!(moved.min, canvas.min);
     }
 
     /// 置顶：移到末尾，且不移乱其它项的相对顺序。

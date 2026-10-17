@@ -26,8 +26,8 @@ use pdfcore::prelude::*;
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
-    destination_points, find_dest_index, find_float_for_target, fit_inside, compose_snapshot,
-    hover_preview_allowed, move_to_last,
+    destination_points, drag_float_rect, find_dest_index, find_float_for_target, fit_inside,
+    compose_snapshot, hover_preview_allowed, move_to_last,
     page_rect_to_screen, pointer_over_any,
     screen_rect_to_content, tip_rect_for, veil_bands, view_rect_to_page_rect, SnapshotPage,
     flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
@@ -1631,7 +1631,12 @@ impl PdfReaderApp {
         // 锚点 anchor = 链接框中心；把它当作链接框中心传进去（尺寸用上一帧记录的链接框尺寸）
         let link_rect = egui::Rect::from_center_size(anchor, self.hover_link_size);
         let rect = tip_rect_for(link_rect, wanted, canvas);
-        let response = ui.interact(rect, Id::unique("hover-tip"), Sense::click());
+        // 临时预览：**点击或拖动都固定**；拖动时把位移带到新浮窗上（用户要求）
+        let response = ui.interact(
+            rect,
+            Id::unique("hover-tip"),
+            Sense::click_and_drag(),
+        );
         let painter = ui.painter();
         painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(30, 32, 36));
         painter.rect_stroke(
@@ -1664,8 +1669,8 @@ impl PdfReaderApp {
             tip.rect = Some(rect);
         }
 
-        // 点击 → 转为永久浮窗（保留同一张图，不受鼠标位置影响）
-        if response.clicked() {
+        // 点击或拖动 → 转为永久浮窗（保留同一张图；拖动时采用偏移后的位置）
+        if response.clicked() || response.drag_started() {
             let id = self.next_float_id;
             self.next_float_id += 1;
             self.floats.push(Float {
@@ -1673,9 +1678,10 @@ impl PdfReaderApp {
                 title: format!("引用点截图 · 第 {} 页", page.display_number()),
                 content: FloatContent::Image(texture),
                 origin: Some((page, index)),
-                rect: egui::Rect::from_min_size(
-                    egui::pos2(rect.min.x, rect.min.y),
-                    EVec2::new(rect.width(), rect.height()),
+                rect: clamp_float_rect(
+                    rect.translate(response.drag_delta()),
+                    canvas,
+                    FLOAT_MIN_SIZE,
                 ),
             });
             self.hover_tip = None;
@@ -1967,17 +1973,32 @@ impl PdfReaderApp {
 
             // 主体：占住点击（避免"点在浮窗上却给文档落了光标"）；不参与拖动。
             // 点击主体任意处（除关闭按钮）→ 该浮窗置顶，其余浮窗相对顺序不变。
-            let body = ui.interact(rect, Id::unique(("float", id)), Sense::click());
-            if body.clicked() {
+            // 主体（文字区/截图区）同样**整体拖动浮窗** —— 不能让拖动穿透去拖 PDF 页面
+            let body = ui.interact(rect, Id::unique(("float", id)), Sense::click_and_drag());
+            if body.clicked() || body.drag_started() {
                 raise = Some(id);
+            }
+            if body.dragged() {
+                self.floats[index].rect =
+                    drag_float_rect(rect, body.drag_delta(), canvas, FLOAT_MIN_SIZE);
             }
 
             // 标题栏：拖动移动
             let title_rect =
                 egui::Rect::from_min_size(rect.min, EVec2::new(rect.width(), FLOAT_TITLE_HEIGHT));
-            let title = ui.interact(title_rect, Id::unique(("float-title", id)), Sense::drag());
+            // 标题栏：**点击或开始拖动都要置顶**（用户要求：点击区域要包含标题栏）；
+            // 拖动则移动浮窗。
+            let title = ui.interact(
+                title_rect,
+                Id::unique(("float-title", id)),
+                Sense::click_and_drag(),
+            );
+            if title.clicked() || title.drag_started() {
+                raise = Some(id);
+            }
             if title.dragged() {
-                self.floats[index].rect = rect.translate(title.drag_delta());
+                self.floats[index].rect =
+                    drag_float_rect(rect, title.drag_delta(), canvas, FLOAT_MIN_SIZE);
             }
 
             // 右下角把手：拖动改大小（不小于最小尺寸）
