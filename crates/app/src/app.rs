@@ -26,7 +26,8 @@ use pdfcore::prelude::*;
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
-    destination_points, drag_float_rect, find_dest_index, find_float_for_custom, overflow_layout,
+    destination_points, drag_float_rect, find_dest_index, find_float_for_custom, float_rect_at_row,
+    overflow_layout,
     CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT,
     pin_exits_on_mode_change,
     zero_rect_at,
@@ -293,8 +294,10 @@ pub struct PdfReaderApp {
     show_outline: bool,
     /// 侧栏当前标签页。
     sidebar_tab: SidebarTab,
-    /// 侧栏 Pin 列表里正在被悬浮的条目（Some = 显示临时浮窗，离开即关闭）。
-    custom_hover: Option<usize>,
+    /// 侧栏 Pin 列表里正在被悬浮的条目（下标 + 该行的屏幕矩形，用于定位临时浮窗）。
+    custom_hover: Option<(usize, egui::Rect)>,
+    /// 上一帧主视图（画布）的矩形：侧栏先于画布绘制，用它给浮窗定位。
+    canvas_rect: egui::Rect,
     /// 点击 Pin 条目后的一次性高亮（浮窗 id + 截止时刻）。
     click_highlight: Option<(u64, std::time::Instant)>,
     /// 状态栏文本与错误提示。
@@ -372,6 +375,7 @@ impl PdfReaderApp {
             show_outline: true,
             sidebar_tab: SidebarTab::Outline,
             custom_hover: None,
+            canvas_rect: egui::Rect::NOTHING,
             click_highlight: None,
             message: String::new(),
             error: None,
@@ -943,7 +947,7 @@ impl PdfReaderApp {
             return;
         }
         let row_height = OUTLINE_ROW_HEIGHT;
-        let mut hovered: Option<usize> = None;
+        let mut hovered: Option<(usize, egui::Rect)> = None;
         let count = self.custom_previews.len();
         egui::ScrollArea::vertical().show_rows(ui, row_height, count, |ui, range| {
             for index in range {
@@ -977,12 +981,14 @@ impl PdfReaderApp {
                     Sense::click(),
                 );
                 if response.hovered() {
-                    hovered = Some(index);
+                    hovered = Some((index, rect));
                     ui.painter().rect_filled(
                         rect,
                         CornerRadius::ZERO,
                         ui.visuals().widgets.hovered.weak_bg_fill,
                     );
+                    // 该条目已有正式浮窗 → 高亮并置顶（与链接悬停的"重新激发"一致）
+                    self.highlight_existing_custom_float(index);
                 }
                 let painter = ui.painter();
                 let page_width = 64.0;
@@ -1017,33 +1023,47 @@ impl PdfReaderApp {
                         });
                     }
                 } else if response.clicked() {
-                    self.activate_custom_preview(index);
+                    self.activate_custom_preview(index, rect);
                 }
             }
         });
-        // 悬浮条目 → 只显示临时浮窗（离开即关）
+        // 悬浮条目 → 只显示临时浮窗（离开即关）；同时记录行矩形用于定位
         self.custom_hover = hovered;
     }
 
+    /// 由"侧栏行的屏幕矩形"决定浮窗位置（委托给已测试的 `view::float_rect_at_row`）。
+    fn float_rect_at_row(&self, row: egui::Rect, size: egui::Vec2) -> egui::Rect {
+        float_rect_at_row(self.canvas_rect, row, size, FLOAT_MIN_SIZE)
+    }
+
+    /// 若某个自定义 preview 已有**正式浮窗**，把它高亮并置顶（侧栏悬浮/点击共用）。
+    fn highlight_existing_custom_float(&mut self, index: usize) -> Option<u64> {
+        let customs: Vec<Option<usize>> = self.floats.iter().map(|f| f.custom).collect();
+        let position = find_float_for_custom(&customs, index)?;
+        let window = self.floats.remove(position);
+        let id = window.id;
+        self.floats.push(window);
+        self.highlight_float = Some(id);
+        Some(id)
+    }
+
     /// 侧栏条目被点击：生成正式浮窗；若已存在则高亮 + 置顶（一次性高亮有时限）。
-    fn activate_custom_preview(&mut self, index: usize) {
+    fn activate_custom_preview(&mut self, index: usize, row: egui::Rect) {
         let customs: Vec<Option<usize>> = self.floats.iter().map(|f| f.custom).collect();
         if let Some(position) = find_float_for_custom(&customs, index) {
             let window = self.floats.remove(position);
             let id = window.id;
             self.floats.push(window);
+            // 一次性高亮（点击动作需要有限时长）+ 当帧也置为高亮
             self.click_highlight = Some((id, std::time::Instant::now() + CLICK_HIGHLIGHT));
+            self.highlight_float = Some(id);
             self.message = "已唤出该自定义preview浮窗".to_string();
             return;
         }
         let Some(preview) = self.custom_previews.get(index) else { return };
         let id = self.next_float_id;
         self.next_float_id += 1;
-        let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(48.0 + cascade, 48.0 + cascade),
-            EVec2::new(320.0, 200.0),
-        );
+        let rect = self.float_rect_at_row(row, EVec2::new(320.0, 200.0));
         let content = match (preview.kind, preview.snapshot.clone()) {
             (CustomKind::Image, Some(texture)) => FloatContent::Image(texture),
             _ => FloatContent::Text(preview.text.clone().unwrap_or_default()),
@@ -1723,6 +1743,9 @@ impl PdfReaderApp {
                 }
             }
 
+            // 记下画布矩形：侧栏（在该函数之前绘制）需要它来给浮窗定位
+            self.canvas_rect = canvas;
+
             // 悬停预览：**先只做检测与状态更新**（含"同一目的地已固定 → 高亮 + 置顶"）
             if self.capture.is_none() && self.custom_pin.is_none() {
                 self.update_hover_preview(ui, session, canvas, scroll);
@@ -1983,7 +2006,7 @@ impl PdfReaderApp {
 
     /// 侧栏 Pin 条目被悬浮时，在主视图**右侧**显示该条目的临时浮窗（离开条目即关闭）。
     fn draw_sidebar_hover_float(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
-        let Some(index) = self.custom_hover else { return };
+        let Some((index, row)) = self.custom_hover else { return };
         let Some(preview) = self.custom_previews.get(index) else {
             self.custom_hover = None;
             return;
@@ -1995,10 +2018,11 @@ impl PdfReaderApp {
         };
         let text = preview.text.clone();
         let texture = preview.snapshot.clone();
+        // 与"点击生成的固定浮窗"用同一套定位：紧贴侧边栏、与条目行垂直对齐（用户要求）
         let size = EVec2::new(320.0, 240.0);
         let rect = clamp_float_rect(
             egui::Rect::from_min_size(
-                egui::pos2(canvas.max.x - size.x - 16.0, canvas.min.y + 16.0),
+                egui::pos2(canvas.min.x + 16.0, row.center().y - size.y * 0.5),
                 size,
             ),
             canvas,
@@ -2635,7 +2659,11 @@ impl PdfReaderApp {
 
             // ---- 绘制 ----
             // 被"再次悬停同一目的地"激发时高亮：边框加粗变橙、标题栏变暖色
-            let highlighted = self.highlight_float == Some(id);
+            // 高亮有两个来源：悬浮（每帧判定）与点击（一次性，带截止时刻）
+            let clicked_highlight = self
+                .click_highlight
+                .map_or(false, |(target, until)| target == id && std::time::Instant::now() < until);
+            let highlighted = self.highlight_float == Some(id) || clicked_highlight;
             let (border, border_width, title_color) = if highlighted {
                 (Color32::from_rgb(255, 170, 60), 2.0, Color32::from_rgb(140, 96, 36))
             } else {

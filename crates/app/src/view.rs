@@ -317,6 +317,26 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 侧栏条目触发的浮窗位置：**紧贴主视图左缘（侧边栏）**、与该行垂直居中，再夹取回视图内。
+///
+/// 临时预览与"首次点击生成的固定浮窗"都用它，因此两者位置一致（用户要求）；
+/// 这样也替代了原先"从头左上角按级联顺序摆放"的做法。
+pub fn float_rect_at_row(
+    canvas: egui::Rect,
+    row: egui::Rect,
+    size: egui::Vec2,
+    min_size: egui::Vec2,
+) -> egui::Rect {
+    if canvas.width() <= 0.0 || canvas.height() <= 0.0 {
+        return egui::Rect::from_min_size(egui::pos2(48.0, 48.0), size);
+    }
+    let wanted = egui::Rect::from_min_size(
+        egui::pos2(canvas.min.x + 16.0, row.center().y - size.y * 0.5),
+        size,
+    );
+    clamp_float_rect(wanted, canvas, min_size)
+}
+
 /// 侧栏 Pin 列表行首的**类型符号**：文字 / 截图（用户指定的 unicode）。
 ///
 /// 用 Rust 的 `\u{...}` 转义写出，确保码点与用户要求一致：
@@ -1234,6 +1254,29 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 侧栏条目触发的浮窗：贴左缘、与该行居中、夹取在视图内。
+    #[test]
+    fn float_rect_at_row_hugs_the_sidebar_and_aligns_with_the_row() {
+        let canvas = egui::Rect::from_min_size(egui::pos2(270.0, 40.0), egui::vec2(800.0, 600.0));
+        let size = egui::vec2(320.0, 200.0);
+        let min = egui::vec2(160.0, 90.0);
+
+        // 中间某行 → 贴左缘（画布左 + 16），垂直与行居中
+        let row = egui::Rect::from_min_size(egui::pos2(0.0, 300.0), egui::vec2(260.0, 18.0));
+        let rect = float_rect_at_row(canvas, row, size, min);
+        assert!((rect.min.x - (canvas.min.x + 16.0)).abs() < 1e-3, "紧贴侧边栏");
+        assert!((rect.center().y - row.center().y).abs() < 1e-3, "与条目行垂直居中");
+
+        // 顶部行 → 会被夹回视图内（不会超出上边）
+        let top = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(260.0, 18.0));
+        let rect = float_rect_at_row(canvas, top, size, min);
+        assert!(rect.min.y >= canvas.min.y - 1e-3);
+
+        // 画布未知 → 退回固定位置，不 panic
+        let rect = float_rect_at_row(egui::Rect::NOTHING, row, size, min);
+        assert_eq!(rect.min, egui::pos2(48.0, 48.0));
     }
 
     /// 侧栏行首类型符号：码点必须与用户指定的完全一致。
