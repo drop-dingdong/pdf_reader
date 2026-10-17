@@ -294,6 +294,8 @@ pub struct PdfReaderApp {
     show_outline: bool,
     /// 侧栏当前标签页。
     sidebar_tab: SidebarTab,
+    /// Pin 条目悬浮响应开关（勾选 = 悬浮时显示临时预览/高亮旧浮窗）。
+    pin_hover_enabled: bool,
     /// 侧栏 Pin 列表里正在被悬浮的条目（下标 + 该行的屏幕矩形，用于定位临时浮窗）。
     custom_hover: Option<(usize, egui::Rect)>,
     /// 上一帧主视图（画布）的矩形：侧栏先于画布绘制，用它给浮窗定位。
@@ -374,6 +376,7 @@ impl PdfReaderApp {
             active_hit: None,
             show_outline: true,
             sidebar_tab: SidebarTab::Outline,
+            pin_hover_enabled: true,
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
             click_highlight: None,
@@ -784,6 +787,8 @@ impl PdfReaderApp {
                 ui.checkbox(&mut self.show_links, "链接框");
                 // 被引用的点（链接目的地）：与链接框同样的缩放阈值（过小不显示）
                 ui.checkbox(&mut self.show_dest_points, "引用点");
+                // 关掉后：侧栏 Pin 条目悬浮不再有任何响应（无临时预览、不点亮旧浮窗）
+                ui.checkbox(&mut self.pin_hover_enabled, "Pin悬浮响应");
                 if ui.button("添加测试浮窗").clicked() {
                     self.add_test_float();
                 }
@@ -986,10 +991,13 @@ impl PdfReaderApp {
                         CornerRadius::ZERO,
                         ui.visuals().widgets.hovered.weak_bg_fill,
                     );
-                    // 该条目已有正式浮窗 → **只**高亮并置顶那个浮窗，不再显示临时预览（用户要求）；
-                    // 没有正式浮窗时才显示临时预览浮窗。
-                    if self.highlight_existing_custom_float(index).is_none() {
-                        hovered = Some((index, rect));
+                    // 悬浮响应可整体关闭（用户要求）：关掉后既不出临时预览、也不点亮旧浮窗
+                    if self.pin_hover_enabled {
+                        // 该条目已有正式浮窗 → **只**高亮并置顶那个浮窗，不再显示临时预览；
+                        // 没有正式浮窗时才显示临时预览浮窗。
+                        if self.highlight_existing_custom_float(index).is_none() {
+                            hovered = Some((index, rect));
+                        }
                     }
                 }
                 let painter = ui.painter();
