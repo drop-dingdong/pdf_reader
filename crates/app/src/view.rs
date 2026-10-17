@@ -317,6 +317,23 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 找出所有与 `content_rect` 相交的页（下标 + 该页内容空间矩形）。
+///
+/// 截图要**允许跨页**：不能只取"重叠面积最大的那一页"，也不能依赖当前可见页集合
+/// （选区可能越过可见集合的边界）。页间距等空白处保持白色。
+pub fn pages_intersecting(
+    pages: impl IntoIterator<Item = (usize, Rect)>,
+    content_rect: Rect,
+) -> Vec<(usize, Rect)> {
+    pages
+        .into_iter()
+        .filter(|(_, rect)| {
+            rect.intersection(content_rect)
+                .map_or(false, |overlap| overlap.width > 0.0 && overlap.height > 0.0)
+        })
+        .collect()
+}
+
 /// 浮窗正文区在"浮窗尺寸"里的边距（左右、上下各 8）。
 pub const FLOAT_BODY_PADDING: f32 = 8.0;
 
@@ -1274,6 +1291,34 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 跨页截图：所有与选区相交的页都要参与（含页间距留白，不能只留最大重叠那一页）。
+    #[test]
+    fn pages_intersecting_keeps_every_overlapping_page() {
+        let page_a = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let page_b = Rect::new(0.0, 110.0, 100.0, 100.0); // 与 A 之间有 10pt 页间距
+        let page_c = Rect::new(0.0, 400.0, 100.0, 100.0);
+        let pages = vec![(0usize, page_a), (1usize, page_b), (2usize, page_c)];
+
+        // 选区跨越 A 与 B（含间距）
+        let selection = Rect::new(0.0, 80.0, 100.0, 60.0);
+        let hit = pages_intersecting(pages.iter().copied(), selection);
+        assert_eq!(hit.len(), 2, "A 与 B 都要在");
+        assert_eq!(hit[0].0, 0);
+        assert_eq!(hit[1].0, 1);
+
+        // 选区只碰 C
+        let hit = pages_intersecting(pages.iter().copied(), Rect::new(0.0, 420.0, 50.0, 20.0));
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].0, 2);
+
+        // 只落在页间距里 → 没有任何页（结果是一张全白图）
+        let hit = pages_intersecting(pages.iter().copied(), Rect::new(0.0, 104.0, 100.0, 4.0));
+        assert!(hit.is_empty());
+
+        // 空输入不 panic
+        assert!(pages_intersecting(std::iter::empty(), selection).is_empty());
     }
 
     /// 正文尺寸 ↔ 浮窗尺寸必须互逆（否则每帧写回会让尺寸漂移）。

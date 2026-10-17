@@ -27,7 +27,7 @@ use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
     body_size_of, destination_points, drag_float_rect, find_dest_index, find_float_for_custom,
-    float_rect_at_row, float_size_for_body, overflow_layout,
+    float_rect_at_row, float_size_for_body, overflow_layout, pages_intersecting,
     CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT,
     pin_exits_on_mode_change,
     zero_rect_at,
@@ -2526,12 +2526,16 @@ impl PdfReaderApp {
     ) -> Option<egui::ColorImage> {
         let mut owned: Vec<(Rect, Option<Arc<RasterImage>>, Vec<(TileSpec, Arc<RasterImage>)>)> =
             Vec::new();
-        for page in self.visible.clone() {
-            let Some(placement) = session.placement(page).copied() else { continue };
-            if placement.rect.intersection(content_rect).is_none() {
-                continue;
-            }
-            owned.push((placement.rect, session.image_for(page), session.tiles_for(page)));
+        // **跨页**：凡与选区相交的页都参与拼合（不依赖 visible 集合，也不只取最大重叠那一页）
+        let all_pages: Vec<(usize, Rect)> = (0..session.page_count() as usize)
+            .filter_map(|index| {
+                let page = PageIndex::new(index as u32);
+                session.placement(page).map(|placement| (index, placement.rect))
+            })
+            .collect();
+        for (index, page_rect) in pages_intersecting(all_pages, content_rect) {
+            let page = PageIndex::new(index as u32);
+            owned.push((page_rect, session.image_for(page), session.tiles_for(page)));
         }
         let sources: Vec<SnapshotPage<'_>> = owned
             .iter()
