@@ -981,14 +981,16 @@ impl PdfReaderApp {
                     Sense::click(),
                 );
                 if response.hovered() {
-                    hovered = Some((index, rect));
                     ui.painter().rect_filled(
                         rect,
                         CornerRadius::ZERO,
                         ui.visuals().widgets.hovered.weak_bg_fill,
                     );
-                    // 该条目已有正式浮窗 → 高亮并置顶（与链接悬停的"重新激发"一致）
-                    self.highlight_existing_custom_float(index);
+                    // 该条目已有正式浮窗 → **只**高亮并置顶那个浮窗，不再显示临时预览（用户要求）；
+                    // 没有正式浮窗时才显示临时预览浮窗。
+                    if self.highlight_existing_custom_float(index).is_none() {
+                        hovered = Some((index, rect));
+                    }
                 }
                 let painter = ui.painter();
                 let page_width = 64.0;
