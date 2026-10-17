@@ -317,6 +317,21 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 悬停预览是否应当出现。
+///
+/// 两个约束（用户要求）：
+/// 1. **滚动/缩放进行中或刚进行过**（静默窗口内）不出现 —— 否则滚动时预览会不断闪现；
+/// 2. 指针在**任何浮窗**（永久或临时）之上时不出现 —— 浮窗会屏蔽主视图的动作，
+///    被浮窗覆盖的链接不应再有悬停反馈（点击本来就已经被浮窗拦掉了）。
+pub fn hover_preview_allowed(scrolling: bool, pointer_over_float: bool) -> bool {
+    !scrolling && !pointer_over_float
+}
+
+/// 指针是否落在任一矩形内（用于"浮窗是否遮住了指针"）。
+pub fn pointer_over_any(pointer: egui::Pos2, rects: &[egui::Rect]) -> bool {
+    rects.iter().any(|rect| rect.contains(pointer))
+}
+
 /// 临时预览浮窗的位置：**左上角放在链接框中心**（用户要求）。
 ///
 /// 这样浮窗与链接框**必然重叠**，鼠标从链接移向浮窗的路径是连续的，
@@ -1119,6 +1134,24 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 悬停预览的两个约束：滚动期间不出现；浮窗之下不出现。
+    #[test]
+    fn hover_preview_is_blocked_while_scrolling_and_under_floats() {
+        assert!(hover_preview_allowed(false, false), "正常情况应出现");
+        assert!(!hover_preview_allowed(true, false), "滚动/缩放静默窗口内不出现");
+        assert!(!hover_preview_allowed(false, true), "指针在浮窗上不出现（浮窗屏蔽主视图）");
+        assert!(!hover_preview_allowed(true, true));
+
+        let rects = [
+            egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(100.0, 50.0)),
+            egui::Rect::from_min_size(egui::pos2(200.0, 200.0), egui::vec2(100.0, 50.0)),
+        ];
+        assert!(pointer_over_any(egui::pos2(50.0, 30.0), &rects));
+        assert!(pointer_over_any(egui::pos2(250.0, 220.0), &rects));
+        assert!(!pointer_over_any(egui::pos2(150.0, 150.0), &rects), "浮窗之间不算遮挡");
+        assert!(!pointer_over_any(egui::pos2(50.0, 30.0), &[]), "没有浮窗时不遮挡");
     }
 
     /// 临时预览浮窗：左上角放在链接框中心（保证与链接框重叠，鼠标移动路径连续）。

@@ -26,7 +26,8 @@ use pdfcore::prelude::*;
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
-    destination_points, find_dest_index, fit_inside, compose_snapshot, page_rect_to_screen,
+    destination_points, find_dest_index, fit_inside, compose_snapshot, hover_preview_allowed,
+    page_rect_to_screen, pointer_over_any,
     screen_rect_to_content, tip_rect_for, veil_bands, view_rect_to_page_rect, SnapshotPage,
     flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
@@ -45,6 +46,8 @@ const SIDEBAR_HANDLE_WIDTH: f32 = 5.0;
 
 /// 显示链接热区框所需的最低缩放：更小的时候热区框会糊成一片，反而干扰阅读（用户要求）。
 const LINK_OVERLAY_MIN_ZOOM: f32 = 0.75;
+/// 滚动/缩放之后多久内不显示悬停预览（避免滚动时预览不断闪现）。
+const HOVER_SCROLL_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
 /// 大纲每行的固定高度（虚拟化行渲染要求等行高）。
 const OUTLINE_ROW_HEIGHT: f32 = 18.0;
 /// 链接热区框的颜色（空心红线，用户指定）。
@@ -182,6 +185,8 @@ pub struct PdfReaderApp {
     hover_tip: Option<HoverTip>,
     /// 上一帧鼠标所在链接框的尺寸（仅用于计算临时浮窗位置）
     hover_link_size: egui::Vec2,
+    /// 滚动/缩放"刚刚发生过"的截止时刻：这段时间内不显示悬停预览（用户要求）。
+    scroll_quiet_until: Option<std::time::Instant>,
     /// **链接 → 被引用点** 的登记表（与 `navigation.links_by_page` 同构）：
     /// 下标与 `links_on(page)` 一一对应。打开文档时解析一次，
     /// 之后悬停与跳转都直接用它（用户建议：记住索引，而不是每次按位置查）。
@@ -264,6 +269,7 @@ impl PdfReaderApp {
             capture: None,
             hover_tip: None,
             hover_link_size: EVec2::new(160.0, 20.0),
+            scroll_quiet_until: None,
             link_marks: Vec::new(),
             last_convert_ms: 0.0,
             last_upload_ms: 0.0,
@@ -886,6 +892,8 @@ impl PdfReaderApp {
                 if let Some(command) = command_for_zoom_delta(zoom_delta, session.state().zoom) {
                     session.handle(command, &mut self.events);
                 }
+                // 视图刚被滚动/缩放 → 静默一段时间，期间不显示悬停预览（用户要求）
+                self.scroll_quiet_until = Some(std::time::Instant::now() + HOVER_SCROLL_QUIET);
                 ui.ctx().request_repaint();
             }
 
@@ -939,6 +947,9 @@ impl PdfReaderApp {
                             &mut self.events,
                         );
                         let after = session.viewport().scroll;
+                        // 拖动也是"视图在动" → 同样静默，避免预览在拖动中闪现
+                        self.scroll_quiet_until =
+                            Some(std::time::Instant::now() + HOVER_SCROLL_QUIET);
                         if self.diagnose && after != before {
                             let now = std::time::Instant::now();
                             let since_start = self
@@ -1464,6 +1475,21 @@ impl PdfReaderApp {
         scroll: Vec2,
     ) {
         let pointer = ui.ctx().pointer_hover_pos();
+
+        // 闸门（用户要求）：
+        // 1. 滚动/缩放的静默窗口内不显示；
+        // 2. 指针落在**任何浮窗**（永久或临时）之上时不显示 —— 浮窗屏蔽主视图动作，
+        //    被浮窗盖住的链接不应再有悬停反馈。
+        let scrolling = self
+            .scroll_quiet_until
+            .map_or(false, |deadline| std::time::Instant::now() < deadline);
+        let float_rects: Vec<egui::Rect> = self.floats.iter().map(|window| window.rect).collect();
+        let over_float = pointer.map_or(false, |position| pointer_over_any(position, &float_rects));
+        if !hover_preview_allowed(scrolling, over_float) {
+            self.hover_tip = None;
+            return;
+        }
+
         let mut found: Option<((PageIndex, usize), egui::Pos2)> = None;
 
         if let (Some(pointer), Some(navigation)) = (pointer, self.navigation.clone()) {
