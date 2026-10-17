@@ -317,6 +317,17 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 把第 `index` 项移到末尾，**其余项相对顺序保持不变**。
+///
+/// 用途：点击浮窗任意处 → 该浮窗置顶；因为绘制与交互都按顺序进行，
+/// "移到末尾"就等于最上层，同时其它浮窗的层次关系不变（用户要求）。
+pub fn move_to_last<T>(items: &mut Vec<T>, index: usize) {
+    if index < items.len() {
+        let item = items.remove(index);
+        items.push(item);
+    }
+}
+
 /// 在"浮窗来源"列表里找**由某个被引用点固定出来的浮窗**。
 ///
 /// 用户要求：如果同一目的地的浮窗已经被固定且仍在显示，再次悬停该链接时
@@ -1146,6 +1157,22 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 置顶：移到末尾，且不移乱其它项的相对顺序。
+    #[test]
+    fn move_to_last_keeps_the_relative_order_of_the_rest() {
+        let mut items = vec!["a", "b", "c", "d"];
+        move_to_last(&mut items, 1); // 把 b 置顶
+        assert_eq!(items, vec!["a", "c", "d", "b"], "其余顺序不变（a, c, d）");
+
+        move_to_last(&mut items, 0); // 把 a 置顶
+        assert_eq!(items, vec!["c", "d", "b", "a"]);
+
+        // 越界不 panic、不改变内容
+        let before = items.clone();
+        move_to_last(&mut items, 99);
+        assert_eq!(items, before);
     }
 
     /// 同一目的地的固定浮窗查找：只认同来源的浮窗，普通浮窗（None）不参与。

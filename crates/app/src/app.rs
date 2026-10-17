@@ -27,7 +27,7 @@ use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
     destination_points, find_dest_index, find_float_for_target, fit_inside, compose_snapshot,
-    hover_preview_allowed,
+    hover_preview_allowed, move_to_last,
     page_rect_to_screen, pointer_over_any,
     screen_rect_to_content, tip_rect_for, veil_bands, view_rect_to_page_rect, SnapshotPage,
     flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
@@ -1445,15 +1445,16 @@ impl PdfReaderApp {
                 }
             }
 
-            // 悬停预览：鼠标在页内链接上时，显示该链接目标的被引用点截图（没有则现在渲染一次）
+            // 悬停预览：**先只做检测与状态更新**（含"同一目的地已固定 → 高亮 + 置顶"）
             if self.capture.is_none() {
-                self.update_and_draw_hover_tip(ui, session, canvas, scroll);
+                self.update_hover_preview(ui, session, canvas, scroll);
             }
 
-            // 浮窗**最后**绘制与注册 → 位于最上层；后加入的在更上层（见 draw_floats）。
-            // 截图模式下所有浮窗不显现（连交互也不注册，避免吃掉框选拖动）。
+            // 固定浮窗：绘制与注册都在此；后加入的在更上层（见 draw_floats）
             if self.capture.is_none() {
                 self.draw_floats(ui, canvas);
+                // 临时预览**最后**绘制 → 真正位于最上层（用户要求）
+                self.draw_hover_preview(ui, canvas);
             } else {
                 self.draw_capture(ui, canvas, session, scroll);
             }
@@ -1483,7 +1484,7 @@ impl PdfReaderApp {
 
     /// 悬停预览浮窗：检测鼠标下的页内链接 → 找到对应被引用点 → 必要时**渲染一次**截图 →
     /// 画一个临时浮窗。指针离开链接与浮窗后消失；点击它则转为永久浮窗。
-    fn update_and_draw_hover_tip(
+    fn update_hover_preview(
         &mut self,
         ui: &mut egui::Ui,
         session: &DocumentSession,
@@ -1565,7 +1566,6 @@ impl PdfReaderApp {
         // 需要时**渲染一次**截图（之后复用；这正是"None 才渲染"的懒加载）
         let Some(tip) = self.hover_tip.as_ref() else { return };
         let (page, index) = tip.target;
-        let anchor = tip.anchor;
         let needs_render = self
             .dest_marks
             .get(page.get() as usize)
@@ -1597,7 +1597,23 @@ impl PdfReaderApp {
             }
         }
 
-        // 画临时浮窗：贴在链接左下角，夹取在画布内
+        // 快照已就绪；实际绘制在 `draw_hover_preview`（要画在固定浮窗之上 → 最上层）
+        if self
+            .dest_marks
+            .get(page.get() as usize)
+            .and_then(|marks| marks.get(index))
+            .and_then(|mark| mark.snapshot.clone())
+            .is_none()
+        {
+            return;
+        }
+    }
+
+    /// 绘制临时预览浮窗并处理"点击固定"（本函数在所有固定浮窗之后调用 → 位于最上层）。
+    fn draw_hover_preview(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
+        let Some(tip) = self.hover_tip.as_ref() else { return };
+        let (page, index) = tip.target;
+        let anchor = tip.anchor;
         let Some(texture) = self
             .dest_marks
             .get(page.get() as usize)
@@ -1942,14 +1958,19 @@ impl PdfReaderApp {
             return;
         }
         let mut close: Option<u64> = None;
+        let mut raise: Option<u64> = None;
         for index in 0..self.floats.len() {
             // 每帧夹取回视图区域内（用户要求：浮窗始终在视图区域内部）
             let rect = clamp_float_rect(self.floats[index].rect, canvas, FLOAT_MIN_SIZE);
             self.floats[index].rect = rect;
             let id = self.floats[index].id;
 
-            // 主体：占住点击，避免"点在浮窗上却给文档落了光标"；不参与拖动
-            let _ = ui.interact(rect, Id::unique(("float", id)), Sense::click());
+            // 主体：占住点击（避免"点在浮窗上却给文档落了光标"）；不参与拖动。
+            // 点击主体任意处（除关闭按钮）→ 该浮窗置顶，其余浮窗相对顺序不变。
+            let body = ui.interact(rect, Id::unique(("float", id)), Sense::click());
+            if body.clicked() {
+                raise = Some(id);
+            }
 
             // 标题栏：拖动移动
             let title_rect =
@@ -2056,6 +2077,11 @@ impl PdfReaderApp {
         if let Some(id) = close {
             self.floats.retain(|window| window.id != id);
             self.message = format!("已关闭浮窗 #{id}");
+        } else if let Some(id) = raise {
+            // 关闭按钮优先；否则把被点击的浮窗移到末尾（最上层），其余顺序不变
+            if let Some(index) = self.floats.iter().position(|window| window.id == id) {
+                move_to_last(&mut self.floats, index);
+            }
         }
     }
 
