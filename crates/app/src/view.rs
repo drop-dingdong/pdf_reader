@@ -317,6 +317,18 @@ pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// 在"浮窗来源"列表里找**由某个被引用点固定出来的浮窗**。
+///
+/// 用户要求：如果同一目的地的浮窗已经被固定且仍在显示，再次悬停该链接时
+/// **不再弹临时预览**，而是高亮并置顶那个已有浮窗（"重新激发"）。
+/// 只有从悬停预览固定出来的浮窗带有来源（`Some(target)`），其余为 `None`。
+pub fn find_float_for_target(
+    origins: &[Option<(PageIndex, usize)>],
+    target: (PageIndex, usize),
+) -> Option<usize> {
+    origins.iter().position(|origin| *origin == Some(target))
+}
+
 /// 悬停预览是否应当出现。
 ///
 /// 两个约束（用户要求）：
@@ -1134,6 +1146,19 @@ mod tests {
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
         assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+    }
+
+    /// 同一目的地的固定浮窗查找：只认同来源的浮窗，普通浮窗（None）不参与。
+    #[test]
+    fn find_float_for_target_matches_only_pinned_previews() {
+        let page = PageIndex::new(2);
+        let origins = vec![None, Some((page, 0)), Some((page, 1))];
+
+        assert_eq!(find_float_for_target(&origins, (page, 1)), Some(2));
+        assert_eq!(find_float_for_target(&origins, (page, 0)), Some(1));
+        assert_eq!(find_float_for_target(&origins, (page, 9)), None, "没固定过就没有");
+        assert_eq!(find_float_for_target(&origins, (PageIndex::new(3), 0)), None, "页不同不算");
+        assert_eq!(find_float_for_target(&[], (page, 0)), None);
     }
 
     /// 悬停预览的两个约束：滚动期间不出现；浮窗之下不出现。

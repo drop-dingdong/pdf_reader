@@ -26,7 +26,8 @@ use pdfcore::prelude::*;
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
-    destination_points, find_dest_index, fit_inside, compose_snapshot, hover_preview_allowed,
+    destination_points, find_dest_index, find_float_for_target, fit_inside, compose_snapshot,
+    hover_preview_allowed,
     page_rect_to_screen, pointer_over_any,
     screen_rect_to_content, tip_rect_for, veil_bands, view_rect_to_page_rect, SnapshotPage,
     flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
@@ -153,6 +154,9 @@ struct Float {
     content: FloatContent,
     /// 在**视图区域**（画布）内的矩形；每帧会被夹取回区域内。
     rect: egui::Rect,
+    /// 来源：由某个被引用点的悬停预览**固定**而来时记录 `(页号, 下标)`。
+    /// 用于"同一目的地再次悬停时高亮并置顶这个浮窗，而不是再弹预览"。
+    origin: Option<(PageIndex, usize)>,
 }
 
 /// 应用状态。
@@ -187,6 +191,8 @@ pub struct PdfReaderApp {
     hover_link_size: egui::Vec2,
     /// 滚动/缩放"刚刚发生过"的截止时刻：这段时间内不显示悬停预览（用户要求）。
     scroll_quiet_until: Option<std::time::Instant>,
+    /// 本帧需要**高亮**的浮窗 id（悬停到已固定的同一目的地时设置，仅维持一帧）。
+    highlight_float: Option<u64>,
     /// **链接 → 被引用点** 的登记表（与 `navigation.links_by_page` 同构）：
     /// 下标与 `links_on(page)` 一一对应。打开文档时解析一次，
     /// 之后悬停与跳转都直接用它（用户建议：记住索引，而不是每次按位置查）。
@@ -270,6 +276,7 @@ impl PdfReaderApp {
             hover_tip: None,
             hover_link_size: EVec2::new(160.0, 20.0),
             scroll_quiet_until: None,
+            highlight_float: None,
             link_marks: Vec::new(),
             last_convert_ms: 0.0,
             last_upload_ms: 0.0,
@@ -1468,6 +1475,7 @@ impl PdfReaderApp {
             content: FloatContent::Text(format!(
                 "这是第 {id} 个测试浮窗。\n目前只显示文字。\n\n可以拖动标题栏移动、\n拖右下角改变大小、\n点右上角 ✕ 关闭。"
             )),
+            origin: None,
             rect,
         });
         self.message = format!("已添加测试浮窗 #{id}");
@@ -1529,6 +1537,20 @@ impl PdfReaderApp {
             (Some(tip), Some(pointer)) => tip.rect.map_or(false, |rect| rect.contains(pointer)),
             _ => false,
         };
+        // 该目的地的浮窗**已经固定且仍在显示** → 不再弹临时预览，
+        // 改为高亮它并把提到最上层（"重新激发"，用户要求）。
+        if let Some(target) = found.map(|(target, _)| target) {
+            let origins: Vec<Option<(PageIndex, usize)>> =
+                self.floats.iter().map(|window| window.origin).collect();
+            if let Some(position) = find_float_for_target(&origins, target) {
+                let window = self.floats.remove(position);
+                self.highlight_float = Some(window.id);
+                self.floats.push(window); // 移到末尾 → 绘制与交互都在最上层
+                self.hover_tip = None;
+                return;
+            }
+        }
+
         match found {
             Some((target, anchor)) => {
                 self.hover_tip = Some(HoverTip { target, anchor, rect: None });
@@ -1634,6 +1656,7 @@ impl PdfReaderApp {
                 id,
                 title: format!("引用点截图 · 第 {} 页", page.display_number()),
                 content: FloatContent::Image(texture),
+                origin: Some((page, index)),
                 rect: egui::Rect::from_min_size(
                     egui::pos2(rect.min.x, rect.min.y),
                     EVec2::new(rect.width(), rect.height()),
@@ -1823,6 +1846,7 @@ impl PdfReaderApp {
             id,
             title: format!("引用点截图 #{} · 第 {} 页", index + 1, page.display_number()),
             content: FloatContent::Image(texture),
+            origin: None,
             rect: egui::Rect::from_min_size(
                 egui::pos2(32.0 + cascade, 32.0 + cascade),
                 EVec2::new(
@@ -1903,6 +1927,7 @@ impl PdfReaderApp {
             title: format!("截图 #{id}"),
             content: FloatContent::Image(texture),
             rect: egui::Rect::from_min_size(egui::pos2(32.0 + cascade, 32.0 + cascade), size),
+            origin: None,
         });
         self.message = format!("已把截图放入浮窗 #{id}");
     }
@@ -1975,15 +2000,22 @@ impl PdfReaderApp {
             }
 
             // ---- 绘制 ----
+            // 被"再次悬停同一目的地"激发时高亮：边框加粗变橙、标题栏变暖色
+            let highlighted = self.highlight_float == Some(id);
+            let (border, border_width, title_color) = if highlighted {
+                (Color32::from_rgb(255, 170, 60), 2.0, Color32::from_rgb(140, 96, 36))
+            } else {
+                (Color32::from_gray(130), 1.0, Color32::from_rgb(54, 58, 66))
+            };
             let painter = ui.painter();
             painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(30, 32, 36));
             painter.rect_stroke(
                 rect,
                 CornerRadius::same(4),
-                Stroke::new(1.0, Color32::from_gray(130)),
+                Stroke::new(border_width, border),
                 StrokeKind::Inside,
             );
-            painter.rect_filled(title_rect, CornerRadius::same(4), Color32::from_rgb(54, 58, 66));
+            painter.rect_filled(title_rect, CornerRadius::same(4), title_color);
             painter.text(
                 title_rect.left_center() + EVec2::new(8.0, 0.0),
                 Align2::LEFT_CENTER,
@@ -2125,6 +2157,8 @@ impl eframe::App for PdfReaderApp {
         };
 
         let frame_start = std::time::Instant::now();
+        // 高亮只维持一帧：由本帧的悬停判定重新设置
+        self.highlight_float = None;
         self.collect_commands(&ctx, &session);
         if self.capture.is_some() {
             // 丢弃工具栏等来源的命令：截图期间不改动主视图内容；
