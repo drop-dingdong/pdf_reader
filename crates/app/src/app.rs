@@ -511,6 +511,17 @@ impl PdfReaderApp {
                     Box::new(RangeSelection::new()),
                 ) {
                     Ok(session) => {
+                        // **先**清空上一份文档的自定义状态（含浮窗），再由存档按需恢复。
+                        // 顺序很关键：清理若放在恢复之后，会把刚从存档读到的数据又抹掉。
+                        self.custom_previews.clear();
+                        self.custom_pin = None;
+                        self.custom_dialog = None;
+                        self.custom_hover = None;
+                        self.editing_title = None;
+                        self.editing_body = None;
+                        self.click_highlight = None;
+                        self.hover_tip = None;
+                        self.floats.clear();
                         self.document_path = Some(path.to_path_buf());
                         // 同目录若有存档（<pdf>.json），载入并**替换**链接与被引用点/自定义数据
                         let saved = load_sidecar(path);
@@ -623,17 +634,6 @@ impl PdfReaderApp {
                                 }
                             }
                         }
-                        // 换文件：先清空上一份文档的自定义数据，再按需从存档恢复
-                        // （否则打开没有存档的文件时，上一份的 preview 会残留）
-                        self.custom_previews.clear();
-                        self.custom_pin = None;
-                        self.custom_dialog = None;
-                        self.custom_hover = None;
-                        self.editing_title = None;
-                        self.editing_body = None;
-                        self.click_highlight = None;
-                        self.hover_tip = None;
-                        self.floats.clear();
                         self.next_float_id = 1;
                         self.capture = None;
                         let title = session.opened().document.info().to_string();
