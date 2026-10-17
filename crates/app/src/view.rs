@@ -403,6 +403,10 @@ pub fn float_rect_at_row(
 /// 文字 `U+1F5B9`、截图 `U+1F5BB`。若渲染成方块，说明当前字体缺这两个字形
 /// （与码点无关，换个带符号的字体即可）。
 pub const CUSTOM_SYMBOL_TEXT: &str = "\u{1F5B9}";
+/// 编辑按钮符号（U+270E）。
+pub const CUSTOM_SYMBOL_EDIT: &str = "\u{270E}";
+/// 删除按钮符号（U+274E）。
+pub const CUSTOM_SYMBOL_DELETE: &str = "\u{274E}";
 /// 截图类型符号，见 [`CUSTOM_SYMBOL_TEXT`]。
 pub const CUSTOM_SYMBOL_IMAGE: &str = "\u{1F5BB}";
 
@@ -1421,6 +1425,8 @@ mod tests {
         assert_eq!(CUSTOM_SYMBOL_IMAGE.chars().next().map(u32::from), Some(0x1F5BB));
         assert_eq!(CUSTOM_SYMBOL_TEXT.chars().count(), 1);
         assert_eq!(CUSTOM_SYMBOL_IMAGE.chars().count(), 1);
+        assert_eq!(CUSTOM_SYMBOL_EDIT.chars().next().map(u32::from), Some(0x270E));
+        assert_eq!(CUSTOM_SYMBOL_DELETE.chars().next().map(u32::from), Some(0x274E));
     }
 
     /// 侧栏 Pin 列表 → 正式浮窗的查找。

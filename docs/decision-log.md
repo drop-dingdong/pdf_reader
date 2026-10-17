@@ -88,7 +88,7 @@
 | **D-64** | **自定义数据存档**（JSON，无第三方依赖）：`app/src/persist.rs` 手写序列化/解析 + 往返测试；内容 = 链接（矩形 + `Destination`）、被引用点（point/rect/body）、自定义图片 preview（page/point/rect/body/title）、自定义文字 preview（同上 + text）——**图片像素一律不入档**。工具栏「保存自定义数据」写入 `<pdf>.json`（`view::sidecar_path`）；打开文档时若有存档则载入并**替换**链接索引、覆盖被引用点的 rect/body、重建自定义 preview 列表（`snapshot: None`，需要时再合成）| 用户需求。可行性已确认：被引用点与自定义图片 preview 都保存了"页号 + 页面空间矩形"，载入后按当前缩放用 `snapshot_for` 重新合成即可，无需存像素 |
 | **D-65** | 自定义**图片** preview 补上**懒合成**路径（`ensure_custom_snapshot`）：存档恢复后 `snapshot` 为 `None`，在该条目被**悬浮或点击**时按"页号 + 页面空间矩形"于**当前缩放**重新合成并缓存 | 用户反馈"载入存档后自定义图片 preview 显示不出截图"。根因：这条路径此前只在截图流程里创建纹理，没有像链接目的地那样的懒加载。与 D-64 的"不存像素、按需重建"设计一致（因此也不必在打开时预热）|放在 `pdfcore`（而不是 app）里的理由：它们是**纯 std** 实现，且只有放在这里才能被
 | **D-66** | 三处修正：① 侧栏条目**悬浮**时也调用 `ensure_custom_snapshot`（此前只有点击路径调用 → 临时浮窗无图）；② 自定义图片 preview 的截图**强限制为与本 preview 所在页的交集**（不再取"面积最大的页"——否则 rect 与 page 不匹配，重载后会去错误页取图）；③ 自定义 preview 的浮窗内容**每帧从记录刷新**，因此"快照迟到"（页面尚未渲染好）会在后续帧自动补上，不必等转成固定浮窗 | 用户反馈："图片 preview 只有从临时浮窗变固定后才渲染"、"跨页时可能存了 a 页却按 a+1 页的内容截"、"高缩放下建的 preview 重载后要缩到相近比例才显示" |`cargo test` 完整覆盖（放 app 侧就只能通过 UI 验证，违背 agent.md 规则 2 的精神）。
-
+| **D-67** | Pin 列表每行右侧新增 **✎（U+270E）修改题目** 与 **❎（U+274E）删除条目** 按钮：✎ 弹出题目编辑对话框（save/关闭 保存、cancel 丢弃）；❎ 删除该条目并**清掉它的浮窗、把后续条目的 `custom` 下标左移**（保持关联不断裂）。**文字预览**的正文可在其**固定浮窗内双击文字区域**进入编辑，文本框**失焦**或点「完成」即回到阅览模式 | 用户需求。行布局相应让位：标题宽度再减去两个按钮的宽度，页码右对齐在按钮组左侧 |
 * `pdfcore::scheduler::WorkerScheduler`：后台线程 + 优先级队列（`Interactive < Visible < Prefetch
   < Background`，同优先级 FIFO）、按 `RenderKey` 去重、并发数取 `Capabilities::max_concurrency`；
   **取消不静默丢弃** —— 被取消的任务会被补发 `RenderEvent::Cancelled`，

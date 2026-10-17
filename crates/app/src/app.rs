@@ -30,7 +30,7 @@ use crate::view::{
     body_size_of, destination_points, drag_float_rect, find_dest_index, find_float_for_custom,
     float_rect_at_row, float_size_for_body, overflow_layout,
     pages_intersecting,
-    CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT,
+    CUSTOM_SYMBOL_DELETE, CUSTOM_SYMBOL_EDIT, CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT,
     pin_exits_on_mode_change,
     zero_rect_at,
     find_float_for_target, fit_inside,
@@ -291,6 +291,10 @@ pub struct PdfReaderApp {
     custom_dialog: Option<CustomDialog>,
     /// 已保存的自定义 preview。
     custom_previews: Vec<CustomPreview>,
+    /// 正在编辑题目 `(下标, 草稿)`。
+    editing_title: Option<(usize, String)>,
+    /// 正在编辑正文 `(下标, 草稿)`（文字预览：固定浮窗内双击正文进入）。
+    editing_body: Option<(usize, String)>,
     /// **链接 → 被引用点** 的登记表（与 `navigation.links_by_page` 同构）：
     /// 下标与 `links_on(page)` 一一对应。打开文档时解析一次，
     /// 之后悬停与跳转都直接用它（用户建议：记住索引，而不是每次按位置查）。
@@ -390,6 +394,8 @@ impl PdfReaderApp {
             custom_pin: None,
             custom_dialog: None,
             custom_previews: Vec::new(),
+            editing_title: None,
+            editing_body: None,
             link_marks: Vec::new(),
             last_convert_ms: 0.0,
             last_upload_ms: 0.0,
@@ -1129,9 +1135,13 @@ impl PdfReaderApp {
                     }
                 }
                 let painter = ui.painter();
-                let page_width = 64.0;
+                let page_width = 56.0;
                 let go_width = 24.0;
-                let title_width = (rect.width() - page_width - go_width - 8.0).max(24.0);
+                let edit_width = 20.0;
+                let delete_width = 20.0;
+                let title_width =
+                    (rect.width() - page_width - go_width - edit_width - delete_width - 8.0)
+                        .max(24.0);
                 let job = overflow_layout(
                     &title,
                     egui::FontId::proportional(13.0),
@@ -1146,7 +1156,7 @@ impl PdfReaderApp {
                     ui.visuals().text_color(),
                 );
                 painter.text(
-                    egui::pos2(rect.max.x - go_width, rect.center().y),
+                    egui::pos2(rect.max.x - go_width - edit_width - delete_width, rect.center().y),
                     Align2::RIGHT_CENTER,
                     &page_label,
                     egui::FontId::proportional(11.0),
@@ -1165,6 +1175,29 @@ impl PdfReaderApp {
                     egui::pos2(rect.max.x - 10.0, rect.center().y),
                     EVec2::new(20.0, row_height),
                 );
+                // ✎ 修改题目；❎ 删除条目（都在 → 之前注册，命中优先级更高）
+                let edit_rect = egui::Rect::from_center_size(
+                    egui::pos2(go_rect.min.x - edit_width * 0.5 - delete_width, rect.center().y),
+                    EVec2::new(edit_width, row_height),
+                );
+                let delete_rect = egui::Rect::from_center_size(
+                    egui::pos2(go_rect.min.x - delete_width * 0.5, rect.center().y),
+                    EVec2::new(delete_width, row_height),
+                );
+                if ui
+                    .put(edit_rect, egui::Button::new(CUSTOM_SYMBOL_EDIT).frame(false))
+                    .clicked()
+                {
+                    if let Some(preview) = self.custom_previews.get(index) {
+                        self.editing_title = Some((index, preview.title.clone()));
+                    }
+                }
+                if ui
+                    .put(delete_rect, egui::Button::new(CUSTOM_SYMBOL_DELETE).frame(false))
+                    .clicked()
+                {
+                    self.delete_custom_preview(index);
+                }
                 if ui
                     .put(go_rect, egui::Button::new("\u{2192}").frame(false))
                     .clicked()
@@ -1239,6 +1272,32 @@ impl PdfReaderApp {
             origin: None,
         });
         self.highlight_float = Some(id);
+    }
+
+    /// 删除某个自定义 preview：同时清掉它的浮窗，并把后续条目的 `custom` 下标左移。
+    fn delete_custom_preview(&mut self, index: usize) {
+        if index >= self.custom_previews.len() {
+            return;
+        }
+        self.custom_previews.remove(index);
+        self.floats.retain(|window| window.custom != Some(index));
+        for window in &mut self.floats {
+            if let Some(custom) = window.custom {
+                if custom > index {
+                    window.custom = Some(custom - 1);
+                }
+            }
+        }
+        if self.custom_hover.map_or(false, |(hovered, _)| hovered == index) {
+            self.custom_hover = None;
+        }
+        if self.editing_title.as_ref().map_or(false, |(editing, _)| *editing == index) {
+            self.editing_title = None;
+        }
+        if self.editing_body.as_ref().map_or(false, |(editing, _)| *editing == index) {
+            self.editing_body = None;
+        }
+        self.message = "已删除该自定义preview".to_string();
     }
 
     /// 若某个自定义 preview 已有**正式浮窗**，把它高亮并置顶（侧栏悬浮/点击共用）。
@@ -2312,6 +2371,75 @@ impl PdfReaderApp {
         }
     }
 
+    /// 编辑题目 / 正文的对话框（✎ 按钮与"固定浮窗内双击文字"共用）。
+    fn draw_edit_dialogs(&mut self, ctx: &egui::Context) {
+        // ---- 题目 ----
+        if let Some((index, draft)) = self.editing_title.clone() {
+            let mut text = draft;
+            let mut close = false;
+            egui::Modal::new(Id::unique("edit-title")).show(ctx, |ui| {
+                ui.set_width(360.0);
+                ui.heading("修改题目");
+                ui.add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY));
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("save").clicked() || ui.button("关闭").clicked() {
+                        close = true;
+                    }
+                    if ui.button("cancel").clicked() {
+                        text = self
+                            .custom_previews
+                            .get(index)
+                            .map(|preview| preview.title.clone())
+                            .unwrap_or_default();
+                        close = true;
+                    }
+                });
+            });
+            self.editing_title = Some((index, text.clone()));
+            if close {
+                if let Some(preview) = self.custom_previews.get_mut(index) {
+                    preview.title = text;
+                }
+                self.editing_title = None;
+                self.message = "已更新题目".to_string();
+            }
+        }
+
+        // ---- 正文（仅文字预览；固定浮窗内双击进入） ----
+        if let Some((index, draft)) = self.editing_body.clone() {
+            let mut text = draft;
+            let mut close = false;
+            egui::Modal::new(Id::unique("edit-body")).show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.heading("修改内容");
+                let response = ui.add(
+                    egui::TextEdit::multiline(&mut text)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(10),
+                );
+                // 失焦即回到阅览模式（用户要求）
+                if response.lost_focus() {
+                    close = true;
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("完成").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            self.editing_body = Some((index, text.clone()));
+            if close {
+                if let Some(preview) = self.custom_previews.get_mut(index) {
+                    preview.text = Some(text);
+                }
+                self.editing_body = None;
+                self.message = "已更新内容".to_string();
+            }
+        }
+    }
+
     /// 把截图结果存进某个**自定义图片预览**。
     ///
     /// **不再**自动生成浮窗（用户要求）：浮窗只在用户从侧栏悬浮/点击该条目时出现。
@@ -2924,6 +3052,30 @@ impl PdfReaderApp {
                     }
                 }
             }
+            // 文字预览的自定义浮窗：双击正文区域进入编辑模式（用户要求）
+            if let Some(custom_index) = self.floats[index].custom {
+                let is_text = self
+                    .custom_previews
+                    .get(custom_index)
+                    .map_or(false, |preview| preview.kind == CustomKind::Text);
+                if is_text {
+                    let body_rect = egui::Rect::from_min_max(
+                        rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 4.0),
+                        rect.max - EVec2::new(8.0, 8.0),
+                    );
+                    let hit = ui.interact(
+                        body_rect,
+                        Id::unique(("float-body-edit", id)),
+                        Sense::click(),
+                    );
+                    if hit.double_clicked() {
+                        if let Some(preview) = self.custom_previews.get(custom_index) {
+                            self.editing_body =
+                                Some((custom_index, preview.text.clone().unwrap_or_default()));
+                        }
+                    }
+                }
+            }
             match &self.floats[index].content {
                 FloatContent::Text(text) => {
                     // 正文：**自动换行 + 行数上限（放不下就截断并显示 …）**
@@ -3163,6 +3315,7 @@ impl eframe::App for PdfReaderApp {
         }
         self.draw_password_prompt(&ctx);
         self.draw_custom_dialog(&ctx);
+        self.draw_edit_dialogs(&ctx);
     }
 }
 
