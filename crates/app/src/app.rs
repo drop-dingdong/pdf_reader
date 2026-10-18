@@ -43,11 +43,16 @@ use crate::view::{
     flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
-    view_rect_for, view_to_content, KeyedStore,
+    view_rect_for, view_to_content, plan_page, DrawInput, KeyedStore, PageDraw,
 };
 
-/// 纹理缓存容量（条目数）。真正的淘汰依据是"是否可见"，容量只是兜底。
-const TEXTURE_CAPACITY: usize = 64;
+/// 纹理缓存容量（条目数）。真正的淘汰依据是"是否可见 + 波段"（`retain_preview_scales`），
+/// 容量只是兜底。
+///
+/// 128 的来历（D-96）：保留规则改成"当前波段 + 最近其它波段 + 当前以下最近的整页波段"后，
+/// 高倍下 2 个可见页 × (当前 18 块 + 上一档 18 块 + 1 张整页) ≈ 74 条；64 会开始抖，
+/// 旧档的块被 LRU 挤掉后预览又缺料。单块约 0.8 MB，上限约 100 MB 显存。
+const TEXTURE_CAPACITY: usize = 128;
 
 /// 侧栏宽度范围（内容空间像素）。宽度由 app 自己保存 —— 见 `sidebar_width` 的说明。
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
@@ -311,6 +316,10 @@ pub struct PdfReaderApp {
     session: Option<DocumentSession>,
     navigation: Option<Arc<NavigationIndex>>,
     textures: KeyedStore<egui::TextureHandle>,
+    /// D-96：每页"当前波段从何时开始"（`(scale_milli, 起始时刻)`），用于就绪门槛的超时兜底。
+    band_since: std::collections::HashMap<PageIndex, (u32, std::time::Instant)>,
+    /// D-96：每页上一帧的画法（`(标签, 波段)`），只在变化时打一行 `[画法]` 诊断。
+    last_plan: std::collections::HashMap<PageIndex, (String, u32)>,
     /// 每帧临时持有的命令与事件缓冲（避免反复分配）。
     commands: Vec<ViewerCommand>,
     events: Vec<SessionEvent>,
@@ -457,6 +466,8 @@ impl PdfReaderApp {
             session: None,
             navigation: None,
             textures: KeyedStore::new(TEXTURE_CAPACITY),
+            band_since: std::collections::HashMap::new(),
+            last_plan: std::collections::HashMap::new(),
             commands: Vec::new(),
             events: Vec::new(),
             visible: Vec::new(),
@@ -739,6 +750,10 @@ impl PdfReaderApp {
                         let title = session.opened().document.info().to_string();
                         self.session = Some(session);
                         self.textures.clear();
+                        // D-96 的记账按页号索引：换文档后必须清空，否则旧文档的
+                        // "第一块就绪时刻"会让新文档的同一页号一上来就判定超时（提前补白）。
+                        self.band_since.clear();
+                        self.last_plan.clear();
                         self.error = None;
                         self.message = format!("已打开：{title}");
                         self.password_for = None;
@@ -1943,67 +1958,50 @@ impl PdfReaderApp {
                 // D-94：整页与瓦片的键都用**波段渲染比例**（与 session 完全一致）
                 let render = session.render_scale(page);
                 let whole_key = RenderKey::new(page, render, placement.rotation);
-                let has_previous = self
-                    .textures
-                    .best_page_texture(page, placement.rotation, whole_key.scale_milli)
-                    .is_some();
-
-                // 先决策、再落笔：这段"画法"判定同时用于诊断输出，
-                // 出问题时能直接从日志看出走的是哪条路径（agent.md 规则 2：UI 现象靠实测数据定位）。
-                enum Plan {
-                    Whole,
-                    Stretch,
-                    Tiles(u32, u32, u32, u32),
-                    /// 用上一档缩放的**瓦片**拼出预览（高倍缩放下没有整页图可拉伸）。
-                    TilePreview(u32),
-                    Blank,
-                }
-                let plan = if self.textures.contains(&whole_key) {
-                    Plan::Whole
-                } else if let Some((col0, row0, col1, row1)) = session.visible_tiles(page) {
-                    // 优先级：当前波段的真瓦片 → 上一波段的整页图 → 上一波段的瓦片 → 白纸。
-                    // 只要当前波段还有内容没到齐，就尽量用旧内容顶上，绝不让页面闪白
-                    // （第四轮验收：中心页不闪、相邻页闪白，就是因为相邻页没有旧图可用）。
-                    if self.textures.has_tiles(&whole_key) {
-                        Plan::Tiles(col0, row0, col1, row1)
-                    } else if has_previous {
-                        Plan::Stretch
-                    } else if let Some(old_scale) = self.textures.best_tile_scale(
+                // 可见范围与网格只取一次：决策与绘制必须用**同一份**，否则会出现
+                // "永远差一块"→ 永远停在预览（见 view::ready_tiles_in_view 的说明）。
+                let tile_area = match (session.tile_grid(page), session.visible_tiles(page)) {
+                    (Some(grid), Some(range)) => Some((grid, range)),
+                    _ => None,
+                };
+                let (ready, total) = match &tile_area {
+                    Some((grid, range)) => self.textures.ready_tiles_in_view(
                         page,
                         placement.rotation,
-                        whole_key.scale_milli,
-                    ) {
-                        Plan::TilePreview(old_scale)
-                    } else {
-                        Plan::Tiles(col0, row0, col1, row1)
-                    }
-                } else if has_previous {
-                    Plan::Stretch
-                } else if let Some(old_scale) = self.textures.best_tile_scale(
-                    page,
-                    placement.rotation,
-                    whole_key.scale_milli,
-                ) {
-                    Plan::TilePreview(old_scale)
-                } else {
-                    Plan::Blank
+                        render,
+                        grid,
+                        *range,
+                    ),
+                    None => (0, 0),
                 };
+                let preview =
+                    self.textures.preview_source(page, placement.rotation, whole_key.scale_milli);
+                // D-96：波段切换后"旧内容 vs 新块"的判据（缺一块就不翻页，另有超时兜底）
+                let waited_ms = self.note_band_wait(page, whole_key.scale_milli, ready);
+                let plan = plan_page(&DrawInput {
+                    tiled: tile_area.is_some(),
+                    has_whole_current: self.textures.contains(&whole_key),
+                    ready,
+                    total,
+                    preview,
+                    waited_ms,
+                });
 
-                let (label, ready, total) = match plan {
-                    Plan::Whole => {
+                let mut drawn = (0u32, 0u32);
+                match plan {
+                    PageDraw::Whole => {
                         let texture = self.textures.get(&whole_key).expect("已判定存在");
                         paint_image(&painter, texture, screen);
-                        ("整页纹理", 1u32, 1u32)
+                        drawn = (1, 1);
                     }
-                    Plan::Stretch => {
+                    PageDraw::Stretch(old_scale_milli) => {
                         let texture = self
                             .textures
-                            .best_page_texture(page, placement.rotation, whole_key.scale_milli)
+                            .page_texture_at(page, placement.rotation, old_scale_milli)
                             .expect("已判定存在");
                         paint_image(&painter, texture, screen);
-                        ("旧图拉伸", 0, 0)
                     }
-                    Plan::TilePreview(old_scale_milli) => {
+                    PageDraw::TilePreview(old_scale_milli) => {
                         // 上一波段的块：先按它自己的渲染比例重建网格，
                         // 再"按占比"映射到当前页面矩形（与显示比例无关，因此无需旧显示比例）。
                         let old_render = old_scale_milli as f32 / 1000.0;
@@ -2025,10 +2023,8 @@ impl PdfReaderApp {
                             if width == 0 || height == 0 {
                                 continue;
                             }
-                            let pixels =
-                                Rect::new(x as f32, y as f32, width as f32, height as f32);
-                            let rect =
-                                tile_view_rect_scaled(page_rect, pixels, old_page, new_page);
+                            let pixels = Rect::new(x as f32, y as f32, width as f32, height as f32);
+                            let rect = tile_view_rect_scaled(page_rect, pixels, old_page, new_page);
                             let tile_screen = egui::Rect::from_min_size(
                                 canvas.min + EVec2::new(rect.x, rect.y),
                                 EVec2::new(rect.width, rect.height),
@@ -2036,9 +2032,9 @@ impl PdfReaderApp {
                             paint_image(&painter, texture, tile_screen);
                             count += 1;
                         }
-                        ("旧瓦片预览", count, count)
+                        drawn = (count, count);
                     }
-                    Plan::Tiles(col0, row0, col1, row1) => {
+                    PageDraw::Tiles => {
                         // 视口覆盖到的**全部**块都要画：就绪的贴图、未就绪的补白。
                         // v1 只遍历"已缓存"的块，未就绪区域直接露出深色画布 ——
                         // 高倍缩放时看起来就是"视野全黑"（第二轮验收 §15）。
@@ -2049,23 +2045,15 @@ impl PdfReaderApp {
                         let tile_borders = std::env::var("PDF_READER_TILE_BORDERS")
                             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                             .unwrap_or(false);
-                        let mut ready = 0u32;
-                        let mut total = 0u32;
-                        if let Some(grid) = session.tile_grid(page) {
-                            for row in row0..=row1 {
-                                for col in col0..=col1 {
+                        if let Some((grid, (col0, row0, col1, row1))) = &tile_area {
+                            for row in *row0..=*row1 {
+                                for col in *col0..=*col1 {
                                     if !grid.contains(col, row) {
                                         continue;
                                     }
-                                    total += 1;
                                     let tile = TileSpec::new(col, row);
                                     let rect = tile_view_rect(
-                                        &grid,
-                                        &placement,
-                                        col,
-                                        row,
-                                        render.0,
-                                        scroll,
+                                        grid, &placement, col, row, render.0, scroll,
                                     );
                                     let key =
                                         RenderKey::tiled(page, render, placement.rotation, tile);
@@ -2075,7 +2063,6 @@ impl PdfReaderApp {
                                     );
                                     match self.textures.get(&key) {
                                         Some(texture) => {
-                                            ready += 1;
                                             paint_image(&painter, texture, tile_screen);
                                         }
                                         None => paint_blank(&painter, tile_screen),
@@ -2093,19 +2080,51 @@ impl PdfReaderApp {
                                 }
                             }
                         }
-                        ("瓦片", ready, total)
+                        drawn = (ready as u32, total as u32);
                     }
-                    Plan::Blank => {
+                    PageDraw::Blank => {
                         // 纸张（白底 + 页框）在循环开头已经铺好，这里无需再画任何东西 ——
                         // 尤其不要画块边框（那会变成满屏网格线）。
-                        ("白底页框", 0, 0)
                     }
-                };
+                }
 
                 if self.diagnose {
+                    // 边沿触发：画法一变就立刻打一行（不受 1 秒节流），
+                    // 白块到底是"没渲染好"还是"被旧内容挤掉"一眼可见（D-96）。
+                    let fallback = plan == PageDraw::Tiles && total > 0 && ready < total;
+                    let label = if fallback {
+                        format!("{}（兜底）", plan.label())
+                    } else {
+                        plan.label().to_string()
+                    };
+                    let previous = self.last_plan.get(&page).cloned();
+                    if previous.as_ref() != Some(&(label.clone(), whole_key.scale_milli)) {
+                        eprintln!(
+                            "[画法] p{} 波段={} 从={} 到={} 就绪={}/{} 等待={}ms 可见={:?} 预览={:?}",
+                            page.display_number(),
+                            whole_key.scale_milli,
+                            previous
+                                .map(|(label, scale)| format!("{label}@{scale}"))
+                                .unwrap_or_else(|| "—".to_string()),
+                            label,
+                            ready,
+                            total,
+                            waited_ms,
+                            tile_area.as_ref().map(|(_, range)| *range),
+                            preview
+                        );
+                        self.last_plan.insert(page, (label, whole_key.scale_milli));
+                    }
                     report.push(format!(
-                        "p{} 视图矩形=({:.0},{:.0} {:.0}×{:.0}) 画法={label} 瓦片={ready}/{total}",
+                        "p{} 画法={} 块={}/{} 网格={} 渲染比例={:.3} 等待={}ms 预览={:?} 视图矩形=({:.0},{:.0} {:.0}×{:.0})",
                         page.display_number(),
+                        plan.label(),
+                        drawn.0,
+                        drawn.1,
+                        tile_area.as_ref().map(|(grid, _)| grid.side).unwrap_or(0),
+                        render.0,
+                        waited_ms,
+                        preview,
                         page_rect.x,
                         page_rect.y,
                         page_rect.width,
@@ -3849,6 +3868,32 @@ impl eframe::App for PdfReaderApp {
 
 impl PdfReaderApp {
     /// 是否正处于"缩放/旋转预览窗口"内（此刻只显示旧图，不提交渲染）。
+    /// 返回"该页当前波段**第一块就绪**以来"的毫秒数（0 = 还没有任何块就绪）。
+    ///
+    /// 计时起点刻意选在"第一块就绪"而不是"波段变化"：
+    /// * 慢手势（滚轮按住 1 秒以上）期间不断改波段，若从波段变化开始计时，
+    ///   等渲染真正开始时早已超时 —— 第一块一到就触发兜底，白块又回来了；
+    /// * 从"第一块"开始计时，语义正好是"用户已经看到半张图多久了"。
+    ///
+    /// 波段不变就不重置：同波段内滚动时新块本来就要现渲染，
+    /// 等过 [`view::READY_TIMEOUT_MS`] 后应显示"已就绪 + 补白"，而不是一直糊着（D-96）。
+    fn note_band_wait(&mut self, page: PageIndex, scale_milli: u32, ready: usize) -> u64 {
+        let now = std::time::Instant::now();
+        if ready == 0 {
+            self.band_since.remove(&page);
+            return 0;
+        }
+        match self.band_since.get(&page) {
+            Some((milli, since)) if *milli == scale_milli => {
+                now.saturating_duration_since(*since).as_millis() as u64
+            }
+            _ => {
+                self.band_since.insert(page, (scale_milli, now));
+                0
+            }
+        }
+    }
+
     fn previewing(&self) -> bool {
         self.preview_until
             .map_or(false, |deadline| std::time::Instant::now() < deadline)

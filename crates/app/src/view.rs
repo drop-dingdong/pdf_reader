@@ -305,6 +305,111 @@ pub fn compose_snapshot(pages: &[SnapshotPage<'_>], content_rect: Rect) -> Optio
     Some(color_image(PixelFormat::Rgba8, &rgba, width as u32, height as u32))
 }
 
+// ---------------------------------------------------------------------------
+// 画法决策（波段切换时"旧内容 vs 新块"）
+// ---------------------------------------------------------------------------
+
+/// 当前波段成为"当前"之后，最多等多久再放弃预览、改为"已就绪 + 补白"。
+///
+/// 取 400ms：比"160ms 缩放预览窗口 + 十几块 × 约 9ms 串行渲染"略宽，
+/// 又短于用户感知的"画面卡住"。它同时是"某块渲染失败，不让页面永远停在糊图"的兜底。
+pub const READY_TIMEOUT_MS: u64 = 400;
+
+/// 一页可用的"旧内容"（**整页级**，绝不逐块混用 —— D-88）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preview {
+    /// 没有任何旧内容（首次打开某页、或刚切换文档）。
+    None,
+    /// 有整页图（参数是它所在波段的 `scale_milli`）。
+    Whole(u32),
+    /// 只有旧波段的块（参数是它所在波段的 `scale_milli`）。
+    Tiles(u32),
+}
+
+/// 一页在这一帧应该怎么画。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageDraw {
+    /// 当前波段的整页图（不分块路径）。
+    Whole,
+    /// 旧整页图拉伸到整页矩形（`scale_milli` 供诊断）。
+    Stretch(u32),
+    /// 旧波段的块按占比拼出整页（`scale_milli` 供诊断）。
+    TilePreview(u32),
+    /// 当前波段的块，未就绪处补白。
+    Tiles,
+    /// 什么都没有。
+    Blank,
+}
+
+impl PageDraw {
+    /// 诊断用的短名。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Whole => "整页纹理",
+            Self::Stretch(_) => "旧图拉伸",
+            Self::TilePreview(_) => "旧瓦片预览",
+            Self::Tiles => "瓦片",
+            Self::Blank => "白底页框",
+        }
+    }
+}
+
+/// [`plan_page`] 的输入：全部是"已经知道的事实"，构造后即可单测。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DrawInput {
+    /// 该页当前波段是否分块（`DocumentSession::visible_tiles` 是否 `Some`）。
+    pub tiled: bool,
+    /// 当前波段的整页纹理是否已在（只有不分块路径才可能为真）。
+    pub has_whole_current: bool,
+    /// 可见范围内"已在纹理层"的块数。
+    pub ready: usize,
+    /// 可见范围内有效块数（已按 [`TileGrid::contains`] 过滤）。
+    pub total: usize,
+    /// 可用的旧内容。
+    pub preview: Preview,
+    /// 当前波段**第一块就绪**以来的毫秒数（0 = 还没有任何块就绪）。
+    ///
+    /// 起点选"第一块就绪"而不是"波段变化"：慢手势期间波段不断变化，
+    /// 从波段变化计时会让第一块一到就超时，白块就又回来了。
+    pub waited_ms: u64,
+}
+
+/// 决定一页这一帧怎么画 —— "旧内容 vs 新块"的**唯一**判据。
+///
+/// ## 为什么需要"整页级就绪门槛"（D-96）
+/// 旧实现是"当前波段**任意一块**到了就翻页"（`has_tiles`）。波段切换后块是逐块到达的
+/// （PDFium 串行，约 9ms/块），于是第一块一到，整页立刻从"上一波段的预览"切成
+/// "几块清晰 + 大片纯白补白" —— 这正是真机看到的白块。
+///
+/// 现在只有**可见范围内全部块就绪**才切；否则继续用整页级的旧内容顶住。
+/// 落笔仍然"整页一个来源"，不是 D-87 那种"缺哪块补哪块"的逐块混用（D-88 的结论）。
+pub fn plan_page(input: &DrawInput) -> PageDraw {
+    if input.has_whole_current {
+        return PageDraw::Whole;
+    }
+    if !input.tiled {
+        return match input.preview {
+            Preview::Whole(scale) => PageDraw::Stretch(scale),
+            Preview::Tiles(scale) => PageDraw::TilePreview(scale),
+            Preview::None => PageDraw::Blank,
+        };
+    }
+    // 分块：可见范围一块不缺才切
+    if input.total > 0 && input.ready >= input.total {
+        return PageDraw::Tiles;
+    }
+    // 兜底：已经等过超时（某块渲染失败、或块特别多）→ 先画已就绪的，别永远糊着
+    if input.ready > 0 && input.waited_ms >= READY_TIMEOUT_MS {
+        return PageDraw::Tiles;
+    }
+    match input.preview {
+        Preview::Whole(scale) => PageDraw::Stretch(scale),
+        Preview::Tiles(scale) => PageDraw::TilePreview(scale),
+        // 没有任何旧内容（首次打开某页）：只能边渲染边补白
+        Preview::None => PageDraw::Tiles,
+    }
+}
+
 /// 把图像按**保持长宽比**的方式放进 `area`（居中，不拉伸变形）。
 pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     if image.x <= 0.0 || image.y <= 0.0 || area.width() <= 0.0 || area.height() <= 0.0 {
@@ -909,6 +1014,35 @@ impl<V> KeyedStore<V> {
         self.order.retain(|key| self.entries.contains_key(key));
     }
 
+    /// 同 [`Self::best_page_texture`]，但返回**键**（调用方要取它的 `scale_milli`）。
+    pub fn best_page_texture_key(
+        &self,
+        page: PageIndex,
+        rotation: Rotation,
+        target_scale_milli: u32,
+    ) -> Option<RenderKey> {
+        self.entries
+            .iter()
+            .filter(|(key, _)| key.page == page && key.rotation == rotation && key.tile.is_none())
+            .min_by_key(|(key, _)| key.scale_milli.abs_diff(target_scale_milli))
+            .map(|(key, _)| *key)
+    }
+
+    /// 指定波段的**整页**纹理（精确匹配；`scale_milli` 来自 [`Preview::Whole`]）。
+    pub fn page_texture_at(
+        &self,
+        page: PageIndex,
+        rotation: Rotation,
+        scale_milli: u32,
+    ) -> Option<&V> {
+        self.entries.get(&RenderKey {
+            page,
+            scale_milli,
+            rotation,
+            tile: None,
+        })
+    }
+
     /// 找同一页、同一旋转下**缩放最接近**的整页纹理。
     ///
     /// 用途：缩放过程中新比例的位图还没渲染好时，用旧比例的图**拉伸显示**，
@@ -965,6 +1099,37 @@ impl<V> KeyedStore<V> {
         best
     }
 
+    /// 可见范围内"已在纹理层"的块数 / 有效块数。
+    ///
+    /// 判定与绘制循环**完全一致**：只有 [`TileGrid::contains`] 为真的块才计入总数，
+    /// 键也由同一个 `render` 比例生成。两侧一旦不一致，就会出现
+    /// "永远 `ready < total`" → 页面永远停在预览（糊）。
+    pub fn ready_tiles_in_view(
+        &self,
+        page: PageIndex,
+        rotation: Rotation,
+        render: Scale,
+        grid: &TileGrid,
+        range: (u32, u32, u32, u32),
+    ) -> (usize, usize) {
+        let (col0, row0, col1, row1) = range;
+        let mut ready = 0usize;
+        let mut total = 0usize;
+        for row in row0..=row1 {
+            for col in col0..=col1 {
+                if !grid.contains(col, row) {
+                    continue;
+                }
+                total += 1;
+                let key = RenderKey::tiled(page, render, rotation, TileSpec::new(col, row));
+                if self.contains(&key) {
+                    ready += 1;
+                }
+            }
+        }
+        (ready, total)
+    }
+
     /// 某个缩放档下该页已就绪的全部瓦片。
     pub fn tiles_at(
         &self,
@@ -984,7 +1149,46 @@ impl<V> KeyedStore<V> {
             .collect()
     }
 
-    /// 裁剪纹理：只保留这些页在 `current_scale_milli` 与**每页最接近它的另一个比例**上的条目。
+    /// 波段切换时可用的"旧内容"（整页级）。
+    ///
+    /// 取舍规则（patch-plan-tiling-v3 §2.3）：
+    /// * 只有一种可用 → 用它；
+    /// * 两种都有：
+    ///   - **缩小方向**（块来自更高波段、整页图来自更低波段）→ 用**整页图**。
+    ///     缩小时视口覆盖的页面面积变大，旧块只覆盖"缩之前那一片"
+    ///     （800% → 500% 时约只剩 39% 面积），整页图虽糊但不会露白；
+    ///   - 其它（放大方向，或两者同向）→ 取**更接近目标**的那个（更清晰）。
+    pub fn preview_source(
+        &self,
+        page: PageIndex,
+        rotation: Rotation,
+        target_scale_milli: u32,
+    ) -> Preview {
+        let whole = self
+            .best_page_texture_key(page, rotation, target_scale_milli)
+            .map(|key| key.scale_milli);
+        let tiles = self.best_tile_scale(page, rotation, target_scale_milli);
+        match (whole, tiles) {
+            (None, None) => Preview::None,
+            (Some(scale), None) => Preview::Whole(scale),
+            (None, Some(scale)) => Preview::Tiles(scale),
+            (Some(whole_scale), Some(tile_scale)) => {
+                let zooming_out =
+                    tile_scale > target_scale_milli && whole_scale < target_scale_milli;
+                let whole_is_nearer = whole_scale.abs_diff(target_scale_milli)
+                    <= tile_scale.abs_diff(target_scale_milli);
+                if zooming_out || whole_is_nearer {
+                    Preview::Whole(whole_scale)
+                } else {
+                    Preview::Tiles(tile_scale)
+                }
+            }
+        }
+    }
+
+    /// 裁剪纹理：保留每页的
+    /// ① 当前波段；② **最接近它的另一个波段**（放大方向的预览底料）；
+    /// ③ 当前比例**以下、最近的"有整页纹理"的波段**（缩小方向的整页底料）。
     ///
     /// 两个方向都要顾：
     /// * **不能全丢**：缩放过场要用上一档的旧内容顶上，否则会闪白 ——
@@ -1007,8 +1211,9 @@ impl<V> KeyedStore<V> {
                 .map(|(_, rotation)| *rotation)
         };
 
-        // 每页选出"最接近当前比例的另一个比例"
-        let mut alternate: HashMap<PageIndex, u32> = HashMap::new();
+        // 每页选出"最接近当前比例的另一个比例"与"当前比例以下最近的整页图"
+        let mut nearest_other: HashMap<PageIndex, u32> = HashMap::new();
+        let mut lower_whole: HashMap<PageIndex, u32> = HashMap::new();
         for key in self.entries.keys() {
             if rotation_of(key.page) != Some(key.rotation)
                 || key.scale_milli == current_scale_milli
@@ -1016,10 +1221,21 @@ impl<V> KeyedStore<V> {
                 continue;
             }
             let distance = key.scale_milli.abs_diff(current_scale_milli);
-            match alternate.get(&key.page) {
+            match nearest_other.get(&key.page) {
                 Some(existing) if existing.abs_diff(current_scale_milli) <= distance => {}
                 _ => {
-                    alternate.insert(key.page, key.scale_milli);
+                    nearest_other.insert(key.page, key.scale_milli);
+                }
+            }
+            // ③ 缩小方向的底料：当前比例以下、**整页图**所在的最大比例。
+            //    整页纹理只出现在"该波段不分块"的比例上（A4 是 1600/2560），
+            //    所以这一档通常就是"上次整页渲染的那一档"，代价只有一张位图。
+            if key.tile.is_none() && key.scale_milli < current_scale_milli {
+                match lower_whole.get(&key.page) {
+                    Some(existing) if *existing >= key.scale_milli => {}
+                    _ => {
+                        lower_whole.insert(key.page, key.scale_milli);
+                    }
                 }
             }
         }
@@ -1027,7 +1243,8 @@ impl<V> KeyedStore<V> {
         self.retain(|key| {
             rotation_of(key.page) == Some(key.rotation)
                 && (key.scale_milli == current_scale_milli
-                    || alternate.get(&key.page) == Some(&key.scale_milli))
+                    || nearest_other.get(&key.page) == Some(&key.scale_milli)
+                    || lower_whole.get(&key.page) == Some(&key.scale_milli))
         });
     }
 
@@ -1231,6 +1448,231 @@ mod tests {
 
         store.clear();
         assert!(store.is_empty());
+    }
+
+    // ------------------------------------------------ D-96：整页级就绪门槛
+
+    fn draw_input() -> DrawInput {
+        DrawInput {
+            tiled: true,
+            has_whole_current: false,
+            ready: 0,
+            total: 18,
+            preview: Preview::Tiles(65_540),
+            waited_ms: 0,
+        }
+    }
+
+    /// **关键回归**：只要还缺一块，就不许翻页 —— 否则就是"几块清晰 + 大片白"。
+    #[test]
+    fn plan_page_waits_for_every_visible_tile() {
+        let input = DrawInput { ready: 17, waited_ms: 100, ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::TilePreview(65_540), "缺一块仍用旧内容顶住");
+        let input = DrawInput { ready: 2, waited_ms: 0, ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::TilePreview(65_540));
+
+        let input = DrawInput { ready: 18, waited_ms: 0, ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::Tiles, "全齐才切到当前波段");
+    }
+
+    /// 超时兜底：某块渲染失败/块特别多时，不许永远停在糊图。
+    #[test]
+    fn plan_page_falls_back_to_partial_tiles_after_the_timeout() {
+        let input = DrawInput { ready: 5, waited_ms: READY_TIMEOUT_MS - 1, ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::TilePreview(65_540), "超时前继续顶住");
+        let input = DrawInput { ready: 5, waited_ms: READY_TIMEOUT_MS, ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::Tiles, "超时后画已就绪部分");
+        // 一块都没有时超时也没有意义（没有内容可画）
+        let input = DrawInput { ready: 0, waited_ms: 9_999, ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::TilePreview(65_540));
+    }
+
+    /// 旧内容优先级：整页图 > 旧块；都没有时才允许补白。
+    #[test]
+    fn plan_page_prefers_whole_page_preview_then_tiles_then_blank() {
+        let input = DrawInput { ready: 3, preview: Preview::Whole(25_600), ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::Stretch(25_600));
+        let input = DrawInput { ready: 3, preview: Preview::Tiles(65_540), ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::TilePreview(65_540));
+        let input = DrawInput { ready: 3, preview: Preview::None, ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::Tiles, "没有旧内容时只能补白");
+    }
+
+    /// 不分块（整页路径）不受就绪门槛影响：有整页图看整页，只有旧内容就顶住。
+    #[test]
+    fn plan_page_keeps_the_whole_page_path_unchanged() {
+        let input = DrawInput { tiled: false, has_whole_current: true, ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::Whole);
+        let input = DrawInput { tiled: false, preview: Preview::Whole(16_000), ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::Stretch(16_000));
+        let input = DrawInput { tiled: false, preview: Preview::Tiles(16_000), ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::TilePreview(16_000));
+        let input = DrawInput { tiled: false, preview: Preview::None, ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::Blank);
+    }
+
+    /// 退化输入（可见范围为空的极端情形）不得 panic，也不得永远停在预览。
+    #[test]
+    fn plan_page_handles_an_empty_range() {
+        let input = DrawInput { ready: 0, total: 0, ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::TilePreview(65_540));
+        let input = DrawInput { ready: 0, total: 0, preview: Preview::None, ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::Tiles);
+    }
+
+    /// `ready/total` 必须与绘制用同一段枚举（`grid.contains` 过滤），否则会"永远差一块"。
+    #[test]
+    fn ready_tiles_in_view_matches_the_draw_range() {
+        let page = PageIndex::new(0);
+        let grid = TileGrid::new(Size::new(612.0, 792.0), 8.0);
+        assert_eq!(grid.side, 8);
+        let render = Scale::from_zoom(8.0);
+        let range = (0, 0, 1, 1);
+        let mut store = KeyedStore::new(64);
+
+        assert_eq!(
+            store.ready_tiles_in_view(page, Rotation::None, render, &grid, range),
+            (0, 4),
+            "空存储：四块就绪"
+        );
+        for (col, row) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            store.insert(
+                RenderKey::tiled(page, render, Rotation::None, TileSpec::new(col, row)),
+                (col, row),
+            );
+        }
+        assert_eq!(
+            store.ready_tiles_in_view(page, Rotation::None, render, &grid, range),
+            (4, 4)
+        );
+
+        // 越界块不计入总数（否则永远 ready < total）
+        let out_of_grid = (0, 0, grid.side, grid.side);
+        let (ready, total) =
+            store.ready_tiles_in_view(page, Rotation::None, render, &grid, out_of_grid);
+        assert!(total > 4 && ready >= 4);
+        assert_eq!(
+            total,
+            grid.all_tiles().len(),
+            "总数必须与网格的有效块数一致（越界的行列被过滤）"
+        );
+
+        // 别的波段 / 别的旋转不算
+        let other = Scale::from_zoom(4.0);
+        assert_eq!(
+            store.ready_tiles_in_view(page, Rotation::None, other, &grid, range),
+            (0, 4)
+        );
+        assert_eq!(
+            store.ready_tiles_in_view(page, Rotation::Clockwise90, render, &grid, range),
+            (0, 4)
+        );
+    }
+
+    /// 预览源取舍：缩小方向优先整页图（覆盖），放大方向优先更接近的（清晰）。
+    #[test]
+    fn preview_source_prefers_coverage_when_zooming_out() {
+        let page = PageIndex::new(0);
+        let whole = |scale: f32| RenderKey::new(page, Scale::from_zoom(scale), Rotation::None);
+        let tile = |scale: f32, col: u32| {
+            RenderKey::tiled(
+                page,
+                Scale::from_zoom(scale),
+                Rotation::None,
+                TileSpec::new(col, 0),
+            )
+        };
+        // 只有整页图 / 只有块 / 都没有
+        let mut store = KeyedStore::new(16);
+        store.insert(whole(1.6), "whole");
+        assert_eq!(store.preview_source(page, Rotation::None, 10_486), Preview::Whole(1_600));
+        let mut store = KeyedStore::new(16);
+        store.insert(tile(6.5536, 0), "tile");
+        assert_eq!(store.preview_source(page, Rotation::None, 10_486), Preview::Tiles(6_554));
+        let store: KeyedStore<&str> = KeyedStore::new(16);
+        assert_eq!(store.preview_source(page, Rotation::None, 10_486), Preview::None);
+
+        // 缩小方向：整页图来自更低波段、块来自更高波段 → 用整页图（覆盖整个视口）
+        let mut store = KeyedStore::new(16);
+        store.insert(whole(2.56), "whole");
+        store.insert(tile(10.48576, 0), "tile");
+        assert_eq!(
+            store.preview_source(page, Rotation::None, 6_554),
+            Preview::Whole(2_560),
+            "缩小时旧块只覆盖缩之前那一片，必须用整页图顶住"
+        );
+
+        // 放大方向：块来自更低波段 → 取更接近的（更清晰），且它覆盖是新视口的超集
+        let mut store = KeyedStore::new(16);
+        store.insert(whole(1.6), "whole");
+        store.insert(tile(6.5536, 0), "tile");
+        assert_eq!(
+            store.preview_source(page, Rotation::None, 10_486),
+            Preview::Tiles(6_554),
+            "放大时优先更接近目标的预览"
+        );
+
+        // 距离相等 → 整页图（覆盖更全）
+        let mut store = KeyedStore::new(16);
+        store.insert(whole(2.0), "whole");
+        store.insert(tile(4.0, 0), "tile");
+        assert_eq!(store.preview_source(page, Rotation::None, 3_000), Preview::Whole(2_000));
+    }
+
+    /// 保留规则：当前 + 最近的其它波段 + 当前以下最近的"整页图"所在波段。
+    #[test]
+    fn retain_keeps_current_nearest_and_lower_whole_page() {
+        let page = PageIndex::new(0);
+        let whole = |scale: f32| RenderKey::new(page, Scale::from_zoom(scale), Rotation::None);
+        let tile = |scale: f32, col: u32| {
+            RenderKey::tiled(
+                page,
+                Scale::from_zoom(scale),
+                Rotation::None,
+                TileSpec::new(col, 0),
+            )
+        };
+
+        let mut store = KeyedStore::new(64);
+        // 100% / 200% 是整页图，300% 起分块
+        store.insert(whole(1.6), "w1600");
+        store.insert(whole(2.56), "w2560");
+        store.insert(tile(4.096, 0), "t4096");
+        store.insert(tile(6.5536, 0), "t6554");
+        store.insert(tile(10.48576, 0), "t10486");
+
+        store.retain_preview_scales(&[(page, Rotation::None)], 10_486);
+
+        assert!(store.contains(&whole(10.48576)) || store.contains(&tile(10.48576, 0)));
+        assert!(store.contains(&tile(6.5536, 0)), "最近的其它波段（放大底料）");
+        assert!(
+            store.contains(&whole(2.56)),
+            "当前以下最近的整页图（缩小底料）"
+        );
+        assert!(!store.contains(&tile(4.096, 0)), "更旧的块波段应丢弃");
+        assert!(!store.contains(&whole(1.6)), "更旧的整页图应丢弃");
+    }
+
+    /// 没有整页图时退回"当前 + 最近"（与旧行为一致）。
+    #[test]
+    fn retain_without_whole_pages_only_keeps_current_and_nearest() {
+        let page = PageIndex::new(0);
+        let tile = |scale: f32, col: u32| {
+            RenderKey::tiled(
+                page,
+                Scale::from_zoom(scale),
+                Rotation::None,
+                TileSpec::new(col, 0),
+            )
+        };
+        let mut store = KeyedStore::new(64);
+        store.insert(tile(4.096, 0), "a");
+        store.insert(tile(6.5536, 0), "b");
+        store.insert(tile(10.48576, 0), "c");
+        store.retain_preview_scales(&[(page, Rotation::None)], 10_486);
+        assert!(store.contains(&tile(10.48576, 0)));
+        assert!(store.contains(&tile(6.5536, 0)));
+        assert!(!store.contains(&tile(4.096, 0)));
     }
 
     /// 缩放期间用"上一档缩放"的位图拉伸占位（第二轮验收：避免大片白色填充）。
