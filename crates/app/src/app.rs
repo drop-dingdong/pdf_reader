@@ -358,6 +358,10 @@ pub struct PdfReaderApp {
     zoom_mode: ZoomMode,
     /// 哪个原位编辑框需要在**下一帧**获得焦点（双击后直接进入真编辑）。
     focus_edit: Option<EditField>,
+    /// 正文原位编辑是否需要在当帧获得焦点（与 `focus_edit` 同理，但目标在浮窗里）。
+    focus_body_edit: bool,
+    /// 搜索框是否需要在当帧获得焦点（Ctrl+F 直接可输入）。
+    focus_search: bool,
     /// 底部搜索框是否显示（Ctrl+F 切换）。
     search_open: bool,
     /// 正在编辑题目 `(下标, 草稿)`。
@@ -468,6 +472,8 @@ impl PdfReaderApp {
             zoom_edit: None,
             zoom_mode: ZoomMode::Custom,
             focus_edit: None,
+            focus_body_edit: false,
+            focus_search: false,
             search_open: false,
             editing_title: None,
             editing_body: None,
@@ -1162,8 +1168,9 @@ impl PdfReaderApp {
                         .desired_width(180.0)
                         .hint_text("关键词"),
                 );
-                if response.gained_focus() {
+                if self.focus_search {
                     response.request_focus();
+                    self.focus_search = false;
                 }
                 let submitted = response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 if (submitted || ui.button("查找").clicked()) && !self.search_input.is_empty() {
@@ -2632,6 +2639,11 @@ impl PdfReaderApp {
                 .desired_width(body_rect.width())
                 .desired_rows(6),
         );
+        if self.focus_body_edit {
+            // 进入编辑的那一帧就把焦点交给输入框，否则键入无效（"改了没变化"）
+            response.request_focus();
+            self.focus_body_edit = false;
+        }
         if response.lost_focus() {
             if let Some(preview) = self.custom_previews.get_mut(editing_index) {
                 preview.text = Some(text);
@@ -2671,6 +2683,7 @@ impl PdfReaderApp {
             if hit.double_clicked() {
                 if let Some(preview) = self.custom_previews.get(custom) {
                     self.editing_body = Some((custom, preview.text.clone().unwrap_or_default()));
+                    self.focus_body_edit = true;
                     ui.ctx().request_repaint();
                 }
                 return;
@@ -2756,6 +2769,15 @@ impl PdfReaderApp {
         }
         let page = preview_page;
         let Some(snapshot) = self.snapshot_for(ui, session, overlap) else {
+            if self.diagnose {
+                eprintln!(
+                    "[图片预览] 合成失败：页={:?} 选区={:?} 缩放={:.3} 可见页={:?}",
+                    page,
+                    overlap,
+                    session.state().zoom,
+                    self.visible
+                );
+            }
             self.message = "该区域还没有已渲染的像素（请稍候再试）".to_string();
             return;
         };
@@ -3548,6 +3570,8 @@ impl eframe::App for PdfReaderApp {
         // Ctrl+F 切换底部搜索框；Esc 关闭
         if ctx.input(|input| input.modifiers.command && input.key_pressed(Key::F)) {
             self.search_open = !self.search_open;
+            // 呼出时直接聚焦输入框，省掉"再点一下"（用户要求）
+            self.focus_search = self.search_open;
         }
         if self.search_open && ctx.input(|input| input.key_pressed(Key::Escape)) {
             self.search_open = false;
