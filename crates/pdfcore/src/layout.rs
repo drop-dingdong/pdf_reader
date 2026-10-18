@@ -438,6 +438,55 @@ impl PageLayout for VerticalLayout {
     }
 }
 
+/// 横向布局：所有页**从左到右排成一行**，垂直居中。
+///
+/// 与 [`VerticalLayout`] 完全镜像：主轴累加宽度、交叉轴取最大高度居中。
+/// 用于"横向浏览"模式（阅读漫画、并排核对图表等场景）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HorizontalLayout;
+
+impl PageLayout for HorizontalLayout {
+    fn compute(&self, pages: &[PageGeometry], params: &LayoutParams) -> DocumentLayout {
+        let scale = if params.scale.is_valid() { params.scale } else { Scale::IDENTITY };
+        let margin = params.margin;
+        let gap = params.page_gap.max(0.0);
+
+        let displayed: Vec<(Size, Rotation)> = pages
+            .iter()
+            .map(|page| {
+                let rotation = page.effective_rotation(params.user_rotation);
+                (page.size.rotated(rotation).scale(scale.0), rotation)
+            })
+            .collect();
+        // 交叉轴取所有页中最大高度，用于垂直居中。
+        let inner_height = displayed.iter().map(|(size, _)| size.height).fold(0.0_f32, f32::max);
+
+        let mut x = margin.left;
+        let mut placements = Vec::with_capacity(pages.len());
+        for (index, page) in pages.iter().enumerate() {
+            let (size, rotation) = displayed[index];
+            let y = margin.top + (inner_height - size.height) * 0.5;
+            placements.push(PagePlacement::new(
+                PageIndex::new(index as u32),
+                Rect::new(x, y, size.width, size.height),
+                scale,
+                rotation,
+                page.size,
+            ));
+            x += size.width;
+            if index + 1 < pages.len() {
+                x += gap;
+            }
+        }
+
+        let content_width = if pages.is_empty() { margin.horizontal() } else { x + margin.right };
+        DocumentLayout {
+            content_size: Size::new(content_width, margin.top + inner_height + margin.bottom),
+            placements,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,6 +509,34 @@ mod tests {
             margin: Insets::all(5.0),
             ..LayoutParams::default()
         }
+    }
+
+    /// 横向布局：从左到右累加宽度、垂直居中、页间距生效。
+    #[test]
+    fn lays_pages_out_in_a_row() {
+        let layout = HorizontalLayout.compute(&small_pages(3), &params(2.0));
+        assert_eq!(layout.page_count(), 3);
+        // 100x200 @2x → 200x400；间距 10；留白 5
+        let placements = &layout.placements;
+        assert_eq!(placements[0].rect.x, 5.0);
+        assert_eq!(placements[1].rect.x, 5.0 + 200.0 + 10.0);
+        assert_eq!(placements[2].rect.x, 5.0 + (200.0 + 10.0) * 2.0);
+        // 同一行：y 相同
+        assert_eq!(placements[0].rect.y, placements[1].rect.y);
+        // 内容宽度 = 留白 + 三页 + 两个间距
+        assert_eq!(layout.content_size.width, 5.0 + 200.0 * 3.0 + 10.0 * 2.0 + 5.0);
+    }
+
+    /// 高度不同的页：交叉轴按最大高度居中。
+    #[test]
+    fn centers_horizontally_laid_pages_by_height() {
+        let pages = vec![
+            PageGeometry::new(Size::new(100.0, 200.0), Rotation::None),
+            PageGeometry::new(Size::new(100.0, 100.0), Rotation::None),
+        ];
+        let layout = HorizontalLayout.compute(&pages, &params(1.0));
+        assert_eq!(layout.placements[0].rect.y, 5.0, "高页贴留白");
+        assert_eq!(layout.placements[1].rect.y, 5.0 + 50.0, "矮页垂直居中");
     }
 
     #[test]

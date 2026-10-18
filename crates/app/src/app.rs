@@ -366,6 +366,12 @@ pub struct PdfReaderApp {
     fullscreen: bool,
     /// 全屏下顶栏是否**悬浮显示**（指针靠近窗口顶端时出现）。
     reveal_toolbar: bool,
+    /// 是否横向浏览（页从左到右排成一行）。
+    horizontal_layout: bool,
+    /// 勾选后：**纵向滚动一律转为横向滚动**（原始横向分量丢弃）。
+    horizontal_scroll: bool,
+    /// 待应用的布局切换（`Some(true)` = 横向），在拿到 `&mut session` 时执行。
+    pending_layout: Option<bool>,
     /// 底部搜索框是否显示（Ctrl+F 切换）。
     search_open: bool,
     /// 正在编辑题目 `(下标, 草稿)`。
@@ -480,6 +486,9 @@ impl PdfReaderApp {
             focus_search: false,
             fullscreen: false,
             reveal_toolbar: false,
+            horizontal_layout: false,
+            horizontal_scroll: false,
+            pending_layout: None,
             search_open: false,
             editing_title: None,
             editing_body: None,
@@ -1040,6 +1049,8 @@ impl PdfReaderApp {
                 }
                 ui.separator();
                 ui.checkbox(&mut self.pin_hover_enabled, "Pin悬浮响应");
+                ui.checkbox(&mut self.horizontal_scroll, "横向滚动")
+                    .on_hover_text("勾选后纵向滚轮改为横向滚动（拖动不受影响）");
             });
 
             // ---- 第 2 行：页 / 缩放 / 旋转 / 预览模式（左） + 引用显示样式（右）----
@@ -1050,6 +1061,22 @@ impl PdfReaderApp {
                     let ctx = ui.ctx().clone();
                     self.toggle_fullscreen(&ctx);
                 }
+                egui::ComboBox::from_id_salt("layout-direction")
+                    .selected_text(if self.horizontal_layout { "横向" } else { "纵向" })
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(!self.horizontal_layout, "纵向").clicked() {
+                            if self.horizontal_layout {
+                                self.horizontal_layout = false;
+                                self.pending_layout = Some(false);
+                            }
+                        }
+                        if ui.selectable_label(self.horizontal_layout, "横向").clicked() {
+                            if !self.horizontal_layout {
+                                self.horizontal_layout = true;
+                                self.pending_layout = Some(true);
+                            }
+                        }
+                    });
                 ui.separator();
                 // 上一页 / 页码（双击原位编辑） / 下一页
                 if ui.button("上一页").clicked() {
@@ -1714,6 +1741,12 @@ impl PdfReaderApp {
                 // 曾经把开窗写在"指针在画布上"的分支里，结果静止悬停时也每帧刷新，
                 // 静默窗口永不结束 → 正常悬停也看不到预览。
                 let mut view_changed = false;
+                // 勾选"横向滚动"：纵向分量改作横向，横向分量丢弃（用户要求）；拖动不受影响
+                let scroll_delta = if self.horizontal_scroll {
+                    egui::vec2(scroll_delta.y, 0.0)
+                } else {
+                    egui::vec2(scroll_delta.x, scroll_delta.y)
+                };
                 if let Some(command) = command_for_scroll(
                     scroll_delta,
                     modifiers.ctrl || modifiers.command,
@@ -3600,6 +3633,15 @@ impl eframe::App for PdfReaderApp {
         // 注意：**不再**按命令白名单退出 Pin。用户最终要求是"只有切到选字/截图模式才退出"；
         // 缩放（含适应宽度、100%）、翻页、侧栏开关、checkbox 都不影响 Pin。
         // Pin 的退出由工具切换与截图按钮显式触发（见 draw_toolbar）。
+        // 布局切换（纵向/横向）：拿到 &mut session 才能替换布局实现
+        if let Some(horizontal) = self.pending_layout.take() {
+            if horizontal {
+                session.set_layout(Box::new(pdfcore::layout::HorizontalLayout));
+            } else {
+                session.set_layout(Box::new(pdfcore::layout::VerticalLayout));
+            }
+            session.handle(ViewerCommand::RequestVisible, &mut self.events);
+        }
         self.apply_and_pump(&ctx, &mut session);
         let after_input = frame_start.elapsed();
 

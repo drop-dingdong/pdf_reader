@@ -511,6 +511,16 @@ impl DocumentSession {
 
     // ---------------------------------------------------------------- 命令处理
 
+    /// 替换布局实现并重排（纵向/横向浏览切换）。
+    ///
+    /// 与命令队列分开：`Box<dyn PageLayout>` 不适合放进 `ViewerCommand`（需要 Clone/Debug），
+    /// 而 app 本来就借由 `&mut DocumentSession` 调用会话方法，直接换实现最省事。
+    pub fn set_layout(&mut self, layout: Box<dyn PageLayout>) {
+        self.layout_engine = layout;
+        self.invalidate_render();
+        self.relayout_keeping_anchor(&mut Vec::<SessionEvent>::new());
+    }
+
     /// 处理一条 UI 命令，把产生的事件追加到 `events`。
     pub fn handle(&mut self, command: ViewerCommand, events: &mut Vec<SessionEvent>) {
         match command {
