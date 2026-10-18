@@ -462,3 +462,52 @@ mod band_tests {
         assert!(!reuse_is_enough(1.0, 0.0));
     }
 }
+
+/// 显示比例 → 该波段实际采用的**渲染比例**（= 波段上界）。
+///
+/// 渲染与显示因此分离：请求按此比例渲染，贴图时用 `u = display / 该值` 换算尺寸。
+/// 波段内多次缩放只会改变 `u`，**不会**产生新的渲染请求。
+pub fn render_scale_for(display_scale: f32, overscan: f32) -> f32 {
+    render_scale_for_band(band_for(display_scale, overscan), overscan)
+}
+
+#[cfg(test)]
+mod render_scale_tests {
+    use super::*;
+
+    /// 渲染比例必须 ≥ 显示比例（只下采样），且不超过一个超采样倍数。
+    #[test]
+    fn render_scale_dominates_display_scale() {
+        let overscan = DEFAULT_OVERSCAN;
+        for display in [0.1f32, 0.5, 0.9, 1.0, 1.3, 1.59, 1.6, 2.4, 4.0, 7.38] {
+            let render = render_scale_for(display, overscan);
+            assert!(
+                render >= display - 1e-3,
+                "渲染比例 {render} 必须 ≥ 显示比例 {display}"
+            );
+            assert!(
+                render <= display * overscan + 1e-3,
+                "渲染比例 {render} 不应超过显示比例的 {overscan} 倍（display={display}）"
+            );
+        }
+    }
+
+    /// 同一波段内，多次缩放得到**同一个**渲染比例（这正是"不重渲染"的依据）。
+    #[test]
+    fn render_scale_is_constant_within_a_band() {
+        let overscan = 2.0;
+        let render = render_scale_for(2.2, overscan);
+        for display in [2.2f32, 2.5, 3.0, 3.9] {
+            assert_eq!(
+                render_scale_for(display, overscan),
+                render,
+                "波段内 display={display} 应复用同一渲染比例"
+            );
+        }
+        assert_ne!(
+            render_scale_for(4.1, overscan),
+            render,
+            "跨过波段边界应换渲染比例"
+        );
+    }
+}
