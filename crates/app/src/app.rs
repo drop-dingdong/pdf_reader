@@ -2020,6 +2020,12 @@ impl PdfReaderApp {
                             self.textures.tiles_at(page, placement.rotation, old_scale_milli)
                         {
                             let (x, y, width, height) = old_grid.tile_px(tile.col, tile.row);
+                            // 兜底：`old_scale_milli` 是千分之一的四舍五入值，理论上可能与
+                            // 当时真实渲染比例差一点（若正好落在层级边界上，网格的块数会不同）。
+                            // 越界的块直接跳过，绝不用错误矩形去贴图。
+                            if width == 0 || height == 0 {
+                                continue;
+                            }
                             let pixels =
                                 Rect::new(x as f32, y as f32, width as f32, height as f32);
                             let rect =
