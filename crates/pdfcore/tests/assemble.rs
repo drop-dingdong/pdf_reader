@@ -84,16 +84,16 @@ fn visible_tiles_matches_the_requested_range() {
     session.handle(ViewerCommand::ResizeViewport(Size::new(300.0, 300.0)), &mut events);
     session.handle(ViewerCommand::SetScroll(Vec2::ZERO), &mut events);
 
-    let (first, last) = session.visible_tiles(PageIndex::FIRST).expect("强制分块后应有范围");
-    assert_eq!((first.col, first.row), (0, 0));
-    assert_eq!((last.col, last.row), (0, 0), "300×300 视口只覆盖左上角一块瓦片");
+    let (col0, row0, col1, row1) = session.visible_tiles(PageIndex::FIRST).expect("强制分块后应有范围");
+    assert_eq!((col0, row0), (0, 0));
+    assert_eq!((col1, row1), (0, 0), "300×300 视口只覆盖左上角一块");
 
     // 提交 + 取回后，缓存里的瓦片应与这个范围完全一致
     session.handle(ViewerCommand::RequestVisible, &mut events);
     session.pump(&mut events);
     let tiles = session.tiles_for(PageIndex::FIRST);
     assert_eq!(tiles.len(), 1, "只应渲染并缓存这一块");
-    assert_eq!(tiles[0].0, first);
+    assert_eq!((tiles[0].0.col, tiles[0].0.row), (0, 0));
 }
 
 #[test]
@@ -109,9 +109,15 @@ fn assemble_a_reader_from_traits() {
     session.handle(ViewerCommand::RequestVisible, &mut events);
     session.pump(&mut events);
 
-    // 2) 首页位图应已进入缓存，且尺寸 = 页尺寸 × 缩放（612x792 @1.0）
+    // 2) 首页位图应已进入缓存，且尺寸 = 页尺寸 × **渲染比例**（D-94：渲染比例是波段上界，
+    //    因此比显示比例大 —— 多出来的像素供波段内缩放时下采样，避免重渲染）
+    let render = render_scale_for(1.0, DEFAULT_OVERSCAN);
+    assert!(render > 1.0, "波段上界应大于显示比例（超采样）");
     let image = session.image_for(PageIndex::new(0)).expect("首页应已渲染并写入缓存");
-    assert_eq!((image.width, image.height), (612, 792));
+    assert_eq!(
+        (image.width, image.height),
+        ((612.0 * render).round() as u32, (792.0 * render).round() as u32)
+    );
     assert!(events.iter().any(|event| matches!(event, SessionEvent::PageRendered(_))));
 }
 
@@ -181,11 +187,17 @@ fn zoom_recomputes_layout_and_invalidates_bitmaps() {
     assert!((after.width - before.width * 2.0).abs() < 0.5);
     assert!(events.contains(&SessionEvent::LayoutChanged));
 
-    // 新缩放下需要重新渲染（旧缓存键失效）
+    // 新缩放下需要重新渲染（旧缓存键失效）。位图尺寸按**渲染比例**给，
+    // 它必须 ≥ 显示尺寸（波段超采样），且不超过一个超采样倍数（D-94）。
     session.handle(ViewerCommand::RequestVisible, &mut events);
     session.pump(&mut events);
     let image = session.image_for(PageIndex::new(0)).unwrap();
-    assert!((image.width as f32 - after.width).abs() <= 1.0);
+    let render = render_scale_for(2.0, DEFAULT_OVERSCAN);
+    assert!((image.width as f32 - (612.0 * render).round()).abs() < 1.0);
+    assert!(
+        image.width as f32 >= after.width - 1.0,
+        "渲染尺寸不得小于显示尺寸（否则放大后会糊）"
+    );
 }
 
 #[test]
@@ -202,9 +214,14 @@ fn per_page_rotation_flows_into_layout_and_render_request() {
     assert!((placement.rect.width - 792.0).abs() < 0.5);
     assert!((placement.rect.height - 612.0).abs() < 0.5);
 
-    // 渲染结果必须与布局一致（否则会出现画面与高亮错位）
+    // 渲染结果必须与布局**同朝向**（宽高互换），尺寸按渲染比例放大（D-94）
+    let render = render_scale_for(1.0, DEFAULT_OVERSCAN);
     let image = session.image_for(PageIndex::new(2)).expect("第 3 页应已渲染");
-    assert_eq!((image.width, image.height), (792, 612));
+    assert_eq!(
+        (image.width, image.height),
+        ((792.0 * render).round() as u32, (612.0 * render).round() as u32),
+        "旋转页必须是显示朝向且按渲染比例渲染"
+    );
 }
 
 #[test]
@@ -405,10 +422,17 @@ fn session_consumes_bulk_page_geometries_only() {
     assert!((session.placement(PageIndex::new(2)).unwrap().rect.width - 792.0).abs() < 0.5);
 }
 
-/// D-02 端到端：分块策略决定走"整页"还是"瓦片"路径，且瓦片请求只覆盖视口内那几块。
+/// D-02/D-94 端到端：分块策略决定走"整页"还是"瓦片"路径，且瓦片请求只覆盖视口内那几块；
+/// 块的位图尺寸必须等于**网格给出的**像素矩形（两侧各取整一次就会差 1px、接缝错位）。
 #[test]
 fn tiling_routes_to_tiles_and_limits_requests_to_the_viewport() {
-    let backend = MemoryBackend::demo();
+    // 单页文档：多页时第 3 页的 /Rotate 90 会让内容宽度变大、页 0 被水平居中到 x≈372，
+    // 小视口就完全落在页外了（那种情形由别的测试覆盖）。
+    let backend = MemoryBackend::new(vec![MemoryPage::new(
+        Size::new(612.0, 792.0),
+        Rotation::None,
+        vec!["Hello world".to_string()],
+    )]);
     let opened = backend.open(Source::Bytes(b"%PDF-1.4 fake"), None).unwrap();
     let raster = opened.raster.clone();
     let cache = Arc::new(MemoryCache::new());
@@ -425,34 +449,48 @@ fn tiling_routes_to_tiles_and_limits_requests_to_the_viewport() {
     assert_eq!(
         session.tiling_policy(),
         TilingPolicy::default(),
-        "默认策略是 AbovePixels(16 MP)"
+        "默认策略是 AbovePixels(4 MP)"
     );
 
-    // 强行分块，并把视口缩到只覆盖页面左上角一小块（网格是 2×2）
+    // 强行分块 + 放大到 4 倍，让网格真的有多块
     session.set_tiling_policy(TilingPolicy::Always);
     let mut events = Vec::new();
+    session.handle(ViewerCommand::SetZoom(4.0), &mut events);
     session.handle(ViewerCommand::ResizeViewport(Size::new(300.0, 300.0)), &mut events);
-    // 明确回到内容原点：视口恰好覆盖页 0 的左上角 198×288 像素（都在第 0 块瓦片内）
-    session.handle(ViewerCommand::SetScroll(Vec2::ZERO), &mut events);
+    // 视口左上角对齐页面左上角（页在内容空间从留白 (12,12) 开始）
+    session.handle(ViewerCommand::SetScroll(Vec2::new(12.0, 12.0)), &mut events);
     session.handle(ViewerCommand::RequestVisible, &mut events);
     session.pump(&mut events);
 
     // 分块路径下整页位图不可用（UI 必须走 tiles_for 拼接）
-    assert!(session.image_for(PageIndex::new(0)).is_none());
+    assert!(session.image_for(PageIndex::FIRST).is_none());
 
-    let tiles = session.tiles_for(PageIndex::new(0));
-    assert_eq!(tiles.len(), 1, "视口 300×300 只覆盖左上角一块瓦片");
+    let grid = session.tile_grid(PageIndex::FIRST).expect("分块时应有网格");
+    assert!(grid.side >= 2, "4 倍下必须分成多块，实际 {}×{}", grid.side, grid.side);
+    let (col0, row0, col1, row1) =
+        session.visible_tiles(PageIndex::FIRST).expect("应有视口块范围");
+    assert_eq!((col0, row0, col1, row1), (0, 0, 0, 0), "300×300 视口只覆盖左上角一块");
+
+    let tiles = session.tiles_for(PageIndex::FIRST);
+    assert_eq!(tiles.len(), 1, "只应渲染视口覆盖的那一块");
     let (tile, image) = &tiles[0];
     assert_eq!((tile.col, tile.row), (0, 0));
-    assert_eq!((image.width, image.height), (512, 512));
+    let (_, _, width, height) = grid.tile_px(0, 0);
+    assert_eq!(
+        (image.width, image.height),
+        (width, height),
+        "块位图尺寸必须等于网格给出的像素矩形"
+    );
     assert_eq!(cache.stats().entries, 1, "只应渲染被视口覆盖的那一块");
 
-    // 切回整页策略：瓦片路径关闭，整页位图可用
+    // 切回整页策略：瓦片路径关闭，整页位图的尺寸必须等于网格的整页像素尺寸
+    // —— 两者若各算一次取整，接缝就会错位（D-84/D-94）。
     session.set_tiling_policy(TilingPolicy::Never);
     session.handle(ViewerCommand::RequestVisible, &mut events);
     session.pump(&mut events);
-    assert!(session.tiles_for(PageIndex::new(0)).is_empty());
-    assert_eq!(session.image_for(PageIndex::new(0)).unwrap().width, 612);
+    assert!(session.tiles_for(PageIndex::FIRST).is_empty());
+    let whole = session.image_for(PageIndex::FIRST).expect("整页位图应可用");
+    assert_eq!((whole.width, whole.height), grid.render_px());
 }
 
 /// D-05 端到端：缩放前后"视野中心对应的页内位置"必须不变。
@@ -559,6 +597,8 @@ fn anchor_fallback_keeps_scroll_when_center_is_between_pages() {
 #[test]
 fn zooming_cancels_in_flight_renders_at_the_old_scale() {
     let mut session = assemble();
+    // 关闭超采样：渲染比例 = 显示比例，于是"旧比例/新比例"就是 1.0/2.0，断言更直白
+    session.set_overscan(1.0);
     let mut events = Vec::new();
     session.handle(ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)), &mut events);
 
@@ -587,6 +627,107 @@ fn zooming_cancels_in_flight_renders_at_the_old_scale() {
     );
     assert!(rendered.contains(&new), "新比例必须渲染：{rendered:?}");
     assert!(session.image_for(PageIndex::FIRST).is_some(), "新比例的位图应已入缓存");
+}
+
+/// **验收判据 5**：同一波段内改缩放**不应产生新的渲染请求**。
+///
+/// 做法：把超采样设成 2.0（波段 0 覆盖 [1,2)，渲染比例恒为 2.0），
+/// 先按 100% 渲染好一块，再放大到 150%（仍在波段 0）——此时需要的块是原来那块的子集，
+/// 因此必须**零新渲染**：既没有新的 `PageRendered` 事件，也没有新的 `[瓦片]` 行
+/// （日志行就来自"新提交一次瓦片渲染"）。
+#[test]
+fn zooming_inside_a_band_does_not_render_again() {
+    let backend = MemoryBackend::new(vec![MemoryPage::new(
+        Size::new(612.0, 792.0),
+        Rotation::None,
+        vec!["Hello world".to_string()],
+    )]);
+    let opened = backend.open(Source::Bytes(b"%PDF-1.4 fake"), None).unwrap();
+    let cache = Arc::new(MemoryCache::new());
+    let mut session = DocumentSession::new(
+        opened,
+        cache.clone(),
+        Arc::new(ImmediateScheduler::new(
+            backend.open(Source::Bytes(b"y"), None).unwrap().raster,
+        )),
+        Box::new(VerticalLayout),
+        Box::new(RangeSelection::new()),
+    )
+    .expect("装配会话");
+
+    session.set_overscan(2.0);
+    session.set_tiling_policy(TilingPolicy::Always);
+    let mut events = Vec::new();
+    session.handle(ViewerCommand::SetZoom(1.0), &mut events);
+    session.handle(ViewerCommand::ResizeViewport(Size::new(300.0, 300.0)), &mut events);
+    session.handle(ViewerCommand::SetScroll(Vec2::new(12.0, 12.0)), &mut events);
+
+    session.handle(ViewerCommand::RequestVisible, &mut events);
+    session.pump(&mut events);
+    let rendered_at_100: usize = events
+        .iter()
+        .filter(|event| matches!(event, SessionEvent::PageRendered(_)))
+        .count();
+    assert!(rendered_at_100 > 0, "100% 下应先渲染出内容：{events:?}");
+
+    let render_at_100 = session.render_scale(PageIndex::FIRST);
+    let grid_at_100 = session.tile_grid(PageIndex::FIRST).expect("分块网格");
+    let key_at_100 = RenderKey::tiled(
+        PageIndex::FIRST,
+        render_at_100,
+        Rotation::None,
+        TileSpec::new(0, 0),
+    );
+    let entries_at_100 = cache.stats().entries;
+
+    // 波段内放大：1.0 → 1.5（仍 < 2.0）
+    events.clear();
+    session.handle(ViewerCommand::SetZoom(1.5), &mut events);
+    session.handle(ViewerCommand::RequestVisible, &mut events);
+    session.pump(&mut events);
+
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, SessionEvent::PageRendered(_))),
+        "同一波段内的缩放不应触发任何渲染：{events:?}"
+    );
+    assert_eq!(
+        cache.stats().entries,
+        entries_at_100,
+        "不应产生新的缓存条目（同一批块被复用）"
+    );
+    assert_eq!(
+        session.render_scale(PageIndex::FIRST),
+        render_at_100,
+        "波段内渲染比例必须保持不变"
+    );
+    assert_eq!(
+        session.tile_grid(PageIndex::FIRST).expect("分块网格").render_px(),
+        grid_at_100.render_px(),
+        "波段内整页像素尺寸必须不变（否则日志里会出现第二个 页面px）"
+    );
+    assert_eq!(
+        RenderKey::tiled(
+            PageIndex::FIRST,
+            session.render_scale(PageIndex::FIRST),
+            Rotation::None,
+            TileSpec::new(0, 0),
+        ),
+        key_at_100,
+        "同一块在两个显示比例下必须落在同一个键上"
+    );
+
+    // 跨出波段（1.5 → 2.0）才允许、并且必须重新渲染
+    events.clear();
+    session.handle(ViewerCommand::SetZoom(2.0), &mut events);
+    session.handle(ViewerCommand::RequestVisible, &mut events);
+    session.pump(&mut events);
+    assert_ne!(session.render_scale(PageIndex::FIRST), render_at_100);
+    assert!(
+        events.iter().any(|event| matches!(event, SessionEvent::PageRendered(_))),
+        "跨波段后必须重新渲染：{events:?}"
+    );
 }
 
 /// 链接命中测试（用户需求：链接目的地有具体坐标时，跳转要把该坐标放到视口中心）。

@@ -194,9 +194,11 @@ impl PagePlacement {
         self.rect.size()
     }
 
-    /// 该页在当前缩放下的**像素尺寸**（分块网格用它）。
+    /// 该页在**显示比例**下的像素尺寸（= `rect.size()` 取整）。
     ///
-    /// 在此处一次性取整：瓦片拼接要求整数像素边界，取整只做一次，下游不再各算一遍。
+    /// 注意：分块**不再**用它（D-94）。块的网格与整页位图尺寸都按**渲染比例**由
+    /// [`crate::tiling::TileGrid`] 一次算出整数，避免两侧各取整一次导致接缝错位。
+    /// 这里保留给"按显示像素比对"的调用方（如 UI 的尺寸判断与测试）。
     pub fn pixel_size(&self) -> Size {
         Size::new(self.rect.width.round().max(0.0), self.rect.height.round().max(0.0))
     }

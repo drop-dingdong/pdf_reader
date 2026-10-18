@@ -86,6 +86,24 @@ impl TileGrid {
         (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
     }
 
+    /// 整页在**渲染空间**中的像素尺寸（= 最后一条边界的值）。
+    ///
+    /// 后端渲染时必须用**同一个**尺寸作为整页位图的尺寸（PDFium 的 `set_fixed_size`），
+    /// 否则块与整页的缩放比会差一点点，接缝处就错位 —— 这个方法的唯一目的就是让两侧
+    /// 拿到同一个整数，而不是各自 `round` 一次。
+    pub fn render_px(&self) -> (u32, u32) {
+        (
+            self.edges_x.last().copied().unwrap_or(0),
+            self.edges_y.last().copied().unwrap_or(0),
+        )
+    }
+
+    /// 某块是否在网格内（有正面积）。
+    pub fn contains(&self, col: u32, row: u32) -> bool {
+        let (_, _, width, height) = self.tile_px(col, row);
+        width > 0 && height > 0
+    }
+
     fn edge_span(&self, edges: &[u32], index: u32) -> (u32, u32) {
         let lo = edges.get(index as usize).copied().unwrap_or(0);
         let hi = edges.get(index as usize + 1).copied().unwrap_or(lo);
@@ -377,6 +395,33 @@ mod tests {
             assert!(w > 0 && h > 0);
         }
     }
+
+    /// `render_px()` 必须等于最后一条边界：后端拿它当整页位图尺寸，
+    /// 两侧各算一次 `round` 就可能差 1px，接缝随之错位。
+    #[test]
+    fn render_px_matches_the_last_edge() {
+        for size in sizes() {
+            for render in [1.0f32, 1.6, 2.56, 7.38] {
+                let grid = TileGrid::new(size, render);
+                assert_eq!(
+                    grid.render_px(),
+                    (*grid.x_edges().last().unwrap(), *grid.y_edges().last().unwrap())
+                );
+            }
+        }
+    }
+
+    /// 越界块必须被判为空（后端据此报错，而不是渲染一张 0×0 的图）。
+    #[test]
+    fn tiles_outside_the_grid_are_empty() {
+        let grid = TileGrid::new(Size::new(612.0, 792.0), 8.0);
+        assert_eq!(grid.side, 8, "612×792 @8x 应分成 8×8");
+        assert!(grid.contains(0, 0) && grid.contains(7, 7));
+        assert!(!grid.contains(8, 0), "列越界");
+        assert!(!grid.contains(0, 8), "行越界");
+        assert_eq!(grid.tile_px(8, 0).2, 0);
+        assert_eq!(grid.tile_px(0, 8).3, 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -467,8 +512,16 @@ mod band_tests {
 ///
 /// 渲染与显示因此分离：请求按此比例渲染，贴图时用 `u = display / 该值` 换算尺寸。
 /// 波段内多次缩放只会改变 `u`，**不会**产生新的渲染请求。
+///
+/// `overscan <= 1.0` 表示**关闭超采样**：渲染比例 = 显示比例。
+/// 这只用于测试与"新旧行为对比"（代价是失去波段复用 —— 显示比例是连续值，
+/// 每变一点就是一个新键）；正常运行请用 [`DEFAULT_OVERSCAN`]。
 pub fn render_scale_for(display_scale: f32, overscan: f32) -> f32 {
-    render_scale_for_band(band_for(display_scale, overscan), overscan)
+    let display = if display_scale > 0.0 { display_scale } else { 1.0 };
+    if !(overscan > 1.0) {
+        return display;
+    }
+    render_scale_for_band(band_for(display, overscan), overscan)
 }
 
 #[cfg(test)]
@@ -509,5 +562,15 @@ mod render_scale_tests {
             render,
             "跨过波段边界应换渲染比例"
         );
+    }
+
+    /// `overscan <= 1.0`：关闭超采样，渲染比例就是显示比例（测试/对比用）。
+    #[test]
+    fn overscan_of_one_disables_supersampling() {
+        for display in [0.2f32, 0.5, 1.0, 1.7, 4.0] {
+            assert_eq!(render_scale_for(display, 1.0), display);
+            assert_eq!(render_scale_for(display, 0.5), display, "小于 1 同样视为关闭");
+        }
+        assert_eq!(render_scale_for(0.0, 1.0), 1.0, "非法显示比例退回 1.0");
     }
 }

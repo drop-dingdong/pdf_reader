@@ -130,17 +130,21 @@ fn tiles_render_only_the_requested_region() {
     let Some(backend) = backend() else { return };
     let opened = backend.open(Source::Bytes(&common::two_page_pdf()), None).expect("打开");
 
-    // 612×792 @2x → 1224×1584 → 网格 3×4
+    // 612×792 @2x → 1224×1584 → 2×2 网格，每块 612×792（D-94：网格由 TileGrid 给出）
     let scale = Scale::from_zoom(2.0);
-    assert_eq!(TileSpec::grid_for(Size::new(1224.0, 1584.0)), (3, 4));
+    let grid = TileGrid::new(Size::new(612.0, 792.0), 2.0);
+    assert_eq!(grid.side, 2);
+    assert_eq!(grid.render_px(), (1224, 1584));
 
     let whole = opened
         .raster
         .render(&RenderRequest::new(PageIndex::FIRST, scale, Rotation::None))
         .expect("整页 2x");
-    assert_eq!((whole.width, whole.height), (1224, 1584));
+    assert_eq!((whole.width, whole.height), grid.render_px());
 
-    // 左上角瓦片：512×512，且必须包含文字（文字位于页面顶部）
+    // 左上角块：尺寸 = 网格给出的像素矩形，且必须包含文字（文字位于页面顶部）
+    let (x, y, width, height) = grid.tile_px(0, 0);
+    assert_eq!((x, y, width, height), (0, 0, 612, 792));
     let tile = opened
         .raster
         .render(&RenderRequest::tiled(
@@ -149,33 +153,34 @@ fn tiles_render_only_the_requested_region() {
             Rotation::None,
             TileSpec::new(0, 0),
         ))
-        .expect("瓦片 (0,0)");
-    assert_eq!((tile.width, tile.height), (512, 512));
+        .expect("块 (0,0)");
+    assert_eq!((tile.width, tile.height), (width, height));
     let ink = tile.data().iter().filter(|&&byte| byte < 100).count();
-    assert!(ink > 100, "第 0 块瓦片应包含文字像素，实际 {ink}");
+    assert!(ink > 100, "第 0 块应包含文字像素，实际 {ink}");
 
-    // 右下角瓦片（页面底部空白）：尺寸为余数，且不应有文字
+    // 右下角块（页面底部空白）：尺寸同样来自网格，且不应有文字
+    let (_, _, width, height) = grid.tile_px(1, 1);
     let empty = opened
         .raster
         .render(&RenderRequest::tiled(
             PageIndex::FIRST,
             scale,
             Rotation::None,
-            TileSpec::new(2, 3),
+            TileSpec::new(1, 1),
         ))
-        .expect("瓦片 (2,3)");
-    assert_eq!((empty.width, empty.height), (1224 - 1024, 1584 - 1536));
+        .expect("块 (1,1)");
+    assert_eq!((empty.width, empty.height), (width, height));
     let ink = empty.data().iter().filter(|&&byte| byte < 100).count();
     assert_eq!(ink, 0, "页面底部空白区域不应有文字像素");
 
-    // 越界瓦片必须报错
+    // 越界块必须报错（而不是渲染一张 0×0 的图）
     assert!(opened
         .raster
         .render(&RenderRequest::tiled(
             PageIndex::FIRST,
             scale,
             Rotation::None,
-            TileSpec::new(3, 0),
+            TileSpec::new(2, 0),
         ))
         .is_err());
 }
@@ -243,9 +248,14 @@ fn assembles_a_session_with_the_real_backend() {
     session.handle(ViewerCommand::RequestVisible, &mut events);
     session.pump(&mut events);
 
-    // 位图经"调度 → 缓存"就绪
+    // 位图经"调度 → 缓存"就绪。尺寸按**波段渲染比例**给（D-94：超采样，比显示尺寸大）
+    let render = session.render_scale(PageIndex::FIRST);
     let image = session.image_for(PageIndex::FIRST).expect("首页应渲染并写入缓存");
-    assert_eq!((image.width, image.height), (612, 792));
+    assert_eq!(
+        (image.width, image.height),
+        ((612.0 * render.0).round() as u32, (792.0 * render.0).round() as u32)
+    );
+    assert!(render.0 >= 1.0, "渲染比例不得小于显示比例");
     assert!(events.iter().any(|event| matches!(event, SessionEvent::PageRendered(_))));
 
     // 文本层驱动选择与高亮（真实字符包围盒）
@@ -279,53 +289,54 @@ fn every_tile_contains_ink_for_a_full_page_document() {
     let path = common::many_page_pdf_file("tile-ink", 2, 612.0, 792.0);
     let opened = backend.open(Source::Path(&path), None).expect("打开多页 PDF");
 
-    // 612×792 @2x → 1224×1584 → 网格 3×4
+    // 612×792 @2x → 1224×1584 → 2×2 网格
     let scale = Scale::from_zoom(2.0);
-    assert_eq!(TileSpec::grid_for(Size::new(1224.0, 1584.0)), (3, 4));
+    let grid = TileGrid::new(Size::new(612.0, 792.0), 2.0);
+    assert_eq!(grid.side, 2);
 
-    for row in 0..4u16 {
-        for col in 0..3u16 {
-            let tile = opened
-                .raster
-                .render(&RenderRequest::tiled(
-                    PageIndex::FIRST,
-                    scale,
-                    Rotation::None,
-                    TileSpec::new(col, row),
-                ))
-                .expect("瓦片");
-            let ink = tile.data().iter().filter(|&&byte| byte < 100).count();
-            assert!(
-                ink > 50,
-                "瓦片 ({col},{row}) 必须包含墨迹（该页整页都有边框与横线），实际深色字节 {ink}"
-            );
-        }
+    for (col, row) in grid.all_tiles() {
+        let tile = opened
+            .raster
+            .render(&RenderRequest::tiled(
+                PageIndex::FIRST,
+                scale,
+                Rotation::None,
+                TileSpec::new(col, row),
+            ))
+            .expect("块");
+        let ink = tile.data().iter().filter(|&&byte| byte < 100).count();
+        assert!(
+            ink > 50,
+            "块 ({col},{row}) 必须包含墨迹（该页整页都有边框与横线），实际深色字节 {ink}"
+        );
     }
     let _ = std::fs::remove_file(&path);
 }
 
-/// 瓦片内容必须等于"整页渲染后裁出的同一块区域"：几何、朝向、缩放全都对得上。
+/// 块内容必须等于"整页渲染后裁出的同一区域"：几何、朝向、缩放全都对得上。
 ///
-/// 这是分块渲染最强的一条不变量 —— 只要瓦片与整页裁剪一致，
+/// 这是分块渲染最强的一条不变量 —— 只要块与整页裁剪一致，
 /// 拼接出来的画面就必然与不分块时逐像素等价。
+///
+/// 用两种页宽验证：612×792（每块正好 612×792，边界整数）与 610×790（边界必须取整，
+/// 每块宽度在 457/458 之间交替 —— 这正是"共享整数边界"要覆盖的情形）。
 #[test]
 fn tiles_match_the_crop_of_the_whole_page_render() {
     let Some(backend) = backend() else { return };
-    let path = common::many_page_pdf_file("tile-crop", 1, 612.0, 792.0);
-    let opened = backend.open(Source::Path(&path), None).expect("打开");
 
-    // 用 1x 以便逐像素比较（612×792 → 网格 2×2）
-    let scale = Scale::from_zoom(1.0);
-    assert_eq!(TileSpec::grid_for(Size::new(612.0, 792.0)), (2, 2));
-    let whole = opened
-        .raster
-        .render(&RenderRequest::new(PageIndex::FIRST, scale, Rotation::None))
-        .expect("整页");
-    assert_eq!((whole.width, whole.height), (612, 792));
+    let check = |name: &str, width: f32, height: f32, zoom: f32| {
+        let path = common::many_page_pdf_file(name, 1, width, height);
+        let opened = backend.open(Source::Path(&path), None).expect("打开");
 
-    let pixel_size = Size::new(whole.width as f32, whole.height as f32);
-    for col in 0..2u16 {
-        for row in 0..2u16 {
+        let scale = Scale::from_zoom(zoom);
+        let grid = TileGrid::new(Size::new(width, height), zoom);
+        let whole = opened
+            .raster
+            .render(&RenderRequest::new(PageIndex::FIRST, scale, Rotation::None))
+            .expect("整页");
+        assert_eq!((whole.width, whole.height), grid.render_px());
+
+        for (col, row) in grid.all_tiles() {
             let tile = opened
                 .raster
                 .render(&RenderRequest::tiled(
@@ -334,15 +345,16 @@ fn tiles_match_the_crop_of_the_whole_page_render() {
                     Rotation::None,
                     TileSpec::new(col, row),
                 ))
-                .expect("瓦片");
-            let pixels = TileSpec::new(col, row).pixel_rect(pixel_size);
+                .expect("块");
+            let (tile_x, tile_y, tile_width, tile_height) = grid.tile_px(col, row);
+            assert_eq!((tile.width, tile.height), (tile_width, tile_height));
 
             let mut worst = 0u8;
             for y in 0..tile.height as usize {
                 for x in 0..tile.width as usize {
                     let tile_offset = (y * tile.width as usize + x) * 4;
-                    let whole_offset = ((pixels.y as usize + y) * whole.width as usize
-                        + (pixels.x as usize + x))
+                    let whole_offset = ((tile_y as usize + y) * whole.width as usize
+                        + (tile_x as usize + x))
                         * 4;
                     for channel in 0..4 {
                         let diff = tile.data()[tile_offset + channel]
@@ -353,11 +365,14 @@ fn tiles_match_the_crop_of_the_whole_page_render() {
             }
             assert!(
                 worst <= 16,
-                "瓦片 ({col},{row}) 与整页裁剪不一致：最大通道差 {worst}"
+                "块 ({col},{row}) 与整页裁剪不一致：最大通道差 {worst}"
             );
         }
-    }
-    let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path);
+    };
+
+    check("tile-crop-even", 612.0, 792.0, 2.0);
+    check("tile-crop-odd", 610.0, 790.0, 3.0);
 }
 
 /// 800% 现场诊断：高倍缩放下瓦片是否仍然有内容。
@@ -367,11 +382,13 @@ fn tiles_at_800_percent_still_contain_ink() {
     let path = common::many_page_pdf_file("tile-800", 2, 612.0, 792.0);
     let opened = backend.open(Source::Path(&path), None).expect("打开");
 
-    // 612×792 @8x → 4896×6336 → 网格 10×13
+    // 612×792 @8x → 4896×6336 → 8×8 网格，每块 612×792
     let scale = Scale::from_zoom(8.0);
-    assert_eq!(TileSpec::grid_for(Size::new(4896.0, 6336.0)), (10, 13));
+    let grid = TileGrid::new(Size::new(612.0, 792.0), 8.0);
+    assert_eq!(grid.side, 8);
+    assert_eq!(grid.render_px(), (4896, 6336));
 
-    for (col, row) in [(0u16, 0u16), (1, 0), (0, 1), (2, 1), (5, 6), (9, 12)] {
+    for (col, row) in [(0u32, 0u32), (1, 0), (0, 1), (2, 1), (5, 6), (7, 7)] {
         let started = std::time::Instant::now();
         let tile = opened
             .raster
@@ -381,17 +398,64 @@ fn tiles_at_800_percent_still_contain_ink() {
                 Rotation::None,
                 TileSpec::new(col, row),
             ))
-            .expect("瓦片");
+            .expect("块");
         let ink = tile.data().iter().filter(|&&byte| byte < 100).count();
         println!(
-            "瓦片 ({col},{row}) {}×{} 用时 {:?} 深色字节 {ink}",
+            "块 ({col},{row}) {}×{} 用时 {:?} 深色字节 {ink}",
             tile.width,
             tile.height,
             started.elapsed()
         );
-        assert!(ink > 50, "800% 下瓦片 ({col},{row}) 必须包含墨迹，实际 {ink}");
+        assert!(ink > 50, "800% 下块 ({col},{row}) 必须包含墨迹，实际 {ink}");
     }
     let _ = std::fs::remove_file(&path);
+}
+
+/// **验收判据 5**（真实后端版）：同一波段内改缩放不产生新的渲染请求。
+///
+/// 与 `pdfcore/tests/assemble.rs` 里那条同名测试互补：这里走真实 PDFium 渲染，
+/// 因此能同时验证"键里的比例与真正送给 PDFium 的比例一致"。
+#[test]
+fn zooming_inside_a_band_does_not_render_again_with_the_real_backend() {
+    let Some(backend) = backend() else { return };
+    let opened = backend.open(Source::Bytes(&common::two_page_pdf()), None).expect("打开");
+    let raster = opened.raster.clone();
+
+    let mut session = DocumentSession::new(
+        opened,
+        Arc::new(MemoryCache::new()),
+        Arc::new(ImmediateScheduler::new(raster)),
+        Box::new(VerticalLayout),
+        Box::new(RangeSelection::new()),
+    )
+    .expect("装配会话");
+
+    let mut events = Vec::new();
+    session.handle(ViewerCommand::ResizeViewport(Size::new(600.0, 700.0)), &mut events);
+    // 100% 与 150% 都落在波段 0（[1, 1.6)），渲染比例恒为 1.6
+    session.handle(ViewerCommand::RequestVisible, &mut events);
+    session.pump(&mut events);
+    let render = session.render_scale(PageIndex::FIRST);
+    let image_at_100 = session.image_for(PageIndex::FIRST).expect("100% 应已渲染");
+    assert_eq!(
+        (image_at_100.width, image_at_100.height),
+        ((612.0 * render.0).round() as u32, (792.0 * render.0).round() as u32)
+    );
+
+    events.clear();
+    session.handle(ViewerCommand::SetZoom(1.5), &mut events);
+    session.handle(ViewerCommand::RequestVisible, &mut events);
+    session.pump(&mut events);
+
+    assert_eq!(session.render_scale(PageIndex::FIRST), render, "波段内渲染比例不变");
+    assert!(
+        events.iter().all(|event| !matches!(event, SessionEvent::PageRendered(_))),
+        "同一波段内不应重新渲染：{events:?}"
+    );
+    assert!(
+        session.image_for(PageIndex::FIRST).is_some(),
+        "复用同一张位图，整页图仍应可用"
+    );
 }
 
 /// 坐标归一化：`MediaBox` 原点非 0 时，**文本与链接热区**都必须归一化到渲染盒坐标系。

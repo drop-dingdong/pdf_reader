@@ -97,7 +97,11 @@ pub mod prelude {
     };
     pub use crate::render::{
         CancelToken, CacheStats, PageRaster, RenderCache, RenderEvent, RenderKey, RenderPriority,
-        RenderRequest, RenderScheduler, Scale, TileSpec, TilingPolicy, TILE_SIZE,
+        RenderRequest, RenderScheduler, Scale, TileSpec, TilingPolicy,
+    };
+    pub use crate::tiling::{
+        render_scale_for, band_for, reuse_is_enough, render_scale_for_band, TileGrid,
+        DEFAULT_OVERSCAN, TARGET_TILE_PX,
     };
     pub use crate::session::{DocumentSession, SessionEvent, SidebarTab, ViewerCommand, ViewerState};
     pub use crate::store::{AppSettings, KeyValueStore, RecentFiles};

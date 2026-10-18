@@ -159,7 +159,7 @@ mod tests {
         Arc::new(RasterImage::new(pixels, 1, PixelFormat::Rgba8, data).expect("位图"))
     }
 
-    fn key(page: u32, scale: f32, tile: Option<(u16, u16)>) -> RenderKey {
+    fn key(page: u32, scale: f32, tile: Option<(u32, u32)>) -> RenderKey {
         match tile {
             None => RenderKey::new(PageIndex::new(page), Scale::from_zoom(scale), Rotation::None),
             Some((col, row)) => RenderKey::tiled(

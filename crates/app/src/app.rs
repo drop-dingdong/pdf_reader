@@ -902,10 +902,12 @@ impl PdfReaderApp {
             .filter_map(|page| session.placement(*page).map(|placement| (*page, placement.rotation)))
             .collect();
         let current = session.state().current_page;
+        // D-94：纹理按**波段渲染比例**分档（同一波段内所有缩放共用一份纹理）
         let current_scale_milli = session
             .placement(current)
             .map(|placement| {
-                RenderKey::new(current, placement.scale, placement.rotation).scale_milli
+                RenderKey::new(current, session.render_scale(current), placement.rotation)
+                    .scale_milli
             })
             .unwrap_or(1000);
         self.textures
@@ -923,10 +925,14 @@ impl PdfReaderApp {
         let Some(placement) = session.placement(page).copied() else {
             return 0;
         };
+        // D-94：键与"块在页面里的位置"都用**波段渲染比例**，不能用显示比例
+        let render = session.render_scale(page);
+        let grid = session.tile_grid(page);
+        let scroll = session.viewport().scroll;
         let mut count = 0;
         // 整页路径
         if let Some(image) = session.image_for(page) {
-            let key = RenderKey::new(page, placement.scale, placement.rotation);
+            let key = RenderKey::new(page, render, placement.rotation);
             if !self.textures.contains(&key) {
                 self.upload(ctx, key, &image);
                 count += 1;
@@ -934,26 +940,33 @@ impl PdfReaderApp {
         }
         // 分块路径
         for (tile, image) in session.tiles_for(page) {
-            let key = RenderKey::tiled(page, placement.scale, placement.rotation, tile);
+            let key = RenderKey::tiled(page, render, placement.rotation, tile);
             if !self.textures.contains(&key) {
                 if self.diagnose {
                     // 贴图诊断：渲染尺寸 vs 页面像素尺寸 vs 屏幕摆放位置
                     // 用于区分"内容错位"（后端渲染）与"摆放错位"（前端映射）。
-                    let page_px = Size::new(
-                        placement.rect.width.round(),
-                        placement.rect.height.round(),
-                    );
-                    let pixels = tile.pixel_rect(page_px);
-                    let screen = tile_view_rect(placement.rect, pixels);
-                    let scroll = session.viewport().scroll;
-                    eprintln!(
-                        "[贴图] 页={} col={} row={} 瓦片图={}x{} 页面px={:.0}x{:.0} 瓦片px=({:.0},{:.0},{:.0},{:.0}) 屏幕=({:.1},{:.1},{:.0},{:.0}) scroll=({:.1},{:.1})",
-                        page.get(), tile.col, tile.row, image.width, image.height,
-                        page_px.width, page_px.height,
-                        pixels.x, pixels.y, pixels.width, pixels.height,
-                        screen.x - scroll.x, screen.y - scroll.y,
-                        screen.width, screen.height, scroll.x, scroll.y
-                    );
+                    // 判据 4/5：同一波段内 `页面px` 只应出现一个值、且不应有新行。
+                    if let Some(grid) = &grid {
+                        let (page_width, page_height) = grid.render_px();
+                        let (x, y, width, height) = grid.tile_px(tile.col, tile.row);
+                        let screen = tile_view_rect(
+                            grid,
+                            &placement,
+                            tile.col,
+                            tile.row,
+                            render.0,
+                            scroll,
+                        );
+                        eprintln!(
+                            "[贴图] 页={} col={} row={} 瓦片图={}x{} 页面px={}x{} 显示px={:.0}x{:.0} 瓦片px=({},{},{},{}) 屏幕=({:.1},{:.1},{:.0},{:.0}) scroll=({:.1},{:.1}) 渲染比例={:.3}",
+                            page.get(), tile.col, tile.row, image.width, image.height,
+                            page_width, page_height,
+                            placement.rect.width, placement.rect.height,
+                            x, y, width, height,
+                            screen.x, screen.y, screen.width, screen.height,
+                            scroll.x, scroll.y, render.0
+                        );
+                    }
                 }
                 self.upload(ctx, key, &image);
                 count += 1;
@@ -1928,7 +1941,9 @@ impl PdfReaderApp {
                 // 先铺"纸张"：任何未就绪的区域露出的是白纸，而不是深色画布（D-06 的兜底）
                 paint_placeholder(&painter, screen);
 
-                let whole_key = RenderKey::new(page, placement.scale, placement.rotation);
+                // D-94：整页与瓦片的键都用**波段渲染比例**（与 session 完全一致）
+                let render = session.render_scale(page);
+                let whole_key = RenderKey::new(page, render, placement.rotation);
                 let has_previous = self
                     .textures
                     .best_page_texture(page, placement.rotation, whole_key.scale_milli)
@@ -1939,19 +1954,19 @@ impl PdfReaderApp {
                 enum Plan {
                     Whole,
                     Stretch,
-                    Tiles(TileSpec, TileSpec),
+                    Tiles(u32, u32, u32, u32),
                     /// 用上一档缩放的**瓦片**拼出预览（高倍缩放下没有整页图可拉伸）。
                     TilePreview(u32),
                     Blank,
                 }
                 let plan = if self.textures.contains(&whole_key) {
                     Plan::Whole
-                } else if let Some((first, last)) = session.visible_tiles(page) {
-                    // 优先级：当前比例的真瓦片 → 上一档的整页图 → 上一档的瓦片 → 白纸。
-                    // 只要当前比例还有内容没到齐，就尽量用旧内容顶上，绝不让页面闪白
+                } else if let Some((col0, row0, col1, row1)) = session.visible_tiles(page) {
+                    // 优先级：当前波段的真瓦片 → 上一波段的整页图 → 上一波段的瓦片 → 白纸。
+                    // 只要当前波段还有内容没到齐，就尽量用旧内容顶上，绝不让页面闪白
                     // （第四轮验收：中心页不闪、相邻页闪白，就是因为相邻页没有旧图可用）。
                     if self.textures.has_tiles(&whole_key) {
-                        Plan::Tiles(first, last)
+                        Plan::Tiles(col0, row0, col1, row1)
                     } else if has_previous {
                         Plan::Stretch
                     } else if let Some(old_scale) = self.textures.best_tile_scale(
@@ -1961,7 +1976,7 @@ impl PdfReaderApp {
                     ) {
                         Plan::TilePreview(old_scale)
                     } else {
-                        Plan::Tiles(first, last)
+                        Plan::Tiles(col0, row0, col1, row1)
                     }
                 } else if has_previous {
                     Plan::Stretch
@@ -1990,22 +2005,25 @@ impl PdfReaderApp {
                         ("旧图拉伸", 0, 0)
                     }
                     Plan::TilePreview(old_scale_milli) => {
-                        let old_page = placement
-                            .page_size
-                            .rotated(placement.rotation)
-                            .scale(old_scale_milli as f32 / 1000.0);
-                        let new_page = placement.pixel_size();
+                        // 上一波段的块：先按它自己的渲染比例重建网格，
+                        // 再"按占比"映射到当前页面矩形（与显示比例无关，因此无需旧显示比例）。
+                        let old_render = old_scale_milli as f32 / 1000.0;
+                        let old_grid = TileGrid::new(
+                            placement.page_size.rotated(placement.rotation),
+                            old_render,
+                        );
+                        let (old_width, old_height) = old_grid.render_px();
+                        let old_page = Size::new(old_width as f32, old_height as f32);
+                        let new_page = page_rect.size();
                         let mut count = 0u32;
                         for (tile, texture) in
                             self.textures.tiles_at(page, placement.rotation, old_scale_milli)
                         {
-                            let pixels = tile.pixel_rect(old_page);
-                            let rect = tile_view_rect_scaled(
-                                page_rect,
-                                pixels,
-                                old_page,
-                                new_page,
-                            );
+                            let (x, y, width, height) = old_grid.tile_px(tile.col, tile.row);
+                            let pixels =
+                                Rect::new(x as f32, y as f32, width as f32, height as f32);
+                            let rect =
+                                tile_view_rect_scaled(page_rect, pixels, old_page, new_page);
                             let tile_screen = egui::Rect::from_min_size(
                                 canvas.min + EVec2::new(rect.x, rect.y),
                                 EVec2::new(rect.width, rect.height),
@@ -2015,49 +2033,57 @@ impl PdfReaderApp {
                         }
                         ("旧瓦片预览", count, count)
                     }
-                    Plan::Tiles(first, last) => {
-                        // 视口覆盖到的**全部**瓦片都要画：就绪的贴图、未就绪的补白。
-                        // v1 只遍历"已缓存"的瓦片，未就绪区域直接露出深色画布 ——
+                    Plan::Tiles(col0, row0, col1, row1) => {
+                        // 视口覆盖到的**全部**块都要画：就绪的贴图、未就绪的补白。
+                        // v1 只遍历"已缓存"的块，未就绪区域直接露出深色画布 ——
                         // 高倍缩放时看起来就是"视野全黑"（第二轮验收 §15）。
-                        let pixel_size = placement.pixel_size();
+                        //
+                        // 位置一律由 TileGrid 给出（`页.x + 块像素·u`），因此同一波段内
+                        // 无论显示比例怎么变，块之间的接缝都不会变（D-94）。
                         let tile_borders = std::env::var("PDF_READER_TILE_BORDERS")
                             .map(|value| value != "0")
-                            .unwrap_or(true);
+                            .unwrap_or(false);
                         let mut ready = 0u32;
                         let mut total = 0u32;
-                        for row in first.row..=last.row {
-                            for col in first.col..=last.col {
-                                total += 1;
-                                let tile = TileSpec::new(col, row);
-                                let pixels = tile.pixel_rect(pixel_size);
-                                // 不变量：内容空间单位 == 该页位图像素 → 像素偏移直接相加（D-17）
-                                let rect = tile_view_rect(page_rect, pixels);
-                                let key = RenderKey::tiled(
-                                    page,
-                                    placement.scale,
-                                    placement.rotation,
-                                    tile,
-                                );
-                                let tile_screen = egui::Rect::from_min_size(
-                                    canvas.min + EVec2::new(rect.x, rect.y),
-                                    EVec2::new(rect.width, rect.height),
-                                );
-                                match self.textures.get(&key) {
-                                    Some(texture) => {
-                                        ready += 1;
-                                        paint_image(&painter, texture, tile_screen);
+                        if let Some(grid) = session.tile_grid(page) {
+                            for row in row0..=row1 {
+                                for col in col0..=col1 {
+                                    if !grid.contains(col, row) {
+                                        continue;
                                     }
-                                    None => paint_blank(&painter, tile_screen),
-                                }
-                                // 临时诊断：给每块瓦片描 2px 红线，便于肉眼分辨瓦片范围。
-                                // 默认开启；设 PDF_READER_TILE_BORDERS=0 可关闭。
-                                if tile_borders {
-                                    painter.rect_stroke(
-                                        tile_screen,
-                                        CornerRadius::ZERO,
-                                        Stroke::new(2.0, Color32::from_rgb(230, 30, 30)),
-                                        StrokeKind::Inside,
+                                    total += 1;
+                                    let tile = TileSpec::new(col, row);
+                                    let rect = tile_view_rect(
+                                        &grid,
+                                        &placement,
+                                        col,
+                                        row,
+                                        render.0,
+                                        scroll,
                                     );
+                                    let key =
+                                        RenderKey::tiled(page, render, placement.rotation, tile);
+                                    let tile_screen = egui::Rect::from_min_size(
+                                        canvas.min + EVec2::new(rect.x, rect.y),
+                                        EVec2::new(rect.width, rect.height),
+                                    );
+                                    match self.textures.get(&key) {
+                                        Some(texture) => {
+                                            ready += 1;
+                                            paint_image(&painter, texture, tile_screen);
+                                        }
+                                        None => paint_blank(&painter, tile_screen),
+                                    }
+                                    // 临时诊断（D-89）：给每块描 2px 红线，便于肉眼分辨块范围。
+                                    // **默认关闭**；设 PDF_READER_TILE_BORDERS=1 开启。
+                                    if tile_borders {
+                                        painter.rect_stroke(
+                                            tile_screen,
+                                            CornerRadius::ZERO,
+                                            Stroke::new(2.0, Color32::from_rgb(230, 30, 30)),
+                                            StrokeKind::Inside,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -2065,7 +2091,7 @@ impl PdfReaderApp {
                     }
                     Plan::Blank => {
                         // 纸张（白底 + 页框）在循环开头已经铺好，这里无需再画任何东西 ——
-                        // 尤其不要画瓦片边框（那会变成满屏网格线）。
+                        // 尤其不要画块边框（那会变成满屏网格线）。
                         ("白底页框", 0, 0)
                     }
                 };
@@ -3277,7 +3303,7 @@ impl PdfReaderApp {
         session: &DocumentSession,
         content_rect: Rect,
     ) -> Option<egui::ColorImage> {
-        let mut owned: Vec<(Rect, Option<Arc<RasterImage>>, Vec<(TileSpec, Arc<RasterImage>)>)> =
+        let mut owned: Vec<(Rect, Option<Arc<RasterImage>>, Vec<(Rect, Arc<RasterImage>)>)> =
             Vec::new();
         // **跨页**：凡与选区相交的页都参与拼合（不依赖 visible 集合，也不只取最大重叠那一页）
         let all_pages: Vec<(usize, Rect)> = (0..session.page_count() as usize)
@@ -3288,14 +3314,38 @@ impl PdfReaderApp {
             .collect();
         for (index, page_rect) in pages_intersecting(all_pages, content_rect) {
             let page = PageIndex::new(index as u32);
-            owned.push((page_rect, session.image_for(page), session.tiles_for(page)));
+            // D-94：块的**显示矩形**由网格给出（位图像素 ≠ 内容单位），
+            // 因此这里带上每块在内容空间的位置，合成时才能按 u 正确重采样。
+            let tiles = match (session.placement(page).copied(), session.tile_grid(page)) {
+                (Some(placement), Some(grid)) => {
+                    let render = session.render_scale(page);
+                    session
+                        .tiles_for(page)
+                        .into_iter()
+                        .map(|(tile, image)| {
+                            (
+                                grid.display_rect(
+                                    placement.rect,
+                                    tile.col,
+                                    tile.row,
+                                    placement.scale.0,
+                                    render.0,
+                                ),
+                                image,
+                            )
+                        })
+                        .collect()
+                }
+                _ => Vec::new(),
+            };
+            owned.push((page_rect, session.image_for(page), tiles));
         }
         let sources: Vec<SnapshotPage<'_>> = owned
             .iter()
             .map(|(rect, whole, tiles)| SnapshotPage {
                 rect: *rect,
                 whole: whole.as_deref(),
-                tiles: tiles.iter().map(|(tile, image)| (*tile, image.as_ref())).collect(),
+                tiles: tiles.iter().map(|(rect, image)| (*rect, image.as_ref())).collect(),
             })
             .collect();
         compose_snapshot(&sources, content_rect)

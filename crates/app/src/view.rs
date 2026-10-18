@@ -85,23 +85,26 @@ pub fn command_for_zoom_delta(zoom_delta: f32, current_zoom: f32) -> Option<View
     Some(ViewerCommand::SetZoom(current_zoom * zoom_delta))
 }
 
-/// 瓦片在**视图空间**中的矩形。
+/// 一块瓦片在**视图空间**中的矩形。
 ///
-/// ## 关键不变量（黑屏缺陷的根源，D-17）
+/// 位置与尺寸由 [`TileGrid::display_rect`] 给出：`x = 页.x + 块像素_x · u`、
+/// `w = 块像素_w · u`，其中 `u = 显示比例 / 渲染比例`；最后减去滚动量。
 ///
-/// 内容空间单位在当前缩放下**就等于该页位图的像素**：`PagePlacement::rect` 已经是
-/// `页点数 × 缩放`，而 `PagePlacement::pixel_size()` 就是取整后的 `rect.size()`。
-/// 因此把"位图像素偏移"换算成视图偏移时 **直接相加即可，绝不能再乘/除缩放**。
-///
-/// v1 在这里写了 `pixels.x / scale`：748% 时 6 块瓦片被压缩到页面左上角 1/7 的小方格里，
-/// 而视口落在页面中部 —— 于是"画法=瓦片 6/6"却整块画布全黑（第三轮验收）。
-pub fn tile_view_rect(page_rect: Rect, pixels: Rect) -> Rect {
-    Rect::new(
-        page_rect.x + pixels.x,
-        page_rect.y + pixels.y,
-        pixels.width,
-        pixels.height,
-    )
+/// ## D-17 的旧结论是 `u = 1` 的特例（D-94）
+/// 旧实现直接相加像素偏移（"内容单位 == 位图像素"），因为它假设渲染比例就是显示比例。
+/// 波段超采样后 `u = 显示/渲染 ≤ 1` 且**随波段内缩放连续变化**，因此必须乘 `u`；
+/// 但**绝不能**乘成"除以显示比例"—— 那正是第三轮验收"748% 时整块画布全黑"的根因
+/// （6 块瓦片被压进页面左上角 1/7 的小方格）。
+pub fn tile_view_rect(
+    grid: &TileGrid,
+    placement: &PagePlacement,
+    col: u32,
+    row: u32,
+    render_scale: f32,
+    scroll: Vec2,
+) -> Rect {
+    let content = grid.display_rect(placement.rect, col, row, placement.scale.0, render_scale);
+    content.translate(Vec2::new(-scroll.x, -scroll.y))
 }
 
 /// 把**旧缩放的瓦片**映射到当前页面矩形上（缩放过场的预览用）。
@@ -179,14 +182,19 @@ pub fn link_rect_in_page_bounds(rect: Rect, page_size: Size) -> bool {
 
 /// 合成快照时"一页可用的已渲染位图"。
 ///
-/// 位图像素与内容空间**同尺度**（D-17 的不变量），因此像素偏移可以直接相加。
+/// ## 位图像素 ≠ 内容单位（D-94）
+/// 波段渲染比例可以大于显示比例（超采样），因此"位图像素偏移直接相加"这条旧不变量
+/// （D-17）只在 `u = 显示/渲染 == 1` 时成立。这里改成**与 `u` 无关**的表达：
+/// 每张位图都配一个"它铺满哪个内容矩形"，铺放时统一按比例重采样。
+/// 于是整页图（渲染比例位图 → 页面显示矩形）与块（块位图 → 块的显示矩形）
+/// 走同一条路径，`u` 是多少都不影响结果。
 pub struct SnapshotPage<'a> {
-    /// 该页在内容空间的矩形（其尺寸就是位图像素尺寸）。
+    /// 该页在内容空间的矩形（尺寸 = 显示尺寸）。
     pub rect: Rect,
     /// 整页位图（未分块且已缓存时可用）。
     pub whole: Option<&'a RasterImage>,
-    /// 已缓存的瓦片（分块时可用）。
-    pub tiles: Vec<(TileSpec, &'a RasterImage)>,
+    /// 已缓存的块：`(该块在内容空间的矩形, 位图)`，矩形由 `TileGrid::display_rect` 给出。
+    pub tiles: Vec<(Rect, &'a RasterImage)>,
 }
 
 /// 把 `content_rect` 覆盖到的**已渲染像素**拷成一张自包含图像（截图快照）。
@@ -196,47 +204,65 @@ pub struct SnapshotPage<'a> {
 /// 2. 区域可能跨页、跨留白，单张纹理根本无法表达；
 /// 3. 快照自包含，与主视图状态完全解耦，单页/多页走**同一条**代码路径。
 ///
-/// 代价只有一次区域像素拷贝（区域 ≤ 一屏）。未被页面覆盖或**尚未就绪**的地方保持白色。
+/// 代价只有一次区域像素拷贝（区域 ≤ 一屏），采样为最近邻（预览用，不追求重采样质量）。
+/// 未被页面覆盖或**尚未就绪**的地方保持白色。
 /// 完全没有可用像素时返回 `None`（调用方据此提示）。
 pub fn compose_snapshot(pages: &[SnapshotPage<'_>], content_rect: Rect) -> Option<egui::ColorImage> {
     let width = content_rect.width.ceil().max(1.0) as usize;
     let height = content_rect.height.ceil().max(1.0) as usize;
     // 白底：页面未覆盖处（页间距、页边距）与未就绪处都留白
     let mut rgba = vec![255u8; width * height * 4];
-    let origin = content_rect.min();
 
-    /// 把源位图的一个子矩形拷进目标缓冲；越界一律裁剪。
-    fn blit(
+    /// 把 `image` 铺满 `dest`（内容空间）后，拷进目标缓冲里与 `content_rect` 相交的部分。
+    ///
+    /// 采样点取目标像素中心再按比例映射回源像素：`dest` 比 `image` 大就是放大，
+    /// 小就是缩小（波段超采样时正是缩小），两种情况用同一段代码。
+    fn blit_fitted(
         image: &RasterImage,
-        source_origin: (i64, i64),
-        source: (i64, i64, i64, i64),
+        dest: Rect,
+        content_rect: Rect,
         out: &mut [u8],
         out_size: (usize, usize),
-        dest: (i64, i64),
-    ) {
-        let (sx, sy, sw, sh) = source;
-        let stride = image.format.bytes_per_pixel() as i64;
-        for row in 0..sh {
-            let source_y = sy + row - source_origin.1;
-            let dest_y = dest.1 + row;
-            if source_y < 0 || source_y >= image.height as i64 {
+    ) -> bool {
+        if dest.width <= 0.0 || dest.height <= 0.0 || image.width == 0 || image.height == 0 {
+            return false;
+        }
+        let Some(overlap) = dest.intersection(content_rect) else { return false };
+        if overlap.width <= 0.0 || overlap.height <= 0.0 {
+            return false;
+        }
+        let stride = image.format.bytes_per_pixel() as usize;
+        let origin = content_rect.min();
+        let dest_left = ((overlap.x - origin.x).round().max(0.0)) as usize;
+        let dest_top = ((overlap.y - origin.y).round().max(0.0)) as usize;
+        let columns = overlap.width.round().max(0.0) as usize;
+        let rows = overlap.height.round().max(0.0) as usize;
+        let scale_x = image.width as f32 / dest.width;
+        let scale_y = image.height as f32 / dest.height;
+        let data = image.data();
+        let mut painted = false;
+        for row in 0..rows {
+            let content_y = overlap.y + row as f32 + 0.5;
+            let source_y = ((content_y - dest.y) * scale_y).floor();
+            if source_y < 0.0 || source_y >= image.height as f32 {
                 continue;
             }
-            if dest_y < 0 || dest_y >= out_size.1 as i64 {
+            let dest_y = dest_top + row;
+            if dest_y >= out_size.1 {
                 continue;
             }
-            for column in 0..sw {
-                let source_x = sx + column - source_origin.0;
-                let dest_x = dest.0 + column;
-                if source_x < 0 || source_x >= image.width as i64 {
+            for column in 0..columns {
+                let content_x = overlap.x + column as f32 + 0.5;
+                let source_x = ((content_x - dest.x) * scale_x).floor();
+                if source_x < 0.0 || source_x >= image.width as f32 {
                     continue;
                 }
-                if dest_x < 0 || dest_x >= out_size.0 as i64 {
+                let dest_x = dest_left + column;
+                if dest_x >= out_size.0 {
                     continue;
                 }
-                let from = ((source_y * image.width as i64 + source_x) * stride) as usize;
-                let to = ((dest_y * out_size.0 as i64 + dest_x) * 4) as usize;
-                let data = image.data();
+                let from = (source_y as usize * image.width as usize + source_x as usize) * stride;
+                let to = (dest_y * out_size.0 + dest_x) * 4;
                 let (r, g, b) = match image.format {
                     PixelFormat::Bgra8 => (data[from + 2], data[from + 1], data[from]),
                     PixelFormat::Rgba8 => (data[from], data[from + 1], data[from + 2]),
@@ -246,8 +272,10 @@ pub fn compose_snapshot(pages: &[SnapshotPage<'_>], content_rect: Rect) -> Optio
                 out[to + 1] = g;
                 out[to + 2] = b;
                 out[to + 3] = 255;
+                painted = true;
             }
         }
+        painted
     }
 
     let mut painted = false;
@@ -256,48 +284,14 @@ pub fn compose_snapshot(pages: &[SnapshotPage<'_>], content_rect: Rect) -> Optio
         if overlap.width <= 0.0 || overlap.height <= 0.0 {
             continue;
         }
-        let destination = (
-            (overlap.x - origin.x).round() as i64,
-            (overlap.y - origin.y).round() as i64,
-        );
-        let source_x = (overlap.x - page.rect.x).round() as i64;
-        let source_y = (overlap.y - page.rect.y).round() as i64;
-        let width_px = overlap.width.round() as i64;
-        let height_px = overlap.height.round() as i64;
 
         if let Some(image) = page.whole {
-            blit(
-                image,
-                (0, 0),
-                (source_x, source_y, width_px, height_px),
-                &mut rgba,
-                (width, height),
-                destination,
-            );
-            painted = true;
+            painted |= blit_fitted(image, page.rect, content_rect, &mut rgba, (width, height));
             continue;
         }
 
-        // 分块：逐块与源矩形求交后拷贝
-        for (tile, image) in &page.tiles {
-            let tile_rect = tile.pixel_rect(page.rect.size());
-            let tile_origin = (tile_rect.x.round() as i64, tile_rect.y.round() as i64);
-            let left = source_x.max(tile_origin.0);
-            let top = source_y.max(tile_origin.1);
-            let right = (source_x + width_px).min(tile_origin.0 + image.width as i64);
-            let bottom = (source_y + height_px).min(tile_origin.1 + image.height as i64);
-            if left >= right || top >= bottom {
-                continue;
-            }
-            blit(
-                image,
-                tile_origin,
-                (left, top, right - left, bottom - top),
-                &mut rgba,
-                (width, height),
-                (destination.0 + (left - source_x), destination.1 + (top - source_y)),
-            );
-            painted = true;
+        for (tile_rect, image) in &page.tiles {
+            painted |= blit_fitted(*image, *tile_rect, content_rect, &mut rgba, (width, height));
         }
     }
 
@@ -1071,27 +1065,49 @@ mod tests {
         assert_eq!(rect, Rect::new(-88.0, -238.0, 612.0, 792.0));
     }
 
-    /// 回归测试：瓦片位置**不得**再除以缩放。
+    /// 回归测试：块的位置是 `页.x + 块像素·u`，**不是**"除以显示比例"（D-17/D-94）。
     ///
     /// 数字取自第三轮验收的真实诊断行（748% 下的第 2 页）：
-    /// `视图矩形=(-1679,-2042 3870×4785)`，网格里的第 (1,1) 块瓦片。
-    /// 正确结果是"页面左上角 + (512,512)"；错误实现会把它压到 +69.4 附近 ——
-    /// 视口落在页面中部时就什么都看不到（全黑）。
+    /// `视图矩形=(-1679,-2042 3870×4785)`，网格里的第 (1,1) 块。
+    /// * `u == 1`（渲染比例 = 显示比例）时退化成"像素偏移直接相加"；
+    /// * `u < 1`（波段超采样）时块按 `u` 缩小 —— 但绝不会被压到 1/显示比例 那么小。
     #[test]
-    fn tile_view_rect_is_in_content_units_not_scaled() {
+    fn tile_view_rect_uses_the_display_to_render_ratio() {
+        let page_size = Size::new(612.0, 792.0);
+        let display = 7.48f32;
         let page_rect = Rect::new(-1679.0, -2042.0, 3870.0, 4785.0);
-        let pixels = Rect::new(512.0, 512.0, 512.0, 512.0);
-        let rect = tile_view_rect(page_rect, pixels);
-        assert_eq!(rect, Rect::new(-1167.0, -1530.0, 512.0, 512.0));
-
-        // 反面：任何"除以缩放"的实现都会得到这个值（748% ≈ 7.38 倍）
-        let wrong = Rect::new(
-            page_rect.x + pixels.x / 7.38,
-            page_rect.y + pixels.y / 7.38,
-            pixels.width / 7.38,
-            pixels.height / 7.38,
+        let placement = PagePlacement::new(
+            PageIndex::new(1),
+            page_rect,
+            Scale::from_zoom(display),
+            Rotation::None,
+            page_size,
         );
-        assert_ne!(rect, wrong, "瓦片位置一旦除缩放，瓦片会被压到页面左上角");
+
+        // u == 1：与"像素偏移直接相加"完全一致（D-17 的旧行为）
+        let grid = TileGrid::new(page_size, display);
+        let (x, y, w, _) = grid.tile_px(1, 1);
+        let rect = tile_view_rect(&grid, &placement, 1, 1, display, Vec2::ZERO);
+        assert_eq!(
+            (rect.x, rect.y, rect.width),
+            (page_rect.x + x as f32, page_rect.y + y as f32, w as f32)
+        );
+        assert_eq!(rect.x, -1679.0 + x as f32, "块位置 = 页原点 + 块像素偏移");
+
+        // u < 1（渲染比例更高）：块按 u 缩小，且仍在页面范围内
+        let render = display * 1.6;
+        let grid = TileGrid::new(page_size, render);
+        let rect = tile_view_rect(&grid, &placement, 1, 1, render, Vec2::ZERO);
+        let u = display / render;
+        let (x, _, w, _) = grid.tile_px(1, 1);
+        assert!((rect.x - (page_rect.x + x as f32 * u)).abs() < 1e-2);
+        assert!((rect.width - w as f32 * u).abs() < 1e-2);
+        assert!(rect.right() <= page_rect.right() + 1.0, "块不得超出页面");
+
+        // 反面：除以**显示比例**的实现会把块压到页面左上角（第三轮全黑）
+        let wrong =
+            Rect::new(page_rect.x + x as f32 / display, page_rect.y + y as f32 / display, 0.0, 0.0);
+        assert!(rect.x > wrong.x + 100.0, "块位置一旦除以显示比例就会被压到左上角");
     }
 
     #[test]
@@ -1295,7 +1311,7 @@ mod tests {
     #[test]
     fn best_tile_scale_and_tiles_at_pick_the_previous_scale() {
         let mut store = KeyedStore::new(16);
-        let tile = |scale: f32, col: u16, row: u16| {
+        let tile = |scale: f32, col: u32, row: u32| {
             RenderKey::tiled(
                 PageIndex::new(0),
                 Scale::from_zoom(scale),
@@ -1785,15 +1801,15 @@ mod tests {
         // 完全在页外 → 无可用像素
         assert!(compose_snapshot(&pages, Rect::new(100.0, 100.0, 4.0, 4.0)).is_none());
 
-        // 分块来源：瓦片是 512×512 的网格，因此页要够大才能放两块（1024×512）
+        // 分块来源：两块各占页宽的一半（块的位置由 TileGrid 给出，这里直接给内容空间矩形）
         let left = make(512, 512, 50);
         let right = make(512, 512, 200);
         let tiled = vec![SnapshotPage {
             rect: Rect::new(0.0, 0.0, 1024.0, 512.0),
             whole: None,
             tiles: vec![
-                (TileSpec::new(0, 0), &left),
-                (TileSpec::new(1, 0), &right),
+                (Rect::new(0.0, 0.0, 512.0, 512.0), &left),
+                (Rect::new(512.0, 0.0, 512.0, 512.0), &right),
             ],
         }];
         let snapshot =
@@ -1817,6 +1833,54 @@ mod tests {
         assert_eq!(snapshot.pixels[0].r(), 10, "第一页");
         assert_eq!(snapshot.pixels[2 * 2].r(), 255, "页间距应留白");
         assert_eq!(snapshot.pixels[3 * 2].r(), 20, "第二页");
+    }
+
+    /// 波段超采样（`u = 显示/渲染 < 1`）：位图比它铺满的内容矩形**大**。
+    ///
+    /// 这是 D-94 之后必须成立的一条：快照按"铺满内容矩形"重采样，
+    /// 因此整页图与块都不会因为渲染比例更高而只截到左上角一小块。
+    #[test]
+    fn compose_snapshot_scales_supersampled_bitmaps_to_fit() {
+        let make = |width: u32, height: u32, fill: u8| {
+            let mut data = Vec::with_capacity((width * height * 4) as usize);
+            for _ in 0..(width * height) {
+                data.extend_from_slice(&[fill, fill, fill, 255]);
+            }
+            RasterImage::new(width, height, PixelFormat::Bgra8, std::sync::Arc::from(data))
+                .expect("位图")
+        };
+
+        // 页内容 100×100，整页位图按 1.6 倍渲染成 160×160
+        let whole = make(160, 160, 90);
+        let pages = vec![SnapshotPage {
+            rect: Rect::new(0.0, 0.0, 100.0, 100.0),
+            whole: Some(&whole),
+            tiles: Vec::new(),
+        }];
+        let snapshot = compose_snapshot(&pages, Rect::new(0.0, 0.0, 100.0, 100.0)).expect("应有内容");
+        assert_eq!(snapshot.size, [100, 100]);
+        assert!(
+            snapshot.pixels.iter().all(|pixel| pixel.r() == 90),
+            "整页必须铺满（右下角也不能留白）"
+        );
+
+        // 块：内容空间各占一半，位图同样按 1.6 倍更大 → 仍然各占一半
+        let left = make(160, 160, 10);
+        let right = make(160, 160, 20);
+        let tiled = vec![SnapshotPage {
+            rect: Rect::new(0.0, 0.0, 100.0, 100.0),
+            whole: None,
+            tiles: vec![
+                (Rect::new(0.0, 0.0, 50.0, 100.0), &left),
+                (Rect::new(50.0, 0.0, 50.0, 100.0), &right),
+            ],
+        }];
+        let snapshot =
+            compose_snapshot(&tiled, Rect::new(0.0, 0.0, 100.0, 100.0)).expect("应有内容");
+        assert_eq!(snapshot.pixels[0].r(), 10, "左块覆盖 x<50");
+        assert_eq!(snapshot.pixels[49].r(), 10);
+        assert_eq!(snapshot.pixels[50].r(), 20, "右块覆盖 x≥50");
+        assert_eq!(snapshot.pixels[99 * 100 + 99].r(), 20, "右下角属于右块");
     }
 
     /// 图像按保持长宽比放进窗口区域（居中、不拉伸）。

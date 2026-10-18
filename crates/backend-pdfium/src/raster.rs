@@ -1,8 +1,13 @@
-//! 光栅化适配：**整页**与**瓦片**（D-02）。
+//! 光栅化适配：**整页**与**瓦片**（D-02 / D-94）。
 //!
 //! 瓦片渲染走 PDFium 原生的"部分渲染"能力：
 //! 把目标位图设为瓦片尺寸，再用 `PdfRenderConfig::set_origin(-x, -y)` 把页面左上角推到
 //! 位图之外，于是只有目标区域被真正渲染 —— 而不是"整页渲染后裁剪"。
+//!
+//! ## 几何必须只有一套
+//! 块的像素矩形与整页位图尺寸都由 [`TileGrid`] 给出：网格把"旋转后页尺寸 × 渲染比例"
+//! 一次取整成**共享边界**，因此相邻块严格相接（无 1px 缝、也不会重叠）。
+//! 这里**不得**自己 `round` 一遍尺寸 —— 两侧各取整一次就可能差 1px，接缝随之错位。
 
 use std::sync::Arc;
 
@@ -30,27 +35,25 @@ impl PageRaster for PdfiumRaster {
             .ok_or(CoreError::PageOutOfRange { page: request.page, page_count })?;
         let page = self.0.page(request.page)?;
 
-        // 全页在"请求的最终旋转 + 缩放"下的像素尺寸（= 位图坐标系）
-        let full = geometry.size.rotated(request.rotation).scale(request.scale.0);
-        let full_px = (full.width.round().max(1.0) as i32, full.height.round().max(1.0) as i32);
+        // 该页在"请求的最终旋转 + 渲染比例"下的分块网格。整页位图尺寸**取自网格**
+        // （`render_px`），而不是在这里再算一次 —— 见文件头的"几何必须只有一套"。
+        let grid = TileGrid::new(geometry.size.rotated(request.rotation), request.scale.0);
+        let (page_width, page_height) = grid.render_px();
+        let page_px = (page_width.max(1) as i32, page_height.max(1) as i32);
 
         let (bitmap_size, origin) = match request.tile {
-            None => (full_px, (0, 0)),
+            None => (page_px, (0, 0)),
             Some(tile) => {
-                let pixels = tile.pixel_rect(Size::new(full_px.0 as f32, full_px.1 as f32));
-                if pixels.is_empty() {
+                let (x, y, width, height) = grid.tile_px(tile.col, tile.row);
+                if width == 0 || height == 0 {
                     return Err(CoreError::Internal(format!(
-                        "瓦片越界：col={} row={}",
-                        tile.col, tile.row
+                        "瓦片越界：col={} row={}（网格 {}×{}）",
+                        tile.col, tile.row, grid.side, grid.side
                     )));
                 }
-                let size = (
-                    pixels.width.round().max(1.0) as i32,
-                    pixels.height.round().max(1.0) as i32,
-                );
                 // set_origin 的语义是"页面左上角在目标位图中的位置"，
                 // 取负值即可让目标区域正好落在位图的 (0,0)。
-                (size, (-(pixels.x.round() as i32), -(pixels.y.round() as i32)))
+                ((width as i32, height as i32), (-(x as i32), -(y as i32)))
             }
         };
 
@@ -60,7 +63,7 @@ impl PageRaster for PdfiumRaster {
         // 旋转由本适配层全权负责（`automatic_orientation = false`）：
         // 位图方向因此严格等于 `request.rotation`，与 `PagePlacement` 的约定一一对应。
         let config = PdfRenderConfig::new()
-            .set_fixed_size(full_px.0, full_px.1)
+            .set_fixed_size(page_px.0, page_px.1)
             .set_origin(origin.0, origin.1)
             .rotate(to_pdfium_rotation(request.rotation), false);
 
@@ -69,15 +72,16 @@ impl PageRaster for PdfiumRaster {
         // 瓦片诊断：拼合错位时用它对照"输入像素矩形 / 实际位图尺寸 / PDFium 原点 / 比例"
         if std::env::var_os("PDF_READER_DIAGNOSE").is_some() {
             if let Some(tile) = request.tile {
-                let pixels = tile.pixel_rect(Size::new(full_px.0 as f32, full_px.1 as f32));
+                let (x, y, width, height) = grid.tile_px(tile.col, tile.row);
                 eprintln!(
-                    "[瓦片] 页={} col={} row={} 全页px={}x{} 瓦片={:?} 位图={}x{} 原点={} 比例={:.4}",
+                    "[瓦片] 页={} col={} row={} 网格={} 全页px={}x{} 瓦片={:?} 位图={}x{} 原点={} 比例={:.4}",
                     request.page.get(),
                     tile.col,
                     tile.row,
-                    full_px.0,
-                    full_px.1,
-                    (pixels.x, pixels.y, pixels.width, pixels.height),
+                    grid.side,
+                    page_px.0,
+                    page_px.1,
+                    (x, y, width, height),
                     bitmap_size.0,
                     bitmap_size.1,
                     origin.1,

@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use crate::document::{Capabilities, Destination, NavigationIndex, OpenedDocument};
 use crate::error::{CoreError, Result};
-use crate::geometry::{Insets, Point, Rect, Rotation, Size, Vec2};
+use crate::geometry::{Insets, Point, Rotation, Size, Vec2};
 use crate::ids::{JobId, PageIndex};
 use crate::image::RasterImage;
 use crate::layout::{
@@ -26,13 +26,14 @@ use crate::layout::{
     ReadingDirection, ScrollAnchor, Viewport,
 };
 use crate::render::{
-    tiles_covering, RenderCache, RenderEvent, RenderKey, RenderPriority, RenderRequest,
-    RenderScheduler, Scale, TileSpec, TilingPolicy,
+    RenderCache, RenderEvent, RenderKey, RenderPriority, RenderRequest, RenderScheduler, Scale,
+    TileSpec, TilingPolicy,
 };
 use crate::text::{
     Highlight, HighlightKind, PageText, SearchHit, SearchQuery, SelectionGranularity, TextPosition,
     TextSelection,
 };
+use crate::tiling::{render_scale_for, TileGrid, DEFAULT_OVERSCAN};
 
 /// 最小缩放倍数。
 pub const MIN_ZOOM: f32 = 0.1;
@@ -227,8 +228,11 @@ pub struct DocumentSession {
     submitted: HashSet<RenderKey>,
     jobs: HashMap<RenderKey, JobId>,
     visible_scratch: Vec<PageIndex>,
-    /// D-02：分块策略（默认 `AbovePixels(16 MP)`）。
+    /// D-02：分块策略（默认 `AbovePixels(4 MP)`，按**渲染**像素面积判断）。
     tiling: TilingPolicy,
+    /// D-94：超采样倍数。渲染比例 = 显示比例所在波段的**上界**（最多放大这么多倍），
+    /// 于是波段内的缩放只需下采样、不必重渲染。`<= 1.0` 表示关闭（仅供测试/对比）。
+    overscan: f32,
 }
 
 impl DocumentSession {
@@ -262,6 +266,7 @@ impl DocumentSession {
             jobs: HashMap::new(),
             visible_scratch: Vec::new(),
             tiling: TilingPolicy::default(),
+            overscan: DEFAULT_OVERSCAN,
         };
         session.recompute_layout();
         Ok(session)
@@ -317,18 +322,38 @@ impl DocumentSession {
         self.scheduler.pending()
     }
 
+    /// 该页当前**波段**的渲染比例（≥ 显示比例）。
+    ///
+    /// 这是"渲染比例"的唯一入口（D-94）：渲染键、瓦片网格、贴图换算都必须用它，
+    /// **不能**用布局给出的显示比例 —— 后者在波段内是连续变化的。
+    pub fn render_scale(&self, page: PageIndex) -> Scale {
+        match self.layout.placement(page) {
+            Some(placement) => Scale::from_zoom(self.render_scale_of(placement)),
+            None => Scale::IDENTITY,
+        }
+    }
+
+    /// 该页当前波段的**分块网格**；该页走整页纹理（不分块）时返回 `None`。
+    ///
+    /// UI 用它摆放瓦片：`grid.display_rect(placement.rect, col, row, 显示比例, 渲染比例)`。
+    /// 与提交渲染、`tiles_for` 用的是**同一个**网格，因此不会出现"UI 画的块与渲染的块不一致"。
+    pub fn tile_grid(&self, page: PageIndex) -> Option<TileGrid> {
+        self.grid_of(self.layout.placement(page)?)
+    }
+
     /// 某页当前缩放下的**整页**位图（若已在缓存中）。
     ///
     /// UI 拿它做纹理上传：`RasterImage::to_rgba8()` 之后即可交给 `egui::ColorImage`。
     ///
     /// **分块时返回 `None`** —— 该页的像素请改用 [`DocumentSession::tiles_for`] 拼接。
-    /// 判断依据是 [`DocumentSession::tiling_policy`]，UI 也可据此决定走哪条路径。
+    /// 判断依据是 [`DocumentSession::tile_grid`]（与提交渲染完全一致）。
     pub fn image_for(&self, page: PageIndex) -> Option<Arc<RasterImage>> {
         let placement = self.layout.placement(page)?;
-        if self.tiling.requires_tiling(placement.pixel_size()) {
+        if self.grid_of(placement).is_some() {
             return None;
         }
-        let key = RenderKey::new(page, placement.scale, placement.rotation);
+        let render = Scale::from_zoom(self.render_scale_of(placement));
+        let key = RenderKey::new(page, render, placement.rotation);
         self.cache.get(&key)
     }
 
@@ -351,26 +376,25 @@ impl DocumentSession {
             .map(|link| link.destination.clone())
     }
 
-    /// 该页当前缩放下的全部**已在缓存中**的瓦片，供 UI 按 `TileSpec::pixel_rect` 拼接绘制。
+    /// 该页当前波段下全部**已在缓存中**的瓦片。
     ///
-    /// 未就绪的瓦片不会出现在返回值里 —— UI 应对缺失区域画白底占位（D-06）。
+    /// 块的摆放位置由 [`DocumentSession::tile_grid`] 给出（`TileGrid::display_rect`）。
+    /// 未就绪的瓦片不会出现在返回值里 —— UI 应对缺失区域画白底占位（D-88：整页层面降级，
+    /// 不逐块混用不同比例）。
     pub fn tiles_for(&self, page: PageIndex) -> Vec<(TileSpec, Arc<RasterImage>)> {
         let Some(placement) = self.layout.placement(page).copied() else {
             return Vec::new();
         };
-        let pixel_size = placement.pixel_size();
-        if !self.tiling.requires_tiling(pixel_size) {
+        let Some(grid) = self.grid_of(&placement) else {
             return Vec::new();
-        }
-        let (cols, rows) = TileSpec::grid_for(pixel_size);
+        };
+        let render = Scale::from_zoom(self.render_scale_of(&placement));
         let mut out = Vec::new();
-        for row in 0..rows {
-            for col in 0..cols {
-                let tile = TileSpec::new(col, row);
-                let key = RenderKey::tiled(page, placement.scale, placement.rotation, tile);
-                if let Some(image) = self.cache.get(&key) {
-                    out.push((tile, image));
-                }
+        for (col, row) in grid.all_tiles() {
+            let tile = TileSpec::new(col, row);
+            let key = RenderKey::tiled(page, render, placement.rotation, tile);
+            if let Some(image) = self.cache.get(&key) {
+                out.push((tile, image));
             }
         }
         out
@@ -387,6 +411,49 @@ impl DocumentSession {
             self.tiling = policy;
             self.invalidate_render();
         }
+    }
+
+    /// 当前超采样倍数（[`DEFAULT_OVERSCAN`]）。
+    pub fn overscan(&self) -> f32 {
+        self.overscan
+    }
+
+    /// 设置超采样倍数；`<= 1.0` 表示**关闭超采样**（渲染比例 = 显示比例）。
+    ///
+    /// 关闭后波段复用随之消失（显示比例是连续值，每变一点就是一个新键），
+    /// 因此只用于测试与"新旧行为对比"。
+    pub fn set_overscan(&mut self, overscan: f32) {
+        if (self.overscan - overscan).abs() > f32::EPSILON {
+            self.overscan = overscan;
+            self.invalidate_render();
+        }
+    }
+
+    /// 该页当前波段的**渲染比例**（`f32` 版；见 [`DocumentSession::render_scale`]）。
+    fn render_scale_of(&self, placement: &PagePlacement) -> f32 {
+        render_scale_for(placement.scale.0, self.overscan)
+    }
+
+    /// 该页在渲染比例下的像素尺寸（未取整；取整由 [`TileGrid`] 一次完成）。
+    ///
+    /// 判据用**渲染**尺寸而不是显示尺寸：波段渲染比例最多是显示比例的 1.6 倍，
+    /// 真正分配位图、决定内存与耗时的是渲染尺寸（D-94）。
+    fn render_pixel_size(&self, placement: &PagePlacement) -> Size {
+        placement
+            .page_size
+            .rotated(placement.rotation)
+            .scale(self.render_scale_of(placement))
+    }
+
+    /// 该页当前波段的分块网格；不分块（整页路径）时返回 `None`。
+    fn grid_of(&self, placement: &PagePlacement) -> Option<TileGrid> {
+        if !self.tiling.requires_tiling(self.render_pixel_size(placement)) {
+            return None;
+        }
+        Some(TileGrid::new(
+            placement.page_size.rotated(placement.rotation),
+            self.render_scale_of(placement),
+        ))
     }
 
     /// 捕获当前视野中心对应的页内位置（D-05）。
@@ -812,62 +879,69 @@ impl DocumentSession {
         )
     }
 
-    /// 分块渲染时，某页**当前视口覆盖到的瓦片范围**（左上、右下，含端点）。
+    /// 分块渲染时，某页**当前视口覆盖到的瓦片范围** `(col0, row0, col1, row1)`（含端点）。
     ///
     /// * 未启用分块时返回 `None`（该页走整页纹理路径）；
-    /// * 与提交渲染（`request_tiles`）用的是**同一套计算**，因此 UI 枚举占位与后端实际
-    ///   渲染的瓦片始终一致 —— 这正是修掉"高倍缩放时未就绪区域露出深色画布"的关键。
-    pub fn visible_tiles(&self, page: PageIndex) -> Option<(TileSpec, TileSpec)> {
+    /// * 范围在**渲染像素**里按共享整数边界定位（[`TileGrid::tiles_in_view`]），
+    ///   因此与"块的实际显示范围"严格一致；
+    /// * 与提交渲染（`request_tiles`）用的是**同一套计算**，所以 UI 的占位范围与后端实际
+    ///   渲染的块始终一致 —— 这正是修掉"高倍缩放时未就绪区域露出深色画布"的关键。
+    pub fn visible_tiles(&self, page: PageIndex) -> Option<(u32, u32, u32, u32)> {
         let placement = self.layout.placement(page)?;
-        let pixel_size = placement.pixel_size();
-        if !self.tiling.requires_tiling(pixel_size) {
-            return None;
-        }
-        let grid = TileSpec::grid_for(pixel_size);
-        let visible = self.viewport.content_rect().intersection(placement.rect)?;
-        // 内容空间 → 该页位图内的像素矩形
-        let visible_px = Rect::new(
-            visible.x - placement.rect.x,
-            visible.y - placement.rect.y,
-            visible.width,
-            visible.height,
-        );
-        tiles_covering(visible_px, grid)
+        let grid = self.grid_of(placement)?;
+        grid.tiles_in_view(
+            placement.rect,
+            self.viewport.content_rect(),
+            placement.scale.0,
+            self.render_scale_of(placement),
+        )
     }
 
     /// 请求渲染一页（已缓存或已在飞则跳过）。
     ///
-    /// D-02：按分块策略分流 —— 小页走整页渲染，超大页只提交"视口覆盖到的瓦片"。
-    /// 关键一致性：请求里的 `scale` / `rotation` 必须与布局给出的完全一致，
-    /// 否则渲染结果会与布局对不上（画面错位、高亮偏移）。
+    /// D-02：按分块策略分流 —— 小页走整页渲染，超大页只提交"视口覆盖到的块"。
+    /// D-94：两种情况都用**波段渲染比例**（不是显示比例）—— 这是"同波段内改缩放
+    /// 不产生新请求"的唯一来源，也是键与贴图比例永远一致的保证。
     fn request_page(&mut self, page: PageIndex, priority: RenderPriority) {
         let Some(placement) = self.layout.placement(page).copied() else {
             return;
         };
-        if self.tiling.requires_tiling(placement.pixel_size()) {
-            self.request_tiles(placement, priority);
-        } else {
-            let key = RenderKey::new(placement.page, placement.scale, placement.rotation);
-            let request = RenderRequest::new(placement.page, placement.scale, placement.rotation)
-                .with_priority(priority);
-            self.submit(request, key);
+        let scale = Scale::from_zoom(self.render_scale_of(&placement));
+        match self.grid_of(&placement) {
+            Some(grid) => self.request_tiles(placement, &grid, scale, priority),
+            None => {
+                let key = RenderKey::new(placement.page, scale, placement.rotation);
+                let request = RenderRequest::new(placement.page, scale, placement.rotation)
+                    .with_priority(priority);
+                self.submit(request, key);
+            }
         }
     }
 
-    /// 分块路径：只为"视口在该页位图中覆盖到的瓦片"提交请求。
+    /// 分块路径：只为"视口在该页位图中覆盖到的块"提交请求。
     ///
-    /// 不整页提交（130 块）的原因：分块的目的是省内存，预取整页会把收益抵消掉。
-    fn request_tiles(&mut self, placement: PagePlacement, priority: RenderPriority) {
-        // 与 UI 绘制瓦片时使用**同一个**范围计算（`visible_tiles`），避免两处分歧
-        let Some((first, last)) = self.visible_tiles(placement.page) else {
+    /// 不整页提交的原因：分块的目的是省内存，预取整页会把收益抵消掉。
+    fn request_tiles(
+        &mut self,
+        placement: PagePlacement,
+        grid: &TileGrid,
+        scale: Scale,
+        priority: RenderPriority,
+    ) {
+        // 与 UI 绘制块时使用**同一个**范围计算（`visible_tiles`），避免两处分歧
+        let Some((col0, row0, col1, row1)) = self.visible_tiles(placement.page) else {
             return;
         };
-        for row in first.row..=last.row {
-            for col in first.col..=last.col {
+        for row in row0..=row1 {
+            for col in col0..=col1 {
                 let tile = TileSpec::new(col, row);
-                let key = RenderKey::tiled(placement.page, placement.scale, placement.rotation, tile);
+                // 空块（网格边缘之外）不请求：否则后端会为 0×0 的块报错
+                if !grid.contains(col, row) {
+                    continue;
+                }
+                let key = RenderKey::tiled(placement.page, scale, placement.rotation, tile);
                 let request =
-                    RenderRequest::tiled(placement.page, placement.scale, placement.rotation, tile)
+                    RenderRequest::tiled(placement.page, scale, placement.rotation, tile)
                         .with_priority(priority);
                 self.submit(request, key);
             }
@@ -946,19 +1020,22 @@ impl DocumentSession {
             self.scheduler.cancel_page(page);
         }
 
-        // 2) 页还在视口，但**键（缩放/旋转）已过时**：这类结果渲染出来也会被丢弃。
+        // 2) 页还在视口，但**键（渲染比例/旋转）已过时**：这类结果渲染出来也会被丢弃。
         //    按页取消（而不是逐个 `cancel(job)`）是为了让两种调度器实现都生效 ——
         //    同步的测试实现没有作业队列，只能按页把已产生的事件改写成 `Cancelled`。
         //    此刻当前比例的请求还没提交（取消总在提交之前），因此按页取消不会误伤新任务。
+        //
+        //    D-94：比较的是**波段渲染比例**。同一波段内缩放不会改变它，
+        //    因此波段内的"在飞任务不取消、继续渲染"，这正是判据 5 的另一半。
         let mut outdated_pages: Vec<PageIndex> = self
             .jobs
             .keys()
             .filter(|key| visible.contains(&key.page))
             .filter(|key| {
                 self.layout.placement(key.page).map_or(true, |placement| {
-                    key.scale_milli
-                        != RenderKey::new(key.page, placement.scale, placement.rotation).scale_milli
-                        || key.rotation != placement.rotation
+                    let render = Scale::from_zoom(self.render_scale_of(placement));
+                    let current = RenderKey::new(key.page, render, placement.rotation);
+                    key.scale_milli != current.scale_milli || key.rotation != placement.rotation
                 })
             })
             .map(|key| key.page)

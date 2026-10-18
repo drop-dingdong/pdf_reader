@@ -27,6 +27,7 @@ use crate::render::{
     CacheStats, PageRaster, RenderCache, RenderEvent, RenderKey, RenderRequest, RenderScheduler,
 };
 use crate::store::KeyValueStore;
+use crate::tiling::TileGrid;
 use crate::text::{PageText, SearchHit, SearchQuery, TextChar, TextLayer, TextRange, TextSpan};
 
 // ------------------------------------------------------------------ 存储替身
@@ -364,21 +365,16 @@ impl PageRaster for MemoryRaster {
                 page_count: self.pages.len() as u32,
             },
         )?;
-        let displayed = page.size.rotated(request.rotation);
-        let displayed_px = Size::new(
-            (displayed.width * request.scale.0).round().max(0.0),
-            (displayed.height * request.scale.0).round().max(0.0),
-        );
+        // 与真实后端用**同一套**几何：网格与整页位图尺寸都由「旋转后页尺寸 × 渲染比例」推出，
+        // 因此这里也能验证"请求里给出的块坐标确实落在该网格内"。
+        let grid = TileGrid::new(page.size.rotated(request.rotation), request.scale.0);
+        let (page_width, page_height) = grid.render_px();
 
         let (width, height, color) = match request.tile {
-            None => (
-                displayed_px.width.max(1.0) as u32,
-                displayed_px.height.max(1.0) as u32,
-                Self::color_for(request.page),
-            ),
+            None => (page_width.max(1), page_height.max(1), Self::color_for(request.page)),
             Some(tile) => {
-                let pixels = tile.pixel_rect(displayed_px);
-                if pixels.is_empty() {
+                let (_, _, tile_width, tile_height) = grid.tile_px(tile.col, tile.row);
+                if tile_width == 0 || tile_height == 0 {
                     return Err(CoreError::Internal(format!(
                         "瓦片越界：col={} row={}",
                         tile.col, tile.row
@@ -386,8 +382,8 @@ impl PageRaster for MemoryRaster {
                 }
                 // 像素里编码 (col, row, page)，测试据此断言"这一块确实是该瓦片"
                 (
-                    pixels.width.round().max(1.0) as u32,
-                    pixels.height.round().max(1.0) as u32,
+                    tile_width,
+                    tile_height,
                     [tile.col as u8, tile.row as u8, (request.page.get() % 251) as u8, 255],
                 )
             }
@@ -694,41 +690,35 @@ mod tests {
         assert_eq!(limited.len(), 1, "limit 必须生效");
     }
 
-    /// D-02：瓦片请求只渲染该区域，位图尺寸 = 该瓦片的像素矩形（最后一列不足一整块）。
+    /// D-02/D-94：瓦片请求只渲染该区域，位图尺寸 = 该块在**渲染网格**里的像素矩形。
     #[test]
     fn raster_renders_only_the_requested_tile() {
         let backend = MemoryBackend::demo();
         let opened = backend.open(Source::Bytes(b"%PDF-fake"), None).unwrap();
 
-        // 612×792pt 在 zoom=8 下为 4896×6336 → 10×13 网格（见 data-flow 场景 2b）
+        // 612×792pt 在 8 倍下为 4896×6336 → 8×8 网格，每块正好 612×792
         let scale = Scale::from_zoom(8.0);
-        let displayed = Size::new(4896.0, 6336.0);
-        assert_eq!(TileSpec::grid_for(displayed), (10, 13));
+        let grid = TileGrid::new(Size::new(612.0, 792.0), 8.0);
+        assert_eq!(grid.side, 8);
+        assert_eq!(grid.render_px(), (4896, 6336));
+        assert_eq!(grid.tile_px(1, 1), (612, 792, 612, 792));
 
-        // 中间一块：完整 512×512，且像素里带 (col, row, page)
+        // 中间一块：位图尺寸 = 该块像素矩形，且像素里带 (col, row, page)
         let tile = TileSpec::new(1, 1);
         let request = RenderRequest::tiled(PageIndex::new(0), scale, Rotation::None, tile);
         let image = opened.raster.render(&request).unwrap();
-        assert_eq!((image.width, image.height), (512, 512));
+        assert_eq!((image.width, image.height), (612, 792));
         assert_eq!(&image.data()[0..4], &[1, 1, 0, 255]);
 
-        // 最后一列只有 4896 - 9×512 = 288 px 宽
-        let last_col = RenderRequest::tiled(
-            PageIndex::new(0),
-            scale,
-            Rotation::None,
-            TileSpec::new(9, 0),
-        );
+        // 最右一列：这一页宽度正好被 8 等分，但**只请求这块**时尺寸仍是该块的大小
+        let last_col =
+            RenderRequest::tiled(PageIndex::new(0), scale, Rotation::None, TileSpec::new(7, 0));
         let image = opened.raster.render(&last_col).unwrap();
-        assert_eq!((image.width, image.height), (288, 512));
+        assert_eq!((image.width, image.height), (612, 792));
 
-        // 越界瓦片必须报错，而不是返回空图
-        let out_of_grid = RenderRequest::tiled(
-            PageIndex::new(0),
-            scale,
-            Rotation::None,
-            TileSpec::new(10, 0),
-        );
+        // 越界块必须报错，而不是返回空图
+        let out_of_grid =
+            RenderRequest::tiled(PageIndex::new(0), scale, Rotation::None, TileSpec::new(8, 0));
         assert!(opened.raster.render(&out_of_grid).is_err());
 
         // 整页路径仍然可用（用低倍率，避免测试里分配上百 MB）

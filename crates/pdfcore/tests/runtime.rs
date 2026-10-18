@@ -19,14 +19,19 @@ fn session_with_worker_scheduler(
     let opened = backend.open(Source::Bytes(b"%PDF-1.4 fake"), None).expect("打开假文档");
     let scheduler = Arc::new(WorkerScheduler::new(opened.raster.clone(), concurrency));
 
-    DocumentSession::new(
+    let mut session = DocumentSession::new(
         opened,
         cache,
         scheduler,
         Box::new(VerticalLayout),
         Box::new(RangeSelection::new()),
     )
-    .expect("装配会话")
+    .expect("装配会话");
+    // 本文件只验证"真实线程 + 缓存淘汰 + 取消"的协同，与波段无关：
+    // 关闭超采样后位图尺寸就是显示尺寸（612×792 = 1.9 MB），
+    // 下面那条 LRU 预算（2 MiB 只够放一张）才有意义。
+    session.set_overscan(1.0);
+    session
 }
 
 /// 轮询 `pump` 直到条件成立（真实线程是异步的，必须轮询而不是假定一步到位）。
