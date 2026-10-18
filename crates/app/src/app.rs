@@ -2020,15 +2020,6 @@ impl PdfReaderApp {
                         // v1 只遍历"已缓存"的瓦片，未就绪区域直接露出深色画布 ——
                         // 高倍缩放时看起来就是"视野全黑"（第二轮验收 §15）。
                         let pixel_size = placement.pixel_size();
-                        // 旧比例的一档（用于"新瓦片未就绪"时顶位，避免闪白）
-                        let fallback_scale = self.textures.best_tile_scale(
-                            page,
-                            placement.rotation,
-                            whole_key.scale_milli,
-                        );
-                        let fallback_tiles: Vec<(TileSpec, &egui::TextureHandle)> = fallback_scale
-                            .map(|old| self.textures.tiles_at(page, placement.rotation, old))
-                            .unwrap_or_default();
                         let mut ready = 0u32;
                         let mut total = 0u32;
                         for row in first.row..=last.row {
@@ -2053,42 +2044,7 @@ impl PdfReaderApp {
                                         ready += 1;
                                         paint_image(&painter, texture, tile_screen);
                                     }
-                                    None => {
-                                        // 新比例还没到 → 用**旧比例同一瓦片**按比例拉伸顶位。
-                                        // 绝对不能"先删旧图再等新图"，否则会出现白洞（用户实测）。
-                                        let old_texture = fallback_tiles
-                                            .iter()
-                                            .find(|(spec, _)| spec.col == tile.col && spec.row == tile.row)
-                                            .map(|(_, texture)| *texture);
-                                        match old_texture {
-                                            Some(texture) => {
-                                                let old_page = egui::vec2(
-                                                    pixel_size.width,
-                                                    pixel_size.height,
-                                                );
-                                                let scale_ratio = fallback_scale
-                                                    .map(|old| old as f32 / whole_key.scale_milli as f32)
-                                                    .unwrap_or(1.0);
-                                                let old_size = Size::new(
-                                                    old_page.x * scale_ratio,
-                                                    old_page.y * scale_ratio,
-                                                );
-                                                let old_pixels = tile.pixel_rect(old_size);
-                                                let rect = tile_view_rect_scaled(
-                                                    page_rect,
-                                                    old_pixels,
-                                                    old_size,
-                                                    pixel_size,
-                                                );
-                                                let stretched = egui::Rect::from_min_size(
-                                                    canvas.min + EVec2::new(rect.x, rect.y),
-                                                    EVec2::new(rect.width, rect.height),
-                                                );
-                                                paint_image(&painter, texture, stretched);
-                                            }
-                                            None => paint_blank(&painter, tile_screen),
-                                        }
-                                    }
+                                    None => paint_blank(&painter, tile_screen),
                                 }
                             }
                         }
