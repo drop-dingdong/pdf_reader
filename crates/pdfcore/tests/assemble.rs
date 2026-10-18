@@ -629,6 +629,72 @@ fn zooming_cancels_in_flight_renders_at_the_old_scale() {
     assert!(session.image_for(PageIndex::FIRST).is_some(), "新比例的位图应已入缓存");
 }
 
+/// 绘制映射必须与布局映射重合：任取页内一点，按布局算出的内容坐标，
+/// 必须正好落在"块位图里对应的那个像素"上。
+///
+/// 这是 D-17 真正要守的东西（选区/高亮与文字对齐），只是 **u 不再恒为 1**：
+/// `内容坐标 = 块像素偏移 · u + 页原点`，`u = 显示比例 / 渲染比例`。
+#[test]
+fn tile_placement_agrees_with_layout_coordinates() {
+    let mut session = assemble();
+    let mut events = Vec::new();
+    session.set_tiling_policy(TilingPolicy::Always);
+    session.handle(ViewerCommand::SetZoom(4.0), &mut events);
+    session.handle(ViewerCommand::ResizeViewport(Size::new(400.0, 400.0)), &mut events);
+
+    let page = PageIndex::FIRST;
+    let placement = *session.placement(page).expect("第 1 页布局");
+    let grid = session.tile_grid(page).expect("强制分块后应有网格");
+    let render = session.render_scale(page).0;
+    let display = placement.scale.0;
+    let u = display / render;
+    assert!(u > 0.0 && u <= 1.0, "u 必须在 (0,1]：实际 {u}");
+
+    let mut checked = 0;
+    for page_point in [
+        Point::new(5.0, 5.0),
+        Point::new(300.0, 400.0),
+        Point::new(600.0, 780.0),
+        Point::new(1.0, 790.0),
+    ] {
+        let content = placement.page_to_content(page_point);
+        let mut found = None;
+        for (col, row) in grid.all_tiles() {
+            let rect = grid.display_rect(placement.rect, col, row, display, render);
+            let inside = content.x >= rect.x
+                && content.x <= rect.right()
+                && content.y >= rect.y
+                && content.y <= rect.bottom();
+            if inside {
+                found = Some((col, row, rect));
+                break;
+            }
+        }
+        let (col, row, rect) = found.unwrap_or_else(|| {
+            panic!("页内点 {page_point:?} → 内容 {content:?} 必须落在某一块内")
+        });
+
+        // 该点在"整页渲染像素"里的位置：布局换算一次
+        let expected_x = (content.x - placement.rect.x) / u;
+        let expected_y = (content.y - placement.rect.y) / u;
+        // 从块的位置反推：块像素原点 + 块内偏移 / u
+        let (pixel_x, pixel_y, width, height) = grid.tile_px(col, row);
+        let got_x = pixel_x as f32 + (content.x - rect.x) / u;
+        let got_y = pixel_y as f32 + (content.y - rect.y) / u;
+        assert!(
+            (expected_x - got_x).abs() < 0.01 && (expected_y - got_y).abs() < 0.01,
+            "块 ({col},{row}) 的映射与布局不一致：期望 ({expected_x},{expected_y}) 实得 ({got_x},{got_y})"
+        );
+        // 落在块内（含右/下边界）
+        assert!(got_x >= pixel_x as f32 - 0.01);
+        assert!(got_x <= (pixel_x + width) as f32 + 0.01);
+        assert!(got_y >= pixel_y as f32 - 0.01);
+        assert!(got_y <= (pixel_y + height) as f32 + 0.01);
+        checked += 1;
+    }
+    assert_eq!(checked, 4);
+}
+
 /// **验收判据 5**：同一波段内改缩放**不应产生新的渲染请求**。
 ///
 /// 做法：把超采样设成 2.0（波段 0 覆盖 [1,2)，渲染比例恒为 2.0），

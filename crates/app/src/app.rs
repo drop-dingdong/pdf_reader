@@ -927,7 +927,6 @@ impl PdfReaderApp {
         };
         // D-94：键与"块在页面里的位置"都用**波段渲染比例**，不能用显示比例
         let render = session.render_scale(page);
-        let grid = session.tile_grid(page);
         let scroll = session.viewport().scroll;
         let mut count = 0;
         // 整页路径
@@ -946,11 +945,11 @@ impl PdfReaderApp {
                     // 贴图诊断：渲染尺寸 vs 页面像素尺寸 vs 屏幕摆放位置
                     // 用于区分"内容错位"（后端渲染）与"摆放错位"（前端映射）。
                     // 判据 4/5：同一波段内 `页面px` 只应出现一个值、且不应有新行。
-                    if let Some(grid) = &grid {
+                    if let Some(grid) = session.tile_grid(page) {
                         let (page_width, page_height) = grid.render_px();
                         let (x, y, width, height) = grid.tile_px(tile.col, tile.row);
                         let screen = tile_view_rect(
-                            grid,
+                            &grid,
                             &placement,
                             tile.col,
                             tile.row,
