@@ -128,6 +128,8 @@ pub enum ViewerCommand {
     SetUserRotation(Rotation),
     /// 顺时针旋转 90°。
     RotateClockwise,
+    /// 逆时针旋转 90°（等价于顺时针 270°）。
+    RotateCounterClockwise,
     /// 切换侧边栏。
     SetSidebar(SidebarTab),
     /// 设置选择粒度（单击 = 字符、双击 = 单词、三击 = 整行）。
@@ -558,6 +560,13 @@ impl DocumentSession {
             }
             ViewerCommand::RotateClockwise => {
                 self.state.user_rotation = self.state.user_rotation.compose(Rotation::Clockwise90);
+                self.invalidate_render();
+                self.relayout_keeping_anchor(events);
+            }
+            ViewerCommand::RotateCounterClockwise => {
+                // 连续三次顺时针 == 一次逆时针，用既有表示避免新增旋转种类
+                let ninety = Rotation::Clockwise90;
+                self.state.user_rotation = self.state.user_rotation.compose(ninety).compose(ninety).compose(ninety);
                 self.invalidate_render();
                 self.relayout_keeping_anchor(events);
             }

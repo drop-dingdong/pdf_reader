@@ -403,6 +403,42 @@ pub fn float_rect_at_row(
 /// 文字 `U+1F5B9`、截图 `U+1F5BB`。若渲染成方块，说明当前字体缺这两个字形
 /// （与码点无关，换个带符号的字体即可）。
 pub const CUSTOM_SYMBOL_TEXT: &str = "\u{1F5B9}";
+/// 缩放比 → 显示文本（四舍五入到整数百分比），如 `1.532` → `"153%"`。
+pub fn zoom_percent_text(zoom: f32) -> String {
+    format!("{:.0}%", zoom * 100.0)
+}
+
+/// 解析用户输入的百分比 → 缩放比（取整百分比），如 `"153.2"` → `Some(1.53)`。
+///
+/// 只用整数百分比：输入 `153.2` 与 `153` 等价（用户要求"识别后舍入整数"）。
+/// 非正数或无法解析返回 `None`。
+pub fn parse_zoom_percent(text: &str) -> Option<f32> {
+    let trimmed = text.trim().trim_end_matches('%').trim();
+    let value: f32 = trimmed.parse().ok()?;
+    let percent = value.round();
+    (percent > 0.0).then_some(percent / 100.0)
+}
+
+/// 适应高度的缩放比：视口高 ÷ 页高（页面旋转后取实际显示高度）。
+pub fn fit_height_zoom(viewport_height: f32, page_height: f32) -> Option<f32> {
+    (page_height > 0.0 && viewport_height > 0.0).then_some(viewport_height / page_height)
+}
+
+/// 页码输入 → 页下标：合法范围 `1..=page_count`，否则 `None`。
+pub fn page_index_from_text(text: &str, page_count: u32) -> Option<PageIndex> {
+    let number: u32 = text.trim().parse().ok()?;
+    (number >= 1 && number <= page_count).then(|| PageIndex::new(number - 1))
+}
+
+/// 菜单里的一行 checkbox 文本：行首 `✓` 或空格（用户要求）。
+pub fn checkbox_row(label: &str, checked: bool) -> String {
+    if checked {
+        format!("✓ {label}")
+    } else {
+        format!("  {label}")
+    }
+}
+
 /// 浮窗正文尺寸是否**真的**变了（带容差）。
 ///
 /// 尺寸在"正文 ↔ 浮窗"之间来回换算、还要经过夹取，必然带有亚像素误差；
@@ -1434,6 +1470,36 @@ mod tests {
         // 画布未知 → 退回固定位置，不 panic
         let rect = float_rect_at_row(egui::Rect::NOTHING, row, size, min);
         assert_eq!(rect.min, egui::pos2(48.0, 48.0));
+    }
+
+    /// 顶栏要用的几个纯换算：缩放百分比、适应高度、页码校验、菜单行文本。
+    #[test]
+    fn toolbar_conversions() {
+        // 缩放：显示为整数百分比，解析时取整（153.2 与 153 等价）
+        assert_eq!(zoom_percent_text(1.532), "153%");
+        assert_eq!(zoom_percent_text(1.0), "100%");
+        assert_eq!(parse_zoom_percent("153.2"), Some(1.53));
+        assert_eq!(parse_zoom_percent("153"), Some(1.53));
+        assert_eq!(parse_zoom_percent(" 153% "), Some(1.53));
+        assert_eq!(parse_zoom_percent("abc"), None);
+        assert_eq!(parse_zoom_percent("0"), None, "0% 无意义");
+        assert_eq!(parse_zoom_percent("-5"), None);
+
+        // 适应高度：视口高 ÷ 页高；退化输入返回 None
+        assert_eq!(fit_height_zoom(600.0, 300.0), Some(2.0));
+        assert_eq!(fit_height_zoom(0.0, 300.0), None);
+        assert_eq!(fit_height_zoom(600.0, 0.0), None);
+
+        // 页码：1..=page_count 合法
+        assert_eq!(page_index_from_text("3", 10), Some(PageIndex::new(2)));
+        assert_eq!(page_index_from_text("1", 10), Some(PageIndex::FIRST));
+        assert_eq!(page_index_from_text("0", 10), None);
+        assert_eq!(page_index_from_text("11", 10), None);
+        assert_eq!(page_index_from_text("x", 10), None);
+
+        // 菜单行：勾选时行首为 ✓，否则为空格
+        assert_eq!(checkbox_row("链接框", true), "✓ 链接框");
+        assert_eq!(checkbox_row("链接框", false), "  链接框");
     }
 
     /// 尺寸比较要带容差：亚像素误差不能算"修改"。

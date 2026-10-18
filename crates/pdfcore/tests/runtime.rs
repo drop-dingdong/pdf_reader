@@ -49,6 +49,20 @@ fn pump_until(
     panic!("超时：{label}");
 }
 
+/// 逆时针旋转：等价于三次顺时针，四个方向闭合回原位。
+#[test]
+fn counter_clockwise_rotation_closes_the_loop() {
+    let cache = Arc::new(LruCache::new(64 * 1024 * 1024));
+    let mut session = session_with_worker_scheduler(cache, 1);
+    let start = session.state().user_rotation;
+    for _ in 0..4 {
+        let _ = session.handle(ViewerCommand::RotateCounterClockwise, &mut Vec::new());
+    }
+    assert_eq!(session.state().user_rotation, start, "四次逆时针应回到初始方向");
+    let _ = session.handle(ViewerCommand::RotateCounterClockwise, &mut Vec::new());
+    assert_ne!(session.state().user_rotation, start, "一次逆时针应改变方向");
+}
+
 #[test]
 fn worker_scheduler_renders_through_the_session() {
     let cache = Arc::new(LruCache::new(64 * 1024 * 1024));

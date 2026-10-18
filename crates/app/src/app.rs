@@ -30,7 +30,8 @@ use crate::view::{
     body_size_of, destination_points, drag_float_rect, find_dest_index, find_float_for_custom,
     float_rect_at_row, float_size_for_body, overflow_layout,
     pages_intersecting,
-    body_size_changed, save_button_label, CUSTOM_SYMBOL_DELETE, CUSTOM_SYMBOL_EDIT,
+    body_size_changed, checkbox_row, fit_height_zoom, page_index_from_text,
+    parse_zoom_percent, save_button_label, zoom_percent_text, CUSTOM_SYMBOL_DELETE, CUSTOM_SYMBOL_EDIT,
     CUSTOM_SYMBOL_IMAGE,
     CUSTOM_SYMBOL_TEXT,
     pin_exits_on_mode_change,
@@ -119,6 +120,45 @@ fn load_sidecar(pdf: &std::path::Path) -> Option<persist::SavedData> {
             None
         }
     }
+}
+
+/// 缩放模式（决定缩放菜单的标题）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZoomMode {
+    /// 适应宽度
+    FitWidth,
+    /// 适应高度
+    FitHeight,
+    /// 100%
+    Actual,
+    /// 其它（手动输入或滚轮缩放）
+    Custom,
+}
+
+impl ZoomMode {
+    fn label(self) -> &'static str {
+        match self {
+            ZoomMode::FitWidth => "适应宽度",
+            ZoomMode::FitHeight => "适应高度",
+            ZoomMode::Actual => "100%",
+            ZoomMode::Custom => "自定义",
+        }
+    }
+}
+
+/// 路径过长时中间截断（保留开头与文件名），如 `aa/…/bb.pdf`。
+fn truncate_middle(text: &str, limit: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= limit || limit < 8 {
+        return text.to_string();
+    }
+    let keep = limit - 1;
+    let head = keep / 2;
+    let tail = keep - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(chars[chars.len() - tail..].iter());
+    out
 }
 
 /// 侧栏的两个标签页。
@@ -301,6 +341,14 @@ pub struct PdfReaderApp {
     custom_previews: Vec<CustomPreview>,
     /// 自定义数据是否有未保存的修改（影响保存按钮文案）。
     data_dirty: bool,
+    /// 页码原位编辑草稿（`Some` = 正在编辑）。
+    page_edit: Option<String>,
+    /// 缩放比原位编辑草稿。
+    zoom_edit: Option<String>,
+    /// 缩放菜单当前的模式标题。
+    zoom_mode: ZoomMode,
+    /// 底部搜索框是否显示（Ctrl+F 切换）。
+    search_open: bool,
     /// 正在编辑题目 `(下标, 草稿)`。
     editing_title: Option<(usize, String)>,
     /// 正在编辑正文 `(下标, 草稿)`（文字预览：固定浮窗内双击正文进入）。
@@ -405,6 +453,10 @@ impl PdfReaderApp {
             custom_dialog: None,
             custom_previews: Vec::new(),
             data_dirty: false,
+            page_edit: None,
+            zoom_edit: None,
+            zoom_mode: ZoomMode::Custom,
+            search_open: false,
             editing_title: None,
             editing_body: None,
             link_marks: Vec::new(),
@@ -880,116 +932,216 @@ impl PdfReaderApp {
 
     fn draw_toolbar(&mut self, ui: &mut egui::Ui, session: &DocumentSession) {
         egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("上一页").clicked() {
-                    self.commands.push(ViewerCommand::PrevPage);
-                }
-                if ui.button("下一页").clicked() {
-                    self.commands.push(ViewerCommand::NextPage);
-                }
-                ui.separator();
-                if ui.button("－").clicked() {
-                    self.commands.push(ViewerCommand::ZoomOut);
-                }
-                if ui.button("＋").clicked() {
-                    self.commands.push(ViewerCommand::ZoomIn);
-                }
-                if ui.button("100%").clicked() {
-                    self.commands.push(ViewerCommand::SetZoom(1.0));
-                }
-                if ui.button("适应宽度").clicked() {
-                    self.commands.push(ViewerCommand::FitWidth);
-                }
-                ui.separator();
-                if ui.button("顺时针旋转").clicked() {
-                    self.commands.push(ViewerCommand::RotateClockwise);
-                }
-                ui.separator();
-                // 页码输入：键入数字后回车跳转（第二轮验收要求）
-                ui.label("跳到：");
-                let page_response = ui.add(
-                    egui::TextEdit::singleline(&mut self.page_input)
-                        .desired_width(56.0)
-                        .hint_text("页码"),
+            // ---- 第 0 行：文件（路径 + 保存自定义数据）----
+            ui.horizontal(|ui| {
+                let path_text = self
+                    .document_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "（未打开文件）".to_string());
+                let response = ui.add(
+                    egui::Label::new(RichText::new(truncate_middle(&path_text, 70)).small())
+                        .truncate(),
                 );
-                if page_response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                    match self.page_input.trim().parse::<u32>() {
-                        Ok(number) if number >= 1 && number <= session.page_count() => {
-                            self.commands.push(ViewerCommand::GoToPage(PageIndex::new(number - 1)));
-                            self.error = None;
-                        }
-                        Ok(number) => {
-                            self.error =
-                                Some(format!("页码 {number} 超出范围（1–{}）", session.page_count()))
-                        }
-                        Err(_) => self.error = Some("请输入数字页码".to_string()),
+                response.on_hover_text(&path_text);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(save_button_label(self.data_dirty)).clicked() {
+                        self.save_custom_data();
                     }
-                }
+                });
+            });
+
+            // ---- 第 1 行：侧栏 / 自定义 preview / Pin 悬浮响应（全部左对齐）----
+            ui.horizontal(|ui| {
+                ui.toggle_value(&mut self.show_outline, "侧栏")
+                    .on_hover_text("显示/隐藏侧边栏（目录 / 自定义preview）");
                 ui.separator();
-                // 拖拽语义：平移 / 选字 两档（"自动"模式不可靠，已按反馈移除）
-                ui.label("拖拽：");
-                for tool in [Tool::Pan, Tool::Select] {
-                    if ui.selectable_label(self.tool == tool, tool.label()).clicked() {
-                        self.tool = tool;
-                        // 切到"选字"= 切换预览模式 → 退出 Pin（用户最终要求）
-                        if pin_exits_on_mode_change(tool == Tool::Select, false) {
-                            self.custom_pin = None;
-                        }
-                    }
-                }
-                ui.separator();
-                // 复制：除了 Ctrl+C，也提供一个可见入口，便于确认选区内容
-                if ui.button("复制").clicked() {
-                    self.commands.push(ViewerCommand::CopySelection);
-                }
-                ui.toggle_value(&mut self.show_outline, "侧栏");
-                // 链接热区框（用户需求）：勾选后用红色空心框显示链接 bbox
-                ui.checkbox(&mut self.show_links, "链接框");
-                // 被引用的点（链接目的地）：与链接框同样的缩放阈值（过小不显示）
-                ui.checkbox(&mut self.show_dest_points, "引用点");
-                // 关掉后：侧栏 Pin 条目悬浮不再有任何响应（无临时预览、不点亮旧浮窗）
-                ui.checkbox(&mut self.pin_hover_enabled, "Pin悬浮响应");
-                if ui.button("添加测试浮窗").clicked() {
-                    self.add_test_float();
-                }
-                ui.separator();
-                if ui.button(save_button_label(self.data_dirty)).clicked() {
-                    self.save_custom_data();
-                }
                 if ui.button("＋文字预览").clicked() {
                     self.enter_pin(CustomKind::Text);
                 }
                 if ui.button("＋图片预览").clicked() {
                     self.enter_pin(CustomKind::Image);
                 }
-                // 截图模式：进入后主视图只用于框选区域
-                // 截图模式**不可相互覆盖**：已在截图（普通截图或编辑被引用点）时按钮无响应，
-                // 直到回到正常阅读模式（Esc / Enter 退出）。
-                if ui
-                    .add_enabled(self.capture.is_none(), egui::Button::new("截图"))
-                    .clicked()
-                {
-                    // 切到"截图"= 切换预览模式 → 退出 Pin（用户最终要求）
-                    if pin_exits_on_mode_change(false, true) {
-                        self.custom_pin = None;
+                ui.separator();
+                ui.checkbox(&mut self.pin_hover_enabled, "Pin悬浮响应");
+            });
+
+            // ---- 第 2 行：页 / 缩放 / 旋转 / 预览模式（左） + 引用显示样式（右）----
+            ui.horizontal(|ui| {
+                // 上一页 / 页码（双击原位编辑） / 下一页
+                if ui.button("上一页").clicked() {
+                    self.commands.push(ViewerCommand::PrevPage);
+                }
+                let current = session.state().current_page;
+                if let Some(draft) = self.page_edit.as_mut() {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(draft)
+                            .desired_width(44.0)
+                            .hint_text("页码"),
+                    );
+                    if response.gained_focus() {
+                        // 首次进入编辑时全选，方便直接覆盖
+                        response.request_focus();
                     }
-                    self.capture = Some(CaptureState::default());
-                    self.message = "截图模式：拖动框选区域，Enter 保存并退出，Esc 退出".to_string();
+                    let commit = response.lost_focus() || ui.input(|i| i.key_pressed(Key::Enter));
+                    if commit {
+                        match page_index_from_text(draft, session.page_count()) {
+                            Some(page) => {
+                                self.commands.push(ViewerCommand::GoToPage(page));
+                                self.error = None;
+                                self.page_edit = None;
+                            }
+                            None => {
+                                self.error = Some(format!(
+                                    "页码需在 1–{} 之间",
+                                    session.page_count()
+                                ));
+                                self.page_edit = None;
+                            }
+                        }
+                    }
+                } else {
+                    let label = format!("{} / {}", current.display_number(), session.page_count());
+                    if ui
+                        .add(egui::Label::new(label).sense(egui::Sense::click()))
+                        .on_hover_text("双击可直接输入页码")
+                        .double_clicked()
+                    {
+                        self.page_edit = Some(current.display_number().to_string());
+                    }
+                }
+                if ui.button("下一页").clicked() {
+                    self.commands.push(ViewerCommand::NextPage);
                 }
 
-                // 搜索（同步接口：大文档可能短暂卡顿，见 decision-log D-03/D-07）
                 ui.separator();
+
+                // 缩放比（双击原位编辑）+ 缩放模式菜单
+                let zoom = session.state().zoom;
+                if let Some(draft) = self.zoom_edit.as_mut() {
+                    let response = ui.add(egui::TextEdit::singleline(draft).desired_width(52.0));
+                    if response.gained_focus() {
+                        response.request_focus();
+                    }
+                    let commit = response.lost_focus() || ui.input(|i| i.key_pressed(Key::Enter));
+                    if commit {
+                        match parse_zoom_percent(draft) {
+                            Some(value) => {
+                                self.commands.push(ViewerCommand::SetZoom(value));
+                                self.zoom_mode = ZoomMode::Custom;
+                                self.error = None;
+                            }
+                            None => self.error = Some("缩放比需为正数百分比".to_string()),
+                        }
+                        self.zoom_edit = None;
+                    }
+                } else {
+                    if ui
+                        .add(
+                            egui::Label::new(zoom_percent_text(zoom))
+                                .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text("双击可直接输入缩放百分比")
+                        .double_clicked()
+                    {
+                        self.zoom_edit = Some(format!("{:.0}", zoom * 100.0));
+                    }
+                }
+                egui::ComboBox::from_id_salt("zoom-mode")
+                    .selected_text(self.zoom_mode.label())
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(false, "适应宽度").clicked() {
+                            self.commands.push(ViewerCommand::FitWidth);
+                            self.zoom_mode = ZoomMode::FitWidth;
+                        }
+                        if ui.selectable_label(false, "适应高度").clicked() {
+                            if let Some(placement) = session.placement(current) {
+                                if let Some(fit) = fit_height_zoom(
+                                    session.viewport().size.height,
+                                    placement.rect.height,
+                                ) {
+                                    self.commands.push(ViewerCommand::SetZoom(zoom * fit));
+                                }
+                            }
+                            self.zoom_mode = ZoomMode::FitHeight;
+                        }
+                        if ui.selectable_label(false, "100%").clicked() {
+                            self.commands.push(ViewerCommand::SetZoom(1.0));
+                            self.zoom_mode = ZoomMode::Actual;
+                        }
+                    });
+
+                ui.separator();
+
+                // 旋转：顺时针 / 逆时针
+                if ui.button("\u{21bb}").on_hover_text("顺时针旋转").clicked() {
+                    self.commands.push(ViewerCommand::RotateClockwise);
+                }
+                if ui.button("\u{21ba}").on_hover_text("逆时针旋转").clicked() {
+                    self.commands.push(ViewerCommand::RotateCounterClockwise);
+                }
+
+                ui.separator();
+
+                // 预览模式：平移 / 选字
+                for tool in [Tool::Pan, Tool::Select] {
+                    if ui.selectable_label(self.tool == tool, tool.label()).clicked() {
+                        self.tool = tool;
+                        if pin_exits_on_mode_change(tool == Tool::Select, false) {
+                            self.custom_pin = None;
+                        }
+                    }
+                }
+
+                // 引用显示样式（链接框 + 引用点 合并为一个菜单）
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    egui::ComboBox::from_id_salt("display-style")
+                        .selected_text("引用显示样式")
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(
+                                    self.show_links,
+                                    checkbox_row("链接框", self.show_links),
+                                )
+                                .clicked()
+                            {
+                                self.show_links = !self.show_links;
+                            }
+                            if ui
+                                .selectable_label(
+                                    self.show_dest_points,
+                                    checkbox_row("引用点", self.show_dest_points),
+                                )
+                                .clicked()
+                            {
+                                self.show_dest_points = !self.show_dest_points;
+                            }
+                        });
+                });
+            });
+        });
+    }
+
+    /// 底部搜索框（Ctrl+F 呼出）：关键词、上一个/下一个、命中计数。
+    fn draw_search_bar(&mut self, ui: &mut egui::Ui, session: &DocumentSession) {
+        if !self.search_open {
+            return;
+        }
+        egui::Panel::bottom("search-bar").show(ui, |ui| {
+            ui.horizontal(|ui| {
                 ui.label("搜索：");
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.search_input)
-                        .desired_width(140.0)
+                        .desired_width(180.0)
                         .hint_text("关键词"),
                 );
+                if response.gained_focus() {
+                    response.request_focus();
+                }
                 let submitted = response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 if (submitted || ui.button("查找").clicked()) && !self.search_input.is_empty() {
                     match session.search(&SearchQuery::new(self.search_input.clone())) {
                         Ok(hits) => {
-                            // 0 命中往往意味着"扫描件没有文本层"，而不是搜索坏了 —— 说清楚
                             self.message = if hits.is_empty() {
                                 format!(
                                     "未找到“{}”（若 PDF 是扫描件则没有文本层，无法搜索）",
@@ -1010,7 +1162,6 @@ impl PdfReaderApp {
                     }
                 }
                 if !self.hits.is_empty() {
-                    // 上一个 / 下一个（第二轮验收要求补"上一个"）
                     if ui.button("上一个").clicked() {
                         let index = match self.active_hit {
                             Some(0) | None => self.hits.len() - 1,
@@ -1019,7 +1170,8 @@ impl PdfReaderApp {
                         self.goto_hit(index);
                     }
                     if ui.button("下一个").clicked() {
-                        let index = self.active_hit.map(|index| index + 1).unwrap_or(0) % self.hits.len();
+                        let index =
+                            self.active_hit.map(|index| index + 1).unwrap_or(0) % self.hits.len();
                         self.goto_hit(index);
                     }
                     ui.label(format!(
@@ -1028,6 +1180,11 @@ impl PdfReaderApp {
                         self.hits.len()
                     ));
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("关闭").clicked() {
+                        self.search_open = false;
+                    }
+                });
             });
         });
     }
@@ -1370,16 +1527,11 @@ impl PdfReaderApp {
         self.message = "已生成该自定义preview浮窗".to_string();
     }
 
-    fn draw_status(&self, ui: &mut egui::Ui, session: &DocumentSession) {
+    /// 底部状态栏：页码与缩放已移到顶栏（用户要求），这里只留消息、选中字数与诊断。
+    fn draw_status(&self, ui: &mut egui::Ui) {
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(format!(
-                    "第 {} / {} 页",
-                    session.state().current_page.display_number(),
-                    session.page_count()
-                ));
                 ui.separator();
-                ui.label(format!("缩放 {:.0}%", session.state().zoom * 100.0));
                 ui.separator();
                 ui.label(format!("纹理 {} 个", self.textures.len()));
                 if let Some(kind) = self.custom_pin {
@@ -2080,6 +2232,9 @@ impl PdfReaderApp {
     }
 
     /// 添加一个"测试浮窗"（带任意文字），位置按已有浮窗数量级联偏移。
+    ///
+    /// 入口按钮已按用户要求从界面移除（代码保留，便于以后挂到菜单里恢复）。
+    #[allow(dead_code)]
     fn add_test_float(&mut self) {
         let id = self.next_float_id;
         self.next_float_id += 1;
@@ -3360,8 +3515,16 @@ impl eframe::App for PdfReaderApp {
         }
 
         self.draw_toolbar(ui, &session);
+        // Ctrl+F 切换底部搜索框；Esc 关闭
+        if ctx.input(|input| input.modifiers.command && input.key_pressed(Key::F)) {
+            self.search_open = !self.search_open;
+        }
+        if self.search_open && ctx.input(|input| input.key_pressed(Key::Escape)) {
+            self.search_open = false;
+        }
+        self.draw_search_bar(ui, &session);
         self.draw_sidebar(ui, &session);
-        self.draw_status(ui, &session);
+        self.draw_status(ui);
         self.draw_canvas(ui, &mut session);
         let after_draw = frame_start.elapsed();
 
