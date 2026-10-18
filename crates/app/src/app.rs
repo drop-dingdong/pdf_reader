@@ -936,6 +936,25 @@ impl PdfReaderApp {
         for (tile, image) in session.tiles_for(page) {
             let key = RenderKey::tiled(page, placement.scale, placement.rotation, tile);
             if !self.textures.contains(&key) {
+                if self.diagnose {
+                    // 贴图诊断：渲染尺寸 vs 页面像素尺寸 vs 屏幕摆放位置
+                    // 用于区分"内容错位"（后端渲染）与"摆放错位"（前端映射）。
+                    let page_px = Size::new(
+                        placement.rect.width.round(),
+                        placement.rect.height.round(),
+                    );
+                    let pixels = tile.pixel_rect(page_px);
+                    let screen = tile_view_rect(placement.rect, pixels);
+                    let scroll = session.viewport().scroll;
+                    eprintln!(
+                        "[贴图] 页={} col={} row={} 瓦片图={}x{} 页面px={:.0}x{:.0} 瓦片px=({:.0},{:.0},{:.0},{:.0}) 屏幕=({:.1},{:.1},{:.0},{:.0}) scroll=({:.1},{:.1})",
+                        page.get(), tile.col, tile.row, image.width, image.height,
+                        page_px.width, page_px.height,
+                        pixels.x, pixels.y, pixels.width, pixels.height,
+                        screen.x - scroll.x, screen.y - scroll.y,
+                        screen.width, screen.height, scroll.x, scroll.y
+                    );
+                }
                 self.upload(ctx, key, &image);
                 count += 1;
             }
