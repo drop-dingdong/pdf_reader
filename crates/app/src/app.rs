@@ -2020,6 +2020,9 @@ impl PdfReaderApp {
                         // v1 只遍历"已缓存"的瓦片，未就绪区域直接露出深色画布 ——
                         // 高倍缩放时看起来就是"视野全黑"（第二轮验收 §15）。
                         let pixel_size = placement.pixel_size();
+                        let tile_borders = std::env::var("PDF_READER_TILE_BORDERS")
+                            .map(|value| value != "0")
+                            .unwrap_or(true);
                         let mut ready = 0u32;
                         let mut total = 0u32;
                         for row in first.row..=last.row {
@@ -2045,6 +2048,16 @@ impl PdfReaderApp {
                                         paint_image(&painter, texture, tile_screen);
                                     }
                                     None => paint_blank(&painter, tile_screen),
+                                }
+                                // 临时诊断：给每块瓦片描 2px 红线，便于肉眼分辨瓦片范围。
+                                // 默认开启；设 PDF_READER_TILE_BORDERS=0 可关闭。
+                                if tile_borders {
+                                    painter.rect_stroke(
+                                        tile_screen,
+                                        CornerRadius::ZERO,
+                                        Stroke::new(2.0, Color32::from_rgb(230, 30, 30)),
+                                        StrokeKind::Inside,
+                                    );
                                 }
                             }
                         }
