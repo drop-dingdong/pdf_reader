@@ -513,12 +513,13 @@ fn zoom_keeps_the_view_center_anchored() {
     );
 }
 
-/// D-05 退化路径：视野中心落在页间距时捕获失败，应退化为"当前页顶部对齐"而不是 panic。
+/// D-05 退化路径：视野中心落在页间距时捕获失败 —— 现在**保持位置并夹取**，不再跳回页顶。
 ///
-/// 注意第二轮验收统一了跳转语义：`scroll_to_page` 是**顶部对齐**（不再是居中），
-/// 因此锚点捕获失败时的兜底行为也随之变为顶部对齐。
+/// 原实现退化为"当前页顶部对齐 + 水平居中"。在**横向布局**下这会造成明显跳变：
+/// 向右滚动时视口中心很容易落进页间距，于是每次重排都被拽回"当前页顶部正中"
+/// （用户实测：纵向大缩放时向右移动会跳到该页顶部）。因此改为保持位置。
 #[test]
-fn anchor_falls_back_to_page_top_when_center_is_between_pages() {
+fn anchor_fallback_keeps_scroll_when_center_is_between_pages() {
     let mut session = assemble();
     let mut events = Vec::new();
     session.handle(ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)), &mut events);
@@ -527,17 +528,26 @@ fn anchor_falls_back_to_page_top_when_center_is_between_pages() {
     session.handle(ViewerCommand::SetScroll(Vec2::new(0.0, 410.0)), &mut events);
     assert!(session.capture_anchor().is_none(), "中心落在页间距，应捕获失败");
 
-    let current = session.state().current_page;
+    let before = session.viewport().scroll;
     session.handle(ViewerCommand::SetZoom(1.5), &mut events); // 不得 panic
 
-    // 退化行为 = 当前页顶部对齐（受 max_scroll 夹取）
-    let placement = *session.layout().placement(current).expect("当前页应有布局");
-    let expected = placement.rect.y.min(content_max_scroll_y(&session));
+    // 保持原有位置（只可能被夹取到合法范围），不会跳到某页顶部
+    let after = session.viewport().scroll;
+    let max_y = content_max_scroll_y(&session);
     assert!(
-        (session.viewport().scroll.y - expected).abs() < 0.5,
-        "期望退化到当前页顶部对齐 {expected}，实际 {:?}",
-        session.viewport().scroll
+        after.y <= max_y + 0.5,
+        "位置必须在合法范围内，实际 {after:?}，上限 {max_y}"
     );
+    let page_top = session
+        .layout()
+        .placement(session.state().current_page)
+        .map(|placement| placement.rect.y);
+    if let Some(page_top) = page_top {
+        assert!(
+            (after.y - before.y).abs() < 0.5 || (after.y - page_top).abs() > 5.0,
+            "不应被拉回页顶：before={before:?} after={after:?} page_top={page_top}"
+        );
+    }
 }
 
 /// 第三轮验收：缩放之后，**旧比例**的在飞任务必须被取消。

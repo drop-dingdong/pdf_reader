@@ -674,15 +674,21 @@ impl DocumentSession {
         self.layout = self.layout_engine.compute(&self.pages, &params);
     }
 
-    /// D-05：把锚点放回视口中心；锚点缺失（中心落在页间距）时退化为"当前页居中"。
+    /// D-05：把锚点放回视口中心；锚点缺失（中心落在页间距）时**保持现有位置并夹取**。
+    ///
+    /// 原实现退化为"当前页顶部对齐 + 水平居中"（`scroll_to_page`）。在**横向布局**下
+    /// 这会造成明显跳变：向右滚动时视口中心很容易落进两页之间的**页间距**，
+    /// 于是每次重排都被拽回"当前页顶部正中"（用户实测：纵向大缩放时向右移动会跳到该页顶部）。
+    /// 保持位置并夹取既不会跳变，也不会让视图停在非法位置。
     fn apply_anchor(&mut self, anchor: Option<ScrollAnchor>) {
         match anchor {
             Some(anchor) => self.restore_anchor(anchor),
             None => {
-                self.viewport.scroll = self.layout_engine.scroll_to_page(
+                let target = self.viewport.scroll;
+                self.viewport.scroll = self.layout_engine.clamp_scroll(
                     &self.layout,
-                    self.state.current_page,
                     self.viewport.size,
+                    target,
                 );
             }
         }
