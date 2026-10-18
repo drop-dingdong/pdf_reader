@@ -246,6 +246,12 @@ struct Float {
     rect: egui::Rect,
     /// 若是某个自定义 preview 的**正式浮窗**，记录其在 `custom_previews` 中的下标。
     custom: Option<usize>,
+    /// 正文尺寸的**权威值**：只在"创建"与"拖动右下角改大小"时写入。
+    ///
+    /// 不从 `rect` 每帧反算 —— 那样会带入换算与夹取的亚像素误差，
+    /// 使"尺寸是否变化"的判断失效（D-73 的根因）。浮窗自己持有它，
+    /// 回写时直接赋值，比较就是数值对数值（用户建议的模型）。
+    body: egui::Vec2,
     /// 来源：由某个被引用点的悬停预览**固定**而来时记录 `(页号, 下标)`。
     /// 用于"同一目的地再次悬停时高亮并置顶这个浮窗，而不是再弹预览"。
     origin: Option<(PageIndex, usize)>,
@@ -1277,6 +1283,8 @@ impl PdfReaderApp {
     /// 按某个自定义 preview 的数据生成它的**正式浮窗**（正文尺寸取 `body_size`）。
     fn spawn_custom_float(&mut self, index: usize, rect: egui::Rect) {
         let Some(preview) = self.custom_previews.get(index) else { return };
+        // 权威尺寸直接取记录值：与记录完全一致，天然不会误判"已修改"
+        let body = preview.body_size;
         let id = self.next_float_id;
         self.next_float_id += 1;
         let content = match (preview.kind, preview.snapshot.clone()) {
@@ -1294,6 +1302,7 @@ impl PdfReaderApp {
             content,
             rect,
             custom: Some(index),
+            body,
             origin: None,
         });
         self.highlight_float = Some(id);
@@ -2029,7 +2038,8 @@ impl PdfReaderApp {
 
             // 浮窗尺寸变化 → 回写正文尺寸到来源数据（用户要求：改大小即记住正文面积）
             for window in std::mem::take(&mut self.floats) {
-                let body = body_size_of(window.rect, FLOAT_TITLE_HEIGHT);
+                // 权威尺寸来自浮窗自身（创建/改大小时写入），不做任何反算
+                let body = window.body;
                 if let Some((page, index)) = window.origin {
                     if let Some(mark) = self
                         .dest_marks
@@ -2086,6 +2096,7 @@ impl PdfReaderApp {
             )),
             origin: None,
             custom: None,
+            body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
             rect,
         });
         self.message = format!("已添加测试浮窗 #{id}");
@@ -2301,6 +2312,7 @@ impl PdfReaderApp {
                 content: FloatContent::Image(texture),
                 origin: Some((page, index)),
                 custom: None,
+                body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
                 rect: clamp_float_rect(
                     rect.translate(response.drag_delta()),
                     canvas,
@@ -2984,6 +2996,10 @@ impl PdfReaderApp {
             id,
             title: format!("截图 #{id}"),
             content: FloatContent::Image(texture),
+            body: body_size_of(
+                egui::Rect::from_min_size(egui::pos2(32.0 + cascade, 32.0 + cascade), size),
+                FLOAT_TITLE_HEIGHT,
+            ),
             rect: egui::Rect::from_min_size(egui::pos2(32.0 + cascade, 32.0 + cascade), size),
             origin: None,
             custom: None,
@@ -3046,13 +3062,16 @@ impl PdfReaderApp {
             let handle = ui.interact(handle_rect, Id::unique(("float-resize", id)), Sense::drag());
             if handle.dragged() {
                 let delta = handle.drag_delta();
-                self.floats[index].rect = egui::Rect::from_min_size(
+                let resized = egui::Rect::from_min_size(
                     rect.min,
                     EVec2::new(
                         (rect.width() + delta.x).max(FLOAT_MIN_SIZE.x),
                         (rect.height() + delta.y).max(FLOAT_MIN_SIZE.y),
                     ),
                 );
+                self.floats[index].rect = resized;
+                // 尺寸是**权威值**：只在真正改大小时写入（不从 rect 每帧反算）
+                self.floats[index].body = body_size_of(resized, FLOAT_TITLE_HEIGHT);
             }
 
             // 右上角关闭按钮：**画成带底色的圆**，悬停/按下变红 —— 否则只有一个"✕"太不显眼
