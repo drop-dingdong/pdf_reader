@@ -71,6 +71,7 @@ pub mod ids;
 pub mod image;
 pub mod layout;
 pub mod render;
+pub mod tiling;
 pub mod scheduler;
 pub mod session;
 pub mod store;
