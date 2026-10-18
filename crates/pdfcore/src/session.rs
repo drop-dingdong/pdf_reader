@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use crate::document::{Capabilities, Destination, NavigationIndex, OpenedDocument};
 use crate::error::{CoreError, Result};
-use crate::geometry::{Insets, Point, Rotation, Size, Vec2};
+use crate::geometry::{Insets, Point, Rect, Rotation, Size, Vec2};
 use crate::ids::{JobId, PageIndex};
 use crate::image::RasterImage;
 use crate::layout::{
@@ -227,6 +227,11 @@ pub struct DocumentSession {
     page_texts: HashMap<PageIndex, Arc<PageText>>,
     submitted: HashSet<RenderKey>,
     jobs: HashMap<RenderKey, JobId>,
+    /// D-101：为"预览截图"发起的区域渲染（按 `(页, 渲染比例, 旋转, 块)` 记账）。
+    ///
+    /// 与 `jobs` 分开是为了让 [`DocumentSession::cancel_stale_jobs`] **不碰**它们 ——
+    /// 那是为"用户正在看的页"服务的，预览区域的渲染与视口无关。
+    region_jobs: HashMap<RenderKey, JobId>,
     visible_scratch: Vec<PageIndex>,
     /// D-02：分块策略（默认 `AbovePixels(4 MP)`，按**渲染**像素面积判断）。
     tiling: TilingPolicy,
@@ -264,6 +269,7 @@ impl DocumentSession {
             page_texts: HashMap::new(),
             submitted: HashSet::new(),
             jobs: HashMap::new(),
+            region_jobs: HashMap::new(),
             visible_scratch: Vec::new(),
             tiling: TilingPolicy::default(),
             overscan: DEFAULT_OVERSCAN,
@@ -454,6 +460,113 @@ impl DocumentSession {
             placement.page_size.rotated(placement.rotation),
             self.render_scale_of(placement),
         ))
+    }
+
+    /// 为"**非视口用途**"（预览截图）请求一块页面区域：只渲染覆盖它的块。
+    ///
+    /// 为什么需要它：预览图要按**记录的分辨率**重建（D-100），而那块区域往往不在当前视口
+    /// 所在的波段上 —— 缓存里没有像素，旧实现只能拼出"走过的部分 + 白"（D-101）。
+    /// 这里按给定渲染比例把覆盖该区域的块**当成任务提交**，渲染完再合成。
+    ///
+    /// 与 [`ViewerCommand::RequestVisible`] 的区别：
+    /// * 不受视口限制，可为任意页 / 任意比例请求；
+    /// * 记在独立的在飞表里，**不会**被 [`DocumentSession::cancel_stale_jobs`] 取消
+    ///   （缩放/旋转仍会让它作废，届时会被重新请求）。
+    ///
+    /// 返回覆盖该区域的块数（`0` = 区域在页外或页面无效）。已缓存/已在飞的块不重复提交。
+    pub fn request_region(
+        &mut self,
+        page: PageIndex,
+        page_rect: Rect,
+        render_scale: Scale,
+    ) -> usize {
+        let Some((placement, grid)) = self.region_grid(page, render_scale) else {
+            return 0;
+        };
+        let Some((col0, row0, col1, row1)) =
+            grid.tiles_for_page_rect(page_rect, placement.page_size, placement.rotation)
+        else {
+            return 0;
+        };
+        let mut count = 0;
+        for row in row0..=row1 {
+            for col in col0..=col1 {
+                let (_, _, width, height) = grid.tile_px(col, row);
+                if width == 0 || height == 0 {
+                    continue;
+                }
+                count += 1;
+                let tile = TileSpec::new(col, row);
+                let key = RenderKey::tiled(page, render_scale, placement.rotation, tile);
+                if self.region_jobs.contains_key(&key) || self.jobs.contains_key(&key) {
+                    continue;
+                }
+                if self.cache.get(&key).is_some() {
+                    continue;
+                }
+                let region = RenderRegion {
+                    page_rect: grid.tile_page_rect(
+                        col,
+                        row,
+                        placement.page_size,
+                        placement.rotation,
+                    ),
+                    pixel_size: (width, height),
+                };
+                let request =
+                    RenderRequest::tiled(page, render_scale, placement.rotation, tile, region)
+                        .with_priority(RenderPriority::Visible);
+                let job = self.scheduler.submit(request);
+                self.region_jobs.insert(key, job);
+            }
+        }
+        count
+    }
+
+    /// 该区域在给定渲染比例下**全部就绪**的块；缺任何一块返回 `None`（调用方应继续等待）。
+    pub fn region_tiles(
+        &self,
+        page: PageIndex,
+        page_rect: Rect,
+        render_scale: Scale,
+    ) -> Option<Vec<(TileSpec, Arc<RasterImage>)>> {
+        let (placement, grid) = self.region_grid(page, render_scale)?;
+        let (col0, row0, col1, row1) =
+            grid.tiles_for_page_rect(page_rect, placement.page_size, placement.rotation)?;
+        let mut out = Vec::new();
+        for row in row0..=row1 {
+            for col in col0..=col1 {
+                let (_, _, width, height) = grid.tile_px(col, row);
+                if width == 0 || height == 0 {
+                    continue;
+                }
+                let tile = TileSpec::new(col, row);
+                let key = RenderKey::tiled(page, render_scale, placement.rotation, tile);
+                out.push((tile, self.cache.get(&key)?));
+            }
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    /// 该页在给定渲染比例下的网格与布局（预览区域渲染用）。
+    fn region_grid(
+        &self,
+        page: PageIndex,
+        render_scale: Scale,
+    ) -> Option<(PagePlacement, TileGrid)> {
+        let placement = *self.layout.placement(page)?;
+        if !render_scale.is_valid() {
+            return None;
+        }
+        let grid = TileGrid::new(
+            placement.page_size.rotated(placement.rotation),
+            render_scale.0,
+        );
+        Some((placement, grid))
     }
 
     /// 捕获当前视野中心对应的页内位置（D-05）。
@@ -708,6 +821,7 @@ impl DocumentSession {
                     self.cache.insert(key, image);
                     self.submitted.remove(&key);
                     self.jobs.remove(&key);
+                    self.region_jobs.remove(&key);
                     events.push(SessionEvent::PageRendered(key));
                 }
                 RenderEvent::Failed { page, error } => {
@@ -776,12 +890,15 @@ impl DocumentSession {
         self.scheduler.cancel_all();
         self.submitted.clear();
         self.jobs.clear();
+        // 预览区域的任务也一并作废（缩放/旋转后旧比例的重建没有意义，会重新请求）
+        self.region_jobs.clear();
     }
 
     /// 忘记某一页的所有在飞任务记录。
     fn forget_page(&mut self, page: PageIndex) {
         self.submitted.retain(|key| key.page != page);
         self.jobs.retain(|key, _| key.page != page);
+        self.region_jobs.retain(|key, _| key.page != page);
     }
 
     fn set_scroll(&mut self, target: Vec2, events: &mut Vec<SessionEvent>) {
@@ -1023,6 +1140,7 @@ impl DocumentSession {
         let mut stale_pages: Vec<PageIndex> = self
             .jobs
             .keys()
+            .filter(|key| !self.region_jobs.contains_key(*key))
             .map(|key| key.page)
             .filter(|page| *page != current && !visible.contains(page))
             .collect();
@@ -1042,6 +1160,7 @@ impl DocumentSession {
         let mut outdated_pages: Vec<PageIndex> = self
             .jobs
             .keys()
+            .filter(|key| !self.region_jobs.contains_key(*key))
             .filter(|key| visible.contains(&key.page))
             .filter(|key| {
                 self.layout.placement(key.page).map_or(true, |placement| {

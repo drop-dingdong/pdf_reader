@@ -43,8 +43,8 @@ use crate::view::{
     flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
-    view_rect_for, view_to_content, needs_underlay, plan_page, DrawInput, KeyedStore, PageDraw,
-    Preview,
+    view_rect_for, view_to_content, compose_region_snapshot, needs_underlay, plan_page, DrawInput,
+    KeyedStore, PageDraw, Preview,
 };
 
 /// 纹理缓存容量（条目数）。真正的淘汰依据是"是否可见 + 波段"（`retain_preview_scales`），
@@ -1387,7 +1387,7 @@ impl PdfReaderApp {
         });
     }
 
-    fn draw_sidebar(&mut self, ui: &mut egui::Ui, session: &DocumentSession) {
+    fn draw_sidebar(&mut self, ui: &mut egui::Ui, session: &mut DocumentSession) {
         if !self.show_outline {
             return;
         }
@@ -1464,7 +1464,7 @@ impl PdfReaderApp {
     /// 侧栏的"自定义preview（Pin）"列表：
     /// 标题左对齐、页码右对齐、过长标题截断；双击跳转；悬浮显示临时浮窗；
     /// 单击生成/唤出持久浮窗（已有则高亮并置顶，一次性高亮有时限）。
-    fn draw_pin_list(&mut self, ui: &mut egui::Ui, session: &DocumentSession) {
+    fn draw_pin_list(&mut self, ui: &mut egui::Ui, session: &mut DocumentSession) {
         if self.custom_previews.is_empty() {
             ui.label("（还没有自定义preview）");
             return;
@@ -1607,29 +1607,156 @@ impl PdfReaderApp {
         float_rect_at_row(self.canvas_rect, row, size, FLOAT_MIN_SIZE)
     }
 
-    /// 确保某个自定义**图片** preview 有可用截图（缺则按**当前缩放**重新合成）。
+    /// 按**记录的分辨率**取得某页某区域的预览图；缺像素就**提交渲染**并返回 `None`（D-101）。
+    ///
+    /// 流程：
+    /// 1. 记录的分辨率 `scale`（v2 存档字段，`1.0` = 100%）→ 吸到波段上
+    ///    （`render_scale_for`），这样与主视图同波段时能直接命中已有缓存；
+    /// 2. `region_tiles` 已全部就绪 → 在**渲染像素**里 1:1 拼图（输出尺寸 = 区域 × 渲染比例，
+    ///    与当前缩放无关）；
+    /// 3. 缺块 → `request_region` 提交覆盖该区域的块，本帧返回 `None`（调用方下帧重试）。
+    ///
+    /// 这样"初次生成"不再依赖"用户是否在这个缩放下走过那块地方"。
+    fn preview_texture(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &mut DocumentSession,
+        page: PageIndex,
+        page_rect: Rect,
+        scale: f32,
+        texture_name: String,
+        tag: &str,
+    ) -> Option<egui::TextureHandle> {
+        let Some(placement) = session.placement(page).copied() else { return None };
+        if !(page_rect.width > 0.0) || !(page_rect.height > 0.0) {
+            if self.diagnose {
+                eprintln!("[预览] 初次生成失败：{tag} 页={page:?} 区域为空 {page_rect:?}");
+            }
+            return None;
+        }
+        let display_scale = if scale > 0.0 && scale.is_finite() { scale } else { 1.0 };
+        let render = Scale::from_zoom(render_scale_for(display_scale, session.overscan()));
+        let grid = TileGrid::new(
+            placement.page_size.rotated(placement.rotation),
+            render.0,
+        );
+        let Some(range) =
+            grid.tiles_for_page_rect(page_rect, placement.page_size, placement.rotation)
+        else {
+            if self.diagnose {
+                eprintln!(
+                    "[预览] 初次生成失败：{tag} 页={} 区域 {page_rect:?} 不在页面内",
+                    page.display_number()
+                );
+            }
+            return None;
+        };
+        let Some(tiles) = session.region_tiles(page, page_rect, render) else {
+            let count = session.request_region(page, page_rect, render);
+            if self.diagnose {
+                eprintln!(
+                    "[预览] 初次生成：{tag} 页={} 区域pt=({:.1},{:.1},{:.1},{:.1}) 记录分辨率={:.0}% 渲染比例={:.3} 可见块={:?} 提交渲染={} 块（等待就绪）",
+                    page.display_number(),
+                    page_rect.x,
+                    page_rect.y,
+                    page_rect.width,
+                    page_rect.height,
+                    display_scale * 100.0,
+                    render.0,
+                    range,
+                    count
+                );
+            }
+            return None;
+        };
+        let borrowed: Vec<(TileSpec, &RasterImage)> =
+            tiles.iter().map(|(tile, image)| (*tile, image.as_ref())).collect();
+        let Some(image) = compose_region_snapshot(
+            page_rect,
+            placement.page_size,
+            placement.rotation,
+            render.0,
+            &grid,
+            &borrowed,
+        ) else {
+            if self.diagnose {
+                eprintln!(
+                    "[预览] 初次生成失败：{tag} 页={} 区域 {page_rect:?} 的块都为空（块数 {}）",
+                    page.display_number(),
+                    borrowed.len()
+                );
+            }
+            return None;
+        };
+        if self.diagnose {
+            eprintln!(
+                "[预览] 初次生成完成：{tag} 页={} 区域pt=({:.1},{:.1},{:.1},{:.1}) 记录分辨率={:.0}% 渲染比例={:.3} 尺寸={}x{}",
+                page.display_number(),
+                page_rect.x,
+                page_rect.y,
+                page_rect.width,
+                page_rect.height,
+                display_scale * 100.0,
+                render.0,
+                image.size[0],
+                image.size[1]
+            );
+        }
+        Some(ui.ctx().load_texture(texture_name, image, egui::TextureOptions::LINEAR))
+    }
+
+    /// 为"**正在显示**、但还缺预览图"的自定义图片 preview 重试生成。
+    ///
+    /// 只处理已被浮窗引用的条目：不能对存档里的每一条都预渲染（那会在打开文档时
+    /// 把几十个区域全提交渲染）。
+    fn ensure_pending_custom_snapshots(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &mut DocumentSession,
+    ) {
+        let mut shown: Vec<usize> = self
+            .floats
+            .iter()
+            .filter_map(|window| window.custom)
+            .collect();
+        shown.sort_unstable();
+        shown.dedup();
+        for index in shown {
+            let missing = self
+                .custom_previews
+                .get(index)
+                .map_or(false, |preview| {
+                    preview.kind == CustomKind::Image && preview.snapshot.is_none()
+                });
+            if missing {
+                self.ensure_custom_snapshot(ui, session, index);
+            }
+        }
+    }
+
+    /// 确保某个自定义**图片** preview 有可用截图（缺则按**记录的分辨率**重新生成）。
     fn ensure_custom_snapshot(
         &mut self,
         ui: &mut egui::Ui,
-        session: &DocumentSession,
+        session: &mut DocumentSession,
         index: usize,
     ) {
         let Some(preview) = self.custom_previews.get(index) else { return };
         if preview.kind != CustomKind::Image || preview.snapshot.is_some() {
             return;
         }
-        let (page, page_rect) = (preview.page, preview.rect);
-        if page_rect.width <= 0.0 || page_rect.height <= 0.0 {
-            return;
-        }
-        let Some(placement) = session.placement(page).copied() else { return };
-        let content = placement.rect_to_content(page_rect);
-        let Some(image) = self.snapshot_for(ui, session, content) else { return };
-        let texture = ui.ctx().load_texture(
+        let (page, page_rect, scale) = (preview.page, preview.rect, preview.scale);
+        let Some(texture) = self.preview_texture(
+            ui,
+            session,
+            page,
+            page_rect,
+            scale,
             format!("custom-image-{index}"),
-            image,
-            egui::TextureOptions::LINEAR,
-        );
+            "自定义图片",
+        ) else {
+            return;
+        };
         if let Some(preview) = self.custom_previews.get_mut(index) {
             preview.snapshot = Some(texture);
         }
@@ -2495,6 +2622,10 @@ impl PdfReaderApp {
 
             // 固定浮窗：绘制与注册都在此；后加入的在更上层（见 draw_floats）
             if self.capture.is_none() && self.custom_pin.is_none() {
+                // 正在显示、但还没拿到预览图的自定义图片 preview：每帧重试一次。
+                // 旧实现只在"悬浮/点击侧栏条目"时重试，于是"点了但渲染还没好"的浮窗
+                // 会一直空着（D-101 把初次生成改成了"提交渲染 + 等待"，必须有重试入口）。
+                self.ensure_pending_custom_snapshots(ui, session);
                 self.draw_floats(ui, canvas);
                 // 正文原位编辑：先检测双击，再绘制编辑框（两者都在浮窗之后，层级正确）
                 self.detect_body_double_click(ui);
@@ -2540,7 +2671,7 @@ impl PdfReaderApp {
     fn update_hover_preview(
         &mut self,
         ui: &mut egui::Ui,
-        session: &DocumentSession,
+        session: &mut DocumentSession,
         canvas: egui::Rect,
         scroll: Vec2,
     ) {
@@ -2616,36 +2747,32 @@ impl PdfReaderApp {
             }
         }
 
-        // 需要时**渲染一次**截图（之后复用；这正是"None 才渲染"的懒加载）
+        // 需要时**按记录的分辨率**生成一次（之后复用；缺像素则提交渲染、下帧重试）
         let Some(tip) = self.hover_tip.as_ref() else { return };
         let (page, index) = tip.target;
-        let needs_render = self
+        let pending = self
             .dest_marks
             .get(page.get() as usize)
             .and_then(|marks| marks.get(index))
-            .map_or(false, |mark| mark.snapshot.is_none());
-        if needs_render {
-            let saved_rect = self
-                .dest_marks
-                .get(page.get() as usize)
-                .and_then(|marks| marks.get(index))
-                .map(|mark| mark.rect);
-            if let (Some(saved_rect), Some(placement)) = (saved_rect, session.placement(page).copied())
-            {
-                let content = placement.rect_to_content(saved_rect);
-                if let Some(image) = self.snapshot_for(ui, session, content) {
-                    let texture = ui.ctx().load_texture(
-                        format!("dest-hover-{}-{}", page.get(), index),
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    if let Some(mark) = self
-                        .dest_marks
-                        .get_mut(page.get() as usize)
-                        .and_then(|marks| marks.get_mut(index))
-                    {
-                        mark.snapshot = Some(texture);
-                    }
+            .filter(|mark| mark.snapshot.is_none())
+            .map(|mark| (mark.rect, mark.scale));
+        if let Some((saved_rect, scale)) = pending {
+            let texture = self.preview_texture(
+                ui,
+                session,
+                page,
+                saved_rect,
+                scale,
+                format!("dest-hover-{}-{}", page.get(), index),
+                "被引用点",
+            );
+            if let Some(texture) = texture {
+                if let Some(mark) = self
+                    .dest_marks
+                    .get_mut(page.get() as usize)
+                    .and_then(|marks| marks.get_mut(index))
+                {
+                    mark.snapshot = Some(texture);
                 }
             }
         }
@@ -3876,7 +4003,7 @@ impl eframe::App for PdfReaderApp {
         if self.search_open && ctx.input(|input| input.key_pressed(Key::Escape)) {
             self.search_open = false;
         }
-        self.draw_sidebar(ui, &session);
+        self.draw_sidebar(ui, &mut session);
         self.draw_status(ui);
         self.draw_canvas(ui, &mut session);
         let after_draw = frame_start.elapsed();

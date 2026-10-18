@@ -426,6 +426,94 @@ pub fn needs_underlay(plan: PageDraw, ready: usize, total: usize) -> bool {
     }
 }
 
+/// 由"某页某区域、指定渲染比例的块"拼出一张预览图（D-101）。
+///
+/// ## 与 [`compose_snapshot`] 的分工
+/// * `compose_snapshot` 处理**内容空间**的任意矩形（可跨页），用于手动截图；
+///   它必须按 `u = 显示/渲染` 重采样。
+/// * 本函数处理**页面空间**的单页矩形，在**渲染像素**里 1:1 拷贝（块位图与目标缓冲
+///   处在同一坐标系、同一比例），因此没有重采样误差；输出尺寸 = `矩形 × 渲染比例`，
+///   与"当前缩放"完全无关 —— 这正是预览图要按**记录的分辨率**重建的原因。
+///
+/// 未覆盖到的像素保持白色；一个像素都没覆盖到返回 `None`。
+pub fn compose_region_snapshot(
+    page_rect: Rect,
+    page_size: Size,
+    rotation: Rotation,
+    render_scale: f32,
+    grid: &TileGrid,
+    tiles: &[(TileSpec, &RasterImage)],
+) -> Option<egui::ColorImage> {
+    if !(page_rect.width > 0.0) || !(page_rect.height > 0.0) {
+        return None;
+    }
+    let scale = if render_scale > 0.0 { render_scale } else { 1.0 };
+    // 页面空间矩形 → 旋转后的显示坐标 → 渲染像素（取外接矩形；90°/270° 会交换宽高）
+    let corners = [
+        Point::new(page_rect.x, page_rect.y),
+        Point::new(page_rect.right(), page_rect.y),
+        Point::new(page_rect.x, page_rect.bottom()),
+        Point::new(page_rect.right(), page_rect.bottom()),
+    ];
+    let mut min = Point::new(f32::MAX, f32::MAX);
+    let mut max = Point::new(f32::MIN, f32::MIN);
+    for corner in corners {
+        let display = rotation.map_point(corner, page_size);
+        let device = Point::new(display.x * scale, display.y * scale);
+        min = Point::new(min.x.min(device.x), min.y.min(device.y));
+        max = Point::new(max.x.max(device.x), max.y.max(device.y));
+    }
+    let x0 = min.x.round() as i64;
+    let y0 = min.y.round() as i64;
+    let width = (max.x.round() as i64 - x0).max(0) as usize;
+    let height = (max.y.round() as i64 - y0).max(0) as usize;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut rgba = vec![255u8; width * height * 4];
+    let mut painted = false;
+    for (tile, image) in tiles {
+        let (tile_x, tile_y, tile_width, tile_height) = grid.tile_px(tile.col, tile.row);
+        if tile_width == 0 || tile_height == 0 {
+            continue;
+        }
+        let stride = image.format.bytes_per_pixel() as usize;
+        let data = image.data();
+        // 块与目标区域的交叠（两者都是渲染像素，直接按整数拷贝）
+        let left = (tile_x as i64).max(x0);
+        let top = (tile_y as i64).max(y0);
+        let right = (tile_x as i64 + image.width as i64).min(x0 + width as i64);
+        let bottom = (tile_y as i64 + image.height as i64).min(y0 + height as i64);
+        if left >= right || top >= bottom {
+            continue;
+        }
+        for row in top..bottom {
+            let source_y = (row - tile_y as i64) as usize;
+            let dest_y = (row - y0) as usize;
+            for column in left..right {
+                let source_x = (column - tile_x as i64) as usize;
+                let dest_x = (column - x0) as usize;
+                let from = (source_y * image.width as usize + source_x) * stride;
+                let to = (dest_y * width + dest_x) * 4;
+                let (r, g, b) = match image.format {
+                    PixelFormat::Bgra8 => (data[from + 2], data[from + 1], data[from]),
+                    PixelFormat::Rgba8 => (data[from], data[from + 1], data[from + 2]),
+                    PixelFormat::Gray8 => (data[from], data[from], data[from]),
+                };
+                rgba[to] = r;
+                rgba[to + 1] = g;
+                rgba[to + 2] = b;
+                rgba[to + 3] = 255;
+                painted = true;
+            }
+        }
+    }
+    if !painted {
+        return None;
+    }
+    Some(color_image(PixelFormat::Rgba8, &rgba, width as u32, height as u32))
+}
+
 /// 把图像按**保持长宽比**的方式放进 `area`（居中，不拉伸变形）。
 pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     if image.x <= 0.0 || image.y <= 0.0 || area.width() <= 0.0 || area.height() <= 0.0 {
@@ -1489,6 +1577,67 @@ mod tests {
 
         store.clear();
         assert!(store.is_empty());
+    }
+
+    /// D-101：按页面空间矩形 + 指定渲染比例拼图 —— 与当前缩放无关、1:1 拷贝。
+    #[test]
+    fn compose_region_snapshot_copies_tiles_one_to_one() {
+        let make = |width: u32, height: u32, fill: u8| {
+            let mut data = Vec::with_capacity((width * height * 4) as usize);
+            for _ in 0..(width * height) {
+                data.extend_from_slice(&[fill, fill, fill, 255]);
+            }
+            RasterImage::new(width, height, PixelFormat::Bgra8, std::sync::Arc::from(data))
+                .expect("位图")
+        };
+        // 612×792 @2 倍 → 1224×1584，2×2 网格，每块 612×792
+        let page = Size::new(612.0, 792.0);
+        let grid = TileGrid::new(page, 2.0);
+        assert_eq!(grid.side, 2);
+        let a = make(612, 792, 10);
+        let b = make(612, 792, 20);
+        let tiles = vec![
+            (TileSpec::new(0, 1), &a),
+            (TileSpec::new(1, 1), &b),
+        ];
+        // 页面下半部分 → 1224×792 的图，左半 10、右半 20
+        let rect = Rect::new(0.0, 0.0, 612.0, 396.0);
+        let image = compose_region_snapshot(rect, page, Rotation::None, 2.0, &grid, &tiles)
+            .expect("应有内容");
+        assert_eq!(image.size, [1224, 792]);
+        assert_eq!(image.pixels[0].r(), 10);
+        assert_eq!(image.pixels[611].r(), 10);
+        assert_eq!(image.pixels[612].r(), 20);
+        assert_eq!(image.pixels[1224 * 791 + 1223].r(), 20);
+
+        // 区域跨越上下两块 → 上半没有块 → 白（而不是 None）
+        let rect = Rect::new(0.0, 100.0, 612.0, 700.0);
+        let image = compose_region_snapshot(rect, page, Rotation::None, 2.0, &grid, &tiles)
+            .expect("部分覆盖也应有图");
+        assert_eq!(image.size, [1224, 1400]);
+        assert_eq!(image.pixels[0].r(), 255, "未覆盖的页面上部为白");
+
+        // 一个像素都覆盖不到 → None（调用方据此"继续等待渲染"）
+        let rect = Rect::new(0.0, 700.0, 612.0, 92.0); // 页面上部
+        assert!(compose_region_snapshot(rect, page, Rotation::None, 2.0, &grid, &tiles).is_none());
+
+        // 90° 旋转：块在页面空间是"横"的，映射到设备像素后宽高互换。
+        // 旋转后页 792×612pt @2 → 1584×1224 px，网格 2×2，每块 792×612 px。
+        let grid = TileGrid::new(page.rotated(Rotation::Clockwise90), 2.0);
+        assert_eq!(grid.side, 2);
+        let rotated = make(792, 612, 30);
+        let rect = grid.tile_page_rect(0, 0, page, Rotation::Clockwise90);
+        let image = compose_region_snapshot(
+            rect,
+            page,
+            Rotation::Clockwise90,
+            2.0,
+            &grid,
+            &[(TileSpec::new(0, 0), &rotated)],
+        )
+        .expect("旋转后应有内容");
+        assert_eq!(image.size, [792, 612], "一块在设备像素里的尺寸");
+        assert_eq!(image.pixels[0].r(), 30);
     }
 
     // ------------------------------------------------ D-96：整页级就绪门槛

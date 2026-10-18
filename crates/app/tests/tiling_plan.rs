@@ -178,3 +178,69 @@ fn band_and_grid_are_stable_inside_a_band() {
         "波段内可见范围只应收缩：{range:?} → {other:?}"
     );
 }
+
+/// D-101：预览区域渲染 —— 按"记录的分辨率"请求块，就绪后能拼出**与当前缩放无关**的图。
+#[test]
+fn region_render_feeds_the_preview_at_the_recorded_scale() {
+    let backend = MemoryBackend::new(vec![MemoryPage::new(
+        Size::new(595.28, 841.89),
+        Rotation::None,
+        vec!["Hello".to_string()],
+    )]);
+    let opened = backend.open(Source::Bytes(b"x"), None).unwrap();
+    let raster = opened.raster.clone();
+    let mut session = DocumentSession::new(
+        opened,
+        Arc::new(MemoryCache::new()),
+        Arc::new(ImmediateScheduler::new(raster)),
+        Box::new(VerticalLayout),
+        Box::new(RangeSelection::new()),
+    )
+    .unwrap();
+    let mut events = Vec::new();
+    // 视口只显示页面顶部一小块：页面下半部分在缓存里没有像素
+    session.handle(ViewerCommand::ResizeViewport(Size::new(600.0, 400.0)), &mut events);
+    session.handle(ViewerCommand::SetZoom(8.0), &mut events);
+    session.handle(ViewerCommand::SetScroll(Vec2::new(0.0, 0.0)), &mut events);
+    session.handle(ViewerCommand::RequestVisible, &mut events);
+    session.pump(&mut events);
+
+    let page = PageIndex::FIRST;
+    // 目标区域在页面**下半部**（视口没去过）：当前波段一定没有它的块
+    let target = Rect::new(100.0, 100.0, 120.0, 60.0);
+    // 记录分辨率 200% → 吸到波段 2.56
+    let render = Scale::from_zoom(render_scale_for(2.0, DEFAULT_OVERSCAN));
+    assert!(session.region_tiles(page, target, render).is_none(), "还没请求，必然缺块");
+
+    let count = session.request_region(page, target, render);
+    assert!(count > 0, "应提交覆盖该区域的块");
+    session.pump(&mut events);
+
+    let tiles = session.region_tiles(page, target, render).expect("渲染完应全部就绪");
+    assert!(!tiles.is_empty());
+    // 该区域的像素尺寸 = 区域 × 渲染比例（与当前 800% 的缩放无关）
+    let grid = TileGrid::new(Size::new(595.28, 841.89), render.0);
+    let borrowed: Vec<(TileSpec, &RasterImage)> =
+        tiles.iter().map(|(tile, image)| (*tile, image.as_ref())).collect();
+    let image = app::view::compose_region_snapshot(
+        target,
+        Size::new(595.28, 841.89),
+        Rotation::None,
+        render.0,
+        &grid,
+        &borrowed,
+    )
+    .expect("应能拼出预览图");
+    // 尺寸只由「区域 × 记录分辨率」决定（与当前 800% 无关）。
+    // 允许 ±1：实现按"两端各取整一次"计算（与网格共享边界同一套规则）。
+    let expected_w = (target.width * render.0).round() as usize;
+    let expected_h = (target.height * render.0).round() as usize;
+    assert!(
+        image.size[0].abs_diff(expected_w) <= 1 && image.size[1].abs_diff(expected_h) <= 1,
+        "输出 {}x{} 应约等于区域 × 渲染比例 {}x{}",
+        image.size[0],
+        image.size[1],
+        expected_w,
+        expected_h
+    );
+}

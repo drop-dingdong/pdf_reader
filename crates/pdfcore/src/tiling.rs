@@ -173,6 +173,51 @@ impl TileGrid {
         })
     }
 
+    /// 覆盖某个**页面空间矩形**所需的块范围 `(col0, row0, col1, row1)`（含端点）。
+    ///
+    /// 用途：为"预览截图"这类**非视口**用途按需渲染一块区域（D-101）。它与
+    /// [`Self::tiles_in_view`] 的区别只是输入坐标空间不同（页面空间 vs 内容空间），
+    /// 边界判定规则完全一样：右/下边界正好落在块起点时**不算**下一块。
+    pub fn tiles_for_page_rect(
+        &self,
+        rect: Rect,
+        page_size: Size,
+        rotation: Rotation,
+    ) -> Option<(u32, u32, u32, u32)> {
+        if !(rect.width > 0.0) || !(rect.height > 0.0) {
+            return None;
+        }
+        let scale = if self.render_scale > 0.0 { self.render_scale } else { 1.0 };
+        let corners = [
+            Point::new(rect.x, rect.y),
+            Point::new(rect.right(), rect.y),
+            Point::new(rect.x, rect.bottom()),
+            Point::new(rect.right(), rect.bottom()),
+        ];
+        let mut min = Point::new(f32::MAX, f32::MAX);
+        let mut max = Point::new(f32::MIN, f32::MIN);
+        for corner in corners {
+            let display = rotation.map_point(corner, page_size);
+            let device = Point::new(display.x * scale, display.y * scale);
+            min = Point::new(min.x.min(device.x), min.y.min(device.y));
+            max = Point::new(max.x.max(device.x), max.y.max(device.y));
+        }
+        let (page_width, page_height) = self.render_px();
+        let (page_width, page_height) = (page_width as f32, page_height as f32);
+        // 完全在页外
+        if max.x <= 0.0 || max.y <= 0.0 || min.x >= page_width || min.y >= page_height {
+            return None;
+        }
+        let col0 = index_at(&self.edges_x, min.x.max(0.0), false);
+        let row0 = index_at(&self.edges_y, min.y.max(0.0), false);
+        let col1 = index_at(&self.edges_x, max.x.min(page_width), true);
+        let row1 = index_at(&self.edges_y, max.y.min(page_height), true);
+        if col0 > col1 || row0 > row1 {
+            return None;
+        }
+        Some((col0, row0, col1, row1))
+    }
+
     /// 视口需要的块范围 `(col0, row0, col1, row1)`（含端点）；完全不相交返回 `None`。
     ///
     /// 做法：视口先与该页矩形求交，再换算到"渲染像素"，最后在边界表里定位下标 ——
@@ -461,6 +506,68 @@ mod tests {
         assert_eq!(bottom_left, Rect::new(0.0, 0.0, 306.0, 396.0));
         // 越界块没有矩形
         assert_eq!(grid.tile_page_rect(2, 0, page, Rotation::None), Rect::ZERO);
+    }
+
+    /// 覆盖页面空间矩形的块范围，必须与"逐块用 `tile_page_rect` 求交"的结果一致。
+    #[test]
+    fn page_rect_probe_matches_a_full_scan() {
+        let page = Size::new(595.28, 841.89);
+        for rotation in [Rotation::None, Rotation::Clockwise90, Rotation::Clockwise270] {
+            for render in [1.6f32, 4.096, 10.48576] {
+                let grid = TileGrid::new(page.rotated(rotation), render);
+                // 若干页面空间矩形：整页、四角、跨块、以及一个极小区域
+                let rects = [
+                    Rect::new(0.0, 0.0, page.width, page.height),
+                    Rect::new(0.0, 0.0, 40.0, 40.0),
+                    Rect::new(page.width - 40.0, page.height - 40.0, 40.0, 40.0),
+                    Rect::new(120.0, 200.0, 300.0, 260.0),
+                    Rect::new(page.width * 0.5, page.height * 0.5, 5.0, 5.0),
+                ];
+                for rect in rects {
+                    let Some((c0, r0, c1, r1)) =
+                        grid.tiles_for_page_rect(rect, page, rotation)
+                    else {
+                        panic!("页面内矩形必须覆盖到块：{rect:?}");
+                    };
+                    assert!(c1 >= c0 && r1 >= r0);
+                    // 范围内的每一块都必须与矩形相交
+                    for row in r0..=r1 {
+                        for col in c0..=c1 {
+                            let tile_rect = grid.tile_page_rect(col, row, page, rotation);
+                            let overlap = tile_rect
+                                .intersection(rect)
+                                .map_or(false, |hit| hit.width > 0.0 && hit.height > 0.0);
+                            assert!(
+                                overlap,
+                                "探测给出 ({col},{row}) 却与 {rect:?} 不相交（rotation={rotation:?}）"
+                            );
+                        }
+                    }
+                    // 范围外的每一块都不得与矩形相交
+                    for (col, row) in grid.all_tiles() {
+                        if col >= c0 && col <= c1 && row >= r0 && row <= r1 {
+                            continue;
+                        }
+                        let tile_rect = grid.tile_page_rect(col, row, page, rotation);
+                        let overlap = tile_rect
+                            .intersection(rect)
+                            .map_or(false, |hit| hit.width > 0.0 && hit.height > 0.0);
+                        assert!(
+                            !overlap,
+                            "范围外的 ({col},{row}) 却与 {rect:?} 相交（rotation={rotation:?}）"
+                        );
+                    }
+                }
+                // 页外 → None
+                assert!(grid
+                    .tiles_for_page_rect(
+                        Rect::new(-50.0, -50.0, 10.0, 10.0),
+                        page,
+                        rotation
+                    )
+                    .is_none());
+            }
+        }
     }
 
     /// 层级选择：块边长应接近目标值（512），且页越大层级越高。
