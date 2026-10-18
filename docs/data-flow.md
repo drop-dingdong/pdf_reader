@@ -127,29 +127,29 @@ open(path, Some("s3cr3t")) ──▶ Ok(OpenedDocument)               // 成功
 ### 判断
 
 ```text
-placement.pixel_size() = 612×8, 792×8 = (4896, 6336) px
+渲染像素尺寸 = 612×8, 792×8 = (4896, 6336) px（▲v4：按**渲染比例**算，不再是显示比例）
 面积 = 4896 × 6336 = 31,021,056 px ≈ 31.0 MP > TilingPolicy::AbovePixels(4 MP)
 → 分块（tile = Some(TileSpec { col, row }))
 
 对比：整页一张位图 = 31,021,056 × 4 B = 124,084,224 B ≈ 124 MB（单页！）★
-网格 = ⌈4896/512⌉ × ⌈6336/512⌉ = 10 × 13 = 130 块，每块 512×512×4 B = 1 MiB
-视口 900×1000 px 覆盖约 3×3 = 最多 9 块 ≈ 6–9 MiB（边缘块更小）
+网格 = `TileGrid::new((612,792), 8.0)` → side 8（块边长最接近 512），每块 612×792×4 B ≈ 1.9 MiB
+▲v4：网格不再固定 512，而是"让块边长尽量接近 512 的 2 的幂"；边界由 `round(i·total/side)` 共享生成
 ```
 
 ### 步骤
 
-1. `[UI]` `visible_pages` → `[0]`；`tiling_policy` 判定需分块 →
-   `TileSpec::grid_for((4896, 6336))` → `(10, 13)`。
+1. `[UI]` `visible_pages` → `[0]`；判定需分块（渲染像素面积 > 4 MP）→
+   `TileGrid::new((612, 792), 渲染比例)`（▲v4，取代 `TileSpec::grid_for`）。
 2. `[UI]` 只对**视口覆盖到的瓦片**提交请求（按距离视口中心由近到远排序）：
-   `scheduler.submit(RenderRequest::tiled(0, Scale::from_zoom(8.0), None, TileSpec { col, row }))`；
+   `scheduler.submit(RenderRequest::tiled(0, 渲染比例, rot, TileSpec{col,row}, RenderRegion{..}))`（▲v4）；
    其余 121 块交给 `Prefetch`（或在滚近时再提交）。
-3. `[BG]` 逐块渲染：后端按 `tile.page_rect(page_size, rotation)` 得到的 **PDF 页面空间裁剪矩形**
-   **直接渲染该区域**（`PdfRenderConfig::set_origin()` + 目标位图尺寸 = 该瓦片像素尺寸）★
+3. `[BG]` 逐块渲染：后端把 `RenderRegion.page_rect`（PDF 页面空间矩形）映射成设备像素，
+   **直接渲染该区域**（`set_fixed_size` + 负 `set_origin`），并**校验**输出尺寸 = `pixel_size`（D-95）★
    —— 绝不"先渲染 124 MB 整页再裁剪"。
 4. `[UI]` `pump` → 每块各自按 `RenderKey { .., tile: Some(spec) }` 入缓存 → 事件 `PageRendered(key)`。
-5. `[UI]` 绘制：`session.tiles_for(PageIndex(0))` 返回 `Vec<(TileSpec, Arc<RasterImage>)>`，
-   按 `spec.pixel_rect(displayed_size)` 拼接（整数像素边界，**不重叠、不留缝**）；
-   未就绪的瓦片同样先画白底小框。
+5. `[UI]` 绘制：`session.tiles_for()` 给出位图、`session.tile_grid()` 给出网格，
+   按 `grid.display_rect(页矩形, col, row, 显示比例, 渲染比例)` 拼接（**不重叠、不留缝**）；
+   未就绪的块同样先画白底。▲v4：`u = 显示/渲染 ≤ 1` 时必须乘 `u`，不能直接相加像素偏移。
 
 ### 关键点
 - ★ 分块解决的是**内存**（124 MB → 6–9 MiB），不是速度：渲染总量不变，甚至更多次调用。

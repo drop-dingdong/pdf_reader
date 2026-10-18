@@ -373,11 +373,35 @@ impl PageRaster for MemoryRaster {
         let (width, height, color) = match request.tile {
             None => (page_width.max(1), page_height.max(1), Self::color_for(request.page)),
             Some(tile) => {
+                let region = request.region.ok_or_else(|| {
+                    CoreError::Internal("瓦片请求缺少区域（块矩形 + 期望像素尺寸）".to_string())
+                })?;
                 let (_, _, tile_width, tile_height) = grid.tile_px(tile.col, tile.row);
                 if tile_width == 0 || tile_height == 0 {
                     return Err(CoreError::Internal(format!(
                         "瓦片越界：col={} row={}",
                         tile.col, tile.row
+                    )));
+                }
+                // 假后端也执行契约校验（D-95）：尺寸必须等于期望，块矩形必须与网格一致。
+                // 这样"上层把块矩形算错"会在任何用到会话的测试里立刻暴露，而不是画歪。
+                if region.pixel_size != (tile_width, tile_height) {
+                    return Err(CoreError::Internal(format!(
+                        "块尺寸不符：期望 {:?} ≠ 网格 {:?}",
+                        region.pixel_size,
+                        (tile_width, tile_height)
+                    )));
+                }
+                let expected = grid.tile_page_rect(tile.col, tile.row, page.size, request.rotation);
+                let close = |a: f32, b: f32| (a - b).abs() < 0.05;
+                if !close(expected.x, region.page_rect.x)
+                    || !close(expected.y, region.page_rect.y)
+                    || !close(expected.width, region.page_rect.width)
+                    || !close(expected.height, region.page_rect.height)
+                {
+                    return Err(CoreError::Internal(format!(
+                        "块矩形与网格不符：请求 {:?} ≠ 网格 {:?}",
+                        region.page_rect, expected
                     )));
                 }
                 // 像素里编码 (col, row, page)，测试据此断言"这一块确实是该瓦片"
@@ -601,7 +625,23 @@ impl PdfBackend for MemoryBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{RenderPriority, Scale, TileSpec};
+    use crate::render::{RenderPriority, RenderRegion, Scale, TileSpec};
+
+    /// 按网格构造一个"带块矩形 + 期望像素尺寸"的渲染请求（D-95 的请求形状）。
+    fn tiled_request(
+        grid: &TileGrid,
+        page: PageIndex,
+        scale: Scale,
+        tile: TileSpec,
+    ) -> RenderRequest {
+        let page_size = Size::new(612.0, 792.0);
+        let (_, _, width, height) = grid.tile_px(tile.col, tile.row);
+        let region = RenderRegion {
+            page_rect: grid.tile_page_rect(tile.col, tile.row, page_size, Rotation::None),
+            pixel_size: (width, height),
+        };
+        RenderRequest::tiled(page, scale, Rotation::None, tile, region)
+    }
 
     #[test]
     fn raster_respects_scale_and_rotation() {
@@ -705,21 +745,29 @@ mod tests {
 
         // 中间一块：位图尺寸 = 该块像素矩形，且像素里带 (col, row, page)
         let tile = TileSpec::new(1, 1);
-        let request = RenderRequest::tiled(PageIndex::new(0), scale, Rotation::None, tile);
+        let request = tiled_request(&grid, PageIndex::new(0), scale, tile);
         let image = opened.raster.render(&request).unwrap();
         assert_eq!((image.width, image.height), (612, 792));
         assert_eq!(&image.data()[0..4], &[1, 1, 0, 255]);
 
         // 最右一列：这一页宽度正好被 8 等分，但**只请求这块**时尺寸仍是该块的大小
-        let last_col =
-            RenderRequest::tiled(PageIndex::new(0), scale, Rotation::None, TileSpec::new(7, 0));
+        let last_col = tiled_request(&grid, PageIndex::new(0), scale, TileSpec::new(7, 0));
         let image = opened.raster.render(&last_col).unwrap();
         assert_eq!((image.width, image.height), (612, 792));
 
         // 越界块必须报错，而不是返回空图
-        let out_of_grid =
-            RenderRequest::tiled(PageIndex::new(0), scale, Rotation::None, TileSpec::new(8, 0));
+        let out_of_grid = tiled_request(&grid, PageIndex::new(0), scale, TileSpec::new(8, 0));
         assert!(opened.raster.render(&out_of_grid).is_err());
+
+        // 契约（D-95）：缺区域 / 区域与网格不符都必须报错，而不是"渲染个大概"
+        let mut missing = tiled_request(&grid, PageIndex::new(0), scale, TileSpec::new(0, 0));
+        missing.region = None;
+        assert!(opened.raster.render(&missing).is_err(), "缺区域必须报错");
+        let mut wrong_size = tiled_request(&grid, PageIndex::new(0), scale, TileSpec::new(0, 0));
+        if let Some(region) = wrong_size.region.as_mut() {
+            region.pixel_size = (region.pixel_size.0 + 1, region.pixel_size.1);
+        }
+        assert!(opened.raster.render(&wrong_size).is_err(), "尺寸不符必须报错");
 
         // 整页路径仍然可用（用低倍率，避免测试里分配上百 MB）
         let whole = opened

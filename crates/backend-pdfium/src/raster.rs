@@ -1,13 +1,18 @@
-//! 光栅化适配：**整页**与**瓦片**（D-02 / D-94）。
+//! 光栅化适配：**整页**与**瓦片**（D-02 / D-94 / D-95）。
 //!
 //! 瓦片渲染走 PDFium 原生的"部分渲染"能力：
-//! 把目标位图设为瓦片尺寸，再用 `PdfRenderConfig::set_origin(-x, -y)` 把页面左上角推到
+//! 把目标位图设为块尺寸，再用 `PdfRenderConfig::set_origin(-x, -y)` 把页面左上角推到
 //! 位图之外，于是只有目标区域被真正渲染 —— 而不是"整页渲染后裁剪"。
 //!
-//! ## 几何必须只有一套
-//! 块的像素矩形与整页位图尺寸都由 [`TileGrid`] 给出：网格把"旋转后页尺寸 × 渲染比例"
-//! 一次取整成**共享边界**，因此相邻块严格相接（无 1px 缝、也不会重叠）。
-//! 这里**不得**自己 `round` 一遍尺寸 —— 两侧各取整一次就可能差 1px，接缝随之错位。
+//! ## 请求形状：块矩形 + 期望像素尺寸（D-95）
+//! 上层给出的是 [`RenderRegion::page_rect`]（**PDF 页面空间**的矩形，未旋转）与
+//! [`RenderRegion::pixel_size`]（期望输出尺寸）。本适配层负责：
+//! 1. 把页面空间矩形映射到设备像素（旋转 → 显示坐标 → × 比例）；
+//! 2. **校验**映射结果是整像素、且尺寸与期望一致 —— 不一致返回 [`CoreError::Internal`]；
+//! 3. 按整页位图尺寸 `set_fixed_size` + 负 `set_origin`，只渲染这块区域。
+//!
+//! 第 2 步是刻意的**硬失败**：几何推导不一致时静默拉伸的后果是"看起来有图，
+//! 但同一行文字在接缝处错位"（D-84/D-86 的现象），比报错难查得多。
 
 use std::sync::Arc;
 
@@ -35,25 +40,46 @@ impl PageRaster for PdfiumRaster {
             .ok_or(CoreError::PageOutOfRange { page: request.page, page_count })?;
         let page = self.0.page(request.page)?;
 
-        // 该页在"请求的最终旋转 + 渲染比例"下的分块网格。整页位图尺寸**取自网格**
-        // （`render_px`），而不是在这里再算一次 —— 见文件头的"几何必须只有一套"。
-        let grid = TileGrid::new(geometry.size.rotated(request.rotation), request.scale.0);
-        let (page_width, page_height) = grid.render_px();
-        let page_px = (page_width.max(1) as i32, page_height.max(1) as i32);
+        let scale = request.scale.0;
+        if !(scale > 0.0) {
+            return Err(CoreError::Internal(format!("非法渲染比例：{scale}")));
+        }
 
-        let (bitmap_size, origin) = match request.tile {
-            None => (page_px, (0, 0)),
-            Some(tile) => {
-                let (x, y, width, height) = grid.tile_px(tile.col, tile.row);
-                if width == 0 || height == 0 {
+        // 整页在"请求的最终旋转 + 渲染比例"下的像素尺寸（= 位图坐标系）。
+        //
+        // 这是 `set_fixed_size` 的入参：PDFium 会把整页映射到这个尺寸，块只是它的一块。
+        // 该值与 `pdfcore::tiling::TileGrid::render_px` 是同一个表达式（round(旋转后尺寸 × 比例)），
+        // 因此块的页内位置由上面的区域换算得出后，两者必须对齐 —— 否则下面的校验会报错。
+        let displayed = geometry.size.rotated(request.rotation);
+        let page_px = (
+            (displayed.width * scale).round().max(1.0) as i32,
+            (displayed.height * scale).round().max(1.0) as i32,
+        );
+
+        let (bitmap_size, origin) = match (request.tile, request.region) {
+            (None, None) => (page_px, (0, 0)),
+            (Some(tile), Some(region)) => {
+                let (left, top, size) =
+                    device_rect(region, geometry.size, request.rotation, scale)?;
+                if !block_fits(left, top, size, page_px) {
                     return Err(CoreError::Internal(format!(
-                        "瓦片越界：col={} row={}（网格 {}×{}）",
-                        tile.col, tile.row, grid.side, grid.side
+                        "块越界：col={} row={} 区域=({left},{top},{},{}) 整页px={page_px:?}",
+                        tile.col, tile.row, size.0, size.1
                     )));
                 }
                 // set_origin 的语义是"页面左上角在目标位图中的位置"，
                 // 取负值即可让目标区域正好落在位图的 (0,0)。
-                ((width as i32, height as i32), (-(x as i32), -(y as i32)))
+                (size, (-left, -top))
+            }
+            (Some(_), None) => {
+                return Err(CoreError::Internal(
+                    "瓦片请求缺少区域（块矩形 + 期望像素尺寸）".to_string(),
+                ))
+            }
+            (None, Some(_)) => {
+                return Err(CoreError::Internal(
+                    "整页请求不应携带块区域（否则会渲染出尺寸不符的位图）".to_string(),
+                ))
             }
         };
 
@@ -69,23 +95,26 @@ impl PageRaster for PdfiumRaster {
 
         page.render_into_bitmap_with_config(&mut bitmap, &config).map_err(to_core_error)?;
 
-        // 瓦片诊断：拼合错位时用它对照"输入像素矩形 / 实际位图尺寸 / PDFium 原点 / 比例"
+        // 块诊断：拼合错位时用它对照"块的页面矩形 / 期望与实得尺寸 / PDFium 原点 / 比例"
         if std::env::var_os("PDF_READER_DIAGNOSE").is_some() {
-            if let Some(tile) = request.tile {
-                let (x, y, width, height) = grid.tile_px(tile.col, tile.row);
+            if let (Some(tile), Some(region)) = (request.tile, request.region) {
                 eprintln!(
-                    "[瓦片] 页={} col={} row={} 网格={} 全页px={}x{} 瓦片={:?} 位图={}x{} 原点={} 比例={:.4}",
+                    "[瓦片] 页={} col={} row={} 整页px={}x{} 区域pt=({:.2},{:.2},{:.2},{:.2}) 期望={}x{} 位图={}x{} 原点={} 比例={:.4}",
                     request.page.get(),
                     tile.col,
                     tile.row,
-                    grid.side,
                     page_px.0,
                     page_px.1,
-                    (x, y, width, height),
+                    region.page_rect.x,
+                    region.page_rect.y,
+                    region.page_rect.width,
+                    region.page_rect.height,
+                    region.pixel_size.0,
+                    region.pixel_size.1,
                     bitmap_size.0,
                     bitmap_size.1,
                     origin.1,
-                    request.scale.0
+                    scale
                 );
             }
         }
@@ -98,5 +127,167 @@ impl PageRaster for PdfiumRaster {
         let image = RasterImage::new(width, height, PixelFormat::Bgra8, data)
             .ok_or_else(|| CoreError::Internal("位图字节数与宽高不符".to_string()))?;
         Ok(Arc::new(image))
+    }
+}
+
+/// 把"页面空间矩形 + 期望像素尺寸"换算成整页位图里的整数像素矩形 `(left, top, (w, h))`。
+///
+/// 换算链：页面空间 →（[`Rotation::map_point`]）→ 旋转后的显示坐标（point）→ × 比例 → 像素。
+///
+/// **严格校验**（D-95）：
+/// * 结果必须落在整像素上（容差 0.01px）—— 上层的块边界由整数像素导出，偏移即说明
+///   两侧几何不一致（会让内容整体平移、接缝错位）；
+/// * 像素尺寸必须等于期望值 —— 不满足就报错，**绝不静默拉伸**。
+fn device_rect(
+    region: RenderRegion,
+    page_size: Size,
+    rotation: Rotation,
+    scale: f32,
+) -> Result<(i32, i32, (i32, i32))> {
+    let rect = region.page_rect;
+    if !(rect.width > 0.0) || !(rect.height > 0.0) {
+        return Err(CoreError::Internal(format!("块区域为空：{rect:?}")));
+    }
+    // 四角映射后取外接矩形（90°/270° 会交换宽高）
+    let corners = [
+        Point::new(rect.x, rect.y),
+        Point::new(rect.right(), rect.y),
+        Point::new(rect.x, rect.bottom()),
+        Point::new(rect.right(), rect.bottom()),
+    ];
+    let mut min = Point::new(f32::MAX, f32::MAX);
+    let mut max = Point::new(f32::MIN, f32::MIN);
+    for corner in corners {
+        if corner.x < -1.0
+            || corner.y < -1.0
+            || corner.x > page_size.width + 1.0
+            || corner.y > page_size.height + 1.0
+        {
+            return Err(CoreError::Internal(format!(
+                "块区域超出页面：{rect:?}（页 {page_size:?}）"
+            )));
+        }
+        let display = rotation.map_point(corner, page_size);
+        let device = Point::new(display.x * scale, display.y * scale);
+        min = Point::new(min.x.min(device.x), min.y.min(device.y));
+        max = Point::new(max.x.max(device.x), max.y.max(device.y));
+    }
+
+    let (width, height) = (max.x - min.x, max.y - min.y);
+    // 只允许亚像素级误差：上层给出的块边界是整数像素，这里必须落回整数
+    for value in [min.x, min.y, width, height] {
+        if !value.is_finite() || (value - value.round()).abs() > 0.01 {
+            return Err(CoreError::Internal(format!(
+                "块区域未落在整像素上：left={:.4} top={:.4} w={:.4} h={:.4}（比例 {scale}）",
+                min.x, min.y, width, height
+            )));
+        }
+    }
+    let size = (width.round() as i32, height.round() as i32);
+    if size != (region.pixel_size.0 as i32, region.pixel_size.1 as i32) {
+        return Err(CoreError::Internal(format!(
+            "块尺寸不符：推导 {:?} ≠ 期望 {:?}（区域 {:?}，比例 {scale}）",
+            size, region.pixel_size, rect
+        )));
+    }
+    Ok((min.x.round() as i32, min.y.round() as i32, size))
+}
+
+/// 块矩形必须落在整页位图内（否则 `set_origin` 会渲染出页外内容或空图）。
+fn block_fits(left: i32, top: i32, size: (i32, i32), page_px: (i32, i32)) -> bool {
+    left >= 0
+        && top >= 0
+        && left + size.0 <= page_px.0
+        && top + size.1 <= page_px.1
+        && size.0 > 0
+        && size.1 > 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn region(page_rect: Rect, pixel_size: (u32, u32)) -> RenderRegion {
+        RenderRegion { page_rect, pixel_size }
+    }
+
+    /// 不旋转：页面空间矩形直接按"y 翻转 × 比例"落到像素上。
+    #[test]
+    fn device_rect_maps_page_space_without_rotation() {
+        let page = Size::new(612.0, 792.0);
+        // 页面左下角 306×396 的区域，2 倍 → 612×792 像素，落在位图底部
+        let (left, top, size) = device_rect(
+            region(Rect::new(0.0, 0.0, 306.0, 396.0), (612, 792)),
+            page,
+            Rotation::None,
+            2.0,
+        )
+        .expect("应能换算");
+        assert_eq!((left, top), (0, 792), "PDF 底部 → 位图底部");
+        assert_eq!(size, (612, 792));
+    }
+
+    /// 90°：页面空间矩形会旋转，宽高互换。
+    #[test]
+    fn device_rect_rotates_with_the_page() {
+        let page = Size::new(612.0, 792.0);
+        // 页面左下角 100×200 → 旋转 90° 后在位图里是 200×100（再 ×2）
+        let (_, _, size) = device_rect(
+            region(Rect::new(0.0, 0.0, 100.0, 200.0), (400, 200)),
+            page,
+            Rotation::Clockwise90,
+            2.0,
+        )
+        .expect("应能换算");
+        assert_eq!(size, (400, 200), "旋转后宽高互换");
+    }
+
+    /// 期望尺寸与推导不一致 → 必须报错，**不得静默拉伸**（D-95）。
+    #[test]
+    fn device_rect_rejects_a_size_mismatch() {
+        let page = Size::new(612.0, 792.0);
+        let error = device_rect(
+            region(Rect::new(0.0, 0.0, 306.0, 396.0), (611, 792)),
+            page,
+            Rotation::None,
+            2.0,
+        )
+        .expect_err("尺寸不符必须报错");
+        assert!(matches!(error, CoreError::Internal(_)), "实际 {error:?}");
+    }
+
+    /// 未落在整像素上的区域 → 报错（否则整块内容会被平移/缩放）。
+    #[test]
+    fn device_rect_rejects_half_pixel_regions() {
+        let page = Size::new(612.0, 792.0);
+        // 比例 1.0 时 10.5pt 落在半像素上
+        let error = device_rect(
+            region(Rect::new(10.5, 0.0, 100.0, 100.0), (100, 100)),
+            page,
+            Rotation::None,
+            1.0,
+        )
+        .expect_err("半像素区域必须报错");
+        assert!(matches!(error, CoreError::Internal(_)), "实际 {error:?}");
+    }
+
+    /// 超出页面的区域 → 报错。
+    #[test]
+    fn device_rect_rejects_out_of_page_regions() {
+        let page = Size::new(612.0, 792.0);
+        assert!(device_rect(
+            region(Rect::new(600.0, 0.0, 100.0, 100.0), (100, 100)),
+            page,
+            Rotation::None,
+            1.0
+        )
+        .is_err());
+        assert!(device_rect(
+            region(Rect::new(0.0, 0.0, 0.0, 100.0), (0, 100)),
+            page,
+            Rotation::None,
+            1.0
+        )
+        .is_err());
     }
 }

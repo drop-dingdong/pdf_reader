@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::error::{CoreError, Result};
-use crate::geometry::{Rotation, Size};
+use crate::geometry::{Rect, Rotation, Size};
 use crate::ids::{JobId, PageIndex};
 use crate::image::RasterImage;
 
@@ -218,6 +218,24 @@ fn milli(scale: Scale) -> u32 {
     (scale.0 * 1000.0).round().clamp(1.0, u32::MAX as f32) as u32
 }
 
+/// 一次渲染要覆盖的**页面区域**：块矩形 + 期望像素尺寸。
+///
+/// ## 为什么是"页面空间矩形 + 期望像素尺寸"
+/// 块怎么切是**渲染无关**的几何问题（由 [`crate::tiling::TileGrid`] 决定），后端不该知道
+/// 我们的网格长什么样；它只需要"把这块页面区域画成这么大"。
+///
+/// ## 期望尺寸是**契约**，不是建议
+/// 后端必须精确产出 `pixel_size` 的位图。若它的几何推导（旋转 / 比例 / 取整）与上层不一致，
+/// 必须返回 [`CoreError::Internal`] 而**不得静默拉伸** —— 静默拉伸正是
+/// "同一行文字在块接缝处错位"那类缺陷的温床（D-84/D-86）：错就错在"看起来有图，其实比例不对"。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderRegion {
+    /// 区域在 PDF **页面空间**中的矩形（左下原点、未旋转 —— 后端自己按 `rotation` 旋转）。
+    pub page_rect: Rect,
+    /// 期望输出像素尺寸 `(宽, 高)`。
+    pub pixel_size: (u32, u32),
+}
+
 /// 一次渲染请求。
 #[derive(Debug, Clone)]
 pub struct RenderRequest {
@@ -233,6 +251,8 @@ pub struct RenderRequest {
     pub rotation: Rotation,
     /// 瓦片坐标；`None` 表示整页。
     pub tile: Option<TileSpec>,
+    /// 要渲染的页面区域；**瓦片请求必须携带**（整页请求为 `None`，尺寸由后端推导）。
+    pub region: Option<RenderRegion>,
     /// 优先级。
     pub priority: RenderPriority,
     /// 取消令牌。
@@ -247,14 +267,25 @@ impl RenderRequest {
             scale,
             rotation,
             tile: None,
+            region: None,
             priority: RenderPriority::Visible,
             cancel: CancelToken::new(),
         }
     }
 
     /// 单瓦片渲染请求（`Visible` 优先级）。
-    pub fn tiled(page: PageIndex, scale: Scale, rotation: Rotation, tile: TileSpec) -> Self {
-        Self { tile: Some(tile), ..Self::new(page, scale, rotation) }
+    ///
+    /// `region` 是该块的页面空间矩形与期望像素尺寸（由
+    /// [`crate::tiling::TileGrid::tile_page_rect`] 与 [`crate::tiling::TileGrid::tile_px`]
+    /// 给出）。**必填**：没有它后端无从知道该渲染哪块区域。
+    pub fn tiled(
+        page: PageIndex,
+        scale: Scale,
+        rotation: Rotation,
+        tile: TileSpec,
+        region: RenderRegion,
+    ) -> Self {
+        Self { tile: Some(tile), region: Some(region), ..Self::new(page, scale, rotation) }
     }
 
     /// 设置优先级。
@@ -289,10 +320,10 @@ impl RenderRequest {
 ///   [`crate::document::Capabilities::max_concurrency`] 声明，调度器会遵守；
 ///   **PDFium 后端应声明 1**。
 /// * 渲染前若 [`CancelToken::is_cancelled`] 为真，应立刻返回 [`CoreError::Cancelled`]。
-/// * **瓦片请求**（`request.tile = Some`）只渲染该块区域，**不得先整页渲染再裁剪**
-///   （否则分块就失去了省内存/省时间的意义）。该块在"整页位图"中的像素矩形由
-///   [`crate::tiling::TileGrid::tile_px`] 给出（网格与整页位图尺寸都必须由
-///   `页尺寸(旋转后) × request.scale` 推出，两侧算出的整数必须一致，否则接缝错位）。
+/// * **瓦片请求**（`request.tile = Some`）只渲染 [`RenderRequest::region`] 描述的页面区域，
+///   **不得先整页渲染再裁剪**（否则分块就失去了省内存/省时间的意义）。
+/// * 输出位图尺寸**必须等于** `region.pixel_size`；推导不一致时返回
+///   [`CoreError::Internal`]，**不得静默拉伸**（D-95）。
 pub trait PageRaster: Send + Sync {
     /// 渲染一页。整页请求的位图尺寸应等于 `页尺寸(旋转后) × scale`（允许 ±1 像素取整误差）；
     /// 瓦片请求则是该块的像素矩形尺寸。
@@ -489,6 +520,26 @@ mod tests {
         assert!(TilingPolicy::Always.requires_tiling(Size::new(1.0, 1.0)));
     }
 
+    /// 契约（D-95）：块请求必须带区域，整页请求不得带区域。
+    #[test]
+    fn tiled_request_carries_a_region_and_whole_page_does_not() {
+        let page = PageIndex::new(0);
+        let scale = Scale::from_zoom(2.0);
+        let region = RenderRegion {
+            page_rect: Rect::new(0.0, 396.0, 306.0, 396.0),
+            pixel_size: (612, 792),
+        };
+        let request =
+            RenderRequest::tiled(page, scale, Rotation::None, TileSpec::new(1, 0), region);
+        assert_eq!(request.tile, Some(TileSpec::new(1, 0)));
+        assert_eq!(request.region, Some(region));
+        assert_eq!(request.key().tile, Some(TileSpec::new(1, 0)));
+
+        let whole = RenderRequest::new(page, scale, Rotation::None);
+        assert_eq!(whole.tile, None);
+        assert_eq!(whole.region, None, "整页请求由后端推导尺寸，不带块区域");
+    }
+
     #[test]
     fn tile_keys_do_not_collide_with_whole_page_keys() {
         let page = PageIndex::new(0);
@@ -499,11 +550,14 @@ mod tests {
 
         assert_ne!(whole, tile_a, "整页键与瓦片键必须不同");
         assert_ne!(tile_a, tile_b, "不同瓦片必须有不同的键");
+        let region = RenderRegion {
+            page_rect: Rect::new(0.0, 0.0, 612.0, 792.0),
+            pixel_size: (612, 792),
+        };
         assert_eq!(
-            RenderRequest::tiled(page, scale, Rotation::None, TileSpec::new(1, 0)).key(),
+            RenderRequest::tiled(page, scale, Rotation::None, TileSpec::new(1, 0), region).key(),
             tile_b
         );
         assert_eq!(RenderRequest::new(page, scale, Rotation::None).key(), whole);
-        assert!(RenderRequest::tiled(page, scale, Rotation::None, tile_a.tile.unwrap()).tile.is_some());
     }
 }

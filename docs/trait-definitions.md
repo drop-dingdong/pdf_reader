@@ -157,20 +157,25 @@ pub struct OpenedDocument {
 /// 缩放：设备像素 / point。
 pub struct Scale(pub f32);
 //  const IDENTITY(1.0); from_zoom(f32); from_dpi(f32); zoom(); dpi(); is_valid()
-//  quantize() -> 量化到 1/8 步长（缓存键用，避免滚轮缩放摧毁缓存）
+//  ▲v4（D-94）：quantize() 已删除 —— 缓存键改用**波段渲染比例**（离散值），
+//  不再对显示比例做 1/8 量化（否则键里的比例 ≠ 真正渲染的比例，预览拼合会差几像素）。
 
-/// ▲v3 瓦片边长（设备像素）。做成常量而非配置：它是缓存键的一部分，
-/// 变动会导致全部瓦片失效，没有"运行期可调"的必要。
-pub const TILE_SIZE: u16 = 512;
+/// ▲v4（D-94/D-95）：分块几何全部由 `tiling::TileGrid` 给出，**512 固定网格已删除**
+/// （`TILE_SIZE` / `TileSpec::grid_for` / `pixel_rect` / `page_rect` / `tiles_covering`）。
+/// 网格：在**渲染比例**下用 `round(i·total/side)` 生成一组共享整数边界，
+/// 层级让块边长尽量接近 512px；每块的显示位置由同一组边界导出（`x = 页.x + 块像素·u`）。
 
-/// ▲v3 瓦片坐标（列、行），网格由该页的**像素尺寸**决定。
-pub struct TileSpec { pub col: u16, pub row: u16 }
-//  grid_for(displayed_size: Size) -> (u16, u16)          ⌈宽/512⌉ × ⌈高/512⌉
-//  pixel_rect(displayed_size: Size) -> Rect              该瓦片在"旋转后页位图"中的像素矩形
-//  page_rect(page_size: Size, rotation: Rotation) -> Rect 该瓦片在 PDF 页面空间的裁剪矩形
-//                                                         （渲染请求携带它，避免后端自己推算）
+/// 块坐标（列、行）：只是**身份**（进缓存键），含义由渲染比例决定的网格给出。
+pub struct TileSpec { pub col: u32, pub row: u32 }
 
-/// 缓存键：页 + 量化缩放 + 旋转 + 瓦片坐标（整页渲染时为 None）。
+/// 一块要渲染的页面区域：**页面空间矩形 + 期望像素尺寸**（▲v4/D-95）。
+pub struct RenderRegion {
+    pub page_rect: Rect,       // PDF 页面空间（未旋转、左下原点）
+    pub pixel_size: (u32, u32),// 后端必须精确产出这个尺寸
+}
+
+/// 缓存键：页 + **波段渲染比例** + 旋转 + 块坐标（整页渲染时为 None）。
+/// 同波段内任意缩放 → 同一个键 → 不重渲染、不取消在飞任务。
 pub struct RenderKey {
     pub page: PageIndex,
     pub scale_milli: u32,      // 量化缩放 ×1000（f32 不能做 Hash/Eq）
@@ -496,12 +501,12 @@ pub trait Document: Send + Sync {
 /// * 渲染前若 [`CancelToken::is_cancelled`] 为真，立即返回 [`CoreError::Cancelled`]
 ///   （PDFium 无法中断进行中的渲染，取消只在任务开始前有效）。
 /// * 整页渲染（`tile == None`）：位图尺寸 = "旋转后页尺寸 × scale"，允许 ±1 像素取整误差。
-/// * ▲v3 瓦片渲染（`tile == Some(spec)`）：**只渲染该瓦片**，位图尺寸 =
-///   `spec.pixel_rect(displayed_size)` 的尺寸（最后一列/行不足 [`TILE_SIZE`]）。
-///   必须用 `spec.page_rect(page_size, rotation)` 作为裁剪矩形**直接渲染该区域**，
-///   **不得先整页渲染再裁剪** —— 否则分块就失去了省内存的意义。
-///   （pdfium 适配层用位图尺寸 + 渲染原点即可实现：`PdfRenderConfig::set_origin()`。）
-/// * 瓦片必须对齐整数像素边界，拼接时不得重叠或留缝。
+/// * ▲v4 块渲染（`tile == Some(spec)`）：**只渲染 `request.region.page_rect` 这块区域**，
+///   位图尺寸**必须等于** `region.pixel_size`；几何推导不一致时返回
+///   [`CoreError::Internal`]，**不得静默拉伸**（D-95）。
+///   （pdfium 适配层：把页面空间矩形映射成整页位图里的整像素矩形，
+///   再 `set_fixed_size(整页px)` + 负 `set_origin` 只渲染该区域。）
+/// * 块矩形与尺寸必须对齐整数像素，拼接时不得重叠或留缝。
 /// * 如实填写 [`PixelFormat`]（PDFium 原生 BGRA，不要假装 RGBA）。
 pub trait PageRaster: Send + Sync {
     /// 渲染一页或一页中的一块瓦片。
@@ -912,7 +917,7 @@ impl DocumentSession {
 | # | 位置 | 变更 | 对应决定 |
 | --- | --- | --- | --- |
 | 1 | `Document` | 新增 `page_geometries() -> Arc<[PageGeometry]>`（批量、O(1)）；`page_size`/`page_rotation` 降级为默认方法 | D-01 |
-| 2 | `RenderRequest` / `RenderKey` | 新增 `tile: Option<TileSpec>`；新增 `TILE_SIZE`、`TileSpec`、`TilingPolicy`；`PageRaster` 契约明确"只渲染瓦片、不得整页后裁剪" | D-02 |
+| 2 | `RenderRequest` / `RenderKey` | 新增 `tile: Option<TileSpec>`；新增 `TILE_SIZE`、`TileSpec`、`TilingPolicy`；`PageRaster` 契约明确"只渲染瓦片、不得整页后裁剪"。（▲v4/D-94：`TILE_SIZE` 与 512 网格方法**已删除**，改由 `TileGrid` + `RenderRegion` 承担，见 D-94/D-95） | D-02 |
 | 3 | `TextLayer::search` | 注释明确"同步、不做异步版本" | D-03 |
 | 4 | `TextSelection` | 明确 `&mut self` 为例外并记录已确认 | D-04 |
 | 5 | `Viewport` / `ScrollAnchor` / `PageLayout` | 新增 `center_content_point()`、`ScrollAnchor`、`scroll_to_anchor()`；`scroll_to_page` 保留居中语义（**v4/D-11 起改为顶部对齐 + 横向居中**，并新增 `ViewerCommand::CenterOnPagePoint` 供搜索跳转居中） | D-05 / D-11 |

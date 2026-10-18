@@ -26,8 +26,8 @@ use crate::layout::{
     ReadingDirection, ScrollAnchor, Viewport,
 };
 use crate::render::{
-    RenderCache, RenderEvent, RenderKey, RenderPriority, RenderRequest, RenderScheduler, Scale,
-    TileSpec, TilingPolicy,
+    RenderCache, RenderEvent, RenderKey, RenderPriority, RenderRegion, RenderRequest,
+    RenderScheduler, Scale, TileSpec, TilingPolicy,
 };
 use crate::text::{
     Highlight, HighlightKind, PageText, SearchHit, SearchQuery, SelectionGranularity, TextPosition,
@@ -935,13 +935,25 @@ impl DocumentSession {
         for row in row0..=row1 {
             for col in col0..=col1 {
                 let tile = TileSpec::new(col, row);
+                let (_, _, width, height) = grid.tile_px(col, row);
                 // 空块（网格边缘之外）不请求：否则后端会为 0×0 的块报错
-                if !grid.contains(col, row) {
+                if width == 0 || height == 0 {
                     continue;
                 }
+                // 请求携带"块矩形 + 期望像素尺寸"（D-95）：后端按页面空间区域渲染，
+                // 并校验输出尺寸 —— 两侧几何一旦不一致，宁可报错也不静默拉伸。
+                let region = RenderRegion {
+                    page_rect: grid.tile_page_rect(
+                        col,
+                        row,
+                        placement.page_size,
+                        placement.rotation,
+                    ),
+                    pixel_size: (width, height),
+                };
                 let key = RenderKey::tiled(placement.page, scale, placement.rotation, tile);
                 let request =
-                    RenderRequest::tiled(placement.page, scale, placement.rotation, tile)
+                    RenderRequest::tiled(placement.page, scale, placement.rotation, tile, region)
                         .with_priority(priority);
                 self.submit(request, key);
             }

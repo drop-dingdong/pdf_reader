@@ -189,7 +189,8 @@ PDF 页面坐标
 2. **只有 `PagePlacement` 负责 page ↔ content 换算**（`page_to_content` / `content_to_page` / `rect_to_content`）。UI 与后端都不得自己算。
 3. **旋转必须先于缩放**，且 `Rotation::map_point` 在 **0° 与 180° 时同样包含 y 轴翻转**（这是实现中最常见的错误：0° 时直接返回原点）。
 4. **渲染请求里的 `scale` 与 `rotation` 必须取自 `PagePlacement`**，不能各自计算 —— 否则会出现"布局转了、位图没转"或"高亮与文字错位"。
-5. ▲v3 **分块（tile）必须整数像素对齐**：瓦片在缓存键里带 `(col, row)`，渲染时按 `TileSpec::page_rect()` 的 PDF 空间裁剪区**直接渲染**（不得整页后裁剪），拼接时以 `TileSpec::pixel_rect()` 的整数像素矩形为准 —— 否则会出现 1px 缝隙或重叠导致的模糊带。
+5. ▲v3 **分块必须整数像素对齐**：块在缓存键里带 `(col, row)`，渲染时按 `RenderRegion.page_rect`（PDF 页面空间矩形）**直接渲染该区域**（不得整页后裁剪），输出尺寸必须是 `RenderRegion.pixel_size`（后端**校验**，不符即报错，见 D-95）；拼接时以 `tiling::TileGrid` 的**共享整数边界**为准 —— 否则会出现 1px 缝隙或重叠导致的模糊带。
+   ▲v4（D-94/D-95）：所有块的显示位置都由 `TileGrid::display_rect` 导出（`x = 页.x + 块像素·u`，`u = 显示/渲染`），因此"位图像素偏移直接相加"只在 `u == 1` 时成立。
 
 ---
 
@@ -230,9 +231,10 @@ PDF 页面坐标
 | `DocumentLayout` | `{ content_size, placements }` —— 内容总尺寸（算滚动范围）+ 每页位置 |
 | `Viewport` | `{ size, scroll }` —— 视口尺寸与滚动偏移；▲v3 加 `center_content_point()` |
 | `ScrollAnchor` | ▲v3 `{ page, page_point }` —— 视野中心锚点，布局重算前后保持阅读位置不漂移（D-05） |
-| `Scale` | newtype(f32)：设备像素 / point；含 `quantize()`（缓存键量化）与 `dpi()` |
-| `RenderKey` | `{ page, scale_milli, rotation, tile }` ▲v3 —— 缓存键（f32 不能做 `Hash`，故存千分之一整数；瓦片坐标并入键） |
-| `TileSpec` / `TilingPolicy` | ▲v3 瓦片坐标（`grid_for` / `pixel_rect` / `page_rect`）与分块策略（默认 `AbovePixels(4 MP)`，见 D-15）（D-02） |
+| `Scale` | newtype(f32)：设备像素 / point；含 `dpi()`（▲v4：`quantize()` 已删除，缓存键改用波段渲染比例，见 D-94） |
+| `RenderKey` | `{ page, scale_milli, rotation, tile }` —— 缓存键（f32 不能做 `Hash`，故存千分之一整数）；▲v4：`scale_milli` 是**波段渲染比例**，同波段内任意缩放同键（D-94） |
+| `TileSpec` / `TilingPolicy` / `TileGrid` | ▲v3/v4 块坐标 `(col,row)`、分块策略（默认 `AbovePixels(4 MP)`，按**渲染**像素面积，见 D-15/D-94）、等比分块几何 `TileGrid`（共享整数边界 / `tile_px` / `tiles_in_view` / `display_rect` / `tile_page_rect`）；512 固定网格的 `grid_for`/`pixel_rect`/`page_rect`/`tiles_covering` 已删除 |
+| `RenderRegion` | ▲v4 `{ page_rect, pixel_size }` —— 块请求的"页面空间矩形 + 期望像素尺寸"（D-95） |
 | `RasterImage` | 不可变位图，像素在 `Arc<[u8]>` 中，缓存与 UI 共享零拷贝；`to_rgba8()` 是唯一格式转换点 |
 | `PageText` / `TextChar` / `TextSpan` | 页文本 + 逐字符包围盒 + 样式分段；不变量：`text.chars().count() == chars.len()` |
 | `TextRange` / `TextPosition` / `Selection` | 字符区间（半开、字符下标而非字节）、文档位置、选区（anchor/focus 可反向） |

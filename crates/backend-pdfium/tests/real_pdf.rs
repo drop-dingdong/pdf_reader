@@ -26,6 +26,26 @@ fn assert_close(actual: f32, expected: f32) {
     assert!((actual - expected).abs() < 0.5, "期望 {expected}，实际 {actual}");
 }
 
+/// 按网格构造一个块请求（D-95 的形状：块的**页面空间矩形** + **期望像素尺寸**）。
+///
+/// 与 `DocumentSession` 内部走的是同一个 `TileGrid`，因此这些测试同时验证
+/// "块矩形 → 设备像素"的换算与上位层一致。
+fn tile_request(
+    page: PageIndex,
+    page_size: Size,
+    rotation: Rotation,
+    zoom: f32,
+    tile: TileSpec,
+) -> RenderRequest {
+    let grid = TileGrid::new(page_size.rotated(rotation), zoom);
+    let (_, _, width, height) = grid.tile_px(tile.col, tile.row);
+    let region = RenderRegion {
+        page_rect: grid.tile_page_rect(tile.col, tile.row, page_size, rotation),
+        pixel_size: (width, height),
+    };
+    RenderRequest::tiled(page, Scale::from_zoom(zoom), rotation, tile, region)
+}
+
 #[test]
 fn opens_from_path_and_reports_unrotated_geometry() {
     let Some(backend) = backend() else { return };
@@ -147,10 +167,11 @@ fn tiles_render_only_the_requested_region() {
     assert_eq!((x, y, width, height), (0, 0, 612, 792));
     let tile = opened
         .raster
-        .render(&RenderRequest::tiled(
+        .render(&tile_request(
             PageIndex::FIRST,
-            scale,
+            Size::new(612.0, 792.0),
             Rotation::None,
+            2.0,
             TileSpec::new(0, 0),
         ))
         .expect("块 (0,0)");
@@ -162,10 +183,11 @@ fn tiles_render_only_the_requested_region() {
     let (_, _, width, height) = grid.tile_px(1, 1);
     let empty = opened
         .raster
-        .render(&RenderRequest::tiled(
+        .render(&tile_request(
             PageIndex::FIRST,
-            scale,
+            Size::new(612.0, 792.0),
             Rotation::None,
+            2.0,
             TileSpec::new(1, 1),
         ))
         .expect("块 (1,1)");
@@ -176,10 +198,11 @@ fn tiles_render_only_the_requested_region() {
     // 越界块必须报错（而不是渲染一张 0×0 的图）
     assert!(opened
         .raster
-        .render(&RenderRequest::tiled(
+        .render(&tile_request(
             PageIndex::FIRST,
-            scale,
+            Size::new(612.0, 792.0),
             Rotation::None,
+            2.0,
             TileSpec::new(2, 0),
         ))
         .is_err());
@@ -290,17 +313,18 @@ fn every_tile_contains_ink_for_a_full_page_document() {
     let opened = backend.open(Source::Path(&path), None).expect("打开多页 PDF");
 
     // 612×792 @2x → 1224×1584 → 2×2 网格
-    let scale = Scale::from_zoom(2.0);
-    let grid = TileGrid::new(Size::new(612.0, 792.0), 2.0);
+    let zoom = 2.0;
+    let grid = TileGrid::new(Size::new(612.0, 792.0), zoom);
     assert_eq!(grid.side, 2);
 
     for (col, row) in grid.all_tiles() {
         let tile = opened
             .raster
-            .render(&RenderRequest::tiled(
+            .render(&tile_request(
                 PageIndex::FIRST,
-                scale,
+                Size::new(612.0, 792.0),
                 Rotation::None,
+                zoom,
                 TileSpec::new(col, row),
             ))
             .expect("块");
@@ -324,25 +348,27 @@ fn every_tile_contains_ink_for_a_full_page_document() {
 fn tiles_match_the_crop_of_the_whole_page_render() {
     let Some(backend) = backend() else { return };
 
-    let check = |name: &str, width: f32, height: f32, zoom: f32| {
+    let check = |name: &str, width: f32, height: f32, zoom: f32, rotation: Rotation| {
         let path = common::many_page_pdf_file(name, 1, width, height);
         let opened = backend.open(Source::Path(&path), None).expect("打开");
 
         let scale = Scale::from_zoom(zoom);
-        let grid = TileGrid::new(Size::new(width, height), zoom);
+        let page_size = Size::new(width, height);
+        let grid = TileGrid::new(page_size.rotated(rotation), zoom);
         let whole = opened
             .raster
-            .render(&RenderRequest::new(PageIndex::FIRST, scale, Rotation::None))
+            .render(&RenderRequest::new(PageIndex::FIRST, scale, rotation))
             .expect("整页");
         assert_eq!((whole.width, whole.height), grid.render_px());
 
         for (col, row) in grid.all_tiles() {
             let tile = opened
                 .raster
-                .render(&RenderRequest::tiled(
+                .render(&tile_request(
                     PageIndex::FIRST,
-                    scale,
-                    Rotation::None,
+                    page_size,
+                    rotation,
+                    zoom,
                     TileSpec::new(col, row),
                 ))
                 .expect("块");
@@ -365,14 +391,16 @@ fn tiles_match_the_crop_of_the_whole_page_render() {
             }
             assert!(
                 worst <= 16,
-                "块 ({col},{row}) 与整页裁剪不一致：最大通道差 {worst}"
+                "块 ({col},{row}) 与整页裁剪不一致：最大通道差 {worst}（rotation={rotation:?}）"
             );
         }
         let _ = std::fs::remove_file(&path);
     };
 
-    check("tile-crop-even", 612.0, 792.0, 2.0);
-    check("tile-crop-odd", 610.0, 790.0, 3.0);
+    check("tile-crop-even", 612.0, 792.0, 2.0, Rotation::None);
+    check("tile-crop-odd", 610.0, 790.0, 3.0, Rotation::None);
+    // 旋转 90°：块矩形在页面空间里是"横"的，映射到设备后要交换宽高 —— 最容易算错的一种
+    check("tile-crop-rotated", 610.0, 790.0, 3.0, Rotation::Clockwise90);
 }
 
 /// 800% 现场诊断：高倍缩放下瓦片是否仍然有内容。
@@ -383,8 +411,8 @@ fn tiles_at_800_percent_still_contain_ink() {
     let opened = backend.open(Source::Path(&path), None).expect("打开");
 
     // 612×792 @8x → 4896×6336 → 8×8 网格，每块 612×792
-    let scale = Scale::from_zoom(8.0);
-    let grid = TileGrid::new(Size::new(612.0, 792.0), 8.0);
+    let zoom = 8.0;
+    let grid = TileGrid::new(Size::new(612.0, 792.0), zoom);
     assert_eq!(grid.side, 8);
     assert_eq!(grid.render_px(), (4896, 6336));
 
@@ -392,10 +420,11 @@ fn tiles_at_800_percent_still_contain_ink() {
         let started = std::time::Instant::now();
         let tile = opened
             .raster
-            .render(&RenderRequest::tiled(
+            .render(&tile_request(
                 PageIndex::FIRST,
-                scale,
+                Size::new(612.0, 792.0),
                 Rotation::None,
+                zoom,
                 TileSpec::new(col, row),
             ))
             .expect("块");
@@ -409,6 +438,66 @@ fn tiles_at_800_percent_still_contain_ink() {
         assert!(ink > 50, "800% 下块 ({col},{row}) 必须包含墨迹，实际 {ink}");
     }
     let _ = std::fs::remove_file(&path);
+}
+
+/// 契约（D-95）：期望像素尺寸与几何推导不一致时**必须报错**，不得静默拉伸。
+///
+/// 静默拉伸的后果是"看起来有图，但同一行文字在块接缝处错位"（D-84/D-86）——
+/// 比直接失败难查得多，因此这里把它钉成硬失败。
+#[test]
+fn wrong_expected_tile_size_is_rejected_not_stretched() {
+    let Some(backend) = backend() else { return };
+    let opened = backend.open(Source::Bytes(&common::two_page_pdf()), None).expect("打开");
+    let page_size = Size::new(612.0, 792.0);
+
+    let mut wrong_size = tile_request(
+        PageIndex::FIRST,
+        page_size,
+        Rotation::None,
+        2.0,
+        TileSpec::new(0, 0),
+    );
+    if let Some(region) = wrong_size.region.as_mut() {
+        region.pixel_size.0 += 7;
+    }
+    match opened.raster.render(&wrong_size) {
+        Err(CoreError::Internal(message)) => {
+            assert!(message.contains("尺寸"), "错误信息应指出尺寸不符，实际：{message}")
+        }
+        Ok(image) => panic!("尺寸不符必须报错，实际渲染出 {}×{}", image.width, image.height),
+        Err(other) => panic!("应返回 Internal，实际 {other:?}"),
+    }
+
+    // 块矩形落在半像素上同样必须报错（否则整块内容会被平移/缩放）
+    let mut half_pixel = tile_request(
+        PageIndex::FIRST,
+        page_size,
+        Rotation::None,
+        2.0,
+        TileSpec::new(0, 0),
+    );
+    if let Some(region) = half_pixel.region.as_mut() {
+        // 2 倍下 0.25pt = 0.5px：落在半像素上
+        region.page_rect.x += 0.25;
+    }
+    assert!(
+        matches!(opened.raster.render(&half_pixel), Err(CoreError::Internal(_))),
+        "半像素的块矩形必须被拒绝"
+    );
+
+    // 缺区域 = 无法知道该渲染哪块，必须报错
+    let mut missing = tile_request(
+        PageIndex::FIRST,
+        page_size,
+        Rotation::None,
+        2.0,
+        TileSpec::new(0, 0),
+    );
+    missing.region = None;
+    assert!(
+        matches!(opened.raster.render(&missing), Err(CoreError::Internal(_))),
+        "瓦片请求缺区域必须报错"
+    );
 }
 
 /// **验收判据 5**（真实后端版）：同一波段内改缩放不产生新的渲染请求。

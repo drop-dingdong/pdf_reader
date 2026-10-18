@@ -15,7 +15,7 @@
 //!
 //! 相邻块共用 `edges[i]`，所以 `x_i + w_i == x_{i+1}` **严格成立**（同一个浮点表达式）。
 
-use crate::geometry::{Rect, Size};
+use crate::geometry::{Point, Rect, Rotation, Size};
 
 /// 目标块边长（像素）：层级选择让每块尽量接近这个大小。
 pub const TARGET_TILE_PX: f32 = 512.0;
@@ -25,6 +25,8 @@ pub const TARGET_TILE_PX: f32 = 512.0;
 pub struct TileGrid {
     /// 每边分块数（`2^level`，4、9、16… 由 `level` 决定）。
     pub side: u32,
+    /// 建立网格时用的**渲染比例**（块矩形换算回页面空间要用它）。
+    pub render_scale: f32,
     /// 渲染比例下的页像素尺寸（未取整，仅用于诊断）。
     pub render_size: (f32, f32),
     /// X 方向边界（长度 `side + 1`，单调递增，首元素 0，末元素 = `round(宽)`）。
@@ -45,6 +47,7 @@ impl TileGrid {
         let side = 1u32 << level;
         TileGrid {
             side,
+            render_scale,
             render_size: (width, height),
             edges_x: edges(width, side),
             edges_y: edges(height, side),
@@ -130,6 +133,44 @@ impl TileGrid {
             w as f32 * u,
             h as f32 * u,
         )
+    }
+
+    /// 某块在 **PDF 页面空间**中的矩形（未旋转、左下原点）。
+    ///
+    /// 这是渲染请求要携带的"块矩形"：后端按它渲染该区域即可，**不必知道网格怎么切**
+    /// （网格是渲染无关的几何，块怎么切由上层决定）。越界返回 [`Rect::ZERO`]。
+    ///
+    /// 换算路径：渲染像素 → 渲染比例下的显示坐标（÷`render_scale`）→ 页面空间
+    /// （[`Rotation::unmap_point`]）→ 四角外接矩形（90°/270° 会交换宽高）。
+    pub fn tile_page_rect(
+        &self,
+        col: u32,
+        row: u32,
+        page_size: Size,
+        rotation: Rotation,
+    ) -> Rect {
+        let (x, y, width, height) = self.tile_px(col, row);
+        if width == 0 || height == 0 {
+            return Rect::ZERO;
+        }
+        let scale = if self.render_scale > 0.0 { self.render_scale } else { 1.0 };
+        let pixels = Rect::new(
+            x as f32 / scale,
+            y as f32 / scale,
+            width as f32 / scale,
+            height as f32 / scale,
+        );
+        let corners = [
+            Point::new(pixels.x, pixels.y),
+            Point::new(pixels.right(), pixels.y),
+            Point::new(pixels.x, pixels.bottom()),
+            Point::new(pixels.right(), pixels.bottom()),
+        ];
+        let mut iter = corners.iter().map(|point| rotation.unmap_point(*point, page_size));
+        let first = iter.next().unwrap_or(Point::ORIGIN);
+        iter.fold(Rect::from_min_max(first, first), |acc, point| {
+            acc.union(Rect::from_min_max(point, point))
+        })
     }
 
     /// 视口需要的块范围 `(col0, row0, col1, row1)`（含端点）；完全不相交返回 `None`。
@@ -364,6 +405,62 @@ mod tests {
                 assert!((ratio_a - ratio_b).abs() < 1e-6, "相对位置必须与显示比例无关");
             }
         }
+    }
+
+    /// 块矩形必须在页面空间里：不越界、拼起来正好覆盖整页、且与像素矩形同面积。
+    #[test]
+    fn tile_page_rects_cover_the_page_and_stay_inside() {
+        let page = Size::new(612.0, 792.0);
+        for rotation in [
+            Rotation::None,
+            Rotation::Clockwise90,
+            Rotation::Clockwise180,
+            Rotation::Clockwise270,
+        ] {
+            let render = 2.0f32;
+            let grid = TileGrid::new(page.rotated(rotation), render);
+            let mut area = 0.0;
+            for (col, row) in grid.all_tiles() {
+                let rect = grid.tile_page_rect(col, row, page, rotation);
+                assert!(
+                    rect.x >= -1e-3
+                        && rect.y >= -1e-3
+                        && rect.right() <= page.width + 1e-3
+                        && rect.bottom() <= page.height + 1e-3,
+                    "块 ({col},{row}) 的页面矩形越界：{rect:?}（rotation={rotation:?}）"
+                );
+                // 面积守恒：块的页面面积 × 比例² 应等于它的像素面积
+                let (_, _, width, height) = grid.tile_px(col, row);
+                let expected = (width as f32 * height as f32) / (render * render);
+                let actual = rect.width * rect.height;
+                assert!(
+                    (actual - expected).abs() < 1.0,
+                    "块 ({col},{row}) 面积不符：{actual} vs {expected}"
+                );
+                area += actual;
+            }
+            let page_area = page.width * page.height;
+            assert!(
+                (area - page_area).abs() < 1.0,
+                "所有块的页面面积之和必须等于整页（rotation={rotation:?}）：{area}"
+            );
+        }
+    }
+
+    /// 不旋转时块矩形的数值必须严格可推：底部那块对应页面下半部分（PDF y 向上）。
+    #[test]
+    fn tile_page_rect_values_are_exact_without_rotation() {
+        let page = Size::new(612.0, 792.0);
+        let grid = TileGrid::new(page, 2.0);
+        assert_eq!(grid.side, 2);
+        // 位图第 0 行（顶部）→ 页面 y 396..792
+        let top_left = grid.tile_page_rect(0, 0, page, Rotation::None);
+        assert_eq!(top_left, Rect::new(0.0, 396.0, 306.0, 396.0));
+        // 位图第 1 行（底部）→ 页面 y 0..396
+        let bottom_left = grid.tile_page_rect(0, 1, page, Rotation::None);
+        assert_eq!(bottom_left, Rect::new(0.0, 0.0, 306.0, 396.0));
+        // 越界块没有矩形
+        assert_eq!(grid.tile_page_rect(2, 0, page, Rotation::None), Rect::ZERO);
     }
 
     /// 层级选择：块边长应接近目标值（512），且页越大层级越高。
