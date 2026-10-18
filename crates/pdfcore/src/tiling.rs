@@ -378,3 +378,87 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 波段（超采样复用）
+// ---------------------------------------------------------------------------
+
+/// 默认超采样倍数：按 1.6 倍渲染，则在 1/1.6–1 的区间内只需下采样，不必重渲染。
+pub const DEFAULT_OVERSCAN: f32 = 1.6;
+
+/// 缩放比 → 波段号。同一波段内的缩放**共用一次渲染**。
+///
+/// 波段 `b` 覆盖 `[overscan^b, overscan^(b+1))`；渲染时取波段**上界**，
+/// 因此波段内始终满足 `u = 显示/渲染 ≤ 1`（只下采样，不会放大变糊）。
+pub fn band_for(scale: f32, overscan: f32) -> i32 {
+    let ratio = if overscan > 1.0 { overscan } else { DEFAULT_OVERSCAN };
+    let value = if scale > 0.0 { scale } else { 1.0 };
+    (value.ln() / ratio.ln()).floor() as i32
+}
+
+/// 波段号 → 该波段应采用的**渲染比例**（取波段上界）。
+pub fn render_scale_for_band(band: i32, overscan: f32) -> f32 {
+    let ratio = if overscan > 1.0 { overscan } else { DEFAULT_OVERSCAN };
+    ratio.powi(band + 1)
+}
+
+/// 已缓存 `render_scale` 的纹理，在显示比例为 `display_scale` 时是否仍可用。
+///
+/// 规则：**只允许下采样**（`display_scale <= render_scale`）——
+/// 缩小时永远不必重渲染；放大到超过缓存比例才需要重渲染。
+pub fn reuse_is_enough(display_scale: f32, render_scale: f32) -> bool {
+    if display_scale <= 0.0 || render_scale <= 0.0 {
+        return false;
+    }
+    display_scale <= render_scale * 1.0001
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+
+    /// 同一波段内的缩放必须得到同一个波段号；跨过边界才换号。
+    #[test]
+    fn band_is_stable_inside_its_range() {
+        let overscan = 2.0;
+        // 波段 0 覆盖 [1, 2)
+        assert_eq!(band_for(1.0, overscan), 0);
+        assert_eq!(band_for(1.5, overscan), 0);
+        assert_eq!(band_for(1.99, overscan), 0);
+        assert_eq!(band_for(2.0, overscan), 1, "到达上界即换波段");
+        assert_eq!(band_for(3.9, overscan), 1);
+        assert_eq!(band_for(4.0, overscan), 2);
+        // 缩小方向：波段为负
+        assert_eq!(band_for(0.5, overscan), -1);
+        assert_eq!(band_for(0.25, overscan), -2);
+        // 非法输入退回 0
+        assert_eq!(band_for(0.0, overscan), 0);
+        assert_eq!(band_for(-1.0, overscan), 0);
+    }
+
+    /// 波段上界作为渲染比例：波段内一律只下采样（u ≤ 1），且不会超过一个超采样倍数。
+    #[test]
+    fn render_scale_is_the_band_ceiling() {
+        for overscan in [1.6f32, 2.0, 3.0] {
+            for band in -2..4 {
+                let render = render_scale_for_band(band, overscan);
+                let low = render / overscan;
+                for display in [low, (low + render) * 0.5, render] {
+                    let u = display / render;
+                    assert!(u <= 1.0 + 1e-4, "波段内必须只下采样：u={u}");
+                    assert!(u > 1.0 / overscan - 1e-4, "u 不应超过一个超采样倍数：u={u}");
+                }
+            }
+        }
+    }
+
+    /// 缩小不需要重渲染；放大超过缓存比例才需要。
+    #[test]
+    fn reuse_covers_zoom_out_but_not_zoom_in() {
+        assert!(reuse_is_enough(1.0, 2.0), "缩小可用");
+        assert!(reuse_is_enough(2.0, 2.0), "恰好等于可用");
+        assert!(!reuse_is_enough(2.01, 2.0), "放大超出即需重渲染");
+        assert!(!reuse_is_enough(0.0, 2.0), "非法输入不可用");
+        assert!(!reuse_is_enough(1.0, 0.0));
+    }
+}
