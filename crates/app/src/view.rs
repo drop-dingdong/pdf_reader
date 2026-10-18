@@ -1186,6 +1186,31 @@ impl<V> KeyedStore<V> {
         }
     }
 
+    /// 给"缺块区域"打底的旧内容：**覆盖优先**。
+    ///
+    /// 与 [`Self::preview_source`] 的区别在取舍方向：
+    /// * 整屏预览要"好看"，所以放大方向优先更接近目标的（更清晰）；
+    /// * 打底要"盖住"，所以只要有整页图就用整页图 —— 它是**一张连续图像**铺满整页，
+    ///   缺块的位置都能从它上面取到对应区域的像素，不会露白。
+    ///
+    /// 这不等同于 D-87 的"逐块拉伸旧瓦片"：底料是一张整页图（单一比例、单一映射），
+    /// 叠在上面的当前波段块也由同一套共享边界摆放，二者都对齐到同一个页面矩形，
+    /// 因此接缝处只会有"清晰度差"，不会出现 D-88 那类**几何错位**。
+    pub fn underlay_source(
+        &self,
+        page: PageIndex,
+        rotation: Rotation,
+        target_scale_milli: u32,
+    ) -> Preview {
+        if let Some(key) = self.best_page_texture_key(page, rotation, target_scale_milli) {
+            return Preview::Whole(key.scale_milli);
+        }
+        match self.best_tile_scale(page, rotation, target_scale_milli) {
+            Some(scale) => Preview::Tiles(scale),
+            None => Preview::None,
+        }
+    }
+
     /// 裁剪纹理：保留每页的
     /// ① 当前波段；② **最接近它的另一个波段**（放大方向的预览底料）；
     /// ③ 当前比例**以下、最近的"有整页纹理"的波段**（缩小方向的整页底料）。
@@ -1617,6 +1642,43 @@ mod tests {
         store.insert(whole(2.0), "whole");
         store.insert(tile(4.0, 0), "tile");
         assert_eq!(store.preview_source(page, Rotation::None, 3_000), Preview::Whole(2_000));
+    }
+
+    /// 打底要"覆盖优先"：即使旧块更接近目标，也优先用整页图（能盖满整页）。
+    #[test]
+    fn underlay_source_prefers_coverage_over_sharpness() {
+        let page = PageIndex::new(0);
+        let whole = RenderKey::new(page, Scale::from_zoom(2.56), Rotation::None);
+        let tile = RenderKey::tiled(
+            page,
+            Scale::from_zoom(6.5536),
+            Rotation::None,
+            TileSpec::new(5, 7),
+        );
+
+        let mut store = KeyedStore::new(16);
+        store.insert(whole, "whole");
+        store.insert(tile, "tile");
+        // 目标 800%：旧块 6554 比整页图 2560 更接近，但打底必须用整页图
+        assert_eq!(
+            store.underlay_source(page, Rotation::None, 10_486),
+            Preview::Whole(2_560)
+        );
+        // 同时也说明"整屏预览"仍可选更清晰的那个（两条规则各司其职）
+        assert_eq!(
+            store.preview_source(page, Rotation::None, 10_486),
+            Preview::Tiles(6_554)
+        );
+
+        // 没有整页图时退回旧块；都没有则 None
+        let mut store = KeyedStore::new(16);
+        store.insert(tile, "tile");
+        assert_eq!(
+            store.underlay_source(page, Rotation::None, 10_486),
+            Preview::Tiles(6_554)
+        );
+        let store: KeyedStore<&str> = KeyedStore::new(16);
+        assert_eq!(store.underlay_source(page, Rotation::None, 10_486), Preview::None);
     }
 
     /// 保留规则：当前 + 最近的其它波段 + 当前以下最近的"整页图"所在波段。

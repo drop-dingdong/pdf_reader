@@ -43,7 +43,7 @@ use crate::view::{
     flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
-    view_rect_for, view_to_content, plan_page, DrawInput, KeyedStore, PageDraw,
+    view_rect_for, view_to_content, plan_page, DrawInput, KeyedStore, PageDraw, Preview,
 };
 
 /// 纹理缓存容量（条目数）。真正的淘汰依据是"是否可见 + 波段"（`retain_preview_scales`），
@@ -1988,59 +1988,67 @@ impl PdfReaderApp {
                 });
 
                 let mut drawn = (0u32, 0u32);
+                // 这一帧实际画了几张旧内容（整页拉伸 = 1，旧块拼 = 块数，无 = 0）。
+                let mut layers = 0u32;
+                // 这一帧给缺块处打的底料（D-98）。
+                let mut underlay = Preview::None;
                 match plan {
                     PageDraw::Whole => {
                         let texture = self.textures.get(&whole_key).expect("已判定存在");
                         paint_image(&painter, texture, screen);
                         drawn = (1, 1);
                     }
-                    PageDraw::Stretch(old_scale_milli) => {
-                        let texture = self
-                            .textures
-                            .page_texture_at(page, placement.rotation, old_scale_milli)
-                            .expect("已判定存在");
-                        paint_image(&painter, texture, screen);
-                    }
-                    PageDraw::TilePreview(old_scale_milli) => {
-                        // 上一波段的块：先按它自己的渲染比例重建网格，
-                        // 再"按占比"映射到当前页面矩形（与显示比例无关，因此无需旧显示比例）。
-                        let old_render = old_scale_milli as f32 / 1000.0;
-                        let old_grid = TileGrid::new(
-                            placement.page_size.rotated(placement.rotation),
-                            old_render,
+                    // 画的就是 plan 决定的那一层（比例原样透传，与 `preview` 同源）
+                    PageDraw::Stretch(scale_milli) => {
+                        layers = paint_preview(
+                            &painter,
+                            canvas.min,
+                            &self.textures,
+                            page,
+                            &placement,
+                            page_rect,
+                            screen,
+                            Preview::Whole(scale_milli),
                         );
-                        let (old_width, old_height) = old_grid.render_px();
-                        let old_page = Size::new(old_width as f32, old_height as f32);
-                        let new_page = page_rect.size();
-                        let mut count = 0u32;
-                        for (tile, texture) in
-                            self.textures.tiles_at(page, placement.rotation, old_scale_milli)
-                        {
-                            let (x, y, width, height) = old_grid.tile_px(tile.col, tile.row);
-                            // 兜底：`old_scale_milli` 是千分之一的四舍五入值，理论上可能与
-                            // 当时真实渲染比例差一点（若正好落在层级边界上，网格的块数会不同）。
-                            // 越界的块直接跳过，绝不用错误矩形去贴图。
-                            if width == 0 || height == 0 {
-                                continue;
-                            }
-                            let pixels = Rect::new(x as f32, y as f32, width as f32, height as f32);
-                            let rect = tile_view_rect_scaled(page_rect, pixels, old_page, new_page);
-                            let tile_screen = egui::Rect::from_min_size(
-                                canvas.min + EVec2::new(rect.x, rect.y),
-                                EVec2::new(rect.width, rect.height),
-                            );
-                            paint_image(&painter, texture, tile_screen);
-                            count += 1;
-                        }
-                        drawn = (count, count);
+                    }
+                    PageDraw::TilePreview(scale_milli) => {
+                        layers = paint_preview(
+                            &painter,
+                            canvas.min,
+                            &self.textures,
+                            page,
+                            &placement,
+                            page_rect,
+                            screen,
+                            Preview::Tiles(scale_milli),
+                        );
                     }
                     PageDraw::Tiles => {
-                        // 视口覆盖到的**全部**块都要画：就绪的贴图、未就绪的补白。
-                        // v1 只遍历"已缓存"的块，未就绪区域直接露出深色画布 ——
-                        // 高倍缩放时看起来就是"视野全黑"（第二轮验收 §15）。
-                        //
+                        // 视口覆盖到的**全部**块都要画：就绪的贴图叠在底料上。
                         // 位置一律由 TileGrid 给出（`页.x + 块像素·u`），因此同一波段内
                         // 无论显示比例怎么变，块之间的接缝都不会变（D-94）。
+                        //
+                        // D-98：**缺块处不再补白**，而是先铺一层"整页底料"（覆盖优先），
+                        // 再从它上面取像素 —— 拖动到尚未渲染的区域时看到的是糊的旧图
+                        // 而不是白块。底料是一张整页图（单一比例/单一映射），与当前波段的块
+                        // 都对齐到同一个页面矩形，所以只有清晰度差、不会有 D-88 的几何错位。
+                        if ready < total {
+                            underlay = self.textures.underlay_source(
+                                page,
+                                placement.rotation,
+                                whole_key.scale_milli,
+                            );
+                            layers = paint_preview(
+                                &painter,
+                                canvas.min,
+                                &self.textures,
+                                page,
+                                &placement,
+                                page_rect,
+                                screen,
+                                underlay,
+                            );
+                        }
                         // 只有显式设成 1/true 才描线：默认、空值、其它值都不画。
                         let tile_borders = std::env::var("PDF_READER_TILE_BORDERS")
                             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
@@ -2061,11 +2069,8 @@ impl PdfReaderApp {
                                         canvas.min + EVec2::new(rect.x, rect.y),
                                         EVec2::new(rect.width, rect.height),
                                     );
-                                    match self.textures.get(&key) {
-                                        Some(texture) => {
-                                            paint_image(&painter, texture, tile_screen);
-                                        }
-                                        None => paint_blank(&painter, tile_screen),
+                                    if let Some(texture) = self.textures.get(&key) {
+                                        paint_image(&painter, texture, tile_screen);
                                     }
                                     // 临时诊断（D-89）：给每块描 2px 红线，便于肉眼分辨块范围。
                                     // **默认关闭**；设 PDF_READER_TILE_BORDERS=1 开启。
@@ -2100,7 +2105,7 @@ impl PdfReaderApp {
                     let previous = self.last_plan.get(&page).cloned();
                     if previous.as_ref() != Some(&(label.clone(), whole_key.scale_milli)) {
                         eprintln!(
-                            "[画法] p{} 波段={} 从={} 到={} 就绪={}/{} 等待={}ms 可见={:?} 预览={:?}",
+                            "[画法] p{} 波段={} 从={} 到={} 就绪={}/{} 等待={}ms 可见={:?} 预览={:?} 层={} 底料={:?}",
                             page.display_number(),
                             whole_key.scale_milli,
                             previous
@@ -2111,12 +2116,14 @@ impl PdfReaderApp {
                             total,
                             waited_ms,
                             tile_area.as_ref().map(|(_, range)| *range),
-                            preview
+                            preview,
+                            layers,
+                            underlay
                         );
                         self.last_plan.insert(page, (label, whole_key.scale_milli));
                     }
                     report.push(format!(
-                        "p{} 画法={} 块={}/{} 网格={} 渲染比例={:.3} 等待={}ms 预览={:?} 视图矩形=({:.0},{:.0} {:.0}×{:.0})",
+                        "p{} 画法={} 块={}/{} 网格={} 渲染比例={:.3} 等待={}ms 预览={:?} 底料={:?} 视图矩形=({:.0},{:.0} {:.0}×{:.0})",
                         page.display_number(),
                         plan.label(),
                         drawn.0,
@@ -2125,6 +2132,7 @@ impl PdfReaderApp {
                         render.0,
                         waited_ms,
                         preview,
+                        underlay,
                         page_rect.x,
                         page_rect.y,
                         page_rect.width,
@@ -3941,12 +3949,65 @@ fn paint_placeholder(painter: &egui::Painter, rect: egui::Rect) {
     );
 }
 
-/// 只铺白色、**不画任何边框**。
+/// 画"旧内容"（整页拉伸 / 旧波段的块拼），返回实际画了几张。用两个地方：
+/// 整屏预览（`PageDraw::Stretch`/`TilePreview`）与缺块处的**底料**（D-98）。
 ///
-/// 用于"尚未就绪的瓦片"：整页已经铺过纸张（`paint_placeholder`），若每块缺失瓦片再描一圈灰边，
-/// 用户就会看到满屏网格线（第四轮验收反馈）。
-fn paint_blank(painter: &egui::Painter, rect: egui::Rect) {
-    painter.rect_filled(rect, CornerRadius::ZERO, Color32::WHITE);
+/// * [`Preview::Whole`]：把该波段的整页图拉伸到整页矩形；
+/// * [`Preview::Tiles`]：把该波段的块按占比拼回整页；
+/// * [`Preview::None`]：什么都不画（露出纸张）。
+///
+/// `preview` 里的比例来自同一份 `KeyedStore`，正常不会落空；万一同帧被裁剪，
+/// 只是少画一层，不 panic。
+fn paint_preview(
+    painter: &egui::Painter,
+    canvas_min: egui::Pos2,
+    textures: &KeyedStore<egui::TextureHandle>,
+    page: PageIndex,
+    placement: &PagePlacement,
+    page_rect: Rect,
+    screen: egui::Rect,
+    preview: Preview,
+) -> u32 {
+    match preview {
+        Preview::None => 0,
+        Preview::Whole(scale_milli) => {
+            let Some(texture) = textures.page_texture_at(page, placement.rotation, scale_milli)
+            else {
+                return 0;
+            };
+            paint_image(painter, texture, screen);
+            1
+        }
+        Preview::Tiles(scale_milli) => {
+            // 先按它自己的渲染比例重建网格，再"按占比"映射到当前页面矩形
+            // （与显示比例无关，因此不需要旧的显示比例）。
+            let grid = TileGrid::new(
+                placement.page_size.rotated(placement.rotation),
+                scale_milli as f32 / 1000.0,
+            );
+            let (old_width, old_height) = grid.render_px();
+            let old_page = Size::new(old_width as f32, old_height as f32);
+            let new_page = page_rect.size();
+            let mut count = 0u32;
+            for (tile, texture) in textures.tiles_at(page, placement.rotation, scale_milli) {
+                let (x, y, width, height) = grid.tile_px(tile.col, tile.row);
+                // 兜底：`scale_milli` 是四舍五入值，理论上可能与真实比例差一点
+                // （若正好落在层级边界上，块数会不同）。越界的块直接跳过。
+                if width == 0 || height == 0 {
+                    continue;
+                }
+                let pixels = Rect::new(x as f32, y as f32, width as f32, height as f32);
+                let rect = tile_view_rect_scaled(page_rect, pixels, old_page, new_page);
+                let tile_screen = egui::Rect::from_min_size(
+                    canvas_min + EVec2::new(rect.x, rect.y),
+                    EVec2::new(rect.width, rect.height),
+                );
+                paint_image(painter, texture, tile_screen);
+                count += 1;
+            }
+            count
+        }
+    }
 }
 
 /// 画一块高亮：PDF 页面空间 → 内容空间 → 视图空间。
