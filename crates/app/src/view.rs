@@ -410,6 +410,22 @@ pub fn plan_page(input: &DrawInput) -> PageDraw {
     }
 }
 
+/// 这一帧是否需要在"主图层"下面再铺一层**底料**（D-99）。
+///
+/// 预览层（整页拉伸 / 旧块拼）本身也可能**不完整**：连续放大时上一波段常常只画完
+/// 一两块就被下一次缩放取消（`set_zoom` 会 `cancel_all`），此时 `TilePreview` 只覆盖
+/// 页面的一小块 —— 光靠它，其余位置没有任何图层，就是实测到的白块。
+///
+/// 因此规则是：只要这一帧画的不是"当前波段整页图"，就先把覆盖优先的底料铺上；
+/// `Tiles` 模式只在**还有块没就绪**时需要（全齐时块已经把底料盖满了）。
+pub fn needs_underlay(plan: PageDraw, ready: usize, total: usize) -> bool {
+    match plan {
+        PageDraw::Whole | PageDraw::Blank => false,
+        PageDraw::Stretch(_) | PageDraw::TilePreview(_) => true,
+        PageDraw::Tiles => ready < total,
+    }
+}
+
 /// 把图像按**保持长宽比**的方式放进 `area`（居中，不拉伸变形）。
 pub fn fit_inside(image: egui::Vec2, area: egui::Rect) -> egui::Rect {
     if image.x <= 0.0 || image.y <= 0.0 || area.width() <= 0.0 || area.height() <= 0.0 {
@@ -1642,6 +1658,25 @@ mod tests {
         store.insert(whole(2.0), "whole");
         store.insert(tile(4.0, 0), "tile");
         assert_eq!(store.preview_source(page, Rotation::None, 3_000), Preview::Whole(2_000));
+    }
+
+    /// **回归（D-99）**：预览层也必须叠在底料之上 —— 连续放大时旧波段可能只有一两块，
+    /// 光靠"旧瓦片预览"会露白。
+    #[test]
+    fn preview_layers_always_need_an_underlay() {
+        assert!(
+            needs_underlay(PageDraw::TilePreview(6_554), 0, 0),
+            "旧块预览可能只覆盖一小块，必须有底料"
+        );
+        assert!(needs_underlay(PageDraw::TilePreview(6_554), 18, 18));
+        assert!(needs_underlay(PageDraw::Stretch(2_560), 0, 0));
+        assert!(needs_underlay(PageDraw::Tiles, 7, 8), "缺块时需要底料");
+        assert!(
+            !needs_underlay(PageDraw::Tiles, 8, 8),
+            "块全齐时块已把底料盖满，不必再画"
+        );
+        assert!(!needs_underlay(PageDraw::Whole, 0, 0), "当前波段整页图无需底料");
+        assert!(!needs_underlay(PageDraw::Blank, 0, 0));
     }
 
     /// 打底要"覆盖优先"：即使旧块更接近目标，也优先用整页图（能盖满整页）。

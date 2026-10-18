@@ -43,7 +43,8 @@ use crate::view::{
     flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
-    view_rect_for, view_to_content, plan_page, DrawInput, KeyedStore, PageDraw, Preview,
+    view_rect_for, view_to_content, needs_underlay, plan_page, DrawInput, KeyedStore, PageDraw,
+    Preview,
 };
 
 /// 纹理缓存容量（条目数）。真正的淘汰依据是"是否可见 + 波段"（`retain_preview_scales`），
@@ -1988,57 +1989,49 @@ impl PdfReaderApp {
                 });
 
                 let mut drawn = (0u32, 0u32);
-                // 这一帧实际画了几张旧内容（整页拉伸 = 1，旧块拼 = 块数，无 = 0）。
+                // 这一帧实际画了几张旧内容（整页拉伸 = 1，旧块拼 = 块数，底料 = +1）。
                 let mut layers = 0u32;
-                // 这一帧给缺块处打的底料（D-98）。
-                let mut underlay = Preview::None;
+
+                // 底料（D-98/D-99）：**覆盖优先**的旧内容，保证"缺的地方绝不露白"。
+                //
+                // 为什么不只在 `Tiles` 分支铺：预览层自己也可能不完整 —— 连续放大时
+                // 上一波段往往只画完一两块就被下一次缩放取消（`set_zoom` 会 `cancel_all`），
+                // 这时 `TilePreview` 只覆盖页面的一小块，其余位置没有任何图层（实测白块）。
+                // 底料是一张整页图（单一比例、单一映射，铺满整个页面矩形），
+                // 与块/预览层都对齐到同一个页面矩形，因此只有清晰度差、没有几何错位。
+                let underlay = if needs_underlay(plan, ready, total) {
+                    self.textures.underlay_source(
+                        page,
+                        placement.rotation,
+                        whole_key.scale_milli,
+                    )
+                } else {
+                    Preview::None
+                };
+                if underlay != Preview::None {
+                    layers += paint_preview(
+                        &painter,
+                        canvas.min,
+                        &self.textures,
+                        page,
+                        &placement,
+                        page_rect,
+                        screen,
+                        underlay,
+                    );
+                }
+
                 match plan {
                     PageDraw::Whole => {
                         let texture = self.textures.get(&whole_key).expect("已判定存在");
                         paint_image(&painter, texture, screen);
                         drawn = (1, 1);
                     }
-                    // 画的就是 plan 决定的那一层（比例原样透传，与 `preview` 同源）
+                    // 画的就是 plan 决定的那一层（比例原样透传，与 `preview` 同源）；
+                    // 与底料相同就不必重复画一遍。
                     PageDraw::Stretch(scale_milli) => {
-                        layers = paint_preview(
-                            &painter,
-                            canvas.min,
-                            &self.textures,
-                            page,
-                            &placement,
-                            page_rect,
-                            screen,
-                            Preview::Whole(scale_milli),
-                        );
-                    }
-                    PageDraw::TilePreview(scale_milli) => {
-                        layers = paint_preview(
-                            &painter,
-                            canvas.min,
-                            &self.textures,
-                            page,
-                            &placement,
-                            page_rect,
-                            screen,
-                            Preview::Tiles(scale_milli),
-                        );
-                    }
-                    PageDraw::Tiles => {
-                        // 视口覆盖到的**全部**块都要画：就绪的贴图叠在底料上。
-                        // 位置一律由 TileGrid 给出（`页.x + 块像素·u`），因此同一波段内
-                        // 无论显示比例怎么变，块之间的接缝都不会变（D-94）。
-                        //
-                        // D-98：**缺块处不再补白**，而是先铺一层"整页底料"（覆盖优先），
-                        // 再从它上面取像素 —— 拖动到尚未渲染的区域时看到的是糊的旧图
-                        // 而不是白块。底料是一张整页图（单一比例/单一映射），与当前波段的块
-                        // 都对齐到同一个页面矩形，所以只有清晰度差、不会有 D-88 的几何错位。
-                        if ready < total {
-                            underlay = self.textures.underlay_source(
-                                page,
-                                placement.rotation,
-                                whole_key.scale_milli,
-                            );
-                            layers = paint_preview(
+                        if underlay != Preview::Whole(scale_milli) {
+                            layers += paint_preview(
                                 &painter,
                                 canvas.min,
                                 &self.textures,
@@ -2046,9 +2039,29 @@ impl PdfReaderApp {
                                 &placement,
                                 page_rect,
                                 screen,
-                                underlay,
+                                Preview::Whole(scale_milli),
                             );
                         }
+                    }
+                    PageDraw::TilePreview(scale_milli) => {
+                        if underlay != Preview::Tiles(scale_milli) {
+                            layers += paint_preview(
+                                &painter,
+                                canvas.min,
+                                &self.textures,
+                                page,
+                                &placement,
+                                page_rect,
+                                screen,
+                                Preview::Tiles(scale_milli),
+                            );
+                        }
+                    }
+                    PageDraw::Tiles => {
+                        // 视口覆盖到的**全部**块都要画：就绪的贴图叠在底料上。
+                        // 位置一律由 TileGrid 给出（`页.x + 块像素·u`），因此同一波段内
+                        // 无论显示比例怎么变，块之间的接缝都不会变（D-94）。
+                        // **缺块处不再补白**：底料已经铺在下面（D-98）。
                         // 只有显式设成 1/true 才描线：默认、空值、其它值都不画。
                         let tile_borders = std::env::var("PDF_READER_TILE_BORDERS")
                             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
