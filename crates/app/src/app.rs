@@ -1051,17 +1051,6 @@ impl PdfReaderApp {
                 ui.checkbox(&mut self.pin_hover_enabled, "Pin悬浮响应");
                 ui.checkbox(&mut self.horizontal_scroll, "横向滚动")
                     .on_hover_text("勾选后纵向滚轮改为横向滚动（拖动不受影响）");
-                // 临时放回：便于测试截图功能（此前按要求从界面移除）
-                if ui
-                    .add_enabled(self.capture.is_none(), egui::Button::new("截图"))
-                    .clicked()
-                {
-                    if pin_exits_on_mode_change(false, true) {
-                        self.custom_pin = None;
-                    }
-                    self.capture = Some(CaptureState::default());
-                    self.message = "截图模式：拖动框选区域，Enter 保存并退出，Esc 退出".to_string();
-                }
             });
 
             // ---- 第 2 行：页 / 缩放 / 旋转 / 预览模式（左） + 引用显示样式（右）----
@@ -1756,6 +1745,7 @@ impl PdfReaderApp {
                 } else {
                     egui::vec2(scroll_delta.x, scroll_delta.y)
                 };
+                let scroll_before = session.viewport().scroll;
                 if let Some(command) = command_for_scroll(
                     scroll_delta,
                     modifiers.ctrl || modifiers.command,
@@ -1763,6 +1753,16 @@ impl PdfReaderApp {
                 ) {
                     session.handle(command, &mut self.events);
                     view_changed = true;
+                    if self.diagnose {
+                        let after = session.viewport().scroll;
+                        let viewport = session.viewport().size;
+                        eprintln!(
+                            "[滚动] 滚轮 delta=({:.1},{:.1}) scroll ({:.1},{:.1})→({:.1},{:.1}) 视口={}x{} 横向布局={}",
+                            scroll_delta.x, scroll_delta.y, scroll_before.x, scroll_before.y,
+                            after.x, after.y, viewport.width, viewport.height,
+                            self.horizontal_layout
+                        );
+                    }
                 }
                 if let Some(command) = command_for_zoom_delta(zoom_delta, session.state().zoom) {
                     session.handle(command, &mut self.events);

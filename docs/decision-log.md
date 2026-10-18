@@ -103,7 +103,7 @@
 | **D-79** | 全屏悬浮顶栏**内容缺失**的修复：`Area` 内 `available_rect_before_wrap()` 的宽度接近 0（Area 按内容收缩），`set_width` 因此把右侧内容挤掉。改为用**窗口视口宽度**（`viewport().inner_rect`）设宽。另加 **F11** 切换全屏（与按钮共用 `toggle_fullscreen`）。选字行为保持 D-78：拖动恒为选字，起点不在字上时不做动作（命中本身就带半个字高的容差，见 D-13）| 用户反馈"全屏顶栏比正常模式少内容"——根因是容器宽度取错 |现改为优先取视口中心，取不到再退回顶部探针。
 | **D-80** | **横向浏览**：新增 `pdfcore::layout::HorizontalLayout`（页从左到右排成一行、交叉轴按最大高度垂直居中）+ `DocumentSession::set_layout(Box<dyn PageLayout>)`（替换布局实现并重排）。顶栏第三行「全屏」右侧加 `纵向/横向` 菜单，切换经 `pending_layout` 在拿到 `&mut session` 时执行。**横向滚动** checkbox（第二行，独立、不并入菜单）：勾选后滚轮的**纵向分量改作横向**、横向分量丢弃（`egui::vec2(scroll.y, 0.0)`），拖动不受影响 | 用户需求。布局实现放核心是为了让它与纵向布局共享同一套摆放/虚拟化机制；`Box<dyn PageLayout>` 不适合塞进 `ViewerCommand`（需 Clone/Debug），故用会话方法 |
 | **D-81** | 修「切文件后横/纵向状态错位」：① 打开文档后若 UI 标记为横向，给**新会话**也 `set_layout(HorizontalLayout)`；② 布局菜单**每次点击都提交** `pending_layout`（原先只在"值变化"时提交，状态错位后重选同一项无效）。另把「截图」按钮**临时放回第二行**供测试 | 用户反馈。横向滚动勾选后"拖动无法工作"未能复现：拖动走的是 `ScrollBy(实际位移)`，与该开关无交集；但**横向布局下纵向拖动本就无效**（内容高度=视口高度），推测是这一现象 |**测试总数：101 passed, 0 failed, 0 warnings**（pdfcore 85 + backend-pdfium 16）。
-
+| **D-82** | 再次从界面移除「截图」按钮（用户确认功能正常后）；横向移动异常**暂未定位**，先加诊断：`PDF_READER_DIAGNOSE=1` 时滚轮与拖动都会打印 `[滚动] ... scroll 前→后 视口 横向布局`，用于判断是"滚动量被改写"还是"重排/夹取把位置拉回" | 用户实测：较大缩放下向右移动会跳到该页"正中顶部"；较小缩放下像"弹回中间"。需实测数据区分 `clamp_scroll` 的居中分支、`relayout_keeping_anchor`、`scroll_to_page` 三者 |
 ### ✅ 已完成：`crates/app`（egui/eframe 桌面壳）
 
 * 打开方式：命令行参数 / 拖放文件；加密文档弹**模态密码框**（`PasswordRequired` 非故障分支的落地）；
