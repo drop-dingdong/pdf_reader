@@ -362,6 +362,10 @@ pub struct PdfReaderApp {
     focus_body_edit: bool,
     /// 搜索框是否需要在当帧获得焦点（Ctrl+F 直接可输入）。
     focus_search: bool,
+    /// 是否处于全屏模式（窗口最大化、去标题栏、顶栏改为悬浮显示）。
+    fullscreen: bool,
+    /// 全屏下顶栏是否**悬浮显示**（指针靠近窗口顶端时出现）。
+    reveal_toolbar: bool,
     /// 底部搜索框是否显示（Ctrl+F 切换）。
     search_open: bool,
     /// 正在编辑题目 `(下标, 草稿)`。
@@ -474,6 +478,8 @@ impl PdfReaderApp {
             focus_edit: None,
             focus_body_edit: false,
             focus_search: false,
+            fullscreen: false,
+            reveal_toolbar: false,
             search_open: false,
             editing_title: None,
             editing_body: None,
@@ -949,7 +955,30 @@ impl PdfReaderApp {
     }
 
     fn draw_toolbar(&mut self, ui: &mut egui::Ui, session: &DocumentSession) {
+        if self.fullscreen {
+            // 全屏：顶栏**不占布局空间**，只在指针靠近顶端时悬浮出现（遮住下方内容）
+            if self.reveal_toolbar {
+                egui::Area::new(Id::unique("toolbar-overlay"))
+                    .fixed_pos(egui::pos2(0.0, 0.0))
+                    .order(egui::Order::Foreground)
+                    .show(ui.ctx(), |ui| {
+                        let width = ui.available_rect_before_wrap().width().max(1.0);
+                        egui::Frame::side_top_panel(&ui.style().clone()).show(ui, |ui| {
+                            ui.set_width(width);
+                            self.toolbar_rows(ui, session);
+                        });
+                    });
+            }
+            return;
+        }
         egui::Panel::top("toolbar").show(ui, |ui| {
+            self.toolbar_rows(ui, session);
+        });
+    }
+
+    /// 顶栏的三行内容（正常模式与全屏悬浮共用）。
+    fn toolbar_rows(&mut self, ui: &mut egui::Ui, session: &DocumentSession) {
+        {
             // ---- 第 0 行：文件（路径 + 保存自定义数据）----
             ui.horizontal(|ui| {
                 let path_text = self
@@ -995,6 +1024,18 @@ impl PdfReaderApp {
 
             // ---- 第 2 行：页 / 缩放 / 旋转 / 预览模式（左） + 引用显示样式（右）----
             ui.horizontal(|ui| {
+                // 全屏切换（现阶段纯文字）
+                let fullscreen_label = if self.fullscreen { "退出全屏" } else { "全屏" };
+                if ui.button(fullscreen_label).on_hover_text("全屏/退出全屏").clicked() {
+                    self.fullscreen = !self.fullscreen;
+                    self.reveal_toolbar = self.fullscreen;
+                    let on = self.fullscreen;
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::Decorations(!on));
+                }
+                ui.separator();
                 // 上一页 / 页码（双击原位编辑） / 下一页
                 if ui.button("上一页").clicked() {
                     self.commands.push(ViewerCommand::PrevPage);
@@ -1150,7 +1191,7 @@ impl PdfReaderApp {
                         });
                 });
             });
-        });
+        }
     }
 
     /// 搜索框（Ctrl+F 呼出）：关键词、上一个/下一个、命中计数。
@@ -1712,6 +1753,9 @@ impl PdfReaderApp {
                                 &mut self.events,
                             );
                         }
+                        // 选字模式下即使起点不在文字上，也**不做平移**（用户反馈）：
+                        // 拖动过程中指针移到文字上时仍可继续扩选；不在文字上则什么也不发生。
+                        (true, None) => self.drag = Some(DragMode::Select),
                         _ => self.drag = Some(DragMode::Pan),
                     }
                 }
@@ -3566,6 +3610,15 @@ impl eframe::App for PdfReaderApp {
             ctx.request_repaint();
         }
 
+        if self.fullscreen {
+            // 指针靠近窗口顶端才显示顶栏；离开顶栏区域即隐藏（显示区域本身不变）
+            let pointer_y = ctx.pointer_hover_pos().map(|position| position.y);
+            match pointer_y {
+                Some(y) if y < 6.0 => self.reveal_toolbar = true,
+                Some(y) if y > 120.0 => self.reveal_toolbar = false,
+                _ => {}
+            }
+        }
         self.draw_toolbar(ui, &session);
         // Ctrl+F 切换底部搜索框；Esc 关闭
         if ctx.input(|input| input.modifiers.command && input.key_pressed(Key::F)) {
