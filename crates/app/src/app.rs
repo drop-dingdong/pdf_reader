@@ -122,6 +122,15 @@ fn load_sidecar(pdf: &std::path::Path) -> Option<persist::SavedData> {
     }
 }
 
+/// 原位编辑的目标字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditField {
+    /// 页码
+    Page,
+    /// 缩放比
+    Zoom,
+}
+
 /// 缩放模式（决定缩放菜单的标题）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ZoomMode {
@@ -347,6 +356,8 @@ pub struct PdfReaderApp {
     zoom_edit: Option<String>,
     /// 缩放菜单当前的模式标题。
     zoom_mode: ZoomMode,
+    /// 哪个原位编辑框需要在**下一帧**获得焦点（双击后直接进入真编辑）。
+    focus_edit: Option<EditField>,
     /// 底部搜索框是否显示（Ctrl+F 切换）。
     search_open: bool,
     /// 正在编辑题目 `(下标, 草稿)`。
@@ -456,6 +467,7 @@ impl PdfReaderApp {
             page_edit: None,
             zoom_edit: None,
             zoom_mode: ZoomMode::Custom,
+            focus_edit: None,
             search_open: false,
             editing_title: None,
             editing_body: None,
@@ -956,10 +968,19 @@ impl PdfReaderApp {
                 ui.toggle_value(&mut self.show_outline, "侧栏")
                     .on_hover_text("显示/隐藏侧边栏（目录 / 自定义preview）");
                 ui.separator();
-                if ui.button("＋文字预览").clicked() {
+                ui.label("添加预览：");
+                if ui
+                    .button(CUSTOM_SYMBOL_TEXT)
+                    .on_hover_text("添加文字预览")
+                    .clicked()
+                {
                     self.enter_pin(CustomKind::Text);
                 }
-                if ui.button("＋图片预览").clicked() {
+                if ui
+                    .button(CUSTOM_SYMBOL_IMAGE)
+                    .on_hover_text("添加图片预览")
+                    .clicked()
+                {
                     self.enter_pin(CustomKind::Image);
                 }
                 ui.separator();
@@ -979,9 +1000,10 @@ impl PdfReaderApp {
                             .desired_width(44.0)
                             .hint_text("页码"),
                     );
-                    if response.gained_focus() {
-                        // 首次进入编辑时全选，方便直接覆盖
+                    if self.focus_edit == Some(EditField::Page) {
+                        // 双击后当帧就把焦点交给输入框 → 一步进入真编辑
                         response.request_focus();
+                        self.focus_edit = None;
                     }
                     let commit = response.lost_focus() || ui.input(|i| i.key_pressed(Key::Enter));
                     if commit {
@@ -1008,6 +1030,7 @@ impl PdfReaderApp {
                         .double_clicked()
                     {
                         self.page_edit = Some(current.display_number().to_string());
+                        self.focus_edit = Some(EditField::Page);
                     }
                 }
                 if ui.button("下一页").clicked() {
@@ -1020,8 +1043,9 @@ impl PdfReaderApp {
                 let zoom = session.state().zoom;
                 if let Some(draft) = self.zoom_edit.as_mut() {
                     let response = ui.add(egui::TextEdit::singleline(draft).desired_width(52.0));
-                    if response.gained_focus() {
+                    if self.focus_edit == Some(EditField::Zoom) {
                         response.request_focus();
+                        self.focus_edit = None;
                     }
                     let commit = response.lost_focus() || ui.input(|i| i.key_pressed(Key::Enter));
                     if commit {
@@ -1045,6 +1069,7 @@ impl PdfReaderApp {
                         .double_clicked()
                     {
                         self.zoom_edit = Some(format!("{:.0}", zoom * 100.0));
+                        self.focus_edit = Some(EditField::Zoom);
                     }
                 }
                 egui::ComboBox::from_id_salt("zoom-mode")
@@ -1122,8 +1147,10 @@ impl PdfReaderApp {
         });
     }
 
-    /// 底部搜索框（Ctrl+F 呼出）：关键词、上一个/下一个、命中计数。
-    fn draw_search_bar(&mut self, ui: &mut egui::Ui, session: &DocumentSession) {
+    /// 搜索框（Ctrl+F 呼出）：关键词、上一个/下一个、命中计数。
+    ///
+    /// 它在**中央区域**里作为底部面板创建，因此宽度与画布一致 —— 不会横跨到侧栏下方。
+    fn draw_search_bar_in_center(&mut self, ui: &mut egui::Ui, session: &DocumentSession) {
         if !self.search_open {
             return;
         }
@@ -1558,6 +1585,9 @@ impl PdfReaderApp {
 
     /// 画布：页面（纹理或白底页框）+ 高亮 + 鼠标交互。
     fn draw_canvas(&mut self, ui: &mut egui::Ui, session: &mut DocumentSession) {
+        // 搜索栏放在**中央区域**的底部：只占画布宽度（不会跑到侧栏下方），
+        // 且位于状态栏之上（用户建议）。
+        self.draw_search_bar_in_center(ui, &session);
         egui::CentralPanel::default().show(ui, |ui| {
             // 同时用"显式矩形 + interact"处理这两个区域，而**不是** `allocate_painter`：
             // 后者会按布局流占用空间 —— 上一版用 `allocate_painter(5px × 整高)` 画拖拽条，
@@ -3522,7 +3552,6 @@ impl eframe::App for PdfReaderApp {
         if self.search_open && ctx.input(|input| input.key_pressed(Key::Escape)) {
             self.search_open = false;
         }
-        self.draw_search_bar(ui, &session);
         self.draw_sidebar(ui, &session);
         self.draw_status(ui);
         self.draw_canvas(ui, &mut session);
