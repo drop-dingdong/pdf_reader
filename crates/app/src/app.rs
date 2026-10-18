@@ -1051,6 +1051,17 @@ impl PdfReaderApp {
                 ui.checkbox(&mut self.pin_hover_enabled, "Pin悬浮响应");
                 ui.checkbox(&mut self.horizontal_scroll, "横向滚动")
                     .on_hover_text("勾选后纵向滚轮改为横向滚动（拖动不受影响）");
+                // 临时放回：便于测试截图功能（此前按要求从界面移除）
+                if ui
+                    .add_enabled(self.capture.is_none(), egui::Button::new("截图"))
+                    .clicked()
+                {
+                    if pin_exits_on_mode_change(false, true) {
+                        self.custom_pin = None;
+                    }
+                    self.capture = Some(CaptureState::default());
+                    self.message = "截图模式：拖动框选区域，Enter 保存并退出，Esc 退出".to_string();
+                }
             });
 
             // ---- 第 2 行：页 / 缩放 / 旋转 / 预览模式（左） + 引用显示样式（右）----
@@ -1064,17 +1075,15 @@ impl PdfReaderApp {
                 egui::ComboBox::from_id_salt("layout-direction")
                     .selected_text(if self.horizontal_layout { "横向" } else { "纵向" })
                     .show_ui(ui, |ui| {
+                        // 无条件提交：即使标记已经是该值，也强制重排一次，
+                        // 这样"状态错位"（UI 说横向、实际纵向）点一下就能纠正。
                         if ui.selectable_label(!self.horizontal_layout, "纵向").clicked() {
-                            if self.horizontal_layout {
-                                self.horizontal_layout = false;
-                                self.pending_layout = Some(false);
-                            }
+                            self.horizontal_layout = false;
+                            self.pending_layout = Some(false);
                         }
                         if ui.selectable_label(self.horizontal_layout, "横向").clicked() {
-                            if !self.horizontal_layout {
-                                self.horizontal_layout = true;
-                                self.pending_layout = Some(true);
-                            }
+                            self.horizontal_layout = true;
+                            self.pending_layout = Some(true);
                         }
                     });
                 ui.separator();
@@ -3640,6 +3649,12 @@ impl eframe::App for PdfReaderApp {
             } else {
                 session.set_layout(Box::new(pdfcore::layout::VerticalLayout));
             }
+            session.handle(ViewerCommand::RequestVisible, &mut self.events);
+        }
+        // 新会话默认是纵向布局：若 UI 仍标记为"横向"，这里补上，
+        // 否则会出现"菜单显示横向、实际纵向"的错位（用户反馈）。
+        if self.horizontal_layout {
+            session.set_layout(Box::new(pdfcore::layout::HorizontalLayout));
             session.handle(ViewerCommand::RequestVisible, &mut self.events);
         }
         self.apply_and_pump(&ctx, &mut session);
