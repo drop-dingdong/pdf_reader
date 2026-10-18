@@ -2045,8 +2045,9 @@ impl PdfReaderApp {
                         //
                         // 位置一律由 TileGrid 给出（`页.x + 块像素·u`），因此同一波段内
                         // 无论显示比例怎么变，块之间的接缝都不会变（D-94）。
+                        // 只有显式设成 1/true 才描线：默认、空值、其它值都不画。
                         let tile_borders = std::env::var("PDF_READER_TILE_BORDERS")
-                            .map(|value| value != "0")
+                            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                             .unwrap_or(false);
                         let mut ready = 0u32;
                         let mut total = 0u32;
