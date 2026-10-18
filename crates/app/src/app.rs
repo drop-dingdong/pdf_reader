@@ -962,7 +962,18 @@ impl PdfReaderApp {
                     .fixed_pos(egui::pos2(0.0, 0.0))
                     .order(egui::Order::Foreground)
                     .show(ui.ctx(), |ui| {
-                        let width = ui.available_rect_before_wrap().width().max(1.0);
+                        // Area 内 `available_rect_before_wrap()` 宽度接近 0（Area 按内容收缩），
+                        // 会导致右侧内容被挤掉 —— 必须用窗口视口宽度。
+                        let width = ui
+                            .ctx()
+                            .input(|input| {
+                                input
+                                    .viewport()
+                                    .inner_rect
+                                    .map(|rect| rect.width())
+                                    .unwrap_or(1200.0)
+                            })
+                            .max(320.0);
                         egui::Frame::side_top_panel(&ui.style().clone()).show(ui, |ui| {
                             ui.set_width(width);
                             self.toolbar_rows(ui, session);
@@ -974,6 +985,15 @@ impl PdfReaderApp {
         egui::Panel::top("toolbar").show(ui, |ui| {
             self.toolbar_rows(ui, session);
         });
+    }
+
+    /// 切换全屏：窗口最大化 + 去装饰，并让顶栏改为悬浮显隐。
+    fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
+        self.fullscreen = !self.fullscreen;
+        self.reveal_toolbar = self.fullscreen;
+        let on = self.fullscreen;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(!on));
     }
 
     /// 顶栏的三行内容（正常模式与全屏悬浮共用）。
@@ -1026,14 +1046,9 @@ impl PdfReaderApp {
             ui.horizontal(|ui| {
                 // 全屏切换（现阶段纯文字）
                 let fullscreen_label = if self.fullscreen { "退出全屏" } else { "全屏" };
-                if ui.button(fullscreen_label).on_hover_text("全屏/退出全屏").clicked() {
-                    self.fullscreen = !self.fullscreen;
-                    self.reveal_toolbar = self.fullscreen;
-                    let on = self.fullscreen;
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::Decorations(!on));
+                if ui.button(fullscreen_label).on_hover_text("全屏/退出全屏（F11）").clicked() {
+                    let ctx = ui.ctx().clone();
+                    self.toggle_fullscreen(&ctx);
                 }
                 ui.separator();
                 // 上一页 / 页码（双击原位编辑） / 下一页
@@ -3621,6 +3636,10 @@ impl eframe::App for PdfReaderApp {
         }
         self.draw_toolbar(ui, &session);
         // Ctrl+F 切换底部搜索框；Esc 关闭
+        // F11 切换全屏
+        if ctx.input(|input| input.key_pressed(Key::F11)) {
+            self.toggle_fullscreen(&ctx);
+        }
         if ctx.input(|input| input.modifiers.command && input.key_pressed(Key::F)) {
             self.search_open = !self.search_open;
             // 呼出时直接聚焦输入框，省掉"再点一下"（用户要求）
