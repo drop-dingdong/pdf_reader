@@ -66,6 +66,26 @@ impl PageRaster for PdfiumRaster {
 
         page.render_into_bitmap_with_config(&mut bitmap, &config).map_err(to_core_error)?;
 
+        // 瓦片诊断：拼合错位时用它对照"输入像素矩形 / 实际位图尺寸 / PDFium 原点 / 比例"
+        if std::env::var_os("PDF_READER_DIAGNOSE").is_some() {
+            if let Some(tile) = request.tile {
+                let pixels = tile.pixel_rect(Size::new(full_px.0 as f32, full_px.1 as f32));
+                eprintln!(
+                    "[瓦片] 页={} col={} row={} 全页px={}x{} 瓦片={:?} 位图={}x{} 原点={} 比例={:.4}",
+                    request.page.get(),
+                    tile.col,
+                    tile.row,
+                    full_px.0,
+                    full_px.1,
+                    (pixels.x, pixels.y, pixels.width, pixels.height),
+                    bitmap_size.0,
+                    bitmap_size.1,
+                    origin.1,
+                    request.scale.0
+                );
+            }
+        }
+
         let width = bitmap.width() as u32;
         let height = bitmap.height() as u32;
         // PDFium 原生输出 BGRA；BGRA→RGBA 的转换统一由 pdfcore 的
