@@ -13,6 +13,47 @@ use pdfcore::prelude::*;
 /// 本模块的错误类型（避开 pdfcore prelude 里的 `Result` 别名）。
 type Parsed<T> = std::result::Result<T, String>;
 
+/// 存档格式的当前版本。
+///
+/// 约定（加版本时请遵守，见 `docs/custom-data-versions.md`）：
+/// * 读取侧必须能读**所有更旧**的版本，并把它升级到当前版本；
+/// * 升级只做**加法**（给新字段填默认值），不删除、不改名、不改变已有字段的语义；
+/// * `to_json` **永远写当前版本**；读到旧版本后由调用方置脏，下次保存即写回新版本。
+///
+/// 历史：
+/// * **v1**：没有 `version` 字段（或写成 `1`）。只记录页号 / 页面空间矩形 / 正文尺寸 / 题目 / 文字。
+/// * **v2**：被引用点与自定义**图片** preview 增加 `scale`（截图时的**显示比例**，`1.0` = 100%）。
+///   预览图不再"按当前缩放合成"，而是按这个记录值请求渲染 —— 否则缩放到别处后
+///   缓存里没有那块像素，初次生成会只剩白的/干脆没有图。
+pub const CURRENT_VERSION: u32 = 2;
+
+/// 旧存档缺 `scale` 时的默认分辨率（用户要求：按 100% 处理）。
+pub const DEFAULT_SCALE: f32 = 1.0;
+
+/// 版本迁移的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Migration {
+    /// 读到的原始版本（缺 `version` 字段时按 1）。
+    pub from: u32,
+    /// 迁移后的版本（比当前版本新时保持原值）。
+    pub to: u32,
+    /// 是否改动了数据 —— 调用方据此**置脏**，让下次保存写回当前版本。
+    pub changed: bool,
+    /// 给人看的说明（进日志 / 状态栏）。
+    pub notes: Vec<String>,
+}
+
+impl Migration {
+    /// 一行摘要（状态栏用）。
+    pub fn summary(&self) -> String {
+        if self.changed {
+            format!("存档已从 v{} 升级到 v{}（保存后生效）", self.from, self.to)
+        } else {
+            format!("存档版本 v{}（当前）", self.to)
+        }
+    }
+}
+
 /// 一条被引用点的可持久化数据（不含截图）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SavedMark {
@@ -22,6 +63,8 @@ pub struct SavedMark {
     pub rect: Rect,
     /// 浮窗正文尺寸（egui 单位）
     pub body: [f32; 2],
+    /// ▲v2 截图时的**显示比例**（`1.0` = 100%）。预览图按它请求渲染。
+    pub scale: f32,
 }
 
 /// 一条自定义 preview 的可持久化数据（不含截图）。
@@ -39,11 +82,15 @@ pub struct SavedCustom {
     pub title: String,
     /// 仅文字预览有内容
     pub text: Option<String>,
+    /// ▲v2 截图时的**显示比例**（`1.0` = 100%）。文字预览用不到，写 1.0。
+    pub scale: f32,
 }
 
 /// 整个存档。
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SavedData {
+    /// 读到 / 写入的格式版本（`from_json` 填的是**文件里的**版本）。
+    pub version: u32,
     /// 每页的链接（含目的地的类型/页号/坐标/URI）
     pub links: Vec<Vec<Link>>,
     /// 每页的被引用点
@@ -54,11 +101,23 @@ pub struct SavedData {
     pub custom_texts: Vec<SavedCustom>,
 }
 
+impl Default for SavedData {
+    fn default() -> Self {
+        Self {
+            version: CURRENT_VERSION,
+            links: Vec::new(),
+            dest_marks: Vec::new(),
+            custom_images: Vec::new(),
+            custom_texts: Vec::new(),
+        }
+    }
+}
+
 impl SavedData {
     /// 序列化为 JSON 文本。
     pub fn to_json(&self) -> String {
         let mut out = String::new();
-        out.push_str("{\n  \"version\": 1,\n");
+        let _ = write!(out, "{{\n  \"version\": {CURRENT_VERSION},\n");
 
         // links
         out.push_str("  \"links\": [");
@@ -96,7 +155,13 @@ impl SavedData {
                 write_point(&mut out, "point", mark.point);
                 out.push_str(", ");
                 write_rect(&mut out, "rect", mark.rect);
-                let _ = write!(out, ", \"body\": [{}, {}]", num(mark.body[0]), num(mark.body[1]));
+                let _ = write!(
+                    out,
+                    ", \"body\": [{}, {}], \"scale\": {}",
+                    num(mark.body[0]),
+                    num(mark.body[1]),
+                    num(mark.scale)
+                );
                 out.push('}');
             }
             out.push(']');
@@ -115,6 +180,12 @@ impl SavedData {
         let value = Json::parse(text)?;
         let root = value.as_object().ok_or("根节点不是对象")?;
         let mut data = SavedData::default();
+        // 缺 `version` 字段 = v1（本模块在 v2 之前确实写过 `"version": 1`，也兼容没有它的文件）
+        data.version = root
+            .field("version")
+            .and_then(|value| value.as_number())
+            .map(|value| value.round().max(1.0) as u32)
+            .unwrap_or(1);
         if let Some(links) = root.field("links") {
             for page in links.as_array().ok_or("links 不是数组")? {
                 let mut page_links = Vec::new();
@@ -145,6 +216,45 @@ impl SavedData {
         }
         Ok(data)
     }
+}
+
+/// 把旧版本的存档**就地升级**到 [`CURRENT_VERSION`]。
+///
+/// * 只做加法：给新字段填默认值（v1 → v2 是给 `scale` 填 [`DEFAULT_SCALE`]）；
+/// * 幂等：同一份数据再调一次不会有变化（`changed == false`）；
+/// * 比当前版本**新**的存档不改动，只给一条提示（未识别字段在保存时会丢）。
+pub fn migrate(data: &mut SavedData) -> Migration {
+    let from = data.version;
+    let mut notes = Vec::new();
+
+    if data.version < 2 {
+        let mut patched = 0usize;
+        for mark in data.dest_marks.iter_mut().flatten() {
+            if !(mark.scale > 0.0 && mark.scale.is_finite()) {
+                mark.scale = DEFAULT_SCALE;
+                patched += 1;
+            }
+        }
+        for item in data.custom_images.iter_mut() {
+            if !(item.scale > 0.0 && item.scale.is_finite()) {
+                item.scale = DEFAULT_SCALE;
+                patched += 1;
+            }
+        }
+        notes.push(format!(
+            "v1 → v2：{patched} 处截图没有记录分辨率，按 100% 处理（保存后写回 v{CURRENT_VERSION}）"
+        ));
+        data.version = 2;
+    }
+
+    if data.version > CURRENT_VERSION {
+        notes.push(format!(
+            "存档版本 {} 比本程序支持的 v{CURRENT_VERSION} 新：按兼容方式读取，未识别的字段会在保存时丢失",
+            data.version
+        ));
+    }
+
+    Migration { from, to: data.version, changed: from != data.version, notes }
 }
 
 /// 与 PDF 同目录同名、追加 `.json` 的存档路径。
@@ -214,9 +324,10 @@ fn write_customs(out: &mut String, key: &str, items: &[SavedCustom]) {
         write_rect(out, "rect", item.rect);
         let _ = write!(
             out,
-            ", \"body\": [{}, {}], \"title\": {}",
+            ", \"body\": [{}, {}], \"scale\": {}, \"title\": {}",
             num(item.body[0]),
             num(item.body[1]),
+            num(item.scale),
             json_string(&item.title)
         );
         if let Some(text) = &item.text {
@@ -275,7 +386,17 @@ fn parse_mark(value: &Json) -> Parsed<SavedMark> {
         point: parse_point(object.field("point").ok_or("mark 缺 point")?)?,
         rect: parse_rect(object.field("rect").ok_or("mark 缺 rect")?)?,
         body: parse_pair(object.field("body").ok_or("mark 缺 body")?)?,
+        scale: parse_scale(object),
     })
+}
+
+/// `scale` 是 v2 新增字段：缺省（旧存档）按 [`DEFAULT_SCALE`]，非法值同样退回默认。
+fn parse_scale(object: &[(String, Json)]) -> f32 {
+    object
+        .field("scale")
+        .and_then(|value| value.as_number())
+        .filter(|value| *value > 0.0 && value.is_finite())
+        .unwrap_or(DEFAULT_SCALE)
 }
 
 fn parse_custom(value: &Json) -> Parsed<SavedCustom> {
@@ -292,6 +413,7 @@ fn parse_custom(value: &Json) -> Parsed<SavedCustom> {
             .unwrap_or_default()
             .to_string(),
         text: object.field("text").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        scale: parse_scale(object),
     })
 }
 
@@ -567,6 +689,7 @@ mod tests {
 
     fn sample() -> SavedData {
         SavedData {
+            version: CURRENT_VERSION,
             links: vec![
                 vec![
                     Link {
@@ -588,6 +711,7 @@ mod tests {
                     point: Point::new(100.0, 200.0),
                     rect: Rect::new(40.0, 170.0, 120.0, 60.0),
                     body: [120.0, 60.0],
+                    scale: 8.0,
                 }],
                 Vec::new(),
             ],
@@ -598,6 +722,7 @@ mod tests {
                 body: [30.0, 40.0],
                 title: "图 \"一\"".into(),
                 text: None,
+                scale: 2.5,
             }],
             custom_texts: vec![SavedCustom {
                 page: PageIndex::new(2),
@@ -606,6 +731,7 @@ mod tests {
                 body: [300.0, 170.0],
                 title: "题\n目".into(),
                 text: Some("内容\\带转义".into()),
+                scale: DEFAULT_SCALE,
             }],
         }
     }
@@ -624,6 +750,91 @@ mod tests {
     fn sidecar_path_appends_json() {
         let path = sidecar_path(std::path::Path::new("aa/bb.pdf"));
         assert_eq!(path, std::path::PathBuf::from("aa/bb.pdf.json"));
+    }
+
+    /// v1（没有 `version`、没有 `scale`）的存档必须能读，并按 100% 处理分辨率。
+    #[test]
+    fn v1_sidecar_is_read_with_default_scale_and_migrated() {
+        // 手写一份 v1：没有 version 字段、被引用点/自定义图没有 scale
+        let text = r#"{
+  "links": [],
+  "dest_marks": [
+    [{"point": [100, 200], "rect": [40, 170, 120, 60], "body": [120, 60]}]
+  ],
+  "custom_images": [
+    {"page": 1, "point": [50, 60], "rect": [10, 20, 30, 40], "body": [30, 40], "title": "旧图"}
+  ],
+  "custom_texts": [
+    {"page": 2, "point": [5, 6], "rect": [5, 6, 0, 0], "body": [300, 170], "title": "旧文字", "text": "x"}
+  ]
+}
+"#;
+        let mut data = SavedData::from_json(text).expect("v1 应能解析");
+        assert_eq!(data.version, 1, "缺 version 字段按 v1");
+        assert_eq!(data.dest_marks[0][0].scale, DEFAULT_SCALE);
+        assert_eq!(data.custom_images[0].scale, DEFAULT_SCALE);
+
+        let migration = migrate(&mut data);
+        assert_eq!((migration.from, migration.to), (1, CURRENT_VERSION));
+        assert!(migration.changed, "旧版本必须让调用方置脏");
+        assert!(migration.notes.iter().any(|note| note.contains("100%")));
+        assert_eq!(data.version, CURRENT_VERSION);
+        assert_eq!(data.dest_marks[0][0].scale, DEFAULT_SCALE);
+        assert_eq!(data.custom_images[0].scale, DEFAULT_SCALE);
+
+        // 幂等：再迁移一次什么都不变
+        let again = migrate(&mut data);
+        assert!(!again.changed);
+        assert_eq!(again.from, CURRENT_VERSION);
+
+        // 保存后写回当前版本，往返仍然一致
+        let text = data.to_json();
+        assert!(text.contains(&format!("\"version\": {CURRENT_VERSION}")));
+        let back = SavedData::from_json(&text).expect("v2 应能解析");
+        assert_eq!(back, data);
+    }
+
+    /// v2 的 `scale` 必须原样往返，不能被迁移改写。
+    #[test]
+    fn v2_scale_survives_a_round_trip_and_migration() {
+        let data = sample();
+        let mut back = SavedData::from_json(&data.to_json()).expect("应能解析");
+        assert_eq!(back.version, CURRENT_VERSION);
+        assert_eq!(back.dest_marks[0][0].scale, 8.0);
+        assert_eq!(back.custom_images[0].scale, 2.5);
+        let migration = migrate(&mut back);
+        assert!(!migration.changed, "当前版本不需要迁移");
+        assert_eq!(back, data);
+    }
+
+    /// 比当前版本更新的存档：不改动数据，只给提示（不该 panic、也不该丢字段）。
+    #[test]
+    fn newer_sidecar_is_accepted_with_a_note() {
+        let mut data = SavedData::from_json(
+            r#"{"version": 99, "custom_images": [{"page": 0, "point": [0, 0], "rect": [0, 0, 10, 10], "body": [10, 10], "title": "x", "scale": 3.0}]}"#,
+        )
+        .expect("应能解析");
+        assert_eq!(data.version, 99);
+        let migration = migrate(&mut data);
+        assert!(!migration.changed, "更新的存档不改动");
+        assert_eq!(data.version, 99);
+        assert!(migration.notes.iter().any(|note| note.contains("更新")
+            || note.contains("新")));
+        assert_eq!(data.custom_images[0].scale, 3.0);
+    }
+
+    /// 非法的 `scale`（0/负数/NaN）按默认值处理。
+    #[test]
+    fn invalid_scale_falls_back_to_the_default() {
+        let data = SavedData::from_json(
+            r#"{"version": 2, "custom_images": [
+                {"page": 0, "point": [0, 0], "rect": [0, 0, 10, 10], "body": [10, 10], "title": "a", "scale": 0},
+                {"page": 0, "point": [0, 0], "rect": [0, 0, 10, 10], "body": [10, 10], "title": "b"}
+            ]}"#,
+        )
+        .expect("应能解析");
+        assert_eq!(data.custom_images[0].scale, DEFAULT_SCALE);
+        assert_eq!(data.custom_images[1].scale, DEFAULT_SCALE);
     }
 
     /// 损坏的输入返回 Err 而不是 panic。

@@ -223,6 +223,9 @@ struct CustomPreview {
     snapshot: Option<egui::TextureHandle>,
     /// **浮窗正文尺寸**（egui 单位），语义同 `DestMark::body_size`。
     body_size: egui::Vec2,
+    /// ▲v2 截图时的**显示比例**（`1.0` = 100%）：预览图按它请求渲染，
+    /// 因此预览分辨率与"当前缩放"解耦（D-100）。文字预览用不到，填 1.0。
+    scale: f32,
 }
 
 /// 截图模式产出的去向。
@@ -264,6 +267,8 @@ struct DestMark {
     /// **浮窗正文尺寸**（egui 单位）：生成浮窗时正文按它显示；
     /// 用户改浮窗大小后回写。
     body_size: egui::Vec2,
+    /// ▲v2 截图时的**显示比例**（`1.0` = 100%）：预览图按它请求渲染（D-100）。
+    scale: f32,
 }
 
 /// 截图模式的状态。
@@ -321,6 +326,8 @@ pub struct PdfReaderApp {
     band_since: std::collections::HashMap<PageIndex, (u32, std::time::Instant)>,
     /// D-96：每页上一帧的画法（`(标签, 波段)`），只在变化时打一行 `[画法]` 诊断。
     last_plan: std::collections::HashMap<PageIndex, (String, u32)>,
+    /// 本次打开是否发生过**存档版本迁移**（旧版本 → 当前版本）：是则置脏，提示保存。
+    sidecar_migrated: bool,
     /// 每帧临时持有的命令与事件缓冲（避免反复分配）。
     commands: Vec<ViewerCommand>,
     events: Vec<SessionEvent>,
@@ -469,6 +476,7 @@ impl PdfReaderApp {
             textures: KeyedStore::new(TEXTURE_CAPACITY),
             band_since: std::collections::HashMap::new(),
             last_plan: std::collections::HashMap::new(),
+            sidecar_migrated: false,
             commands: Vec::new(),
             events: Vec::new(),
             visible: Vec::new(),
@@ -574,6 +582,7 @@ impl PdfReaderApp {
                         point: mark.point,
                         rect: mark.rect,
                         body: [mark.body_size.x, mark.body_size.y],
+                        scale: mark.scale,
                     })
                     .collect()
             })
@@ -588,13 +597,20 @@ impl PdfReaderApp {
                 body: [preview.body_size.x, preview.body_size.y],
                 title: preview.title.clone(),
                 text: preview.text.clone(),
+                scale: preview.scale,
             };
             match preview.kind {
                 CustomKind::Image => custom_images.push(saved),
                 CustomKind::Text => custom_texts.push(saved),
             }
         }
-        let data = persist::SavedData { links, dest_marks, custom_images, custom_texts };
+        let data = persist::SavedData {
+            version: persist::CURRENT_VERSION,
+            links,
+            dest_marks,
+            custom_images,
+            custom_texts,
+        };
         let target = persist::sidecar_path(&path);
         match std::fs::write(&target, data.to_json()) {
             Ok(()) => {
@@ -634,9 +650,18 @@ impl PdfReaderApp {
                         self.hover_tip = None;
                         self.floats.clear();
                         self.data_dirty = false;
+                        self.sidecar_migrated = false;
                         self.document_path = Some(path.to_path_buf());
-                        // 同目录若有存档（<pdf>.json），载入并**替换**链接与被引用点/自定义数据
-                        let saved = load_sidecar(path);
+                        // 同目录若有存档（<pdf>.json），载入并**替换**链接与被引用点/自定义数据。
+                        // 读到旧版本就**就地升级**并置脏（下次保存写回当前版本）。
+                        let saved = load_sidecar(path).map(|mut data| {
+                            let migration = persist::migrate(&mut data);
+                            for note in &migration.notes {
+                                eprintln!("[存档] {note}");
+                            }
+                            self.sidecar_migrated = migration.changed;
+                            data
+                        });
                         self.navigation = session.navigation().ok();
                         // `NavigationIndex` 在会话里是共享只读的，因此这里**替换整个索引**
                         // （克隆后换成存档里的链接），而不是原地改字段。
@@ -675,6 +700,8 @@ impl PdfReaderApp {
                                                 rect,
                                                 snapshot: None,
                                                 body_size: egui::vec2(rect.width, rect.height),
+                                                // 默认 rect 是按 pt 给的（相当于 100%）：分辨率记 1.0
+                                                scale: 1.0,
                                             }
                                         })
                                         .collect()
@@ -724,6 +751,7 @@ impl PdfReaderApp {
                                         mark.rect = saved_mark.rect;
                                         mark.body_size =
                                             egui::vec2(saved_mark.body[0], saved_mark.body[1]);
+                                        mark.scale = saved_mark.scale;
                                     }
                                 }
                             }
@@ -742,6 +770,7 @@ impl PdfReaderApp {
                                         text: item.text.clone(),
                                         snapshot: None,
                                         body_size: egui::vec2(item.body[0], item.body[1]),
+                                        scale: item.scale,
                                     });
                                 }
                             }
@@ -756,7 +785,14 @@ impl PdfReaderApp {
                         self.band_since.clear();
                         self.last_plan.clear();
                         self.error = None;
-                        self.message = format!("已打开：{title}");
+                        if self.sidecar_migrated {
+                            // 旧版本存档被升级过：置脏，让"保存自定义数据"写回当前版本
+                            self.data_dirty = true;
+                            self.message = format!("已打开：{title}（存档已升级到 v{}，请保存）", persist::CURRENT_VERSION);
+                        } else {
+                            self.message = format!("已打开：{title}");
+                        }
+                        self.sidecar_migrated = false;
                         self.password_for = None;
                         self.password_input.clear();
                         self.hits.clear();
@@ -3008,6 +3044,8 @@ impl PdfReaderApp {
         preview.snapshot = Some(texture);
         preview.rect = page_rect;
         preview.body_size = egui::vec2(overlap.width, overlap.height);
+        // ▲v2：记录这张图的分辨率（截图时的显示比例）—— 之后重建预览时按它请求渲染
+        preview.scale = session.state().zoom;
         self.data_dirty = true;
         self.message = format!(
             "已保存图片预览（取第 {} 页，交叠 {:.0}×{:.0}）",
@@ -3120,6 +3158,7 @@ impl PdfReaderApp {
                     text: Some(dialog.content.clone()),
                     snapshot: None,
                     body_size,
+                    scale: 1.0,
                 });
                 // **不**自动生成浮窗（用户要求）：只在从侧栏悬浮/点击该条目时出现
                 self.data_dirty = true;
@@ -3138,6 +3177,8 @@ impl PdfReaderApp {
                     snapshot: None,
                     // 占位：截图完成时按"选区在当时缩放下的显示尺寸"覆盖
                     body_size: DEFAULT_CUSTOM_TEXT_BODY,
+                    // 占位：截图完成时写入当时的显示比例
+                    scale: 1.0,
                 });
                 // 进入截图模式：结果回写到这条自定义记录
                 self.capture = Some(CaptureState {
@@ -3324,6 +3365,8 @@ impl PdfReaderApp {
             mark.rect = page_rect;
             mark.snapshot = Some(texture.clone());
             mark.body_size = egui::vec2(overlap.width, overlap.height);
+            // ▲v2：记录这张图的分辨率（截图时的显示比例）
+            mark.scale = session.state().zoom;
             self.data_dirty = true;
             rect_saved = true;
         }
