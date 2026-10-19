@@ -17,9 +17,18 @@
 
 - 每次交付之前，**必须** `commit` 提交。
 
+## 4. 文档
+
+- 文档分两类（见 [docs/README.md](docs/README.md)）：**现状**（`docs/current/`，写"现在是什么样"，
+  代码改了必须同步）与**决策与背景**（`docs/decisions/`，只追加：决策索引、架构理由、演进史）。
+- 改动触及架构、契约、可观察行为、持久化格式或阈值时，**必须**在
+  [docs/decisions/log.md](docs/decisions/log.md) 追加一条决策（下一个编号）。
+- 不要再引用工作区里已不存在的旧文档；历史原文用 `git show 778dc60:docs/...` 取。
+
 ## 交付前自检清单
 
 - [ ] 改动是否附带新增或更新的测试？
 - [ ] 全部测试是否通过？（`cargo test`）
 - [ ] 必须依赖 UI 的验证项是否已明确交给用户，并说明了「怎么看、看什么」？
+- [ ] 现状文档（`docs/current/`）是否已同步？新决策是否已追加到 `docs/decisions/log.md`？
 - [ ] 是否已完成 `git commit`？

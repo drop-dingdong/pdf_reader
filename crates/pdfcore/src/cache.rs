@@ -19,7 +19,7 @@ use crate::ids::PageIndex;
 use crate::image::RasterImage;
 use crate::render::{CacheStats, RenderCache, RenderKey};
 
-/// 默认容量上限：512 MiB（见 architecture.md §3.1 的体积预算）。
+/// 默认容量上限：512 MiB（见 `docs/current/architecture.md` §8 的资源与性能要点）。
 pub const DEFAULT_CAPACITY_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Default)]

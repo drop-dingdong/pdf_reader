@@ -1,12 +1,15 @@
 # backend-pdfium
 
 把 [`pdfium-render`](https://crates.io/crates/pdfium-render) 适配成 [`pdfcore`](../pdfcore) 的 trait 实现。
+本文件只讲**怎么把 PDFium 跑起来**与适配层的取舍；架构现状见
+[docs/current/architecture.md](../../docs/current/architecture.md) 与
+[docs/current/rendering.md](../../docs/current/rendering.md)（§4 后端渲染路径与校验）。
 
 | pdfcore trait | 本 crate 的实现 | 关键点 |
 | --- | --- | --- |
 | `PdfBackend` | `PdfiumBackend` | `max_concurrency = 1`（PDFium 非线程安全） |
 | `Document` | `PdfiumDocument` | 打开时一次性备好**页几何表**与**导航索引**（D-01 / D-08） |
-| `PageRaster` | `PdfiumRaster` | 整页 + **真正的部分渲染**瓦片（D-02，`set_origin`），不是整页后裁剪 |
+| `PageRaster` | `PdfiumRaster` | 整页 + **真正的部分渲染**块（`set_origin`），块尺寸/整像素有硬校验（D-95） |
 | `TextLayer` | `PdfiumTextLayer` | 逐字符包围盒 + 搜索 |
 
 ## 一、准备 PDFium 动态库（必做）

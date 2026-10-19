@@ -4,7 +4,7 @@
 //! **只做胶水**：坐标换算、输入映射、纹理存储都在 [`crate::view`] 里（可单测）。
 //! 剩下的部分需要真实窗口才能验证，按 agent.md 规则 2 **交由用户验收**。
 //!
-//! ## 每帧流程（与 architecture.md §4.2 的契约一致）
+//! ## 每帧流程（与 `docs/current/architecture.md` §4.2 的契约一致）
 //! 1. 采集输入 → 命令；2. `handle` 命令；3. `pump` 取回渲染结果；
 //! 4. 画页面（就绪则贴纹理，未就绪则白底页框）；5. 画高亮；6. 请求可见页渲染。
 //!
@@ -4121,7 +4121,7 @@ fn paint_image(painter: &egui::Painter, texture: &egui::TextureHandle, rect: egu
     );
 }
 
-/// 画"白底页框"占位（decision-log D-06：位图未就绪时用它，而不是保留上一档拉伸图）。
+/// 画"白底页框"占位（D-06：位图未就绪时用它；D-98 起缺块处优先铺整页底料，不再补白）。
 fn paint_placeholder(painter: &egui::Painter, rect: egui::Rect) {
     painter.rect_filled(rect, CornerRadius::ZERO, Color32::WHITE);
     painter.rect_stroke(
