@@ -474,8 +474,6 @@ mod tests {
         assert!(!TilingPolicy::AbovePixels(4_000_000).requires_tiling_bounded(strip, 0));
     }
 
-    use super::*;
-
     #[test]
     fn render_key_tracks_scale_and_rotation_exactly() {
         let page = PageIndex::new(3);

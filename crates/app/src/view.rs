@@ -1191,12 +1191,36 @@ pub struct KeyedStore<V> {
     entries: HashMap<RenderKey, V>,
     order: VecDeque<RenderKey>,
     capacity: usize,
+    /// 当前占用的字节数（由构造时给的 `bytes_of` 算出）。诊断与预算用（D-109）。
+    bytes: u64,
+    /// 单个值占多少字节（测试替身恒为 0）。
+    bytes_of: fn(&V) -> u64,
+}
+
+/// 一张 `egui` 纹理占多少字节（`w×h×4`）。
+///
+/// 有了字节账才能把"128 条目"这种 A4 时代的经验值换成真正有意义的上限：
+/// 条目数相同的两张纹理，面积可能差几十倍（D-109）。
+pub fn texture_bytes(texture: &egui::TextureHandle) -> u64 {
+    let [width, height] = texture.size();
+    (width as u64) * (height as u64) * 4
 }
 
 impl<V> KeyedStore<V> {
     /// 构造（容量至少为 1）。
     pub fn new(capacity: usize) -> Self {
-        Self { entries: HashMap::new(), order: VecDeque::new(), capacity: capacity.max(1) }
+        Self::with_bytes(capacity, |_| 0)
+    }
+
+    /// 同 [`KeyedStore::new`]，但知道每个值占多少字节（纹理层用 [`texture_bytes`]）。
+    pub fn with_bytes(capacity: usize, bytes_of: fn(&V) -> u64) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            capacity: capacity.max(1),
+            bytes: 0,
+            bytes_of,
+        }
     }
 
     /// 当前条目数。
@@ -1224,20 +1248,51 @@ impl<V> KeyedStore<V> {
         self.entries.get(key)
     }
 
-    /// 写入并维护 LRU 顺序；超出容量时淘汰最旧的。
-    pub fn insert(&mut self, key: RenderKey, value: V) {
-        self.entries.insert(key, value);
-        self.touch(key);
-        while self.entries.len() > self.capacity {
-            let Some(oldest) = self.order.pop_front() else { break };
-            self.entries.remove(&oldest);
+    /// 当前占用的字节数。
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// 平均每条的字节数（诊断用）。
+    pub fn average_bytes(&self) -> u64 {
+        if self.entries.is_empty() {
+            0
+        } else {
+            self.bytes / self.entries.len() as u64
         }
     }
 
-    /// 丢弃所有不满足 `keep` 的条目（用于"只保留可见页的纹理"）。
+    /// 丢弃所有不满足 `keep` 的条目（用于"只保留可见页的纹理"），并重算字节账。
     pub fn retain(&mut self, mut keep: impl FnMut(&RenderKey) -> bool) {
         self.entries.retain(|key, _| keep(key));
         self.order.retain(|key| self.entries.contains_key(key));
+        self.refresh_bytes();
+    }
+
+    /// 按当前实际持有的值**重算**字节账。
+    ///
+    /// 为什么是"重算"而不是"逐个扣减"：摘除路径有好几条（`retain` / LRU 淘汰 / 替换），
+    /// 任何一条忘了扣减都会让账目静默漂移；而条目数最多几十个，重算是 O(n) 的常数活。
+    pub fn refresh_bytes(&mut self) {
+        let bytes_of = self.bytes_of;
+        self.bytes = self.entries.values().map(bytes_of).sum();
+    }
+
+    /// 写入并维护 LRU 顺序；超出容量时淘汰最旧的。
+    pub fn insert(&mut self, key: RenderKey, value: V) {
+        let bytes_of = self.bytes_of;
+        let cost = bytes_of(&value);
+        if let Some(previous) = self.entries.insert(key, value) {
+            self.bytes = self.bytes.saturating_sub(bytes_of(&previous));
+        }
+        self.bytes += cost;
+        self.touch(key);
+        while self.entries.len() > self.capacity {
+            let Some(oldest) = self.order.pop_front() else { break };
+            if let Some(value) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(bytes_of(&value));
+            }
+        }
     }
 
     /// 同 [`Self::best_page_texture`]，但返回**键**（调用方要取它的 `scale_milli`）。
@@ -1499,10 +1554,11 @@ impl<V> KeyedStore<V> {
         });
     }
 
-    /// 清空。
+    /// 清空（字节账归零）。
     pub fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
+        self.bytes = 0;
     }
 
     fn touch(&mut self, key: RenderKey) {
@@ -1667,6 +1723,36 @@ mod tests {
         assert_eq!(store.len(), 2, "容量上限必须生效");
         assert!(!store.contains(&key(0)), "最旧的应被淘汰");
         assert_eq!(store.get(&key(2)), Some(&"c"));
+    }
+
+    /// D-109：字节账跟着插入/替换/LRU 淘汰/retain/clear 一起动，且**重算**与实际值一致。
+    #[test]
+    fn keyed_store_tracks_bytes_of_its_values() {
+        // 用"值本身即字节数"的替身，便于手算
+        let mut store = KeyedStore::with_bytes(3, |value: &u64| *value);
+        store.insert(key(0), 100);
+        store.insert(key(1), 200);
+        assert_eq!(store.bytes(), 300);
+        assert_eq!(store.average_bytes(), 150);
+
+        // 同键替换：只加差值
+        store.insert(key(0), 50);
+        assert_eq!(store.bytes(), 250);
+
+        // 超过容量（3）→ 淘汰最旧的（key(0) 刚被 touch，被淘汰的是 key(1)）
+        store.insert(key(2), 400);
+        store.insert(key(3), 1000);
+        assert_eq!(store.len(), 3);
+        assert_eq!(store.bytes(), 50 + 400 + 1000, "淘汰后账目要对上");
+
+        // retain 摘除后重算
+        store.retain(|key| key.page.get() % 2 == 0);
+        assert_eq!(store.bytes(), store.iter().map(|(_, value)| *value).sum::<u64>());
+
+        // 清空归零
+        store.clear();
+        assert_eq!(store.bytes(), 0);
+        assert!(store.is_empty());
     }
 
     #[test]

@@ -20,7 +20,7 @@ use std::path::Path;
 use super::{escape, Report};
 
 /// 基线格式版本。
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// 跑这份基线时的机器与构建条件。
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +88,8 @@ pub struct ActionBaseline {
     pub upload_bytes: u64,
     /// 纹理条目峰值。
     pub textures_peak: usize,
+    /// 纹理**字节**峰值（结构指标：与硬件无关）。
+    pub texture_bytes_peak: u64,
     /// 预览纹理尺寸（没有则为空）。
     pub preview: Option<(usize, usize)>,
 }
@@ -134,6 +136,7 @@ impl Baseline {
                 submitted: action.submitted,
                 upload_bytes: action.upload_bytes,
                 textures_peak: action.textures_peak,
+                texture_bytes_peak: action.texture_bytes_peak,
                 preview: action.previews.first().map(|(_, width, height)| (*width, *height)),
             })
             .collect();
@@ -175,12 +178,13 @@ impl Baseline {
             let _ = writeln!(
                 out,
                 "    {{\"id\": \"{}\", \"submitted\": {}, \"upload_bytes\": {}, \
-                 \"textures_peak\": {}, \"busy_frames\": {}, \"cpu_ms_total\": {:.3}, \
-                 \"wall_ms\": {:.1}, \"preview\": {preview}}}{comma}",
+                 \"textures_peak\": {}, \"texture_bytes_peak\": {}, \"busy_frames\": {}, \
+                 \"cpu_ms_total\": {:.3}, \"wall_ms\": {:.1}, \"preview\": {preview}}}{comma}",
                 escape(&action.id),
                 action.submitted,
                 action.upload_bytes,
                 action.textures_peak,
+                action.texture_bytes_peak,
                 action.busy_frames,
                 action.cpu_ms_total,
                 action.wall_ms
@@ -283,6 +287,10 @@ impl Baseline {
                     .field("textures_peak")
                     .and_then(|value| value.as_number())
                     .unwrap_or(0.0) as usize,
+                texture_bytes_peak: object
+                    .field("texture_bytes_peak")
+                    .and_then(|value| value.as_number())
+                    .unwrap_or(0.0) as u64,
                 preview,
             });
         }
@@ -430,6 +438,19 @@ pub fn compare(baseline: &Baseline, report: &Report, machine: &Machine) -> Vec<F
                 expected.id, actual.textures_peak, expected.textures_peak
             )));
         }
+        if !within(
+            expected.texture_bytes_peak,
+            actual.texture_bytes_peak,
+            BYTE_TOLERANCE_RATIO,
+        ) {
+            findings.push(Finding::gate(format!(
+                "动作 {} 的纹理字节峰值 {:.1}MB 偏离基线 {:.1}MB 超过 {:.0}%",
+                expected.id,
+                actual.texture_bytes_peak as f64 / (1024.0 * 1024.0),
+                expected.texture_bytes_peak as f64 / (1024.0 * 1024.0),
+                BYTE_TOLERANCE_RATIO * 100.0
+            )));
+        }
         if !within(expected.upload_bytes, actual.upload_bytes, BYTE_TOLERANCE_RATIO) {
             findings.push(Finding::gate(format!(
                 "动作 {} 的上传字节 {} 偏离基线 {} 超过 {:.0}%",
@@ -553,6 +574,7 @@ mod tests {
             previews: Vec::new(),
             submitted,
             textures_peak: 4,
+            texture_bytes_peak: 1024 * 1024,
             upload_bytes: upload,
             elapsed_ms: 1.0,
             busy_frames: 1,

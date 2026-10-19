@@ -188,6 +188,8 @@ pub struct FrameStat {
     pub upload_bytes: u64,
     /// 纹理层条目数。
     pub textures: usize,
+    /// 纹理层占用字节数（`w×h×4` 之和）。
+    pub texture_bytes: u64,
     /// 在飞渲染任务数。
     pub pending: usize,
     /// 累计提交的渲染请求数（`DocumentSession::submitted_jobs`，单调递增）。
@@ -233,6 +235,8 @@ pub struct ActionReport {
     pub submitted: u64,
     /// 该动作期间纹理层条目峰值。
     pub textures_peak: usize,
+    /// 该动作期间纹理层**字节**峰值（结构指标：与硬件无关）。
+    pub texture_bytes_peak: u64,
     /// 该动作期间"打算上传"的字节总数。
     pub upload_bytes: u64,
     /// 该动作实际耗时（墙钟毫秒，含等预览窗口的时间）。
@@ -307,6 +311,15 @@ impl Report {
         self.actions.iter().map(|action| action.busy_frames).sum()
     }
 
+    /// 纹理层占用字节峰值（整段脚本）。
+    pub fn texture_bytes_peak(&self) -> u64 {
+        self.actions
+            .iter()
+            .map(|action| action.texture_bytes_peak)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// 人读摘要。
     pub fn summary(&self) -> String {
         let (p50, p95, p99, max) = self.busy_frame_percentiles();
@@ -319,7 +332,8 @@ impl Report {
         let submitted: u64 = self.actions.iter().map(|action| action.submitted).sum();
         format!(
             "脚本={} 动作={} 帧={}(忙帧 {}) 提交={} 墙钟={:.0}ms CPU合计={:.1}ms \
-             忙帧 p50={p50:.2} p95={p95:.2} p99={p99:.2} max={max:.2}ms 上传={:.1}MB 违规={}",
+             忙帧 p50={p50:.2} p95={p95:.2} p99={p99:.2} max={max:.2}ms 上传={:.1}MB \
+             纹理峰值={:.1}MB 违规={}",
             self.script,
             self.actions.len(),
             self.frames(),
@@ -328,6 +342,7 @@ impl Report {
             self.wall_ms_total(),
             self.busy_cpu_ms_total(),
             uploads as f64 / (1024.0 * 1024.0),
+            self.texture_bytes_peak() as f64 / (1024.0 * 1024.0),
             self.violations.len()
         )
     }
@@ -660,6 +675,7 @@ pub fn run(
             previews: Vec::new(),
             submitted: 0,
             textures_peak: 0,
+            texture_bytes_peak: 0,
             upload_bytes: 0,
             elapsed_ms: 0.0,
             busy_frames: 0,
@@ -736,6 +752,12 @@ pub fn run(
             .frames_data
             .iter()
             .map(|frame| frame.textures)
+            .max()
+            .unwrap_or(0);
+        action_report.texture_bytes_peak = action_report
+            .frames_data
+            .iter()
+            .map(|frame| frame.texture_bytes)
             .max()
             .unwrap_or(0);
         action_report.upload_bytes = action_report
@@ -904,6 +926,7 @@ impl Harness {
             cpu_ms,
             upload_bytes,
             textures: app.textures.len(),
+            texture_bytes: app.textures.bytes(),
             pending: app.session.as_ref().map_or(0, |session| session.pending_renders()),
             submitted: app.session.as_ref().map_or(0, |session| session.submitted_jobs()),
             rss_kb: resident_kb(),
@@ -1167,6 +1190,7 @@ fn action_json(report: &Report, action: &ActionReport) -> String {
             ),
         ),
         ("upload_bytes", action.upload_bytes.to_string()),
+        ("texture_bytes_peak", action.texture_bytes_peak.to_string()),
         (
             "textures",
             action
@@ -1232,6 +1256,7 @@ mod tests {
             previews: vec![(0, 1573, 839)],
             submitted: 12,
             textures_peak: 18,
+            texture_bytes_peak: 18 * 860_000,
             upload_bytes: 10327920,
             elapsed_ms: 173.4,
             busy_frames: 3,
@@ -1243,6 +1268,7 @@ mod tests {
             cpu_ms: 5.0,
             upload_bytes: 10327920,
             textures: 18,
+            texture_bytes: 15_480_000,
             pending: 0,
             submitted: 12,
             rss_kb: 0,
