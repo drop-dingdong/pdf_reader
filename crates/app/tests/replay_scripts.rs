@@ -19,6 +19,7 @@ const CASES: &[(&str, Sample)] = &[
     ("many_pages.json", Sample::Many),
     ("preview_100.json", Sample::Preview),
     ("preview_800.json", Sample::Preview),
+    ("strip_page.json", Sample::Strip),
 ];
 
 /// 脚本目录（测试的工作目录是 crate 目录，不是工作区根）。

@@ -234,6 +234,8 @@ pub struct DocumentSession {
     region_jobs: HashMap<RenderKey, JobId>,
     /// 累计**真正提交**给调度器的渲染请求数（去重之后）。诊断与性能基线用（D-106）。
     submitted_jobs: u64,
+    /// 纹理**单边**上限（显卡能力；0 = 不限制）。超过它的页必须分块（D-108）。
+    max_texture_side: u32,
     visible_scratch: Vec<PageIndex>,
     /// D-02：分块策略（默认 `AbovePixels(4 MP)`，按**渲染**像素面积判断）。
     tiling: TilingPolicy,
@@ -273,6 +275,7 @@ impl DocumentSession {
             jobs: HashMap::new(),
             region_jobs: HashMap::new(),
             submitted_jobs: 0,
+            max_texture_side: 0,
             visible_scratch: Vec::new(),
             tiling: TilingPolicy::default(),
             overscan: DEFAULT_OVERSCAN,
@@ -327,6 +330,19 @@ impl DocumentSession {
     }
 
     /// 后台是否还有排队或正在渲染的任务（UI 据此决定要不要持续重绘）。
+    /// 纹理单边上限（0 = 不限制）。
+    pub fn max_texture_side(&self) -> u32 {
+        self.max_texture_side
+    }
+
+    /// 设置纹理单边上限（由 UI 从 `max_texture_side` 传入；只在变化时调用）。
+    ///
+    /// 它会让"单边超限的页"强制走分块（D-108），因此**改变网格**：调用方应保证它稳定
+    /// （真实后端给出的上限在会话期间是常量）。
+    pub fn set_max_texture_side(&mut self, max_side: u32) {
+        self.max_texture_side = max_side;
+    }
+
     /// 累计提交的渲染请求数（去重后）。两条相邻采样之差 = 这段期间"又渲染了多少块/页"。
     pub fn submitted_jobs(&self) -> u64 {
         self.submitted_jobs
@@ -462,12 +478,15 @@ impl DocumentSession {
 
     /// 该页当前波段的分块网格；不分块（整页路径）时返回 `None`。
     fn grid_of(&self, placement: &PagePlacement) -> Option<TileGrid> {
-        if !self.tiling.requires_tiling(self.render_pixel_size(placement)) {
+        let pixels = self.render_pixel_size(placement);
+        // 面积超阈值**或**单边超过纹理上限都要分块（D-108）
+        if !self.tiling.requires_tiling_bounded(pixels, self.max_texture_side) {
             return None;
         }
-        Some(TileGrid::new(
+        Some(TileGrid::new_bounded(
             placement.page_size.rotated(placement.rotation),
             self.render_scale_of(placement),
+            self.max_texture_side,
         ))
     }
 
@@ -572,9 +591,10 @@ impl DocumentSession {
         if !render_scale.is_valid() {
             return None;
         }
-        let grid = TileGrid::new(
+        let grid = TileGrid::new_bounded(
             placement.page_size.rotated(placement.rotation),
             render_scale.0,
+            self.max_texture_side,
         );
         Some((placement, grid))
     }

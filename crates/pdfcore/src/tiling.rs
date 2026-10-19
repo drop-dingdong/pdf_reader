@@ -41,9 +41,25 @@ impl TileGrid {
     /// * `render_scale` 是**实际渲染**使用的比例（通常 = 显示比例 × 超采样倍数）；
     /// * 层级按"渲染像素 / [`TARGET_TILE_PX`]"取最接近的 2 的幂。
     pub fn new(page_size: Size, render_scale: f32) -> Self {
+        Self::new_bounded(page_size, render_scale, u32::MAX)
+    }
+
+    /// 同 [`TileGrid::new`]，但保证**块边长不超过** `max_side_px`（纹理单边上限）。
+    ///
+    /// 为什么需要：显卡对单张纹理的边长有硬限制（常见 16384）。一页即使总像素不多，
+    /// 只要**单边**超限就画不出来 —— 例如很长的条幅页。这时必须继续细分，
+    /// 与"面积超过 4 MP 才分块"是**两件独立**的事（D-108）。
+    pub fn new_bounded(page_size: Size, render_scale: f32, max_side_px: u32) -> Self {
         let width = (page_size.width * render_scale).max(1.0);
         let height = (page_size.height * render_scale).max(1.0);
-        let level = Self::level_for(width.max(height));
+        let longest = width.max(height);
+        let mut level = Self::level_for(longest);
+        // 单边硬上限：继续细分到"块边长 ≤ 上限"，但仍受 32×32 的层级上限约束
+        // 0 = 不限制（与 `DocumentSession::max_texture_side` 的约定一致）
+        let limit = if max_side_px == 0 { f32::INFINITY } else { max_side_px as f32 };
+        while level < 5 && longest / ((1u32 << level) as f32) > limit {
+            level += 1;
+        }
         let side = 1u32 << level;
         TileGrid {
             side,
@@ -571,6 +587,24 @@ mod tests {
     }
 
     /// 层级选择：块边长应接近目标值（512），且页越大层级越高。
+    /// D-108：单边超过纹理上限时继续细分，直到每块都放得下。
+    #[test]
+    fn bounded_grid_keeps_tiles_within_the_texture_side_limit() {
+        // 3000×4000 的页：按 512 目标应得 side=4（块 1000×1000）
+        let plain = TileGrid::new(Size::new(3000.0, 4000.0), 1.0);
+        assert_eq!(plain.side, 4);
+        // 上限 900 → 必须再细分一级（块 500 ≤ 900）
+        let bounded = TileGrid::new_bounded(Size::new(3000.0, 4000.0), 1.0, 900);
+        assert_eq!(bounded.side, 8);
+        assert!(bounded.render_size.1 / bounded.side as f32 <= 900.0);
+        // 上限很宽松时不改变原有层级
+        let loose = TileGrid::new_bounded(Size::new(3000.0, 4000.0), 1.0, 16_384);
+        assert_eq!(loose.side, plain.side);
+        // 层级上限 32：极端长页也只能到 32，块边长由后端上限兜底
+        let extreme = TileGrid::new_bounded(Size::new(100.0, 600_000.0), 1.0, 512);
+        assert_eq!(extreme.side, 32);
+    }
+
     #[test]
     fn level_targets_about_512_pixels() {
         let small = TileGrid::new(Size::new(595.0, 842.0), 1.0);

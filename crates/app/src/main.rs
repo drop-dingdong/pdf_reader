@@ -110,11 +110,11 @@ fn main() -> eframe::Result<()> {
     if args.first().map(String::as_str) == Some("--sample") {
         let kind = args.get(1).map(String::as_str).unwrap_or("a4");
         let Some(out) = args.get(2).map(PathBuf::from) else {
-            eprintln!("用法：app --sample <a4|rotated|large|many|preview> <输出.pdf>");
+            eprintln!("用法：app --sample <a4|rotated|large|many|preview|strip> <输出.pdf>");
             std::process::exit(2);
         };
         let Some(sample) = app::replay::samples::Sample::parse(kind) else {
-            eprintln!("未知样本 {kind}（可选 a4 / rotated / large / many / preview）");
+            eprintln!("未知样本 {kind}（可选 a4 / rotated / large / many / preview / strip）");
             std::process::exit(2);
         };
         match sample.write_to(&out) {

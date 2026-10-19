@@ -157,14 +157,27 @@ impl Default for TilingPolicy {
 }
 
 impl TilingPolicy {
-    /// 给定页的像素尺寸，是否需要分块。
+    /// 给定页的像素尺寸，是否需要分块（只看面积，忽略纹理单边上限）。
     pub fn requires_tiling(self, pixel_size: Size) -> bool {
+        self.requires_tiling_bounded(pixel_size, u32::MAX)
+    }
+
+    /// 同 [`TilingPolicy::requires_tiling`]，但**先看硬约束**：单边超过 `max_side_px` 必须分块。
+    ///
+    /// 即使策略是 [`TilingPolicy::Never`]，超限也必须分块 —— 那不是"取舍"，
+    /// 而是"这张纹理根本创建不出来"（D-108）。
+    pub fn requires_tiling_bounded(self, pixel_size: Size, max_side_px: u32) -> bool {
+        let width = pixel_size.width.max(0.0);
+        let height = pixel_size.height.max(0.0);
+        let longest = width.max(height);
+        // 0 = 不限制（与 `DocumentSession::max_texture_side` 的约定一致）
+        if max_side_px > 0 && longest > max_side_px as f32 {
+            return true;
+        }
         match self {
             Self::Never => false,
             Self::Always => true,
-            Self::AbovePixels(limit) => {
-                pixel_size.width.max(0.0) * pixel_size.height.max(0.0) > limit as f32
-            }
+            Self::AbovePixels(limit) => width * height > limit as f32,
         }
     }
 }
@@ -446,6 +459,21 @@ pub fn scale_for_target_width(page_size: Size, rotation: Rotation, target_width:
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// D-108：面积没超，但单边超限 → 仍然必须分块（与策略无关）。
+    #[test]
+    fn a_long_page_tiles_even_below_the_area_threshold() {
+        let strip = Size::new(100.0, 30_000.0); // 3 MP，面积远低于 4 MP
+        assert!(!TilingPolicy::AbovePixels(4_000_000).requires_tiling(strip));
+        assert!(TilingPolicy::AbovePixels(4_000_000).requires_tiling_bounded(strip, 16_384));
+        // 即使策略说"永不分块"，超过纹理上限也得服从硬约束
+        assert!(TilingPolicy::Never.requires_tiling_bounded(strip, 16_384));
+        // 不限制时保持原行为
+        assert!(!TilingPolicy::Never.requires_tiling_bounded(strip, 0));
+        assert!(!TilingPolicy::AbovePixels(4_000_000).requires_tiling_bounded(strip, 0));
+    }
+
     use super::*;
 
     #[test]

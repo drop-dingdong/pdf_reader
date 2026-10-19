@@ -992,9 +992,15 @@ impl PdfReaderApp {
     fn ensure_textures(
         &mut self,
         ctx: &egui::Context,
-        session: &DocumentSession,
+        session: &mut DocumentSession,
         allow_upload: bool,
     ) -> usize {
+        // 纹理单边上限来自后端（显卡能力）。告诉会话：单边超限的页会被强制分块（D-108）。
+        // 只在变化时写入 —— 它会改变网格，真实后端给出的值在会话期间是常量。
+        let max_side = ctx.input(|input| input.max_texture_side as u32);
+        if session.max_texture_side() != max_side {
+            session.set_max_texture_side(max_side);
+        }
         self.visible.clear();
         session.visible_pages(&mut self.visible);
 
@@ -1721,7 +1727,15 @@ impl PdfReaderApp {
             return None;
         }
         let display_scale = if scale > 0.0 && scale.is_finite() { scale } else { 1.0 };
-        let render = Scale::from_zoom(render_scale_for(display_scale, session.overscan()));
+        // 记录的比例可能让预览图超出纹理单边上限（大区域 + 高倍）：按超采样步长降档（D-108）
+        let render_value = crate::view::preview_render_scale(
+            page_rect,
+            placement.page_size,
+            placement.rotation,
+            render_scale_for(display_scale, session.overscan()),
+            session.max_texture_side(),
+        );
+        let render = Scale::from_zoom(render_value);
         let grid = TileGrid::new(
             placement.page_size.rotated(placement.rotation),
             render.0,
@@ -4068,7 +4082,7 @@ impl eframe::App for PdfReaderApp {
         // 拖动期间**暂缓**转换与上传：把"新页进入"那一帧的逐像素开销挪到松手之后，
         // 拖动本身只需保证画面跟着走（未就绪的区域显示旧图或白纸）。
         let dragging = self.drag.is_some();
-        let uploaded = self.ensure_textures(&ctx, &session, !dragging);
+        let uploaded = self.ensure_textures(&ctx, &mut session, !dragging);
         let after_textures = frame_start.elapsed();
         if uploaded > 0 {
             // 本帧上传过 → 继续重绘，把"松手后补齐"的过程走完（拖动期间暂缓的上传会在这里补上）

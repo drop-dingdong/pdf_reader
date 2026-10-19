@@ -23,6 +23,8 @@ pub enum Sample {
     Many,
     /// A4 三页 + sidecar 里一条图片 preview（记录分辨率 800%）。
     Preview,
+    /// 细长条幅页（100×15000 pt）：渲染面积不大但**单边**超过纹理上限，必须分块（D-108）。
+    Strip,
 }
 
 impl Sample {
@@ -34,6 +36,7 @@ impl Sample {
             Self::Large => "large",
             Self::Many => "many",
             Self::Preview => "preview",
+            Self::Strip => "strip",
         }
     }
 
@@ -45,6 +48,7 @@ impl Sample {
             "large" => Some(Self::Large),
             "many" => Some(Self::Many),
             "preview" => Some(Self::Preview),
+            "strip" | "tall" => Some(Self::Strip),
             _ => None,
         }
     }
@@ -57,12 +61,13 @@ impl Sample {
             Self::Large => "large_a0.pdf",
             Self::Many => "many_120p.pdf",
             Self::Preview => "preview.pdf",
+            Self::Strip => "strip_tall.pdf",
         }
     }
 
     /// 全部样本（脚本自检用）。
-    pub fn all() -> [Self; 5] {
-        [Self::A4, Self::Rotated, Self::Large, Self::Many, Self::Preview]
+    pub fn all() -> [Self; 6] {
+        [Self::A4, Self::Rotated, Self::Large, Self::Many, Self::Preview, Self::Strip]
     }
 
     /// PDF 字节。
@@ -75,6 +80,8 @@ impl Sample {
             // A0：2384×3370 pt，100% 时 2384×3370 px ≈ 8MP > 4MP，必然分块
             Self::Large => backend_pdfium::fixtures::many_page_pdf(1, 2383.94, 3370.39),
             Self::Many => backend_pdfium::fixtures::many_page_pdf(120, 595.28, 841.89),
+            // 100×15000 pt：160% 时光是 160×24000，单边 24000 > 16384
+            Self::Strip => backend_pdfium::fixtures::many_page_pdf(1, 100.0, 15_000.0),
         }
     }
 

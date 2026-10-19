@@ -29,7 +29,7 @@ render_scale_for(display, over)    = render_scale_for_band(band_for(display))
 `pdfcore::tiling::TileGrid`（`crates/pdfcore/src/tiling.rs`）是**唯一的块几何来源**：
 
 ```rust
-TileGrid::new(旋转后的页尺寸(point), 渲染比例)
+TileGrid::new_bounded(旋转后的页尺寸(point), 渲染比例, 纹理单边上限)
   → side            每边块数（2 的幂，level 5 封顶 = 32×32）
   → edges_x/edges_y 共享整数边界 edges[i] = round(i * total / side)
   → render_px()     整页渲染像素 = 最后一条边界
@@ -40,10 +40,17 @@ TileGrid::new(旋转后的页尺寸(point), 渲染比例)
   → tiles_for_page_rect(页面矩形, 页尺寸, 旋转)        → 覆盖某页面矩形的块范围（预览用）
 ```
 
+**分块判据是两条，任一成立就分**（`TilingPolicy::requires_tiling_bounded`）：
+
+1. 渲染像素**面积** > 4 MP（性能/内存取舍）；
+2. 渲染像素**单边** > 纹理上限（显卡硬约束，例如 16384）。**这条优先于策略** ——
+   即使策略是 `Never`，单边超限也必须分（不然那张纹理根本创建不出来）。
+
 要点：
 
 * 边界 `round(i·total/side)` **共享**：相邻块 `x_i + w_i == x_{i+1}` 严格成立（f32 相等）；
-* `side` 由"再细分一级后块边长仍 ≥ `TARGET_TILE_PX = 512`"决定 → 块边长接近 512px；
+* `side` 先由"再细分一级后块边长仍 ≥ `TARGET_TILE_PX = 512`"决定，再**保证块边长 ≤ 纹理上限**
+  （必要时继续细分，最多 32×32）；
 * 同一渲染比例下网格固定 ⇒ `(页, 渲染比例, 旋转, 块坐标)` 唯一确定一块区域（拱卫 `RenderKey`）。
 
 守它的测试：`tiling::tests::*`（边界单调/覆盖整页、相邻块相接、视口探测==全量扫描、
@@ -181,6 +188,15 @@ PageDraw  = Whole | Stretch(scale) | TilePreview(scale) | Tiles | Blank
 `preview_layers_always_need_an_underlay`、
 `zooming_out_keeps_a_whole_page_preview_even_after_bitmaps_are_evicted`（真实会话 + 清空位图缓存）。
 
+## 8.5 纹理单边上限（D-108）
+
+`max_texture_side` 从 egui/后端传进 `DocumentSession`（`set_max_texture_side`），导致两个行为：
+
+| 位置 | 行为 |
+| --- | --- |
+| 分块判据 | 单边超限 → 强制分块（见 §2） |
+| 预览图重建 | 记录的分辨率若让区域超过上限，按 1.6 步长**降档**（`view::preview_render_scale`，最多降 4 档） |
+
 ## 9. 预览图（截图）的重建
 
 见 [`persistence.md`](persistence.md) §4：按存档里记录的 **`scale`（截图时的显示比例）**
@@ -194,3 +210,6 @@ PageDraw  = Whole | Stretch(scale) | TilePreview(scale) | Tiles | Blank
   可能差一级；旧块预览对越界块直接跳过（不用错误矩形贴图）。
 * `tiles_for(page)` 遍历整个网格的缓存查询（≤1024 次），每帧每页一次。
 * 整页位图的渲染像素面积永远 < 4 MP（否则走分块），因此单张整页位图 ≤ 16 MB。
+* **极端长宽比**（如 100×15000pt 的条幅页）会按"最长边"决定网格层级，于是被切成很多
+  极窄的块（实测 32×32 = 1024 块，可见范围一次 64 块）。正确但目前浪费；要改需要**非正方网格**
+  （每轴独立层级），暂列待办。

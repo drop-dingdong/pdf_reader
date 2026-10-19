@@ -283,6 +283,36 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **回退**：单提交 `git revert`。
 - **状态**：有效。
 
+### D-108 分块判据加入"纹理单边上限"，预览图超限时降档
+
+- **决定**：分块不再只看"渲染像素面积 > 4 MP"，而是**两条任一成立就分**：
+  ① 面积超阈值；② **单边**超过纹理上限 `max_texture_side`（由 app 每帧从 egui 后端传入
+  `DocumentSession::set_max_texture_side`，0 = 不限制）。第②条**优先于策略**：即使
+  `TilingPolicy::Never` 也必须分（那不是取舍，是纹理根本创建不出来）。
+  网格构造改为 `TileGrid::new_bounded(页尺寸, 渲染比例, 上限)`：在"512 目标"给出的层级之上，
+  继续细分直到块边长 ≤ 上限（仍受 32×32 封顶）。
+  另外预览图重建（`preview_texture`）若按记录分辨率会超过上限，按 1.6 步长降档
+  （`view::preview_render_scale`，最多 4 档），回放器的断言③用同一个助手计算期望尺寸。
+- **理由**（用户提出）：显卡对单张纹理的**边长**有硬限制，面积小但很长的页
+  （例如 100×15000pt 的条幅）在 160% 下是 160×24000 px —— 面积只有 3.84 MP、远低于 4 MP，
+  却根本画不出来。只按面积判会把"显存够不够"当成唯一条件，漏掉了"单张装不装得下"。
+- **影响**：`TilingPolicy::requires_tiling_bounded`、`TileGrid::new_bounded`、
+  `DocumentSession::max_texture_side/set_max_texture_side`（`grid_of` 与 `region_grid` 都用它）、
+  `view::preview_render_scale`；app 在 `ensure_textures` 里把后端上限同步进会话（只在变化时）。
+- **验证**：`render::tests::a_long_page_tiles_even_below_the_area_threshold`、
+  `tiling::tests::bounded_grid_keeps_tiles_within_the_texture_side_limit`、
+  `assemble::a_strip_page_tiles_because_of_the_texture_side_limit`（真实会话：不设上限→整页；
+  设 16384→分块且每块都在上限内）、`view::tests::preview_scale_drops_when_the_texture_side_limit_would_be_exceeded`；
+  回放新增样本 `strip`（100×15000pt）+ 脚本 `strip_page.json`（真实 PDFium 下 0 违规）。
+- **回退**：单提交 `git revert`（改的是判据与网格构造，不涉及绘制顺序）。
+- **状态**：有效。已知遗留：极端长宽比会切出很多极窄块（按最长边定层级），需要"每轴独立层级"才能优化，列待办。
+
+#### 顺带修掉：JSONL 的字段错位
+
+回放写 JSONL 时用位置参数拼格式串，插入新字段后静默错位（写出 `"settled":5` 这种非法 JSON，
+`--out` 的文件无法被脚本解析）。改为"键值对列表"逐个拼接，并加单测 `jsonl_lines_are_valid_json_with_the_right_fields`
+（写一行 → 用自家 JSON 解析 → 校验字段）。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

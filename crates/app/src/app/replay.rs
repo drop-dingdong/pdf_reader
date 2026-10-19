@@ -1094,7 +1094,13 @@ impl Harness {
             }
             let Some(texture) = &preview.snapshot else { continue };
             let Some(placement) = session.placement(preview.page) else { continue };
-            let render = render_scale_for(preview.scale.max(0.1), session.overscan());
+            let render = crate::view::preview_render_scale(
+                preview.rect,
+                placement.page_size,
+                placement.rotation,
+                render_scale_for(preview.scale.max(0.1), session.overscan()),
+                session.max_texture_side(),
+            );
             let Some(expected) = crate::view::region_pixel_size(
                 preview.rect,
                 placement.page_size,
@@ -1126,37 +1132,59 @@ impl Harness {
 
 /// 把报告写成 JSONL（每个动作一行）。
 pub fn write_jsonl(report: &Report, path: &Path) -> std::io::Result<()> {
-    use std::fmt::Write as _;
     let mut out = String::new();
     for action in &report.actions {
-        let (p50, p95, p99, max) = action.busy_cpu_ms;
-        let upload: u64 = action.frames_data.iter().map(|frame| frame.upload_bytes).sum();
-        let diag = serde_free_array(&action.diag);
-        let violations = serde_free_array(&action.violations);
-        let notes = serde_free_array(&action.notes);
-        let previews: Vec<String> = action
-            .previews
-            .iter()
-            .map(|(index, width, height)| format!("[{index},{width},{height}]"))
-            .collect();
-        let _ = writeln!(
-            out,
-            "{{\"script\":\"{}\",\"action\":\"{}\",\"op\":\"{}\",\"frames\":{},\"settled\":{},\
-             \"busy_frames\":{},\"wall_ms\":{:.1},\"cpu_ms\":{{\"p50\":{p50:.3},\"p95\":{p95:.3},\"p99\":{p99:.3},\"max\":{max:.3},\"total\":{:.3}}},\
-             \"upload_bytes\":{upload},\"textures\":{},\"violations\":{violations},\"notes\":{notes},\"previews\":[{}],\"diag\":{diag}}}",
-            escape(&report.script),
-            escape(&action.id),
-            escape(&action.action),
-            action.frames,
-            action.busy_frames,
-            action.elapsed_ms,
-            action.busy_cpu_ms_total,
-            action.settled,
-            action.frames_data.last().map_or(0, |frame| frame.textures),
-            previews.join(","),
-        );
+        out.push_str(&action_json(report, action));
+        out.push('\n');
     }
     std::fs::write(path, out)
+}
+
+/// 一个动作的 JSONL 行。
+///
+/// 用"键值对列表"而不是位置参数：位置参数一旦插队就会静默错位
+/// （曾经出现过 `"settled":5` 这种把帧数写进布尔字段的事故）。
+fn action_json(report: &Report, action: &ActionReport) -> String {
+    let (p50, p95, p99, max) = action.busy_cpu_ms;
+    let previews: Vec<String> = action
+        .previews
+        .iter()
+        .map(|(index, width, height)| format!("[{index},{width},{height}]"))
+        .collect();
+    let fields = [
+        ("script", format!("\"{}\"", escape(&report.script))),
+        ("action", format!("\"{}\"", escape(&action.id))),
+        ("op", format!("\"{}\"", escape(&action.action))),
+        ("frames", action.frames.to_string()),
+        ("settled", action.settled.to_string()),
+        ("busy_frames", action.busy_frames.to_string()),
+        ("wall_ms", format!("{:.1}", action.elapsed_ms)),
+        (
+            "cpu_ms",
+            format!(
+                "{{\"p50\":{p50:.3},\"p95\":{p95:.3},\"p99\":{p99:.3},\"max\":{max:.3},\"total\":{:.3}}}",
+                action.busy_cpu_ms_total
+            ),
+        ),
+        ("upload_bytes", action.upload_bytes.to_string()),
+        (
+            "textures",
+            action
+                .frames_data
+                .last()
+                .map_or(0, |frame| frame.textures)
+                .to_string(),
+        ),
+        ("violations", serde_free_array(&action.violations)),
+        ("notes", serde_free_array(&action.notes)),
+        ("previews", format!("[{}]", previews.join(","))),
+        ("diag", serde_free_array(&action.diag)),
+    ];
+    let body: Vec<String> = fields
+        .iter()
+        .map(|(key, value)| format!("\"{key}\":{value}"))
+        .collect();
+    format!("{{{}}}", body.join(","))
 }
 
 fn serde_free_array(items: &[String]) -> String {
@@ -1187,6 +1215,59 @@ mod tests {
 
     fn stamp(plan: PageDraw, preview: Preview, ready: usize, total: usize, waited: u64) -> PlanStamp {
         PlanStamp { plan, band: 10486, partial: false, ready, total, waited_ms: waited, preview }
+    }
+
+    /// JSONL 必须是合法 JSON 且字段对得上（曾经因为位置参数错位写出过 `"settled":5`）。
+    #[test]
+    fn jsonl_lines_are_valid_json_with_the_right_fields() {
+        let mut action = ActionReport {
+            id: "zoom_800".to_string(),
+            action: "zoom 8".to_string(),
+            frames: 42,
+            settled: true,
+            diag: vec!["[画法] x".to_string()],
+            frames_data: Vec::new(),
+            violations: vec!["违规一条".to_string()],
+            notes: vec!["观察一条".to_string()],
+            previews: vec![(0, 1573, 839)],
+            submitted: 12,
+            textures_peak: 18,
+            upload_bytes: 10327920,
+            elapsed_ms: 173.4,
+            busy_frames: 3,
+            busy_cpu_ms: (5.0, 18.5, 22.7, 22.7),
+            busy_cpu_ms_total: 41.6,
+        };
+        action.frames_data.push(FrameStat {
+            frame: 1,
+            cpu_ms: 5.0,
+            upload_bytes: 10327920,
+            textures: 18,
+            pending: 0,
+            submitted: 12,
+            rss_kb: 0,
+            previewing: false,
+            busy: true,
+            plans: BTreeMap::new(),
+            ranges: BTreeMap::new(),
+        });
+        let report = Report {
+            script: "tiling_800".to_string(),
+            actions: vec![action],
+            violations: Vec::new(),
+        };
+        let path = std::env::temp_dir().join(format!("pdf-jsonl-{}.jsonl", std::process::id()));
+        write_jsonl(&report, &path).expect("写 JSONL");
+        let text = std::fs::read_to_string(&path).expect("读回");
+        let line = text.lines().next().expect("应有一行");
+        let value = crate::json::Json::parse(line).expect("JSONL 必须是合法 JSON");
+        let object = value.as_object().expect("一行是对象");
+        assert_eq!(object.field("frames").and_then(|v| v.as_number()), Some(42.0));
+        assert_eq!(object.field("busy_frames").and_then(|v| v.as_number()), Some(3.0));
+        assert_eq!(object.field("settled").and_then(|v| v.as_str()), None, "布尔不是字符串");
+        assert_eq!(object.field("previews").and_then(|v| v.as_array()).map(|a| a.len()), Some(1));
+        assert_eq!(object.field("notes").and_then(|v| v.as_array()).map(|a| a.len()), Some(1));
+        let _ = std::fs::remove_file(&path);
     }
 
     // ---------- 断言 ②：一次波段切换只翻一次 ----------

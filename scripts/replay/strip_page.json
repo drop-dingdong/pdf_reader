@@ -1,0 +1,11 @@
+{
+  "name": "strip_page",
+  "pdf": "strip_tall.pdf",
+  "actions": [
+    { "id": "resize", "op": "resize", "width": 900, "height": 700 },
+    { "id": "z100",   "op": "zoom", "value": 1.0 },
+    { "id": "down",   "op": "scroll_by", "dx": 0, "dy": 900 },
+    { "id": "z200",   "op": "zoom", "value": 2.0 },
+    { "id": "settle", "op": "wait", "frames": 20 }
+  ]
+}

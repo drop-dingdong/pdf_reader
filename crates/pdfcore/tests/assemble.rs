@@ -830,3 +830,49 @@ fn link_hit_testing_returns_the_destination_with_its_offset() {
     let last = session.page_count() - 1;
     assert_eq!(session.link_at(PageIndex::new(last), inside), None);
 }
+
+/// D-108：**单边**超过纹理上限时也要分块，哪怕总面积远低于 4 MP。
+///
+/// 现实里的触发者是"很长的条幅页"（例如 100×15000 pt）：渲染面积只有 3.84 MP，
+/// 但单边 24000 px 超过显卡的 16384 上限 —— 整页一张纹理根本创建不出来。
+#[test]
+fn a_strip_page_tiles_because_of_the_texture_side_limit() {
+    let backend = MemoryBackend::new(vec![MemoryPage::new(
+        // 渲染比例 1.6 → 160×24000 = 3.84 MP（面积没超 4 MP），但单边 24000 超了 16384
+        Size::new(100.0, 15_000.0),
+        Rotation::None,
+        vec!["long".to_string()],
+    )]);
+    let opened = backend.open(Source::Bytes(b"%PDF-1.4 strip"), None).unwrap();
+    let mut session = DocumentSession::new(
+        opened,
+        Arc::new(MemoryCache::new()),
+        Arc::new(ImmediateScheduler::new(
+            backend.open(Source::Bytes(b"y"), None).unwrap().raster,
+        )),
+        Box::new(VerticalLayout),
+        Box::new(RangeSelection::new()),
+    )
+    .expect("装配会话");
+
+    // 不设上限：3 MP < 4 MP → 整页一张（旧行为）
+    session.set_max_texture_side(0);
+    session.handle(ViewerCommand::SetZoom(1.0), &mut Vec::new());
+    session.handle(ViewerCommand::ResizeViewport(Size::new(400.0, 600.0)), &mut Vec::new());
+    assert!(
+        session.tile_grid(PageIndex::FIRST).is_none(),
+        "面积没超阈值时不应分块"
+    );
+
+    // 设成 16384：高度 30000 > 上限 → 必须分块，且每块的边长都在上限内
+    session.set_max_texture_side(16_384);
+    let grid = session
+        .tile_grid(PageIndex::FIRST)
+        .expect("单边超限必须分块（D-108）");
+    let (_, _, width, height) = grid.tile_px(0, 0);
+    assert!(
+        width <= 16_384 && height <= 16_384,
+        "块 {width}×{height} 必须放得进纹理上限"
+    );
+    assert!(grid.side > 1, "单边超限时至少切成 2 段");
+}

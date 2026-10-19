@@ -476,6 +476,41 @@ pub fn needs_underlay(plan: PageDraw, ready: usize, total: usize) -> bool {
     }
 }
 
+/// 预览实际可用的渲染比例：从"记录分辨率对应的波段比例"开始，按超采样步长**降档**，
+/// 直到区域像素尺寸的**单边**不超过纹理上限（`max_side == 0` 表示不限制）。
+///
+/// 为什么需要：预览区域可能很大（比如整页截图）而记录的分辨率很高，直接按记录值
+/// 合成会得到一张超过显卡上限的纹理 —— 那是创建不出来的。降档后图会糊一点，但能显示（D-108）。
+pub fn preview_render_scale(
+    page_rect: Rect,
+    page_size: Size,
+    rotation: Rotation,
+    recorded_scale: f32,
+    max_side: u32,
+) -> f32 {
+    let mut scale = if recorded_scale > 0.0 && recorded_scale.is_finite() {
+        recorded_scale
+    } else {
+        1.0
+    };
+    if max_side == 0 {
+        return scale;
+    }
+    // 最多降到 1/1.6^4（约 1/6.5）：再小就没有预览的意义了
+    for _ in 0..4 {
+        match region_pixel_size(page_rect, page_size, rotation, scale) {
+            Some((width, height)) if width.max(height) > max_side => {
+                scale /= DEFAULT_PREVIEW_STEP;
+            }
+            _ => break,
+        }
+    }
+    scale
+}
+
+/// 预览降档的步长（与超采样倍数一致：每降一档就是"上一个波段"）。
+pub const DEFAULT_PREVIEW_STEP: f32 = 1.6;
+
 /// 页面空间矩形在**设备像素**里的整数矩形 `(x0, y0, 宽, 高)`。
 ///
 /// 换算链：四角 `Rotation::map_point` → 显示坐标 → × 渲染比例 → 外接矩形 → 两端取整
@@ -1725,6 +1760,26 @@ mod tests {
         .expect("旋转后应有内容");
         assert_eq!(image.size, [792, 612], "一块在设备像素里的尺寸");
         assert_eq!(image.pixels[0].r(), 30);
+    }
+
+    /// D-108：记录分辨率让预览超过纹理单边上限时，按 1.6 步长降档。
+    #[test]
+    fn preview_scale_drops_when_the_texture_side_limit_would_be_exceeded() {
+        let page = Size::new(595.28, 841.89);
+        let rect = Rect::new(0.0, 0.0, 595.28, 841.89);
+        // 整页 + 800% 波段（10.486）→ 6242×8828，边长远小于 16384：不动
+        assert_eq!(
+            preview_render_scale(rect, page, Rotation::None, 10.486, 16_384),
+            10.486
+        );
+        // 上限 4096：需要降档，降完必须放得下
+        let clamped = preview_render_scale(rect, page, Rotation::None, 10.486, 4096);
+        assert!(clamped < 10.486, "应降档：{clamped}");
+        let (width, height) = region_pixel_size(rect, page, Rotation::None, clamped)
+            .expect("区域有效");
+        assert!(width.max(height) <= 4096, "降档后 {width}×{height} 仍超限");
+        // 0 = 不限制
+        assert_eq!(preview_render_scale(rect, page, Rotation::None, 10.486, 0), 10.486);
     }
 
     // ------------------------------------------------ D-96：整页级就绪门槛
