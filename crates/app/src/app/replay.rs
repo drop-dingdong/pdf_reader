@@ -196,6 +196,12 @@ pub struct FrameStat {
     pub rss_kb: u64,
     /// 这一帧是否处于"缩放预览窗口"内（窗口内不提交渲染，所以画面会原地不动）。
     pub previewing: bool,
+    /// 这一帧是否**真的干活**（转换/上传了像素，或画面内容变了）。
+    ///
+    /// 为什么要区分：timing 模式下循环是全速转的，160ms 的缩放预览窗口里会空转上千帧
+    /// （每帧 ~0.08ms），它们会把 p50/p99 稀释成"什么都没干"的数字。
+    /// 只有 busy 帧的耗时才代表真实工作成本。
+    pub busy: bool,
     /// 每页的画法快照。
     pub plans: BTreeMap<u32, PlanStamp>,
     /// 每页当前可见的块范围 `(col0, row0, col1, row1)`。
@@ -229,8 +235,14 @@ pub struct ActionReport {
     pub textures_peak: usize,
     /// 该动作期间"打算上传"的字节总数。
     pub upload_bytes: u64,
-    /// 该动作实际耗时（墙钟毫秒）。
+    /// 该动作实际耗时（墙钟毫秒，含等预览窗口的时间）。
     pub elapsed_ms: f64,
+    /// 该动作里"真的干活"的帧数。
+    pub busy_frames: u64,
+    /// 忙帧耗时（毫秒）：p50 / p95 / p99 / max。
+    pub busy_cpu_ms: (f64, f64, f64, f64),
+    /// 忙帧的 CPU 时间合计（毫秒）—— 这个动作一共烧了多少 CPU。
+    pub busy_cpu_ms_total: f64,
 }
 
 /// 整次回放的报告。
@@ -265,27 +277,39 @@ impl Report {
         self.violations.is_empty()
     }
 
-    /// 帧耗时分位数（毫秒）：`p` ∈ [0,100]。返回 `(p50, p95, p99, max)`。
-    pub fn frame_time_percentiles(&self) -> (f64, f64, f64, f64) {
-        let mut values: Vec<f64> = self
+    /// **忙帧**耗时分位数（毫秒）：`(p50, p95, p99, max)`。
+    ///
+    /// 只统计"真的干活"的帧（见 [`FrameStat::busy`]）：timing 模式下上千帧空转会把
+    /// 全帧分位数稀释成无意义的 0.0x ms。
+    pub fn busy_frame_percentiles(&self) -> (f64, f64, f64, f64) {
+        let values: Vec<f64> = self
             .actions
             .iter()
-            .flat_map(|action| action.frames_data.iter().map(|frame| frame.cpu_ms))
+            .flat_map(|action| action.frames_data.iter())
+            .filter(|frame| frame.busy)
+            .map(|frame| frame.cpu_ms)
             .collect();
-        if values.is_empty() {
-            return (0.0, 0.0, 0.0, 0.0);
-        }
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let pick = |p: f64| -> f64 {
-            let index = ((p / 100.0) * (values.len() as f64 - 1.0)).round() as usize;
-            values[index.min(values.len() - 1)]
-        };
-        (pick(50.0), pick(95.0), pick(99.0), *values.last().unwrap())
+        percentiles(&values)
+    }
+
+    /// 全部忙帧的 CPU 时间合计（毫秒）。
+    pub fn busy_cpu_ms_total(&self) -> f64 {
+        self.actions.iter().map(|action| action.busy_cpu_ms_total).sum()
+    }
+
+    /// 全部动作的墙钟合计（毫秒）。
+    pub fn wall_ms_total(&self) -> f64 {
+        self.actions.iter().map(|action| action.elapsed_ms).sum()
+    }
+
+    /// 忙帧数合计。
+    pub fn busy_frames(&self) -> u64 {
+        self.actions.iter().map(|action| action.busy_frames).sum()
     }
 
     /// 人读摘要。
     pub fn summary(&self) -> String {
-        let (p50, p95, p99, max) = self.frame_time_percentiles();
+        let (p50, p95, p99, max) = self.busy_frame_percentiles();
         let uploads: u64 = self
             .actions
             .iter()
@@ -294,12 +318,15 @@ impl Report {
             .sum();
         let submitted: u64 = self.actions.iter().map(|action| action.submitted).sum();
         format!(
-            "脚本={} 动作={} 帧={} 提交={} 帧耗时 p50={p50:.2}ms p95={p95:.2}ms p99={p99:.2}ms max={max:.2}ms \
-             上传={:.1}MB 违规={}",
+            "脚本={} 动作={} 帧={}(忙帧 {}) 提交={} 墙钟={:.0}ms CPU合计={:.1}ms \
+             忙帧 p50={p50:.2} p95={p95:.2} p99={p99:.2} max={max:.2}ms 上传={:.1}MB 违规={}",
             self.script,
             self.actions.len(),
             self.frames(),
+            self.busy_frames(),
             submitted,
+            self.wall_ms_total(),
+            self.busy_cpu_ms_total(),
             uploads as f64 / (1024.0 * 1024.0),
             self.violations.len()
         )
@@ -421,6 +448,20 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
         actions.push((id, action));
     }
     Ok(Script { name, pdf: PathBuf::from(pdf), actions })
+}
+
+/// 分位数：返回 `(p50, p95, p99, max)`（空输入返回全 0）。
+fn percentiles(values: &[f64]) -> (f64, f64, f64, f64) {
+    if values.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pick = |p: f64| -> f64 {
+        let index = ((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
+        sorted[index.min(sorted.len() - 1)]
+    };
+    (pick(50.0), pick(95.0), pick(99.0), *sorted.last().unwrap())
 }
 
 // ------------------------------------------------------------------ 画法追踪
@@ -621,6 +662,9 @@ pub fn run(
             textures_peak: 0,
             upload_bytes: 0,
             elapsed_ms: 0.0,
+            busy_frames: 0,
+            busy_cpu_ms: (0.0, 0.0, 0.0, 0.0),
+            busy_cpu_ms_total: 0.0,
         };
         harness.apply_action(app, action);
         // 每个动作开始时清空诊断缓冲：这一行只属于这个动作
@@ -628,6 +672,7 @@ pub fn run(
 
         let mut quiet = 0u32;
         let mut last_state = (usize::MAX, 0usize, BTreeMap::new());
+        let mut last_visual = (usize::MAX, BTreeMap::new());
         let action_started = Instant::now();
         for _ in 0..options.max_frames_per_action {
             let stat = harness.run_frame(app);
@@ -640,6 +685,18 @@ pub fn run(
                     .map(|(page, stamp)| (*page, stamp.stable_key()))
                     .collect::<BTreeMap<_, _>>(),
             );
+            // "这一帧真的干活了吗"：传了像素，或画面（纹理条目/画法）变了
+            let visual = (
+                stat.textures,
+                stat.plans
+                    .iter()
+                    .map(|(page, stamp)| (*page, stamp.stable_key()))
+                    .collect::<BTreeMap<_, _>>(),
+            );
+            let busy = stat.upload_bytes > 0 || visual != last_visual;
+            last_visual = visual;
+            let mut stat = stat;
+            stat.busy = busy;
             // "稳定"必须同时满足：没有在飞渲染、**不在缩放预览窗口内**、纹理与画法都不变。
             // 少了"预览窗口"这一条，动作会在窗口还没结束时就判定稳定 —— 此时渲染请求
             // 还没提交，后面自然看不到新瓦片（第一版回放就踩了这个坑）。
@@ -686,6 +743,15 @@ pub fn run(
             .iter()
             .map(|frame| frame.upload_bytes)
             .sum();
+        let busy: Vec<f64> = action_report
+            .frames_data
+            .iter()
+            .filter(|frame| frame.busy)
+            .map(|frame| frame.cpu_ms)
+            .collect();
+        action_report.busy_frames = busy.len() as u64;
+        action_report.busy_cpu_ms_total = busy.iter().sum();
+        action_report.busy_cpu_ms = percentiles(&busy);
         action_report.previews = app
             .custom_previews
             .iter()
@@ -842,6 +908,8 @@ impl Harness {
             submitted: app.session.as_ref().map_or(0, |session| session.submitted_jobs()),
             rss_kb: resident_kb(),
             previewing: app.previewing(),
+            // 由结算循环按"和上一帧比有没有变化"回填（见 `busy`）
+            busy: false,
             plans: app
                 .last_plan
                 .iter()
@@ -1061,18 +1129,7 @@ pub fn write_jsonl(report: &Report, path: &Path) -> std::io::Result<()> {
     use std::fmt::Write as _;
     let mut out = String::new();
     for action in &report.actions {
-        let (p50, p95, p99, max) = {
-            let mut values: Vec<f64> = action.frames_data.iter().map(|frame| frame.cpu_ms).collect();
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let pick = |p: f64| -> f64 {
-                if values.is_empty() {
-                    return 0.0;
-                }
-                let index = ((p / 100.0) * (values.len() as f64 - 1.0)).round() as usize;
-                values[index.min(values.len() - 1)]
-            };
-            (pick(50.0), pick(95.0), pick(99.0), values.last().copied().unwrap_or(0.0))
-        };
+        let (p50, p95, p99, max) = action.busy_cpu_ms;
         let upload: u64 = action.frames_data.iter().map(|frame| frame.upload_bytes).sum();
         let diag = serde_free_array(&action.diag);
         let violations = serde_free_array(&action.violations);
@@ -1085,12 +1142,15 @@ pub fn write_jsonl(report: &Report, path: &Path) -> std::io::Result<()> {
         let _ = writeln!(
             out,
             "{{\"script\":\"{}\",\"action\":\"{}\",\"op\":\"{}\",\"frames\":{},\"settled\":{},\
-             \"cpu_ms\":{{\"p50\":{p50:.3},\"p95\":{p95:.3},\"p99\":{p99:.3},\"max\":{max:.3}}},\
+             \"busy_frames\":{},\"wall_ms\":{:.1},\"cpu_ms\":{{\"p50\":{p50:.3},\"p95\":{p95:.3},\"p99\":{p99:.3},\"max\":{max:.3},\"total\":{:.3}}},\
              \"upload_bytes\":{upload},\"textures\":{},\"violations\":{violations},\"notes\":{notes},\"previews\":[{}],\"diag\":{diag}}}",
             escape(&report.script),
             escape(&action.id),
             escape(&action.action),
             action.frames,
+            action.busy_frames,
+            action.elapsed_ms,
+            action.busy_cpu_ms_total,
             action.settled,
             action.frames_data.last().map_or(0, |frame| frame.textures),
             previews.join(","),

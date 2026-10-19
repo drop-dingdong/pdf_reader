@@ -68,9 +68,11 @@ fn replay_runs_a_script_and_reports_per_action() {
         zoom_800.diag
     );
 
-    // 帧耗时与上传字节必须有值（无 GPU 时 upload_bytes 仍反映"打算上传多少"）
-    let (p50, _, p99, max) = report.frame_time_percentiles();
-    assert!(p50 > 0.0 && p99 > 0.0 && max >= p99, "帧耗时应可统计");
+    // 忙帧耗时与上传字节必须有值（无 GPU 时 upload_bytes 仍反映"打算上传多少"）
+    let (p50, _, p99, max) = report.busy_frame_percentiles();
+    assert!(p50 > 0.0 && p99 > 0.0 && max >= p99, "忙帧耗时应可统计");
+    assert!(report.busy_frames() > 0, "至少要有一帧真的干了活");
+    assert!(report.busy_cpu_ms_total() > 0.0, "CPU 合计应可统计");
 
     // 结构断言（S1 版本）不应误报
     assert!(

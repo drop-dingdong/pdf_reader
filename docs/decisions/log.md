@@ -246,6 +246,19 @@
 * 摘要与逐动作输出加 `提交=n`（一眼看出"到底渲染了没有"）；
 * 回归测试：`timing_mode_settles_and_actually_renders`、`a_baseline_without_any_render_requests_is_rejected`。
 
+#### D-106 后续修正二（"忙帧"口径，基线格式升到 v2）
+
+修好帧预算后真机再测：`提交=21`、动作都稳定，但 `cpu_ms.p50` 仍旧是 **0.08ms** —— 因为
+timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms），把"所有帧"的分位数
+稀释成了空转成本。
+
+修正：
+* `FrameStat` 增加 `busy`（这一帧转换/上传了像素，或画面内容变了）；指标改为
+  **忙帧分位数 + 忙帧 CPU 合计 + 动作墙钟**（墙钟含等预览窗口，最接近手感）；
+* 基线格式 `version: 2`：逐动作加 `busy_frames / cpu_ms_total / wall_ms`，顶层加
+  `cpu_ms_total / wall_ms_total / busy_frames`；比较时这三项也进 `[提示]` 档；
+* 输出摘要与逐动作行都带上"忙 N / 墙钟 / CPU"，一眼能看出是不是空转。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

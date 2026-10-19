@@ -33,11 +33,13 @@ fn main() -> eframe::Result<()> {
                 println!("{}", report.summary());
                 for action in &report.actions {
                     println!(
-                        "  {} [{}] 帧={} 墙钟={:.0}ms 提交={} 稳定={} 违规={} 观察={}",
+                        "  {} [{}] 帧={}(忙 {}) 墙钟={:.0}ms CPU={:.1}ms 提交={} 稳定={} 违规={} 观察={}",
                         action.id,
                         action.action,
                         action.frames,
+                        action.busy_frames,
                         action.elapsed_ms,
+                        action.busy_cpu_ms_total,
                         action.submitted,
                         action.settled,
                         action.violations.len(),

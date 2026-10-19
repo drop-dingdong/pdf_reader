@@ -20,7 +20,7 @@ use std::path::Path;
 use super::{escape, Report};
 
 /// 基线格式版本。
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// 跑这份基线时的机器与构建条件。
 #[derive(Debug, Clone, PartialEq)]
@@ -76,6 +76,12 @@ impl Machine {
 pub struct ActionBaseline {
     /// 动作 id。
     pub id: String,
+    /// 该动作的忙帧数。
+    pub busy_frames: u64,
+    /// 该动作的忙帧 CPU 合计（毫秒）。
+    pub cpu_ms_total: f64,
+    /// 该动作的墙钟耗时（毫秒）。
+    pub wall_ms: f64,
     /// 新增渲染请求数。
     pub submitted: u64,
     /// 打算上传的字节总数。
@@ -97,8 +103,14 @@ pub struct Baseline {
     pub machine: Machine,
     /// 逐动作结构指标。
     pub actions: Vec<ActionBaseline>,
-    /// 帧耗时 p50/p95/p99/max（毫秒）。
+    /// **忙帧**耗时 p50/p95/p99/max（毫秒）——见 [`Report::busy_frame_percentiles`]。
     pub cpu_ms: (f64, f64, f64, f64),
+    /// 忙帧 CPU 时间合计（毫秒）。
+    pub cpu_ms_total: f64,
+    /// 全部动作墙钟合计（毫秒）。
+    pub wall_ms_total: f64,
+    /// 忙帧数。
+    pub busy_frames: u64,
     /// RSS 峰值（KB）。
     pub rss_peak_kb: u64,
 }
@@ -116,19 +128,25 @@ impl Baseline {
             .iter()
             .map(|action| ActionBaseline {
                 id: action.id.clone(),
+                busy_frames: action.busy_frames,
+                cpu_ms_total: action.busy_cpu_ms_total,
+                wall_ms: action.elapsed_ms,
                 submitted: action.submitted,
                 upload_bytes: action.upload_bytes,
                 textures_peak: action.textures_peak,
                 preview: action.previews.first().map(|(_, width, height)| (*width, *height)),
             })
             .collect();
-        let cpu_ms = report.frame_time_percentiles();
+        let cpu_ms = report.busy_frame_percentiles();
         Self {
             version: VERSION,
             script: report.script.clone(),
             machine,
             actions,
             cpu_ms,
+            cpu_ms_total: report.busy_cpu_ms_total(),
+            wall_ms_total: report.wall_ms_total(),
+            busy_frames: report.busy_frames(),
             rss_peak_kb: report.rss_peak_kb(),
         }
     }
@@ -157,11 +175,15 @@ impl Baseline {
             let _ = writeln!(
                 out,
                 "    {{\"id\": \"{}\", \"submitted\": {}, \"upload_bytes\": {}, \
-                 \"textures_peak\": {}, \"preview\": {preview}}}{comma}",
+                 \"textures_peak\": {}, \"busy_frames\": {}, \"cpu_ms_total\": {:.3}, \
+                 \"wall_ms\": {:.1}, \"preview\": {preview}}}{comma}",
                 escape(&action.id),
                 action.submitted,
                 action.upload_bytes,
-                action.textures_peak
+                action.textures_peak,
+                action.busy_frames,
+                action.cpu_ms_total,
+                action.wall_ms
             );
         }
         let _ = writeln!(out, "  ],");
@@ -170,6 +192,13 @@ impl Baseline {
             out,
             "  \"cpu_ms\": {{\"p50\": {p50:.3}, \"p95\": {p95:.3}, \"p99\": {p99:.3}, \"max\": {max:.3}}},"
         );
+        let _ = writeln!(
+            out,
+            "  \"cpu_ms_total\": {:.3},",
+            self.cpu_ms_total
+        );
+        let _ = writeln!(out, "  \"wall_ms_total\": {:.1},", self.wall_ms_total);
+        let _ = writeln!(out, "  \"busy_frames\": {},", self.busy_frames);
         let _ = writeln!(out, "  \"rss_peak_kb\": {}", self.rss_peak_kb);
         let _ = writeln!(out, "}}");
         out
@@ -225,6 +254,18 @@ impl Baseline {
                 Some((pair[0].as_number()? as usize, pair[1].as_number()? as usize))
             });
             actions.push(ActionBaseline {
+                busy_frames: object
+                    .field("busy_frames")
+                    .and_then(|value| value.as_number())
+                    .unwrap_or(0.0) as u64,
+                cpu_ms_total: object
+                    .field("cpu_ms_total")
+                    .and_then(|value| value.as_number())
+                    .map_or(0.0, f64::from),
+                wall_ms: object
+                    .field("wall_ms")
+                    .and_then(|value| value.as_number())
+                    .map_or(0.0, f64::from),
                 id: object
                     .field("id")
                     .and_then(|value| value.as_str())
@@ -263,6 +304,18 @@ impl Baseline {
             machine,
             actions,
             cpu_ms: (pick("p50"), pick("p95"), pick("p99"), pick("max")),
+            cpu_ms_total: root
+                .field("cpu_ms_total")
+                .and_then(|value| value.as_number())
+                .map_or(0.0, f64::from),
+            wall_ms_total: root
+                .field("wall_ms_total")
+                .and_then(|value| value.as_number())
+                .map_or(0.0, f64::from),
+            busy_frames: root
+                .field("busy_frames")
+                .and_then(|value| value.as_number())
+                .unwrap_or(0.0) as u64,
             rss_peak_kb: number("rss_peak_kb")? as u64,
         })
     }
@@ -321,6 +374,12 @@ pub const BYTE_TOLERANCE_RATIO: f64 = 0.10;
 /// 比较当前报告与基线。
 pub fn compare(baseline: &Baseline, report: &Report, machine: &Machine) -> Vec<Finding> {
     let mut findings = Vec::new();
+    if baseline.version != VERSION {
+        findings.push(Finding::warn(format!(
+            "基线格式版本 {} ≠ 当前 {VERSION}（指标口径变过，建议重录）",
+            baseline.version
+        )));
+    }
     if !baseline.machine.same_condition(machine) {
         findings.push(Finding::warn(format!(
             "机器条件不同（基线：{}；当前：{}），时序指标只作参考",
@@ -389,7 +448,7 @@ pub fn compare(baseline: &Baseline, report: &Report, machine: &Machine) -> Vec<F
         }
     }
     // 时序指标：只报告
-    let (p50, p95, p99, _) = report.frame_time_percentiles();
+    let (p50, p95, p99, _) = report.busy_frame_percentiles();
     let (b50, b95, b99, _) = baseline.cpu_ms;
     // `max` 只记录不比较：同一台机器上两次跑能差 50%（一次冷启动/一次 GC 就够），
     // 拿它当门禁或告警只会产生噪声；p50/p99 才是"稳不稳"的指标。
@@ -397,6 +456,18 @@ pub fn compare(baseline: &Baseline, report: &Report, machine: &Machine) -> Vec<F
         if expected > 0.0 && actual > expected * (1.0 + TIMING_WARN_RATIO) {
             findings.push(Finding::warn(format!(
                 "帧耗时 {name} {actual:.2}ms 比基线 {expected:.2}ms 慢 {:.0}%",
+                (actual / expected - 1.0) * 100.0
+            )));
+        }
+    }
+    // "这个动作一共烧了多少 CPU / 等了多久"比单帧分位数更稳，也更接近手感
+    for (name, actual, expected) in [
+        ("忙帧 CPU 合计", report.busy_cpu_ms_total(), baseline.cpu_ms_total),
+        ("墙钟合计", report.wall_ms_total(), baseline.wall_ms_total),
+    ] {
+        if expected > 0.0 && actual > expected * (1.0 + TIMING_WARN_RATIO) {
+            findings.push(Finding::warn(format!(
+                "{name} {actual:.1}ms 比基线 {expected:.1}ms 慢 {:.0}%",
                 (actual / expected - 1.0) * 100.0
             )));
         }
@@ -484,6 +555,9 @@ mod tests {
             textures_peak: 4,
             upload_bytes: upload,
             elapsed_ms: 1.0,
+            busy_frames: 1,
+            busy_cpu_ms: (1.0, 1.0, 1.0, 1.0),
+            busy_cpu_ms_total: 1.0,
         }
     }
 
@@ -562,6 +636,20 @@ mod tests {
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].severity, Severity::Warn);
         assert!(findings[0].message.contains("机器条件不同"));
+    }
+
+    #[test]
+    fn an_old_format_baseline_warns() {
+        let mut old = Baseline::record(&report(vec![action("a", 1, 100)]), machine());
+        old.version = 1;
+        let findings = compare(&old, &report(vec![action("a", 1, 100)]), &machine());
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.severity == Severity::Warn
+                    && finding.message.contains("基线格式版本")),
+            "{findings:?}"
+        );
     }
 
     #[test]
