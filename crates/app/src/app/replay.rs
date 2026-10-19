@@ -148,8 +148,14 @@ pub struct Script {
 pub struct RunOptions {
     /// 无窗口时的画布尺寸（逻辑点）。
     pub screen: (f32, f32),
-    /// 每个动作最多跑多少帧（防死循环）。
+    /// 每个动作最多跑多少帧（防死循环；**timing 模式下帧很便宜**，这里的数量级要够大）。
     pub max_frames_per_action: u64,
+    /// 每个动作最多跑多少**墙钟**时间（timing 模式下才是真正的兜底）。
+    ///
+    /// 为什么必须有这一条：timing 模式用真实时钟，而"缩放预览窗口"是 160ms 墙钟。
+    /// 若一帧只要 0.1ms，240 帧总共才 24ms —— 窗口还没过，渲染请求都还没提交，
+    /// 动作却已经用光帧数（本项目的真机基线第一次录制就是这么失败的）。
+    pub max_action_duration: Duration,
     /// 连续多少帧"没有在飞任务 + 纹理不变 + 画法不变"就算稳定。
     pub quiet_frames: u32,
     /// 手动时钟每帧推进的时长（确定性回放用）。
@@ -160,9 +166,11 @@ impl Default for RunOptions {
     fn default() -> Self {
         Self {
             screen: (1100.0, 900.0),
-            // 上限保证"渲染很慢"的脚本也能跑完：40 帧/动作 × 20ms = 800ms 虚拟时间，
-            // 已经覆盖 160ms 预览窗口 + 400ms 就绪兜底。
-            max_frames_per_action: 240,
+            // 帧上限只是"防死循环"的保险；真正的兜底是墙钟时长。
+            // 确定性模式下每帧推进 20ms，20 帧就跨过预览窗口；timing 模式下帧可能只要 0.1ms，
+            // 需要上千帧才能等到 160ms 的窗口结束 —— 所以这里给足数量。
+            max_frames_per_action: 20_000,
+            max_action_duration: Duration::from_secs(5),
             quiet_frames: 3,
             advance_per_frame: Duration::from_millis(20),
         }
@@ -186,6 +194,8 @@ pub struct FrameStat {
     pub submitted: u64,
     /// 进程常驻内存（KB；非 Linux 平台上为 0）。
     pub rss_kb: u64,
+    /// 这一帧是否处于"缩放预览窗口"内（窗口内不提交渲染，所以画面会原地不动）。
+    pub previewing: bool,
     /// 每页的画法快照。
     pub plans: BTreeMap<u32, PlanStamp>,
     /// 每页当前可见的块范围 `(col0, row0, col1, row1)`。
@@ -219,6 +229,8 @@ pub struct ActionReport {
     pub textures_peak: usize,
     /// 该动作期间"打算上传"的字节总数。
     pub upload_bytes: u64,
+    /// 该动作实际耗时（墙钟毫秒）。
+    pub elapsed_ms: f64,
 }
 
 /// 整次回放的报告。
@@ -280,12 +292,14 @@ impl Report {
             .flat_map(|action| action.frames_data.iter())
             .map(|frame| frame.upload_bytes)
             .sum();
+        let submitted: u64 = self.actions.iter().map(|action| action.submitted).sum();
         format!(
-            "脚本={} 动作={} 帧={} 帧耗时 p50={p50:.2}ms p95={p95:.2}ms p99={p99:.2}ms max={max:.2}ms \
+            "脚本={} 动作={} 帧={} 提交={} 帧耗时 p50={p50:.2}ms p95={p95:.2}ms p99={p99:.2}ms max={max:.2}ms \
              上传={:.1}MB 违规={}",
             self.script,
             self.actions.len(),
             self.frames(),
+            submitted,
             uploads as f64 / (1024.0 * 1024.0),
             self.violations.len()
         )
@@ -606,6 +620,7 @@ pub fn run(
             submitted: 0,
             textures_peak: 0,
             upload_bytes: 0,
+            elapsed_ms: 0.0,
         };
         harness.apply_action(app, action);
         // 每个动作开始时清空诊断缓冲：这一行只属于这个动作
@@ -613,6 +628,7 @@ pub fn run(
 
         let mut quiet = 0u32;
         let mut last_state = (usize::MAX, 0usize, BTreeMap::new());
+        let action_started = Instant::now();
         for _ in 0..options.max_frames_per_action {
             let stat = harness.run_frame(app);
             action_report.frames += 1;
@@ -646,7 +662,11 @@ pub fn run(
                     break;
                 }
             }
+            if action_started.elapsed() > options.max_action_duration {
+                break;
+            }
         }
+        action_report.elapsed_ms = action_started.elapsed().as_secs_f64() * 1000.0;
         action_report.diag = app.diag.take();
         // 结构指标（与硬件无关，可做硬门禁）：
         let first = action_report.frames_data.first();
@@ -821,6 +841,7 @@ impl Harness {
             pending: app.session.as_ref().map_or(0, |session| session.pending_renders()),
             submitted: app.session.as_ref().map_or(0, |session| session.submitted_jobs()),
             rss_kb: resident_kb(),
+            previewing: app.previewing(),
             plans: app
                 .last_plan
                 .iter()
@@ -958,18 +979,24 @@ impl Harness {
                         .map(|(page, stamp)| format!("p{page}={}", stamp.describe()))
                         .collect();
                     format!(
-                        "帧{} 纹理={} 在飞={} 画法=[{}]",
+                        "帧{} 纹理={} 在飞={} 预览窗口={} 画法=[{}]",
                         frame.frame,
                         frame.textures,
                         frame.pending,
+                        if frame.previewing { "是" } else { "否" },
                         plans.join(" ")
                     )
                 })
                 .collect::<Vec<_>>()
                 .join("; ");
+            let hint = if action.frames_data.iter().rev().take(3).all(|frame| frame.previewing) {
+                "；这段时间一帧都没出预览窗口（窗口内不提交渲染），说明帧跑得比 160ms 快得多"
+            } else {
+                ""
+            };
             violations.push(format!(
-                "动作 {} 在 {} 帧内没有稳定（最后状态：{tail}）",
-                action.id, action.frames
+                "动作 {} 在 {} 帧 / {:.0}ms 内没有稳定{hint}（最后状态：{tail}）",
+                action.id, action.frames, action.elapsed_ms
             ));
         }
         // 就绪兜底：说明有块在 READY_TIMEOUT_MS（虚拟时间）内没到。

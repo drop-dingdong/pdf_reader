@@ -104,6 +104,11 @@ pub struct Baseline {
 }
 
 impl Baseline {
+    /// 所有动作累计的渲染请求数。
+    pub fn total_submitted(&self) -> u64 {
+        self.actions.iter().map(|action| action.submitted).sum()
+    }
+
     /// 从一次回放记录基线。
     pub fn record(report: &Report, machine: Machine) -> Self {
         let actions = report
@@ -323,6 +328,13 @@ pub fn compare(baseline: &Baseline, report: &Report, machine: &Machine) -> Vec<F
             machine.summary()
         )));
     }
+    if baseline.total_submitted() == 0 {
+        // 一份"一次渲染都没发生"的基线几乎一定是录制时跑错了（例如帧太便宜、
+        // 整段都停在缩放预览窗口里）。拿它当门禁会一路放行，所以直接判失败。
+        findings.push(Finding::gate(
+            "基线里没有任何渲染请求（很可能录制时跑错了），请重新录制",
+        ));
+    }
     if baseline.script != report.script {
         findings.push(Finding::gate(format!(
             "脚本不同：基线是 {}，当前是 {}",
@@ -471,6 +483,7 @@ mod tests {
             submitted,
             textures_peak: 4,
             upload_bytes: upload,
+            elapsed_ms: 1.0,
         }
     }
 
@@ -549,6 +562,19 @@ mod tests {
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].severity, Severity::Warn);
         assert!(findings[0].message.contains("机器条件不同"));
+    }
+
+    #[test]
+    fn a_baseline_without_any_render_requests_is_rejected() {
+        // 真机第一次录制就踩到：帧太便宜，整段都停在缩放预览窗口里，一次渲染都没发生。
+        // 这样的基线必须判失败，否则它会"一路放行"。
+        let empty = Baseline::record(&report(vec![action("a", 0, 0)]), machine());
+        let findings = compare(&empty, &report(vec![action("a", 0, 0)]), &machine());
+        assert!(
+            findings.iter().any(|finding| finding.severity == Severity::Gate
+                && finding.message.contains("没有任何渲染请求")),
+            "{findings:?}"
+        );
     }
 
     #[test]

@@ -112,6 +112,24 @@ fn preview_size_does_not_depend_on_the_current_zoom() {
     );
 }
 
+/// **timing 模式**也必须收敛（回归：快机器上一帧只有 0.1ms，240 帧撑不到 160ms 的预览窗口，
+/// 动作会"用光帧数却没稳定"，并把一份什么都没做的基线记录下来）。
+#[test]
+fn timing_mode_settles_and_actually_renders() {
+    if !backend_available() {
+        eprintln!("跳过：未找到 PDFium 动态库");
+        return;
+    }
+    let path = stage("tiling_800.json", Sample::A4);
+    let report = replay::run_script_file_with(&path, None, true).expect("timing 回放应能跑完");
+    assert!(report.ok(), "timing 模式有违规：{:#?}", report.violations);
+    for action in &report.actions {
+        assert!(action.settled, "timing 模式下动作 {} 没稳定", action.id);
+    }
+    let submitted: u64 = report.actions.iter().map(|action| action.submitted).sum();
+    assert!(submitted > 0, "整段脚本一次渲染都没发生，测出来的基数是假的");
+}
+
 /// 性能基线：记录一次 → 立刻比较，不应出现**门禁级**结论（时序提示允许，机器噪声）。
 #[test]
 fn a_freshly_recorded_baseline_has_no_gate_findings() {

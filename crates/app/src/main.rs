@@ -33,10 +33,12 @@ fn main() -> eframe::Result<()> {
                 println!("{}", report.summary());
                 for action in &report.actions {
                     println!(
-                        "  {} [{}] 帧={} 稳定={} 违规={} 观察={}",
+                        "  {} [{}] 帧={} 墙钟={:.0}ms 提交={} 稳定={} 违规={} 观察={}",
                         action.id,
                         action.action,
                         action.frames,
+                        action.elapsed_ms,
+                        action.submitted,
                         action.settled,
                         action.violations.len(),
                         action.notes.len()
@@ -44,6 +46,16 @@ fn main() -> eframe::Result<()> {
                     for note in &action.notes {
                         println!("      观察：{note}");
                     }
+                }
+                if !report.ok() {
+                    eprintln!("违规 {} 条：", report.violations.len());
+                    for violation in &report.violations {
+                        eprintln!("  - {violation}");
+                    }
+                    if record.is_some() {
+                        eprintln!("本次回放有违规，**不记录**基线（先修好再录）");
+                    }
+                    std::process::exit(1);
                 }
                 // 性能基线：记录 / 比较（结构指标硬门禁，时序指标只提示）
                 use app::replay::baseline::{self, Baseline, Machine, Severity};
@@ -79,13 +91,6 @@ fn main() -> eframe::Result<()> {
                             std::process::exit(2);
                         }
                     }
-                }
-                if !report.ok() {
-                    eprintln!("违规 {} 条：", report.violations.len());
-                    for violation in &report.violations {
-                        eprintln!("  - {violation}");
-                    }
-                    std::process::exit(1);
                 }
                 if gate_failed {
                     std::process::exit(1);
