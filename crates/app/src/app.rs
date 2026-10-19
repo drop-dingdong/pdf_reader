@@ -118,15 +118,32 @@ impl Tool {
     }
 }
 
-/// 读取同目录存档（不存在或解析失败都返回 `None`，不打扰用户）。
-fn load_sidecar(pdf: &std::path::Path) -> Option<persist::SavedData> {
+/// 同目录存档的读取结果。
+enum Sidecar {
+    /// 没有存档 / 解析失败（都当作"没有"）。
+    Missing,
+    /// 可用（可能刚从旧版本升级）。
+    Ready(persist::Loaded),
+    /// 由**更新版本**的程序写入：拒绝读取，并且**禁止写回**（D-107）。
+    Locked { found: u32, supported: u32 },
+}
+
+/// 读取同目录存档。解析失败只打一行日志、当作没有；更新版本则返回 [`Sidecar::Locked`]。
+fn load_sidecar(pdf: &std::path::Path) -> Sidecar {
     let target = persist::sidecar_path(pdf);
-    let text = std::fs::read_to_string(&target).ok()?;
-    match persist::SavedData::from_json(&text) {
-        Ok(data) => Some(data),
+    let Ok(text) = std::fs::read_to_string(&target) else { return Sidecar::Missing };
+    match persist::load(&text) {
+        Ok(loaded) => Sidecar::Ready(loaded),
+        Err(persist::LoadError::NewerVersion { found, supported }) => {
+            eprintln!(
+                "[存档] {} 由更新版本写入（v{found} > v{supported}）：不加载，也不会覆盖它",
+                target.display()
+            );
+            Sidecar::Locked { found, supported }
+        }
         Err(error) => {
             eprintln!("[存档] 解析失败（忽略）：{}：{error}", target.display());
-            None
+            Sidecar::Missing
         }
     }
 }
@@ -331,6 +348,8 @@ pub struct PdfReaderApp {
     last_plan: std::collections::HashMap<PageIndex, PlanStamp>,
     /// 本次打开是否发生过**存档版本迁移**（旧版本 → 当前版本）：是则置脏，提示保存。
     sidecar_migrated: bool,
+    /// 同目录存档由**更新版本**写入：不加载、也不允许覆盖（`(存档版本, 本程序版本)`，D-107）。
+    sidecar_locked: Option<(u32, u32)>,
     /// 每帧临时持有的命令与事件缓冲（避免反复分配）。
     commands: Vec<ViewerCommand>,
     events: Vec<SessionEvent>,
@@ -510,6 +529,7 @@ impl PdfReaderApp {
             band_since: std::collections::HashMap::new(),
             last_plan: std::collections::HashMap::new(),
             sidecar_migrated: false,
+            sidecar_locked: None,
             commands: Vec::new(),
             events: Vec::new(),
             visible: Vec::new(),
@@ -597,6 +617,13 @@ impl PdfReaderApp {
     /// 打开文档（装配会话：LRU 缓存 + 后台调度器 + 纵向布局 + 选区模型）。
     /// 保存自定义数据到 `<pdf>.json`（不含任何图片像素）。
     fn save_custom_data(&mut self) {
+        if let Some((found, supported)) = self.sidecar_locked {
+            // 见 D-107：更新版本的存档不读也不写，否则就是用残缺数据覆盖完整数据
+            self.message = format!(
+                "同目录存档是 v{found}（本程序支持到 v{supported}）：为了不覆盖它，保存被拒绝"
+            );
+            return;
+        }
         let Some(path) = self.document_path.clone() else {
             self.message = "没有打开的文档".to_string();
             return;
@@ -685,17 +712,24 @@ impl PdfReaderApp {
                         self.floats.clear();
                         self.data_dirty = false;
                         self.sidecar_migrated = false;
+                        self.sidecar_locked = None;
                         self.document_path = Some(path.to_path_buf());
                         // 同目录若有存档（<pdf>.json），载入并**替换**链接与被引用点/自定义数据。
-                        // 读到旧版本就**就地升级**并置脏（下次保存写回当前版本）。
-                        let saved = load_sidecar(path).map(|mut data| {
-                            let migration = persist::migrate(&mut data);
-                            for note in &migration.notes {
-                                eprintln!("[存档] {note}");
+                        // 旧版本就地升级并置脏（下次保存写回当前版本）；**更新版本一律拒绝**（D-107）。
+                        let saved = match load_sidecar(path) {
+                            Sidecar::Missing => None,
+                            Sidecar::Ready(loaded) => {
+                                for note in &loaded.migration.notes {
+                                    eprintln!("[存档] {note}");
+                                }
+                                self.sidecar_migrated = loaded.migration.changed;
+                                Some(loaded.data)
                             }
-                            self.sidecar_migrated = migration.changed;
-                            data
-                        });
+                            Sidecar::Locked { found, supported } => {
+                                self.sidecar_locked = Some((found, supported));
+                                None
+                            }
+                        };
                         self.navigation = session.navigation().ok();
                         // `NavigationIndex` 在会话里是共享只读的，因此这里**替换整个索引**
                         // （克隆后换成存档里的链接），而不是原地改字段。
@@ -819,7 +853,11 @@ impl PdfReaderApp {
                         self.band_since.clear();
                         self.last_plan.clear();
                         self.error = None;
-                        if self.sidecar_migrated {
+                        if let Some((found, supported)) = self.sidecar_locked {
+                            self.message = format!(
+                                "已打开：{title}（同目录存档是 v{found}，本程序只支持到 v{supported}：不加载、也不会覆盖它）"
+                            );
+                        } else if self.sidecar_migrated {
                             // 旧版本存档被升级过：置脏，让"保存自定义数据"写回当前版本
                             self.data_dirty = true;
                             self.message = format!("已打开：{title}（存档已升级到 v{}，请保存）", persist::CURRENT_VERSION);
@@ -1138,8 +1176,22 @@ impl PdfReaderApp {
                 );
                 response.on_hover_text(&path_text);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(save_button_label(self.data_dirty)).clicked() {
-                        self.save_custom_data();
+                    let label = save_button_label(self.data_dirty);
+                    match self.sidecar_locked {
+                        // 存档属于更新版本：不读也不写（D-107），按钮直接禁用并说明原因
+                        Some((found, supported)) => {
+                            ui.add_enabled(false, egui::Button::new(label)).on_disabled_hover_text(
+                                format!(
+                                    "同目录存档是 v{found}，本程序只支持到 v{supported}：\
+                                     为了不覆盖它，保存已禁用"
+                                ),
+                            );
+                        }
+                        None => {
+                            if ui.button(label).clicked() {
+                                self.save_custom_data();
+                            }
+                        }
                     }
                 });
             });

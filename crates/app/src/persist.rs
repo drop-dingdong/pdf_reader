@@ -217,6 +217,57 @@ impl SavedData {
     }
 }
 
+/// 载入存档失败的原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadError {
+    /// 内容不是合法的存档 JSON。
+    Parse(String),
+    /// 存档由**更新版本**的程序写入 —— 禁止读取（见 D-107）。
+    NewerVersion {
+        /// 存档里的版本号。
+        found: u32,
+        /// 本程序支持的版本号。
+        supported: u32,
+    },
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parse(error) => write!(f, "不是合法的存档：{error}"),
+            Self::NewerVersion { found, supported } => write!(
+                f,
+                "存档由更新版本写入（v{found} > v{supported}），本程序拒绝读取，也不会覆盖它"
+            ),
+        }
+    }
+}
+
+/// 一次成功载入：已迁移到当前版本的数据。
+#[derive(Debug, Clone)]
+pub struct Loaded {
+    /// 迁移后的数据。
+    pub data: SavedData,
+    /// 这次迁移做了什么。
+    pub migration: Migration,
+}
+
+/// **载入存档的唯一入口**：解析 → 版本闸门 → 迁移。
+///
+/// 版本策略（D-107）：
+/// * **向后兼容**：旧版本（v1、无 `version`）照常读，就地升级并置脏，保存后写回当前版本；
+/// * **禁止向前兼容**：`version > CURRENT_VERSION` 直接拒绝，**不读也不写**。
+///   旧程序读新存档必然丢字段，读一半再保存就是"用残缺数据覆盖完整数据"，
+///   比"什么都不做"更糟 —— 所以宁可不给用。
+pub fn load(text: &str) -> std::result::Result<Loaded, LoadError> {
+    let mut data = SavedData::from_json(text).map_err(LoadError::Parse)?;
+    if data.version > CURRENT_VERSION {
+        return Err(LoadError::NewerVersion { found: data.version, supported: CURRENT_VERSION });
+    }
+    let migration = migrate(&mut data);
+    Ok(Loaded { data, migration })
+}
+
 /// 把旧版本的存档**就地升级**到 [`CURRENT_VERSION`]。
 ///
 /// * 只做加法：给新字段填默认值（v1 → v2 是给 `scale` 填 [`DEFAULT_SCALE`]）；
@@ -244,13 +295,6 @@ pub fn migrate(data: &mut SavedData) -> Migration {
             "v1 → v2：{patched} 处截图没有记录分辨率，按 100% 处理（保存后写回 v{CURRENT_VERSION}）"
         ));
         data.version = 2;
-    }
-
-    if data.version > CURRENT_VERSION {
-        notes.push(format!(
-            "存档版本 {} 比本程序支持的 v{CURRENT_VERSION} 新：按兼容方式读取，未识别的字段会在保存时丢失",
-            data.version
-        ));
     }
 
     Migration { from, to: data.version, changed: from != data.version, notes }
@@ -568,24 +612,46 @@ mod tests {
         assert_eq!(back, data);
     }
 
-    /// 比当前版本更新的存档：不改动数据，只给提示（不该 panic、也不该丢字段）。
+    /// 比当前版本更新的存档：**拒绝读取**（禁止向前兼容，D-107）。
+    ///
+    /// 关键点：`from_json` 本身照常解析（忠实反映文件内容），但 `load` 的版本闸门必须拦住它 ——
+    /// 旧程序读一半再保存，等于用残缺数据覆盖完整数据。
     #[test]
-    fn newer_sidecar_is_accepted_with_a_note() {
-        let mut data = SavedData::from_json(
-            r#"{"version": 99, "custom_images": [{"page": 0, "point": [0, 0], "rect": [0, 0, 10, 10], "body": [10, 10], "title": "x", "scale": 3.0}]}"#,
-        )
-        .expect("应能解析");
-        assert_eq!(data.version, 99);
-        let migration = migrate(&mut data);
-        assert!(!migration.changed, "更新的存档不改动");
-        assert_eq!(data.version, 99);
-        assert!(migration.notes.iter().any(|note| note.contains("更新")
-            || note.contains("新")));
-        assert_eq!(data.custom_images[0].scale, 3.0);
+    fn newer_sidecar_is_refused() {
+        let text = r#"{"version": 99, "custom_images": [{"page": 0, "point": [0, 0], "rect": [0, 0, 10, 10], "body": [10, 10], "title": "x", "scale": 3.0}]}"#;
+        let parsed = SavedData::from_json(text).expect("解析本身应成功（忠实反映文件）");
+        assert_eq!(parsed.version, 99);
+
+        match load(text) {
+            Err(LoadError::NewerVersion { found, supported }) => {
+                assert_eq!((found, supported), (99, CURRENT_VERSION));
+            }
+            other => panic!("应当拒绝读取，实际：{other:?}"),
+        }
+        let message = LoadError::NewerVersion { found: 99, supported: CURRENT_VERSION }.to_string();
+        assert!(message.contains("拒绝"), "{message}");
     }
 
-    /// 非法的 `scale`（0/负数/NaN）按默认值处理。
+    /// 版本恰好等于当前版本：正常载入，且不算迁移。
     #[test]
+    fn current_version_loads_without_migration() {
+        let data = SavedData::default();
+        let loaded = load(&data.to_json()).expect("当前版本应能载入");
+        assert_eq!(loaded.data.version, CURRENT_VERSION);
+        assert!(!loaded.migration.changed);
+        assert!(loaded.migration.notes.is_empty());
+    }
+
+    /// 缺 `version` 的老文件：照常读，升级并置脏（向后兼容）。
+    #[test]
+    fn missing_version_is_treated_as_v1_and_migrated() {
+        let text = r#"{"custom_images": [{"page": 0, "point": [0, 0], "rect": [0, 0, 10, 10], "body": [10, 10], "title": "old"}]}"#;
+        let loaded = load(text).expect("无版本号的文件应能载入");
+        assert_eq!(loaded.data.version, CURRENT_VERSION);
+        assert!(loaded.migration.changed, "应置脏，让下次保存写回当前版本");
+        assert_eq!(loaded.data.custom_images[0].scale, DEFAULT_SCALE);
+    }
+
     fn invalid_scale_falls_back_to_the_default() {
         let data = SavedData::from_json(
             r#"{"version": 2, "custom_images": [
