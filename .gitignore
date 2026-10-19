@@ -4,3 +4,4 @@ vendor/
 
 # 回放器样本（现场生成，不入库）
 scripts/replay/*.pdf
+scripts/replay/*.pdf.json

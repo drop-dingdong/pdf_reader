@@ -56,11 +56,40 @@ scripts/fetch-pdfium.sh          # 自动识别平台
 实现在 [`crates/app/src/app/replay.rs`](../../crates/app/src/app/replay.rs)。
 
 ```bash
-# 1) 生成样本（仓库不放二进制夹具；生成的 .pdf 已被 .gitignore 忽略）
-cargo run -p app -- --sample a4 scripts/replay/a4_3p.pdf   # 也可 two-page / many / offset
+# 1) 生成样本（仓库不放二进制夹具；生成的 .pdf / .pdf.json 已被 .gitignore 忽略）
+cargo run -p app -- --sample a4 scripts/replay/a4_3p.pdf
+#    a4 / rotated / large / many / preview（preview 会一并写 sidecar）
 # 2) 跑脚本（脚本里的 "pdf" 相对于脚本所在目录）
 cargo run -p app -- --replay scripts/replay/tiling_800.json --out /tmp/out.jsonl
+# 3) 全套脚本（9 个）作为回归网，一条命令：
+cargo test -p app --test replay_scripts
 ```
+
+### 样本（`replay::samples`）
+
+| 名字 | 内容 | 覆盖的路径 |
+| --- | --- | --- |
+| `a4` | A4 三页，满页横线 | 分块、波段切换、滚动、跳页 |
+| `rotated` | 两页，其中一页 `/Rotate 90`，带链接与大纲 | 旋转后的网格与摆放 |
+| `large` | 单页 A0（100% 就 8MP） | 低倍即分块、整页位图很大 |
+| `many` | 120 页 A4 | 跳页/布局、远处页面的按需渲染 |
+| `preview` | A4 三页 + sidecar 一条图片 preview（记录分辨率 800%） | 存档 → 按记录分辨率请求渲染 → 拼图（断言 ③） |
+
+样本都用 `backend_pdfium::fixtures` **现场拼 PDF**（纯字符串，不需要动态库）。
+扫描件/JPEG 样本没有纳入：那类页面主要压 PDFium 的图像解码，对我们自己的分块/摆放逻辑没有新覆盖。
+
+### 脚本（`scripts/replay/`）
+
+| 脚本 | 样本 | 想守住什么 |
+| --- | --- | --- |
+| `tiling_800.json` | a4 | 400%→800%→拖动→退回：波段切换各翻一次、缺块补底料 |
+| `band_walk.json` | a4 | 100→120→150→160→200→回退：同波段内改缩放不重渲染（`[瓦片]` 不新增） |
+| `scroll_walk.json` | a4 | 400% 下四方向滚动：粘性瓦片（D-104）、不整页变糊、不露白 |
+| `page_walk.json` | a4 | 200% 下 0→1→2→1 跳页：每页各自进门，互不干扰 |
+| `rotated.json` | rotated | 300%/600% + 拖动 + 跳到旋转页：旋转后的块与摆放 |
+| `large_page.json` | large | 100% 就分块的大页：整页位图不存在时的底料与兜底 |
+| `many_pages.json` | many | 120 页里跳到 60/61/119/0：远处页面按需渲染 |
+| `preview_100.json` / `preview_800.json` | preview | 同一预览在 100% 与 800% 下唤出，尺寸必须相同（断言 ③ 的"与缩放无关"） |
 
 脚本格式（JSON，每个动作一个 `id`）：
 
@@ -74,7 +103,8 @@ cargo run -p app -- --replay scripts/replay/tiling_800.json --out /tmp/out.jsonl
 ```
 
 可用动作：`resize`（宽/高）、`zoom`（`value`）、`scroll_by`（`dx/dy`）、`set_scroll`（`x/y`）、
-`go_to_page`（`page`，0 起）、`hover_link`（`page/link`）、`unhover`、`wait`（`frames`）。
+`go_to_page`（`page`，0 起）、`hover_link`（`page/link`）、`unhover`、`wait`（`frames`）、
+`open_preview`（`index`：唤出第 index 条自定义图片 preview 的浮窗，走 app 自己的懒生成路径）。
 
 ### 4.5.1 确定性从哪来
 
@@ -93,13 +123,14 @@ cargo run -p app -- --replay scripts/replay/tiling_800.json --out /tmp/out.jsonl
 | ③ | **预览尺寸 == 区域 × 分辨率** | 预览纹理的实际尺寸必须等于 `region_device_rect` 的结果（±1 边缘取整），与当前缩放无关 |
 | ④ | **不得提前切到瓦片**（D-97 的编码） | **翻到瓦片的那一刻**若可见范围没齐、又有旧内容可用、且未等满 400ms → 违规（翻过去之后的部分块由底料补，属 D-104 的正常状态） |
 
-③ 目前只在"存在自定义图片预览"时生效（回放脚本还没有"打开预览"的动作，S2 补）；
-`region_device_rect` 本身已有单测与 `compose_region_snapshot` 共用同一套取整。
+③ 由 `preview_100.json` / `preview_800.json` 实测：两者都在 `open_preview` 后得到
+**1573×839** 的纹理（= 150×80pt × 10.486，两端取整），与当前缩放无关；
+`region_device_rect` 与 `compose_region_snapshot` 共用同一套取整。
 
 ### 4.5.3 输出
 
 JSONL 每个动作一行：`frames` / `settled` / `cpu_ms{p50,p95,p99,max}` / `upload_bytes` / `textures` /
-`violations` / `notes` / `diag`。其中：
+`violations` / `notes` / `previews`（`[下标,宽,高]`）/ `diag`。其中：
 
 * `notes` = 不算违规但值得记录的观察（例如"以 9/12 块进入瓦片模式，等待 412ms"= 走了兜底）；
 * `upload_bytes` = 本帧**打算**上传的像素字节（无 GPU，所以是"搬运量"而不是"上传耗时"）；

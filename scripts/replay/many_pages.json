@@ -1,0 +1,13 @@
+{
+  "name": "many_pages",
+  "pdf": "many_120p.pdf",
+  "actions": [
+    { "id": "resize", "op": "resize", "width": 1000, "height": 800 },
+    { "id": "z100",   "op": "zoom", "value": 1.0 },
+    { "id": "p60",    "op": "go_to_page", "page": 60 },
+    { "id": "p61",    "op": "go_to_page", "page": 61 },
+    { "id": "p119",   "op": "go_to_page", "page": 119 },
+    { "id": "p0",     "op": "go_to_page", "page": 0 },
+    { "id": "settle", "op": "wait", "frames": 20 }
+  ]
+}

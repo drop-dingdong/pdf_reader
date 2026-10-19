@@ -1,0 +1,12 @@
+{
+  "name": "large_page",
+  "pdf": "large_a0.pdf",
+  "actions": [
+    { "id": "resize",  "op": "resize", "width": 1100, "height": 900 },
+    { "id": "z100",    "op": "zoom", "value": 1.0 },
+    { "id": "drag",    "op": "scroll_by", "dx": 800, "dy": 600 },
+    { "id": "z200",    "op": "zoom", "value": 2.0 },
+    { "id": "drag2",   "op": "scroll_by", "dx": -400, "dy": -300 },
+    { "id": "settle",  "op": "wait", "frames": 20 }
+  ]
+}

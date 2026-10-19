@@ -56,32 +56,24 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // 生成回放用的样本 PDF（仓库里不放二进制夹具，现场生成）
+    // 生成回放用的样本（仓库里不放二进制夹具，现场生成；`preview` 会一并写 sidecar）
     if args.first().map(String::as_str) == Some("--sample") {
         let kind = args.get(1).map(String::as_str).unwrap_or("a4");
         let Some(out) = args.get(2).map(PathBuf::from) else {
-            eprintln!("用法：app --sample <a4|two-page|many|offset> <输出.pdf>");
+            eprintln!("用法：app --sample <a4|rotated|large|many|preview> <输出.pdf>");
             std::process::exit(2);
         };
-        let bytes = match kind {
-            // A4 三页，满页横线：放大后必然分块
-            "a4" => backend_pdfium::fixtures::many_page_pdf(3, 595.28, 841.89),
-            // 两页，其中一页 /Rotate 90，带链接与大纲
-            "two-page" => backend_pdfium::fixtures::two_page_pdf(),
-            // 大页（图纸尺寸），低倍就分块
-            "many" => backend_pdfium::fixtures::many_page_pdf(120, 595.28, 841.89),
-            // MediaBox 原点非 0
-            "offset" => backend_pdfium::fixtures::offset_media_box_pdf(),
-            other => {
-                eprintln!("未知样本 {other}（可选 a4 / two-page / many / offset）");
+        let Some(sample) = app::replay::samples::Sample::parse(kind) else {
+            eprintln!("未知样本 {kind}（可选 a4 / rotated / large / many / preview）");
+            std::process::exit(2);
+        };
+        match sample.write_to(&out) {
+            Ok(path) => println!("已生成 {}", path.display()),
+            Err(error) => {
+                eprintln!("写入 {} 失败：{error}", out.display());
                 std::process::exit(2);
             }
-        };
-        if let Err(error) = std::fs::write(&out, bytes) {
-            eprintln!("写入 {} 失败：{error}", out.display());
-            std::process::exit(2);
         }
-        println!("已生成 {}", out.display());
         return Ok(());
     }
 

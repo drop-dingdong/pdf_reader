@@ -187,6 +187,24 @@
 - **回退**：单提交 `git revert`（判据是纯函数，回退只影响绘制选择）。
 - **状态**：有效（真机手感待用户验收：高倍拖动时新区域应"先糊后清"，页面整体不闪）。
 
+### D-105 回放脚本集与样本集入库，断言 ③ 接上真实预览（第二阶段）
+
+- **决定**：① 回放器新增动作 `open_preview`（唤出第 index 条自定义图片 preview 的浮窗，
+  由 app 自己的 `ensure_pending_custom_snapshots` 每帧重试生成 —— 不绕过真实路径）；
+  ② 样本统一到 `app::replay::samples`（`a4 / rotated / large / many / preview` 五种，
+  `preview` 会一并写 sidecar），命令行 `--sample` 与测试共用；
+  ③ `scripts/replay/` 收录 **9 个脚本**，`cargo test -p app --test replay_scripts` 逐个跑并断言 0 违规；
+  ④ `ActionReport.previews` 记录每次动作后预览纹理的实际尺寸，写进 JSONL，供"跨缩放一致性"断言。
+- **理由**：D-103 的断言 ③ 当时是"潜伏"的（没有脚本会创建预览）；把"存档 → 按记录分辨率请求
+  渲染 → 拼图"接进回放后，预览尺寸第一次被端到端验证。样本现场生成（不提交二进制）、
+  脚本用数据文件（不改代码就能加场景），两者都让回归网可以持续长大。
+- **影响**：`app::replay::samples` 新模块；`--sample` 的种类由样本表决定；测试新增
+  `crates/app/tests/replay_scripts.rs`（3 个用例，含"9 个脚本 0 违规"与"预览尺寸与缩放无关"）。
+- **验证**：`preview_100` / `preview_800` 的 `[预览]` 行显示两者都是
+  `记录分辨率=800% 渲染比例=10.486 尺寸=1573x839`；`replay_scripts` 全部通过（234 passed）。
+- **回退**：单提交 `git revert`（新增文件为主，不改运行时行为）。
+- **状态**：有效（第三阶段：`timing` profile + 本机硬件信息 + 基线比较）。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

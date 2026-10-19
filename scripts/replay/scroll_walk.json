@@ -1,0 +1,14 @@
+{
+  "name": "scroll_walk",
+  "pdf": "a4_3p.pdf",
+  "actions": [
+    { "id": "resize",  "op": "resize", "width": 1200, "height": 900 },
+    { "id": "z400",    "op": "zoom", "value": 4.0 },
+    { "id": "down1",   "op": "scroll_by", "dx": 0, "dy": 200 },
+    { "id": "down2",   "op": "scroll_by", "dx": 0, "dy": 200 },
+    { "id": "right1",  "op": "scroll_by", "dx": 250, "dy": 0 },
+    { "id": "up1",     "op": "scroll_by", "dx": 0, "dy": -300 },
+    { "id": "z100",    "op": "zoom", "value": 1.0 },
+    { "id": "settle",  "op": "wait", "frames": 20 }
+  ]
+}

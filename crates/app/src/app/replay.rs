@@ -27,6 +27,8 @@
 //!   浮窗、侧栏、编辑等交互不在范围内。
 //! * 没有 GPU：测不到纹理上传的真实开销；`textures_delta` 只反映"打算上传多少字节"。
 
+pub mod samples;
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -84,6 +86,11 @@ pub enum Action {
         /// 该页链接下标。
         link: usize,
     },
+    /// 唤出第 `index` 条自定义图片 preview 的浮窗（触发"按记录分辨率生成预览图"）。
+    OpenPreview {
+        /// 自定义 preview 的下标（来自 sidecar 的加载顺序）。
+        index: usize,
+    },
     /// 指针移出画布。
     Unhover,
     /// 什么都不做，只跑若干帧（用来观察"稳定后"的状态）。
@@ -103,6 +110,7 @@ impl Action {
             Self::SetScroll { .. } => "set_scroll",
             Self::GoToPage { .. } => "go_to_page",
             Self::HoverLink { .. } => "hover_link",
+            Self::OpenPreview { .. } => "open_preview",
             Self::Unhover => "unhover",
             Self::Wait { .. } => "wait",
         }
@@ -116,6 +124,7 @@ impl Action {
             Self::SetScroll { x, y } => format!("set_scroll ({x},{y})"),
             Self::GoToPage { page } => format!("go_to_page {page}"),
             Self::HoverLink { page, link } => format!("hover_link p{page} #{link}"),
+            Self::OpenPreview { index } => format!("open_preview #{index}"),
             Self::Unhover => "unhover".to_string(),
             Self::Wait { frames } => format!("wait {frames}"),
         }
@@ -197,6 +206,8 @@ pub struct ActionReport {
     pub violations: Vec<String>,
     /// 不算违规、但值得记录的观察（例如走了就绪兜底：那时确实有块没到）。
     pub notes: Vec<String>,
+    /// 该动作结束时各自定义 preview 的**实际纹理尺寸**（下标, 宽, 高）。
+    pub previews: Vec<(usize, usize, usize)>,
 }
 
 /// 整次回放的报告。
@@ -331,6 +342,9 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
             "hover_link" => Action::HoverLink {
                 page: number("page")? as u32,
                 link: number("link").unwrap_or(0.0) as usize,
+            },
+            "open_preview" => Action::OpenPreview {
+                index: number("index").unwrap_or(0.0) as usize,
             },
             "unhover" => Action::Unhover,
             "wait" => Action::Wait { frames: number("frames").unwrap_or(3.0) as u64 },
@@ -534,6 +548,7 @@ pub fn run(
             frames_data: Vec::new(),
             violations: Vec::new(),
             notes: Vec::new(),
+            previews: Vec::new(),
         };
         harness.apply_action(app, action);
         // 每个动作开始时清空诊断缓冲：这一行只属于这个动作
@@ -576,7 +591,20 @@ pub fn run(
             }
         }
         action_report.diag = app.diag.take();
+        action_report.previews = app
+            .custom_previews
+            .iter()
+            .enumerate()
+            .filter_map(|(index, preview)| {
+                let texture = preview.snapshot.as_ref()?;
+                let size = texture.size();
+                Some((index, size[0], size[1]))
+            })
+            .collect();
         let (violations, notes) = harness.finish_action(&action_report);
+        // 断言 ③ 归到动作名下（不然所有违规都堆在报告末尾，不知道该怪谁）
+        let mut violations = violations;
+        violations.extend(harness.assert_preview_sizes(app));
         action_report.violations = violations;
         action_report.notes = notes;
         report.violations.extend(action_report.violations.iter().cloned());
@@ -626,6 +654,15 @@ impl Harness {
             }
             Action::GoToPage { page } => {
                 session.handle(ViewerCommand::GoToPage(PageIndex::new(*page)), &mut events)
+            }
+            Action::OpenPreview { index } => {
+                // 故意**不**自己合成纹理：唤出浮窗后由 app 的
+                // `ensure_pending_custom_snapshots` 每帧重试，走的正是真机上的那条路径。
+                let rect = egui::Rect::from_min_size(
+                    app.canvas_rect.min + egui::vec2(40.0, 40.0),
+                    egui::vec2(320.0, 240.0),
+                );
+                app.spawn_custom_float(*index, rect);
             }
             Action::HoverLink { .. } | Action::Unhover => {
                 // 指针位置必须走 egui 的输入事件：在 `run_frame` 里按帧重放
@@ -936,17 +973,23 @@ pub fn write_jsonl(report: &Report, path: &Path) -> std::io::Result<()> {
         let diag = serde_free_array(&action.diag);
         let violations = serde_free_array(&action.violations);
         let notes = serde_free_array(&action.notes);
+        let previews: Vec<String> = action
+            .previews
+            .iter()
+            .map(|(index, width, height)| format!("[{index},{width},{height}]"))
+            .collect();
         let _ = writeln!(
             out,
             "{{\"script\":\"{}\",\"action\":\"{}\",\"op\":\"{}\",\"frames\":{},\"settled\":{},\
              \"cpu_ms\":{{\"p50\":{p50:.3},\"p95\":{p95:.3},\"p99\":{p99:.3},\"max\":{max:.3}}},\
-             \"upload_bytes\":{upload},\"textures\":{},\"violations\":{violations},\"notes\":{notes},\"diag\":{diag}}}",
+             \"upload_bytes\":{upload},\"textures\":{},\"violations\":{violations},\"notes\":{notes},\"previews\":[{}],\"diag\":{diag}}}",
             escape(&report.script),
             escape(&action.id),
             escape(&action.action),
             action.frames,
             action.settled,
             action.frames_data.last().map_or(0, |frame| frame.textures),
+            previews.join(","),
         );
     }
     std::fs::write(path, out)

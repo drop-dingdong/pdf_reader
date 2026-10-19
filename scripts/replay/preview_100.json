@@ -1,0 +1,10 @@
+{
+  "name": "preview_100",
+  "pdf": "preview.pdf",
+  "actions": [
+    { "id": "resize",  "op": "resize", "width": 1100, "height": 900 },
+    { "id": "z100",    "op": "zoom", "value": 1.0 },
+    { "id": "preview", "op": "open_preview", "index": 0 },
+    { "id": "settle",  "op": "wait", "frames": 20 }
+  ]
+}

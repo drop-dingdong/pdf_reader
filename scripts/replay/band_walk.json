@@ -1,0 +1,16 @@
+{
+  "name": "band_walk",
+  "pdf": "a4_3p.pdf",
+  "actions": [
+    { "id": "resize",  "op": "resize", "width": 1100, "height": 900 },
+    { "id": "z100",    "op": "zoom", "value": 1.0 },
+    { "id": "z120",    "op": "zoom", "value": 1.2 },
+    { "id": "z150",    "op": "zoom", "value": 1.5 },
+    { "id": "z160",    "op": "zoom", "value": 1.6 },
+    { "id": "z200",    "op": "zoom", "value": 2.0 },
+    { "id": "back150", "op": "zoom", "value": 1.5 },
+    { "id": "back120", "op": "zoom", "value": 1.2 },
+    { "id": "back100", "op": "zoom", "value": 1.0 },
+    { "id": "settle",  "op": "wait", "frames": 20 }
+  ]
+}

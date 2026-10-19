@@ -1,0 +1,13 @@
+{
+  "name": "page_walk",
+  "pdf": "a4_3p.pdf",
+  "actions": [
+    { "id": "resize", "op": "resize", "width": 1000, "height": 800 },
+    { "id": "z200",   "op": "zoom", "value": 2.0 },
+    { "id": "p0",     "op": "go_to_page", "page": 0 },
+    { "id": "p1",     "op": "go_to_page", "page": 1 },
+    { "id": "p2",     "op": "go_to_page", "page": 2 },
+    { "id": "p1again","op": "go_to_page", "page": 1 },
+    { "id": "settle", "op": "wait", "frames": 20 }
+  ]
+}
