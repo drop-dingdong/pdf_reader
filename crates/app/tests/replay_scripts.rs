@@ -135,6 +135,31 @@ fn timing_mode_settles_and_actually_renders() {
     assert!(submitted > 0, "整段脚本一次渲染都没发生，测出来的基数是假的");
 }
 
+/// D-111 的"软上限"路径：预算小到连当前视口都放不下时，
+/// **不能**崩、**不能**露白，只是把底料/旧内容让出来（并把提示写进诊断）。
+#[test]
+fn a_tiny_texture_budget_still_keeps_the_view_correct() {
+    if !backend_available() {
+        eprintln!("跳过：未找到 PDFium 动态库");
+        return;
+    }
+    let path = stage("page_walk.json", Sample::A4);
+    let script = replay::load_script(&path).expect("读脚本");
+    let clock = app::clock::Clock::manual();
+    let mut reader = app::PdfReaderApp::new_headless(
+        clock.clone(),
+        app::diag::Diagnostics::capturing(),
+        None,
+    );
+    // 4 MB：远小于"3 页 × 13 MB 的整页图"，必然触发软上限
+    reader.set_texture_budget(4 * 1024 * 1024);
+    let report = replay::run(&mut reader, &script, &clock, &replay::RunOptions::default());
+    assert!(report.ok(), "软上限路径不应产生违规：{:#?}", report.violations);
+    for action in &report.actions {
+        assert!(action.settled, "动作 {} 没稳定", action.id);
+    }
+}
+
 /// 性能基线：记录一次 → 立刻比较，不应出现**门禁级**结论（时序提示允许，机器噪声）。
 #[test]
 fn a_freshly_recorded_baseline_has_no_gate_findings() {

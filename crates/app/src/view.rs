@@ -4,7 +4,7 @@
 //! 需要真实窗口与人工观察的部分（滚动跟手性、字形、配色）全部留给 `app.rs` 的 egui 胶水，
 //! 按 agent.md 规则 2 交由用户验收。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use egui::{Key, Modifiers, Vec2 as EguiVec2};
 use pdfcore::prelude::*;
@@ -1186,7 +1186,41 @@ pub fn texture_pages(visible: &[PageIndex], current: PageIndex, page_count: u32)
 /// 与 LRU 位图缓存的区别：这里存的是 GPU 纹理句柄（`egui::TextureHandle`），
 /// 丢失后可以按需从位图缓存重新上传，因此策略是"容量 + 按可见性裁剪"，
 /// 而不是精确的字节计量。
-#[derive(Debug)]
+/// 保留策略需要的"事实"（app 从会话里取，view 不依赖会话）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageFacts {
+    /// 页号。
+    pub page: PageIndex,
+    /// 显示用的旋转（按页不同）。
+    pub rotation: Rotation,
+    /// 当前**波段渲染比例**（`scale_milli`）。
+    pub render_milli: u32,
+    /// 分块时：可见块范围 `(col0, row0, col1, row1)`；不分块时 `None`（整页一张）。
+    pub tiles: Option<(u32, u32, u32, u32)>,
+}
+
+/// 一次保留的统计（诊断用）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RetainReport {
+    /// A 类（必须）键数。
+    pub must_keys: usize,
+    /// A 类字节数。
+    pub must_bytes: u64,
+    /// B 类（整页底料）键数。
+    pub bed_keys: usize,
+    /// B 类字节数。
+    pub bed_bytes: u64,
+    /// C 类（旧内容）键数。
+    pub old_keys: usize,
+    /// C 类字节数。
+    pub old_bytes: u64,
+    /// 本次裁掉的字节数。
+    pub dropped_bytes: u64,
+    /// **A 类自身就超过预算**（软上限：不裁 A，只报告）。
+    pub over_budget: bool,
+}
+
+/// 按 [`RenderKey`] 索引的纹理存储：LRU 顺序 + 字节账 + 按类保留（D-111）。
 pub struct KeyedStore<V> {
     entries: HashMap<RenderKey, V>,
     order: VecDeque<RenderKey>,
@@ -1195,6 +1229,8 @@ pub struct KeyedStore<V> {
     bytes: u64,
     /// 单个值占多少字节（测试替身恒为 0）。
     bytes_of: fn(&V) -> u64,
+    /// 字节预算（0 = 不限制）。见 [`KeyedStore::retain_for_view`]。
+    max_bytes: u64,
 }
 
 /// 一张 `egui` 纹理占多少字节（`w×h×4`）。
@@ -1220,7 +1256,27 @@ impl<V> KeyedStore<V> {
             capacity: capacity.max(1),
             bytes: 0,
             bytes_of,
+            max_bytes: 0,
         }
+    }
+
+    /// 设置字节预算（0 = 不限制）。超过时按"必须 → 底料 → 旧内容"依次让位。
+    pub fn set_max_bytes(&mut self, bytes: u64) {
+        self.max_bytes = bytes;
+    }
+
+    /// 当前预算（0 = 不限制）。
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
+    }
+
+    /// 再放一张 `bytes` 会不会超出预算（0 = 不限制，永远可以）。
+    ///
+    /// 只给"可再生的纹理"（底料、旧内容）用：它们必须在**上传前**就问一句，
+    /// 否则会出现"传上去 → 被预算裁掉 → 下一帧再传"的循环（D-111 实测过一次 350MB）。
+    /// A 类（当前视口）不受此限，因为保留策略不会裁它。
+    pub fn can_admit(&self, bytes: u64) -> bool {
+        self.max_bytes == 0 || self.bytes.saturating_add(bytes) <= self.max_bytes
     }
 
     /// 当前条目数。
@@ -1503,56 +1559,165 @@ impl<V> KeyedStore<V> {
     /// * **不能全留**：一次连续缩放会产生十几档比例，显存会无限增长。
     ///
     /// 旋转也必须匹配：旧旋转的图是横躺的，留着只会画错。
-    pub fn retain_preview_scales(
-        &mut self,
-        pages: &[(PageIndex, Rotation)],
-        current_scale_milli: u32,
-    ) {
-        // 注意：旋转必须**按页**取（同一份文档里各页的 /Rotate 可能不同），
-        // 否则含混合旋转的文档里，与"当前页"旋转不同的那些页纹理会被误删（页面空白）。
-        let rotation_of = |page: PageIndex| {
-            pages
+    /// 按"**必须 / 次优先 / 最后**"三类保留，并在预算内裁剪（D-111）。
+    ///
+    /// 类的定义（每页独立，`facts` 由 app 从会话里取）：
+    ///
+    /// | 类 | 内容 | 超预算时 |
+    /// | --- | --- | --- |
+    /// | A 必须 | 当前波段：不分块时是整页图，分块时是**可见范围**内的块 | **不淘汰**（软上限），只报告 |
+    /// | B 次优先 | 整页图（≤ 当前比例，含开场底料） | 按"底料优先、其余从大到小"留 |
+    /// | C 最后 | 其它（旧波段的块、旧波段的整页图之外的） | 先裁，类内按 LRU（最旧先丢） |
+    ///
+    /// 返回一份报告，供诊断（各类占多少、是否超预算）。
+    pub fn retain_for_view(&mut self, facts: &[PageFacts]) -> RetainReport {
+        let fact_of = |page: PageIndex, rotation: Rotation| {
+            facts
                 .iter()
-                .find(|(candidate, _)| *candidate == page)
-                .map(|(_, rotation)| *rotation)
+                .find(|fact| fact.page == page && fact.rotation == rotation)
         };
 
-        // 每页选出"最接近当前比例的另一个比例"；**整页图全部保留**（D-110）：
-        // 整页图是唯一能盖满页面的东西，穷举它比"留最近一张"更划算 ——
-        // A4 最多两三张（缩略图 + 1600 + 2560），换来"缩小方向永远有底料"。
-        let mut nearest_other: HashMap<PageIndex, u32> = HashMap::new();
-        let mut whole_pages: HashMap<PageIndex, Vec<u32>> = HashMap::new();
-        for key in self.entries.keys() {
-            if rotation_of(key.page) != Some(key.rotation)
-                || key.scale_milli == current_scale_milli
-            {
-                continue;
-            }
-            let distance = key.scale_milli.abs_diff(current_scale_milli);
-            match nearest_other.get(&key.page) {
-                Some(existing) if existing.abs_diff(current_scale_milli) <= distance => {}
-                _ => {
-                    nearest_other.insert(key.page, key.scale_milli);
+        // ---- A：当前波段的可见内容 ----
+        let mut must: HashSet<RenderKey> = HashSet::new();
+        for fact in facts {
+            match &fact.tiles {
+                // 分块：可见范围内的块
+                Some(range) => {
+                    let (col0, row0, col1, row1) = *range;
+                    for row in row0..=row1 {
+                        for col in col0..=col1 {
+                            must.insert(RenderKey {
+                                page: fact.page,
+                                scale_milli: fact.render_milli,
+                                rotation: fact.rotation,
+                                tile: Some(TileSpec::new(col, row)),
+                            });
+                        }
+                    }
                 }
-            }
-            // ③ 整页图（≤ 当前比例，含"开场底料"）：能盖满页面，是缩小方向的唯一兜底。
-            //    比当前更大的整页图对"缩小"没意义，丢掉（它会在放大时以"最近一档"身份被重新留下）。
-            if key.tile.is_none() && key.scale_milli <= current_scale_milli {
-                let list = whole_pages.entry(key.page).or_default();
-                if !list.contains(&key.scale_milli) {
-                    list.push(key.scale_milli);
+                // 不分块：整页一张
+                None => {
+                    must.insert(RenderKey {
+                        page: fact.page,
+                        scale_milli: fact.render_milli,
+                        rotation: fact.rotation,
+                        tile: None,
+                    });
                 }
             }
         }
 
-        self.retain(|key| {
-            rotation_of(key.page) == Some(key.rotation)
-                && (key.scale_milli == current_scale_milli
-                    || nearest_other.get(&key.page) == Some(&key.scale_milli)
-                    || whole_pages
-                        .get(&key.page)
-                        .is_some_and(|scales| scales.contains(&key.scale_milli)))
-        });
+        // ---- B：整页图（≤ 当前比例）—— 底料；开场底料也算 ----
+        // ---- C：每页"最接近当前比例的另一个波段"（旧内容，放大方向的预览）----
+        let mut bed: HashSet<RenderKey> = HashSet::new();
+        let mut old: HashSet<RenderKey> = HashSet::new();
+        let mut nearest: HashMap<(PageIndex, Rotation), u32> = HashMap::new();
+        for key in self.entries.keys() {
+            let Some(fact) = fact_of(key.page, key.rotation) else {
+                continue;
+            };
+            if key.scale_milli == fact.render_milli {
+                continue;
+            }
+            let distance = key.scale_milli.abs_diff(fact.render_milli);
+            let entry = nearest.entry((key.page, key.rotation)).or_insert(u32::MAX);
+            if distance < entry.abs_diff(fact.render_milli) {
+                *entry = key.scale_milli;
+            }
+            if key.tile.is_none() && key.scale_milli <= fact.render_milli {
+                bed.insert(*key);
+            }
+        }
+        for key in self.entries.keys() {
+            let Some(fact) = fact_of(key.page, key.rotation) else {
+                continue;
+            };
+            if key.scale_milli != fact.render_milli
+                && nearest.get(&(key.page, key.rotation)) == Some(&key.scale_milli)
+            {
+                old.insert(*key);
+            }
+        }
+
+        // ---- 分类裁剪 + 预算 ----
+        let report = self.apply_classes(&must, &bed, &old);
+        report
+    }
+
+    /// 实际的裁剪：先丢掉"不属于任何类"的，再在预算内从 C 到 B 依次裁。
+    fn apply_classes(
+        &mut self,
+        must: &HashSet<RenderKey>,
+        bed: &HashSet<RenderKey>,
+        old: &HashSet<RenderKey>,
+    ) -> RetainReport {
+        // 1) 不属于任何类的一律丢（含"别的页/别的旋转"）
+        self.retain(|key| must.contains(key) || bed.contains(key) || old.contains(key));
+
+        // 2) 预算：A 不裁；B 与 C 从"最旧"开始丢
+        let must_bytes = self.bytes_of_keys(must);
+        let mut report = RetainReport {
+            must_keys: self.entries.keys().filter(|key| must.contains(*key)).count(),
+            must_bytes,
+            bed_keys: 0,
+            bed_bytes: 0,
+            old_keys: 0,
+            old_bytes: 0,
+            dropped_bytes: 0,
+            over_budget: false,
+        };
+        let budget = self.max_bytes;
+        if budget == 0 {
+            // 不设上限：只统计
+            report.bed_keys = self.entries.keys().filter(|key| bed.contains(*key)).count();
+            report.bed_bytes = self.bytes_of_keys(bed);
+            report.old_keys = self.entries.keys().filter(|key| old.contains(*key)).count();
+            report.old_bytes = self.bytes_of_keys(old);
+            return report;
+        }
+        if must_bytes >= budget {
+            // 软上限：当前视口自身就超了 —— 不裁 A，把 B/C 全部让出来
+            report.over_budget = true;
+            let before = self.bytes;
+            self.retain(|key| must.contains(key));
+            report.dropped_bytes = before.saturating_sub(self.bytes);
+            report.must_keys = self.entries.len();
+            return report;
+        }
+        let mut remaining = budget - must_bytes;
+        // 优先保住 B（底料），再保 C；类内从**最新**往旧留（LRU 语义）
+        let mut admit: HashSet<RenderKey> = HashSet::new();
+        for set in [bed, old] {
+            for key in self.order.iter().rev() {
+                if !set.contains(key) {
+                    continue;
+                }
+                let Some(value) = self.entries.get(key) else { continue };
+                let cost = (self.bytes_of)(value);
+                if cost <= remaining {
+                    remaining -= cost;
+                    admit.insert(*key);
+                }
+            }
+        }
+        let before = self.bytes;
+        self.retain(|key| must.contains(key) || admit.contains(key));
+        report.dropped_bytes = before.saturating_sub(self.bytes);
+        report.bed_keys = self.entries.keys().filter(|key| bed.contains(*key)).count();
+        report.bed_bytes = self.bytes_of_keys(bed);
+        report.old_keys = self.entries.keys().filter(|key| old.contains(*key)).count();
+        report.old_bytes = self.bytes_of_keys(old);
+        report
+    }
+
+    /// 一组键当前占用的字节数（只算**存在**的）。
+    fn bytes_of_keys(&self, keys: &HashSet<RenderKey>) -> u64 {
+        let bytes_of = self.bytes_of;
+        self.entries
+            .iter()
+            .filter(|(key, _)| keys.contains(*key))
+            .map(|(_, value)| bytes_of(value))
+            .sum()
     }
 
     /// 清空（字节账归零）。
@@ -1727,6 +1892,16 @@ mod tests {
     }
 
     /// D-109：字节账跟着插入/替换/LRU 淘汰/retain/clear 一起动，且**重算**与实际值一致。
+    /// 构造一条"页事实"。
+    fn facts(
+        page: PageIndex,
+        rotation: Rotation,
+        render_milli: u32,
+        tiles: Option<(u32, u32, u32, u32)>,
+    ) -> PageFacts {
+        PageFacts { page, rotation, render_milli, tiles }
+    }
+
     #[test]
     fn keyed_store_tracks_bytes_of_its_values() {
         // 用"值本身即字节数"的替身，便于手算
@@ -1754,6 +1929,52 @@ mod tests {
         store.clear();
         assert_eq!(store.bytes(), 0);
         assert!(store.is_empty());
+    }
+
+    /// D-111：预算裁剪 —— A 永不淘汰（软上限），C 先让位，B 在额度内保；类内 LRU（最旧先丢）。
+    #[test]
+    fn retain_respects_the_byte_budget_by_class() {
+        let page = PageIndex::new(0);
+        let tile = |scale: f32, col: u32| {
+            RenderKey::tiled(page, Scale::from_zoom(scale), Rotation::None, TileSpec::new(col, 0))
+        };
+        let whole = |scale: f32| RenderKey::new(page, Scale::from_zoom(scale), Rotation::None);
+
+        // 每张 1 MB（值即字节数）
+        const MB: u64 = 1024 * 1024;
+        let mut store = KeyedStore::with_bytes(64, |value: &u64| *value);
+        // A：当前波段 2 块；B：一张整页底料；C：旧波段的 2 块
+        store.insert(tile(4.096, 0), MB);
+        store.insert(tile(4.096, 1), MB);
+        store.insert(whole(1.6), MB);
+        store.insert(tile(6.5536, 0), MB);
+        store.insert(tile(6.5536, 1), MB);
+
+        let view = [facts(page, Rotation::None, 4096, Some((0, 0, 1, 0)))];
+
+        // 预算充足：一张不丢
+        store.set_max_bytes(64 * MB);
+        let report = store.retain_for_view(&view);
+        assert_eq!(store.len(), 5);
+        assert_eq!(report.must_keys, 2);
+        assert_eq!(report.bed_keys, 1);
+        assert_eq!(report.old_keys, 2);
+        assert!(!report.over_budget);
+
+        // 预算 3 MB：A(2) 之后只剩 1 MB → 只能保一张；B 优先于 C
+        store.set_max_bytes(3 * MB);
+        let report = store.retain_for_view(&view);
+        assert_eq!(store.len(), 3, "2 块 A + 1 张底料");
+        assert_eq!(report.bed_bytes, MB, "底料优先保住");
+        assert_eq!(report.old_bytes, 0, "旧内容先让位");
+        assert!(!report.over_budget);
+
+        // 预算 1 MB：连 A 都放不下 → 软上限：A 全留，B/C 全让位，只报告
+        store.set_max_bytes(MB);
+        let report = store.retain_for_view(&view);
+        assert_eq!(store.len(), 2, "A 必须完整保留");
+        assert!(report.over_budget);
+        assert_eq!(report.bed_bytes + report.old_bytes, 0);
     }
 
     #[test]
@@ -2155,7 +2376,7 @@ mod tests {
         store.insert(tile(6.5536, 0), "t6554");
         store.insert(tile(10.48576, 0), "t10486");
 
-        store.retain_preview_scales(&[(page, Rotation::None)], 10_486);
+        store.retain_for_view(&[facts(page, Rotation::None, 10_486, Some((0, 0, 1, 1)))]);
 
         assert!(store.contains(&whole(10.48576)) || store.contains(&tile(10.48576, 0)));
         assert!(store.contains(&tile(6.5536, 0)), "最近的其它波段（放大底料）");
@@ -2186,7 +2407,7 @@ mod tests {
         store.insert(tile(4.096, 0), "a");
         store.insert(tile(6.5536, 0), "b");
         store.insert(tile(10.48576, 0), "c");
-        store.retain_preview_scales(&[(page, Rotation::None)], 10_486);
+        store.retain_for_view(&[facts(page, Rotation::None, 10_486, Some((0, 0, 1, 1)))]);
         assert!(store.contains(&tile(10.48576, 0)));
         assert!(store.contains(&tile(6.5536, 0)));
         assert!(!store.contains(&tile(4.096, 0)));
@@ -3131,7 +3352,7 @@ mod tests {
 
     /// 缩放过场要用的"上一档"必须保留，但比例不能无限堆积（第五轮验收：相邻页闪白）。
     #[test]
-    fn retain_preview_scales_keeps_current_and_one_old_scale() {
+    fn retain_keeps_current_and_one_old_scale() {
         let page = PageIndex::new(0);
         let other = PageIndex::new(1);
         // 用**瓦片**表达"旧档"：整页图另有"全留"的规则（D-110），不能混在一起测
@@ -3149,7 +3370,10 @@ mod tests {
         // 旧旋转的图留着只会画成横躺
         store.insert(key(page, 2.0, Rotation::Clockwise90), 2.0);
 
-        store.retain_preview_scales(&[(page, Rotation::None), (other, Rotation::None)], 2000);
+        store.retain_for_view(&[
+            facts(page, Rotation::None, 2000, Some((0, 0, 0, 0))),
+            facts(other, Rotation::None, 2000, Some((0, 0, 0, 0))),
+        ]);
 
         assert!(store.contains(&key(page, 2.0, Rotation::None)), "当前比例必须保留");
         assert!(
@@ -3161,7 +3385,10 @@ mod tests {
         assert!(!store.contains(&key(page, 3.0, Rotation::None)));
         // 高于当前比例的**整页图**没有用（缩小用不到），丢掉
         store.insert(RenderKey::new(page, Scale::from_zoom(3.0), Rotation::None), 3.0);
-        store.retain_preview_scales(&[(page, Rotation::None), (other, Rotation::None)], 2000);
+        store.retain_for_view(&[
+            facts(page, Rotation::None, 2000, Some((0, 0, 0, 0))),
+            facts(other, Rotation::None, 2000, Some((0, 0, 0, 0))),
+        ]);
         assert!(
             !store.contains(&RenderKey::new(page, Scale::from_zoom(3.0), Rotation::None)),
             "高于当前比例的整页图应丢弃"

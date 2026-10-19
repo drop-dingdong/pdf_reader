@@ -47,10 +47,27 @@ use crate::view::{
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
     view_rect_for, view_to_content, compose_region_snapshot, needs_underlay, plan_page, DrawInput,
-    KeyedStore, PageDraw, PlanStamp, Preview,
+    KeyedStore, PageDraw, PageFacts, PlanStamp, Preview,
 };
 
-/// 纹理缓存容量（条目数）。真正的淘汰依据是"是否可见 + 波段"（`retain_preview_scales`），
+/// 纹理层的**字节**预算（软上限，D-111）。
+///
+/// 256 MiB 的来历：本机 12 个回放脚本实测峰值 9–52 MB（A4 家庭）；
+/// 极端情形（带鱼屏 5120×1440 + A0 在 800%）估算"当前视口"一类就要 68–206 MB。
+/// 软上限的语义：**当前视口所需的那一类永不淘汰**，超出只打一行提示；
+/// 只有"底料 / 旧内容"这些可再生的纹理才受它约束。
+/// 可用 `PDF_READER_TEXTURE_BUDGET_MB` 覆盖（0 = 不限制）。
+pub const TEXTURE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+
+/// 从环境变量 `PDF_READER_TEXTURE_BUDGET_MB` 读预算（缺省用 [`TEXTURE_BUDGET_BYTES`]）。
+fn texture_budget_bytes() -> u64 {
+    std::env::var("PDF_READER_TEXTURE_BUDGET_MB")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or(TEXTURE_BUDGET_BYTES, |mb| mb * 1024 * 1024)
+}
+
+/// 纹理缓存容量（条目数）。真正的淘汰依据是"是否可见 + 波段"（`retain_for_view`），
 /// 容量只是兜底。
 ///
 /// 128 的来历（D-96）：保留规则改成"当前波段 + 最近其它波段 + 当前以下最近的整页波段"后，
@@ -350,6 +367,10 @@ pub struct PdfReaderApp {
     sidecar_migrated: bool,
     /// 同目录存档由**更新版本**写入：不加载、也不允许覆盖（`(存档版本, 本程序版本)`，D-107）。
     sidecar_locked: Option<(u32, u32)>,
+    /// 是否已经提示过"当前视口的纹理需求超出预算"（只提示一次，D-111）。
+    budget_warned: bool,
+    /// 上一帧的保留统计（A/B/C 各占多少字节），诊断用（D-111）。
+    last_retain: crate::view::RetainReport,
     /// 每帧临时持有的命令与事件缓冲（避免反复分配）。
     commands: Vec<ViewerCommand>,
     events: Vec<SessionEvent>,
@@ -500,6 +521,12 @@ impl PdfReaderApp {
         )
     }
 
+    /// 设置纹理层字节预算（0 = 不限制）。给回放/调参用；正常路径由构造时读取。
+    pub fn set_texture_budget(&mut self, bytes: u64) {
+        self.textures.set_max_bytes(bytes);
+        self.budget_warned = false;
+    }
+
     /// **无窗口**构造：自己提供时钟与诊断去处（回放器 / 集成测试用）。
     ///
     /// 与 [`PdfReaderApp::new`] 的唯一区别就是不碰 `CreationContext`；其余行为完全一致。
@@ -525,11 +552,18 @@ impl PdfReaderApp {
         let mut app = Self {
             session: None,
             navigation: None,
-            textures: KeyedStore::with_bytes(TEXTURE_CAPACITY, crate::view::texture_bytes),
+            textures: {
+                let mut textures =
+                    KeyedStore::with_bytes(TEXTURE_CAPACITY, crate::view::texture_bytes);
+                textures.set_max_bytes(texture_budget_bytes());
+                textures
+            },
             band_since: std::collections::HashMap::new(),
             last_plan: std::collections::HashMap::new(),
             sidecar_migrated: false,
             sidecar_locked: None,
+            budget_warned: false,
+            last_retain: crate::view::RetainReport::default(),
             commands: Vec::new(),
             events: Vec::new(),
             visible: Vec::new(),
@@ -1030,25 +1064,43 @@ impl PdfReaderApp {
             }
         }
 
-        // 裁剪：只保留可见页（±1）与当前页，并且每页只保留"当前比例 + 最近一个旧比例"
-        // —— 旧比例是缩放过场要用的（第四轮验收：丢掉其它页的旧图会让它们闪白）。
-        //
-        // 旋转按页取：同一份文档里各页的 /Rotate 可能不同。
-        let pages: Vec<(PageIndex, Rotation)> = targets
+        // 裁剪（D-111）：按"必须 / 底料 / 旧内容"三类保留，并在字节预算内让位。
+        //   A 必须 = 当前波段的可见内容（不分块时是整页图，分块时是可见块）—— 永不淘汰；
+        //   B 底料 = 整页图（≤ 当前比例，含开场底料）；
+        //   C 旧内容 = 最近一个旧波段（缩放过场用它顶替）。
+        let facts: Vec<PageFacts> = targets
             .iter()
-            .filter_map(|page| session.placement(*page).map(|placement| (*page, placement.rotation)))
-            .collect();
-        let current = session.state().current_page;
-        // D-94：纹理按**波段渲染比例**分档（同一波段内所有缩放共用一份纹理）
-        let current_scale_milli = session
-            .placement(current)
-            .map(|placement| {
-                RenderKey::new(current, session.render_scale(current), placement.rotation)
-                    .scale_milli
+            .filter_map(|page| {
+                let placement = session.placement(*page)?;
+                let render_milli = RenderKey::new(
+                    *page,
+                    session.render_scale(*page),
+                    placement.rotation,
+                )
+                .scale_milli;
+                Some(PageFacts {
+                    page: *page,
+                    rotation: placement.rotation,
+                    render_milli,
+                    tiles: session.tile_grid(*page).map(|_| ()).and_then(|_| {
+                        session.visible_tiles(*page)
+                    }),
+                })
             })
-            .unwrap_or(1000);
-        self.textures
-            .retain_preview_scales(&pages, current_scale_milli);
+            .collect();
+        let report = self.textures.retain_for_view(&facts);
+        self.last_retain = report;
+        // 软上限：当前视口自身就超预算时只报告一次（提示"这台机器的显示需求超出预算"）
+        if report.over_budget && !self.budget_warned {
+            self.budget_warned = true;
+            if self.diag.enabled() {
+                self.diag.line(format!(
+                    "[贴图] 纹理超出预算：当前视口需要 {:.1}MB > 预算 {:.0}MB（不淘汰当前视口，只提示）",
+                    report.must_bytes as f64 / (1024.0 * 1024.0),
+                    self.textures.max_bytes() as f64 / (1024.0 * 1024.0)
+                ));
+            }
+        }
         uploaded
     }
 
@@ -1088,7 +1140,9 @@ impl PdfReaderApp {
         if let (Some(key), Some(image)) =
             (session.thumbnail_key(page), session.thumbnail_image(page))
         {
-            if !self.textures.contains(&key) {
+            // 底料是"可再生"的：先问预算，放不下就不传（否则会被保留策略裁掉再重传）
+            let cost = (image.width as u64) * (image.height as u64) * 4;
+            if !self.textures.contains(&key) && self.textures.can_admit(cost) {
                 self.upload(ctx, key, &image);
                 count += 1;
                 if self.diag.enabled() {
@@ -1102,8 +1156,18 @@ impl PdfReaderApp {
                 }
             }
         }
-        // 分块路径
+        // 分块路径：只传**可见范围**内的块 —— 与保留策略的 A 类一致。
+        // 若把"该波段缓存里的所有块"都传上去、而保留只留可见的那些，就会每帧重传一批被裁掉的块
+        // （这正是 D-110 里 "上传集合 ⊆ 保留集合" 那条约束）。
+        let visible_range = session.visible_tiles(page);
         for (tile, image) in session.tiles_for(page) {
+            if let Some((col0, row0, col1, row1)) = visible_range {
+                if tile.col < col0 || tile.col > col1 || tile.row < row0 || tile.row > row1 {
+                    continue;
+                }
+            } else if session.tile_grid(page).is_some() {
+                continue;
+            }
             let key = RenderKey::tiled(page, render, placement.rotation, tile);
             if !self.textures.contains(&key) {
                 if self.diag.enabled() {
@@ -2469,7 +2533,7 @@ impl PdfReaderApp {
                 let max_side = ui.ctx().input(|input| input.max_texture_side);
                 self.diag.line(format!(
                     "[诊断] 缩放={:.0}% 视口={:.0}×{:.0} scroll=({:.1},{:.1}) 当前页={} 可见页={:?} \
-                     纹理={}条/{:.1}MB 缓存在飞={} 预览中={} max_texture_side={} | {}",
+                     纹理={}条/{:.1}MB(A{:.1}/B{:.1}/C{:.1}) 预算={:.0}MB 缓存在飞={} 预览中={} max_texture_side={} | {}",
                     session.state().zoom * 100.0,
                     viewport.size.width,
                     viewport.size.height,
@@ -2479,6 +2543,10 @@ impl PdfReaderApp {
                     self.visible.iter().map(|page| page.display_number()).collect::<Vec<_>>(),
                     self.textures.len(),
                     self.textures.bytes() as f64 / (1024.0 * 1024.0),
+                    self.last_retain.must_bytes as f64 / (1024.0 * 1024.0),
+                    self.last_retain.bed_bytes as f64 / (1024.0 * 1024.0),
+                    self.last_retain.old_bytes as f64 / (1024.0 * 1024.0),
+                    self.textures.max_bytes() as f64 / (1024.0 * 1024.0),
                     session.pending_renders(),
                     previewing,
                     max_side,

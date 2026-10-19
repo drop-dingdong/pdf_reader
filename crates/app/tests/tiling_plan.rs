@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use app::view::{plan_page, DrawInput, KeyedStore, PageDraw, Preview};
+use app::view::{PageFacts, plan_page, DrawInput, KeyedStore, PageDraw, Preview};
 use pdfcore::prelude::*;
 use pdfcore::testkit::{ImmediateScheduler, MemoryBackend, MemoryCache, MemoryPage};
 
@@ -73,7 +73,12 @@ fn settle(session: &mut DocumentSession, store: &mut KeyedStore<&'static str>, p
     let render = session.render_scale(page);
     upload_cached(session, store, page, render, placement.rotation);
     let milli = RenderKey::new(page, render, placement.rotation).scale_milli;
-    store.retain_preview_scales(&[(page, placement.rotation)], milli);
+    store.retain_for_view(&[PageFacts {
+        page,
+        rotation: placement.rotation,
+        render_milli: milli,
+        tiles: session.visible_tiles(page),
+    }]);
 }
 
 /// 到达某个缩放的**第一帧**：上传已缓存的 → 按新波段裁剪 → 返回可用的旧内容。
@@ -87,7 +92,12 @@ fn arrive(session: &mut DocumentSession, store: &mut KeyedStore<&'static str>, z
     let render = session.render_scale(page);
     let milli = RenderKey::new(page, render, placement.rotation).scale_milli;
     upload_cached(session, store, page, render, placement.rotation);
-    store.retain_preview_scales(&[(page, placement.rotation)], milli);
+    store.retain_for_view(&[PageFacts {
+        page,
+        rotation: placement.rotation,
+        render_milli: milli,
+        tiles: session.visible_tiles(page),
+    }]);
     store.preview_source(page, placement.rotation, milli)
 }
 
