@@ -27,6 +27,7 @@
 //!   浮窗、侧栏、编辑等交互不在范围内。
 //! * 没有 GPU：测不到纹理上传的真实开销；`textures_delta` 只反映"打算上传多少字节"。
 
+pub mod baseline;
 pub mod samples;
 
 use std::collections::{BTreeMap, HashMap};
@@ -181,6 +182,10 @@ pub struct FrameStat {
     pub textures: usize,
     /// 在飞渲染任务数。
     pub pending: usize,
+    /// 累计提交的渲染请求数（`DocumentSession::submitted_jobs`，单调递增）。
+    pub submitted: u64,
+    /// 进程常驻内存（KB；非 Linux 平台上为 0）。
+    pub rss_kb: u64,
     /// 每页的画法快照。
     pub plans: BTreeMap<u32, PlanStamp>,
     /// 每页当前可见的块范围 `(col0, row0, col1, row1)`。
@@ -208,6 +213,12 @@ pub struct ActionReport {
     pub notes: Vec<String>,
     /// 该动作结束时各自定义 preview 的**实际纹理尺寸**（下标, 宽, 高）。
     pub previews: Vec<(usize, usize, usize)>,
+    /// 该动作**新增**的渲染请求数（结构指标，与硬件无关）。
+    pub submitted: u64,
+    /// 该动作期间纹理层条目峰值。
+    pub textures_peak: usize,
+    /// 该动作期间"打算上传"的字节总数。
+    pub upload_bytes: u64,
 }
 
 /// 整次回放的报告。
@@ -225,6 +236,16 @@ impl Report {
     /// 总帧数。
     pub fn frames(&self) -> u64 {
         self.actions.iter().map(|action| action.frames).sum()
+    }
+
+    /// 进程常驻内存峰值（KB；非 Linux 平台为 0）。
+    pub fn rss_peak_kb(&self) -> u64 {
+        self.actions
+            .iter()
+            .flat_map(|action| action.frames_data.iter())
+            .map(|frame| frame.rss_kb)
+            .max()
+            .unwrap_or(0)
     }
 
     /// 是否全部通过。
@@ -271,6 +292,24 @@ impl Report {
     }
 }
 
+/// 进程常驻内存（KB）。只在 Linux 上有效（读 `/proc/self/statm`），其它平台返回 0。
+fn resident_kb() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(text) = std::fs::read_to_string("/proc/self/statm") else { return 0 };
+        let pages: u64 = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|field| field.parse().ok())
+            .unwrap_or(0);
+        pages * 4
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
+}
+
 // ------------------------------------------------------------------ 脚本解析
 
 /// 读取并解析一个脚本文件；`pdf` 为相对路径时按**脚本所在目录**解析。
@@ -288,14 +327,29 @@ pub fn load_script(path: &Path) -> std::result::Result<Script, String> {
 /// 一步到位：读脚本 → 无窗口回放 → 可选写 JSONL。
 ///
 /// 命令行（`--replay`）与测试都走这里，保证"你跑的就是测试跑的"。
-pub fn run_script_file(
+pub fn run_script_file(script_path: &Path, out: Option<&Path>) -> std::io::Result<Report> {
+    run_script_file_with(script_path, out, false)
+}
+
+/// 同上，但可以选 **timing 模式**：用真实时钟（不按帧推进），测出来的帧耗时反映真实节奏。
+///
+/// * 断言用**确定性**模式（默认，手动时钟）：同样一段脚本在任何机器上走同一条时间线；
+/// * 性能基线用 **timing** 模式（`--timing`）：真实时钟 + 真实渲染线程，才代表本机手感。
+pub fn run_script_file_with(
     script_path: &Path,
     out: Option<&Path>,
+    timing: bool,
 ) -> std::io::Result<Report> {
     let script = load_script(script_path)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let options = RunOptions::default();
-    let clock = Clock::manual();
+    let mut options = RunOptions::default();
+    let clock = if timing {
+        // 真实时钟：`advance` 是空操作，帧之间按真实时间流逝
+        options.advance_per_frame = Duration::ZERO;
+        Clock::system()
+    } else {
+        Clock::manual()
+    };
     let mut app = PdfReaderApp::new_headless(clock.clone(), Diagnostics::capturing(), None);
     let report = run(&mut app, &script, &clock, &options);
     if let Some(out) = out {
@@ -549,6 +603,9 @@ pub fn run(
             violations: Vec::new(),
             notes: Vec::new(),
             previews: Vec::new(),
+            submitted: 0,
+            textures_peak: 0,
+            upload_bytes: 0,
         };
         harness.apply_action(app, action);
         // 每个动作开始时清空诊断缓冲：这一行只属于这个动作
@@ -591,6 +648,24 @@ pub fn run(
             }
         }
         action_report.diag = app.diag.take();
+        // 结构指标（与硬件无关，可做硬门禁）：
+        let first = action_report.frames_data.first();
+        let last = action_report.frames_data.last();
+        action_report.submitted = match (first, last) {
+            (Some(first), Some(last)) => last.submitted.saturating_sub(first.submitted),
+            _ => 0,
+        };
+        action_report.textures_peak = action_report
+            .frames_data
+            .iter()
+            .map(|frame| frame.textures)
+            .max()
+            .unwrap_or(0);
+        action_report.upload_bytes = action_report
+            .frames_data
+            .iter()
+            .map(|frame| frame.upload_bytes)
+            .sum();
         action_report.previews = app
             .custom_previews
             .iter()
@@ -744,6 +819,8 @@ impl Harness {
             upload_bytes,
             textures: app.textures.len(),
             pending: app.session.as_ref().map_or(0, |session| session.pending_renders()),
+            submitted: app.session.as_ref().map_or(0, |session| session.submitted_jobs()),
+            rss_kb: resident_kb(),
             plans: app
                 .last_plan
                 .iter()
@@ -904,7 +981,7 @@ impl Harness {
         {
             if let Some((page, stamp)) = frame.plans.iter().find(|(_, stamp)| stamp.partial) {
                 self.notes.push(format!(
-                    "动作 {} 第 {} 帧：页 {page} 波段 {} 以 {}/{} 块进入瓦片模式（等待 {}ms，阈值 {READY_TIMEOUT_MS}ms）",
+                    "动作 {} 第 {} 帧：页 {page} 波段 {} 以 {}/{} 块画瓦片（等待 {}ms，阈值 {READY_TIMEOUT_MS}ms；缺的块由底料补）",
                     action.id, frame.frame, stamp.band, stamp.ready, stamp.total, stamp.waited_ms
                 ));
             }
@@ -1001,7 +1078,7 @@ fn serde_free_array(items: &[String]) -> String {
 }
 
 /// JSON 字符串转义（复用 `json` 模块的规则）。
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {

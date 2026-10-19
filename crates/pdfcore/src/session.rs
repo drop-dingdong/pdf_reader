@@ -232,6 +232,8 @@ pub struct DocumentSession {
     /// 与 `jobs` 分开是为了让 [`DocumentSession::cancel_stale_jobs`] **不碰**它们 ——
     /// 那是为"用户正在看的页"服务的，预览区域的渲染与视口无关。
     region_jobs: HashMap<RenderKey, JobId>,
+    /// 累计**真正提交**给调度器的渲染请求数（去重之后）。诊断与性能基线用（D-106）。
+    submitted_jobs: u64,
     visible_scratch: Vec<PageIndex>,
     /// D-02：分块策略（默认 `AbovePixels(4 MP)`，按**渲染**像素面积判断）。
     tiling: TilingPolicy,
@@ -270,6 +272,7 @@ impl DocumentSession {
             submitted: HashSet::new(),
             jobs: HashMap::new(),
             region_jobs: HashMap::new(),
+            submitted_jobs: 0,
             visible_scratch: Vec::new(),
             tiling: TilingPolicy::default(),
             overscan: DEFAULT_OVERSCAN,
@@ -324,6 +327,12 @@ impl DocumentSession {
     }
 
     /// 后台是否还有排队或正在渲染的任务（UI 据此决定要不要持续重绘）。
+    /// 累计提交的渲染请求数（去重后）。两条相邻采样之差 = 这段期间"又渲染了多少块/页"。
+    pub fn submitted_jobs(&self) -> u64 {
+        self.submitted_jobs
+    }
+
+    /// 仍在排队或渲染中的任务数（含区域任务）。
     pub fn pending_renders(&self) -> usize {
         self.scheduler.pending()
     }
@@ -517,6 +526,7 @@ impl DocumentSession {
                     RenderRequest::tiled(page, render_scale, placement.rotation, tile, region)
                         .with_priority(RenderPriority::Visible);
                 let job = self.scheduler.submit(request);
+                self.submitted_jobs += 1;
                 self.region_jobs.insert(key, job);
             }
         }
@@ -1086,6 +1096,7 @@ impl DocumentSession {
             return;
         }
         let job = self.scheduler.submit(request);
+        self.submitted_jobs += 1;
         self.submitted.insert(key);
         self.jobs.insert(key, job);
     }

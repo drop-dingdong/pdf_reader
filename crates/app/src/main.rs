@@ -18,12 +18,17 @@ fn main() -> eframe::Result<()> {
             eprintln!("用法：app --replay <脚本.json> [--out <输出.jsonl>]");
             std::process::exit(2);
         };
-        let out = args
-            .iter()
-            .position(|arg| arg == "--out")
-            .and_then(|index| args.get(index + 1))
-            .map(PathBuf::from);
-        match app::replay::run_script_file(&script, out.as_deref()) {
+        let arg_value = |flag: &str| -> Option<PathBuf> {
+            args.iter()
+                .position(|arg| arg == flag)
+                .and_then(|index| args.get(index + 1))
+                .map(PathBuf::from)
+        };
+        let out = arg_value("--out");
+        let record = arg_value("--record");
+        let compare = arg_value("--compare");
+        let timing = args.iter().any(|arg| arg == "--timing");
+        match app::replay::run_script_file_with(&script, out.as_deref(), timing) {
             Ok(report) => {
                 println!("{}", report.summary());
                 for action in &report.actions {
@@ -40,11 +45,49 @@ fn main() -> eframe::Result<()> {
                         println!("      观察：{note}");
                     }
                 }
+                // 性能基线：记录 / 比较（结构指标硬门禁，时序指标只提示）
+                use app::replay::baseline::{self, Baseline, Machine, Severity};
+                let machine = Machine::detect();
+                println!("机器：{}", machine.summary());
+                let mut gate_failed = false;
+                if let Some(path) = &record {
+                    let data = Baseline::record(&report, machine.clone());
+                    if let Err(error) = data.write(path) {
+                        eprintln!("写基线 {} 失败：{error}", path.display());
+                        std::process::exit(2);
+                    }
+                    println!("已记录基线 {}", path.display());
+                }
+                if let Some(path) = &compare {
+                    match Baseline::read(path) {
+                        Ok(data) => {
+                            let findings = baseline::compare(&data, &report, &machine);
+                            if findings.is_empty() {
+                                println!("与基线一致（{}）", path.display());
+                            }
+                            for finding in &findings {
+                                let tag = match finding.severity {
+                                    Severity::Gate => "门禁",
+                                    Severity::Warn => "提示",
+                                };
+                                eprintln!("[{tag}] {}", finding.message);
+                                gate_failed |= finding.severity == Severity::Gate;
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("读基线 {} 失败：{error}", path.display());
+                            std::process::exit(2);
+                        }
+                    }
+                }
                 if !report.ok() {
                     eprintln!("违规 {} 条：", report.violations.len());
                     for violation in &report.violations {
                         eprintln!("  - {violation}");
                     }
+                    std::process::exit(1);
+                }
+                if gate_failed {
                     std::process::exit(1);
                 }
             }

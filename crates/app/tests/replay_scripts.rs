@@ -112,6 +112,31 @@ fn preview_size_does_not_depend_on_the_current_zoom() {
     );
 }
 
+/// 性能基线：记录一次 → 立刻比较，不应出现**门禁级**结论（时序提示允许，机器噪声）。
+#[test]
+fn a_freshly_recorded_baseline_has_no_gate_findings() {
+    if !backend_available() {
+        eprintln!("跳过：未找到 PDFium 动态库");
+        return;
+    }
+    use app::replay::baseline::{self, Baseline, Machine, Severity};
+    let report = run("tiling_800.json", Sample::A4);
+    let machine = Machine::detect();
+    let recorded = Baseline::record(&report, machine.clone());
+    // 落盘再读回，确保格式闭环（真实用法就是"记一次、之后每次都读文件"）
+    let path = std::env::temp_dir().join(format!("pdf-baseline-{}.json", std::process::id()));
+    recorded.write(&path).expect("写基线");
+    let loaded = Baseline::read(&path).expect("读基线");
+    let findings = baseline::compare(&loaded, &report, &machine);
+    let gates: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.severity == Severity::Gate)
+        .collect();
+    assert!(gates.is_empty(), "新记录的基线不该有门禁结论：{gates:?}");
+    assert_eq!(loaded.machine.cpu, machine.cpu, "基线必须带本机硬件信息");
+    let _ = std::fs::remove_file(&path);
+}
+
 /// 脚本文件本身的自检：能被解析、动作数 > 0、样本名合法（不需要 PDFium）。
 #[test]
 fn all_scripts_parse() {

@@ -736,6 +736,8 @@ fn zooming_inside_a_band_does_not_render_again() {
         .filter(|event| matches!(event, SessionEvent::PageRendered(_)))
         .count();
     assert!(rendered_at_100 > 0, "100% 下应先渲染出内容：{events:?}");
+    let submitted_at_100 = session.submitted_jobs();
+    assert!(submitted_at_100 > 0, "应记录提交过的渲染任务数（D-106）");
 
     let render_at_100 = session.render_scale(PageIndex::FIRST);
     let grid_at_100 = session.tile_grid(PageIndex::FIRST).expect("分块网格");
@@ -758,6 +760,11 @@ fn zooming_inside_a_band_does_not_render_again() {
             .iter()
             .all(|event| !matches!(event, SessionEvent::PageRendered(_))),
         "同一波段内的缩放不应触发任何渲染：{events:?}"
+    );
+    assert_eq!(
+        session.submitted_jobs(),
+        submitted_at_100,
+        "同一波段内的缩放不应新增任何提交（结构指标，D-106）"
     );
     assert_eq!(
         cache.stats().entries,
