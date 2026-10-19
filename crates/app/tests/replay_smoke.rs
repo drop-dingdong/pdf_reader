@@ -36,6 +36,7 @@ fn replay_runs_a_script_and_reports_per_action() {
             ("page3".to_string(), Action::GoToPage { page: 2 }),
             ("back".to_string(), Action::Zoom { value: 1.0 }),
         ],
+        start_zoom: None,
     };
 
     let clock = Clock::manual();

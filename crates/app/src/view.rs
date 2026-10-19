@@ -1517,9 +1517,11 @@ impl<V> KeyedStore<V> {
                 .map(|(_, rotation)| *rotation)
         };
 
-        // 每页选出"最接近当前比例的另一个比例"与"当前比例以下最近的整页图"
+        // 每页选出"最接近当前比例的另一个比例"；**整页图全部保留**（D-110）：
+        // 整页图是唯一能盖满页面的东西，穷举它比"留最近一张"更划算 ——
+        // A4 最多两三张（缩略图 + 1600 + 2560），换来"缩小方向永远有底料"。
         let mut nearest_other: HashMap<PageIndex, u32> = HashMap::new();
-        let mut lower_whole: HashMap<PageIndex, u32> = HashMap::new();
+        let mut whole_pages: HashMap<PageIndex, Vec<u32>> = HashMap::new();
         for key in self.entries.keys() {
             if rotation_of(key.page) != Some(key.rotation)
                 || key.scale_milli == current_scale_milli
@@ -1533,15 +1535,12 @@ impl<V> KeyedStore<V> {
                     nearest_other.insert(key.page, key.scale_milli);
                 }
             }
-            // ③ 缩小方向的底料：当前比例以下、**整页图**所在的最大比例。
-            //    整页纹理只出现在"该波段不分块"的比例上（A4 是 1600/2560），
-            //    所以这一档通常就是"上次整页渲染的那一档"，代价只有一张位图。
-            if key.tile.is_none() && key.scale_milli < current_scale_milli {
-                match lower_whole.get(&key.page) {
-                    Some(existing) if *existing >= key.scale_milli => {}
-                    _ => {
-                        lower_whole.insert(key.page, key.scale_milli);
-                    }
+            // ③ 整页图（≤ 当前比例，含"开场底料"）：能盖满页面，是缩小方向的唯一兜底。
+            //    比当前更大的整页图对"缩小"没意义，丢掉（它会在放大时以"最近一档"身份被重新留下）。
+            if key.tile.is_none() && key.scale_milli <= current_scale_milli {
+                let list = whole_pages.entry(key.page).or_default();
+                if !list.contains(&key.scale_milli) {
+                    list.push(key.scale_milli);
                 }
             }
         }
@@ -1550,7 +1549,9 @@ impl<V> KeyedStore<V> {
             rotation_of(key.page) == Some(key.rotation)
                 && (key.scale_milli == current_scale_milli
                     || nearest_other.get(&key.page) == Some(&key.scale_milli)
-                    || lower_whole.get(&key.page) == Some(&key.scale_milli))
+                    || whole_pages
+                        .get(&key.page)
+                        .is_some_and(|scales| scales.contains(&key.scale_milli)))
         });
     }
 
@@ -2134,7 +2135,7 @@ mod tests {
 
     /// 保留规则：当前 + 最近的其它波段 + 当前以下最近的"整页图"所在波段。
     #[test]
-    fn retain_keeps_current_nearest_and_lower_whole_page() {
+    fn retain_keeps_current_nearest_and_all_whole_pages_below() {
         let page = PageIndex::new(0);
         let whole = |scale: f32| RenderKey::new(page, Scale::from_zoom(scale), Rotation::None);
         let tile = |scale: f32, col: u32| {
@@ -2160,10 +2161,13 @@ mod tests {
         assert!(store.contains(&tile(6.5536, 0)), "最近的其它波段（放大底料）");
         assert!(
             store.contains(&whole(2.56)),
-            "当前以下最近的整页图（缩小底料）"
+            "整页图要留（缩小底料）"
+        );
+        assert!(
+            store.contains(&whole(1.6)),
+            "更小的整页图也要留（D-110：整页图全留，穷举它们比留一张划算）"
         );
         assert!(!store.contains(&tile(4.096, 0)), "更旧的块波段应丢弃");
-        assert!(!store.contains(&whole(1.6)), "更旧的整页图应丢弃");
     }
 
     /// 没有整页图时退回"当前 + 最近"（与旧行为一致）。
@@ -3130,8 +3134,9 @@ mod tests {
     fn retain_preview_scales_keeps_current_and_one_old_scale() {
         let page = PageIndex::new(0);
         let other = PageIndex::new(1);
+        // 用**瓦片**表达"旧档"：整页图另有"全留"的规则（D-110），不能混在一起测
         let key = |page: PageIndex, scale: f32, rotation: Rotation| {
-            RenderKey::new(page, Scale::from_zoom(scale), rotation)
+            RenderKey::tiled(page, Scale::from_zoom(scale), rotation, TileSpec::new(0, 0))
         };
 
         let mut store = KeyedStore::new(64);
@@ -3154,6 +3159,13 @@ mod tests {
         assert!(!store.contains(&key(page, 1.25, Rotation::None)), "更旧的档应丢弃");
         assert!(!store.contains(&key(page, 1.0, Rotation::None)));
         assert!(!store.contains(&key(page, 3.0, Rotation::None)));
+        // 高于当前比例的**整页图**没有用（缩小用不到），丢掉
+        store.insert(RenderKey::new(page, Scale::from_zoom(3.0), Rotation::None), 3.0);
+        store.retain_preview_scales(&[(page, Rotation::None), (other, Rotation::None)], 2000);
+        assert!(
+            !store.contains(&RenderKey::new(page, Scale::from_zoom(3.0), Rotation::None)),
+            "高于当前比例的整页图应丢弃"
+        );
         assert!(!store.contains(&key(page, 2.0, Rotation::Clockwise90)), "旧旋转必须丢弃");
         assert!(
             !store.contains(&key(PageIndex::new(2), 2.0, Rotation::None)),

@@ -1,0 +1,12 @@
+{
+  "name": "start_high",
+  "pdf": "a4_3p.pdf",
+  "start_zoom": 8.0,
+  "actions": [
+    { "id": "resize",   "op": "resize", "width": 1100, "height": 900 },
+    { "id": "drag",     "op": "scroll_by", "dx": 300, "dy": 200 },
+    { "id": "back_400", "op": "zoom", "value": 4.0 },
+    { "id": "back_100", "op": "zoom", "value": 1.0 },
+    { "id": "settle",   "op": "wait", "frames": 20 }
+  ]
+}

@@ -141,6 +141,8 @@ pub struct Script {
     pub pdf: PathBuf,
     /// 动作序列（`id` + 动作）。
     pub actions: Vec<(String, Action)>,
+    /// 打开后**先**设置的显示比例（模拟"一打开就在高倍"，D-110 的关键场景）。
+    pub start_zoom: Option<f32>,
 }
 
 /// 一次回放的控制参数。
@@ -428,6 +430,7 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
     let name = root.field("name").and_then(|v| v.as_str()).unwrap_or("script").to_string();
     let pdf = root.field("pdf").and_then(|v| v.as_str()).ok_or_else(|| "脚本缺 pdf".to_string())?;
     let list = root.field("actions").ok_or_else(|| "脚本缺 actions".to_string())?.as_array().ok_or_else(|| "actions 不是数组".to_string())?;
+    let start_zoom = root.field("start_zoom").and_then(|value| value.as_number());
     let mut actions = Vec::with_capacity(list.len());
     for (index, item) in list.iter().enumerate() {
         let object = item.as_object().ok_or_else(|| format!("actions[{index}] 不是对象"))?;
@@ -462,7 +465,7 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
         };
         actions.push((id, action));
     }
-    Ok(Script { name, pdf: PathBuf::from(pdf), actions })
+    Ok(Script { name, pdf: PathBuf::from(pdf), actions, start_zoom })
 }
 
 /// 分位数：返回 `(p50, p95, p99, max)`（空输入返回全 0）。
@@ -480,6 +483,55 @@ fn percentiles(values: &[f64]) -> (f64, f64, f64, f64) {
 }
 
 // ------------------------------------------------------------------ 画法追踪
+
+/// 某页"可见区域里被盖住的格子比例"（`None` = 看不见或页面无效）。
+fn visible_covered_ratio(
+    placement: &PagePlacement,
+    scroll: Vec2,
+    canvas_width: f32,
+    canvas_height: f32,
+    covered: &[bool],
+) -> Option<f64> {
+    let size = placement.page_size;
+    if !(size.width > 0.0 && size.height > 0.0) {
+        return None;
+    }
+    let page_rect = egui::Rect::from_min_size(
+        egui::pos2(placement.rect.x, placement.rect.y),
+        egui::vec2(placement.rect.width, placement.rect.height),
+    );
+    let view_rect = egui::Rect::from_min_size(
+        egui::pos2(scroll.x, scroll.y),
+        egui::vec2(canvas_width, canvas_height),
+    );
+    let visible = page_rect.intersect(view_rect);
+    if !visible.is_positive() {
+        return None;
+    }
+    let (mut expected, mut missing) = (0usize, 0usize);
+    for row in 0..CELLS {
+        for col in 0..CELLS {
+            let cx = (col as f32 + 0.5) / CELLS as f32 * size.width;
+            let cy = (row as f32 + 0.5) / CELLS as f32 * size.height;
+            let content = placement.page_to_content(Point::new(cx, cy));
+            if content.x < visible.min.x
+                || content.x > visible.max.x
+                || content.y < visible.min.y
+                || content.y > visible.max.y
+            {
+                continue;
+            }
+            expected += 1;
+            if !covered.get(row * CELLS + col).copied().unwrap_or(false) {
+                missing += 1;
+            }
+        }
+    }
+    if expected == 0 {
+        return None;
+    }
+    Some((expected - missing) as f64 / expected as f64)
+}
 
 /// 每个 `(页, 波段)` 的一次**连续逗留**里的画法序列，检查"只翻一次、不得翻回去"。
 ///
@@ -561,6 +613,12 @@ fn premature_switch(page: u32, stamp: PlanStamp, frame: u64) -> Option<String> {
 struct CoverageTracker {
     /// `(页, 波段)` → 曾经清晰过的格子。
     sharp_ever: HashMap<(u32, u32), Vec<bool>>,
+    /// 最近一帧每页"被任一图层覆盖"的格子。
+    covered_last: HashMap<u32, Vec<bool>>,
+    /// 曾经"整页可见区域都被盖住"的页：一旦盖满过，就不允许再出现大片空白（D-110 的判据）。
+    fully_covered_ever: std::collections::HashSet<u32>,
+    /// 本次动作里已经报过"露白"的页（避免每帧刷屏）。
+    reported_gap: std::collections::HashSet<u32>,
     /// `(页, 波段)` → 当前的清晰格子。
     sharp_now: HashMap<(u32, u32), Vec<bool>>,
     /// 上一帧每页是否有可见（有 quad）。
@@ -607,6 +665,14 @@ impl CoverageTracker {
                 .sharp_ever
                 .entry((*page, band))
                 .or_insert_with(|| vec![false; CELLS * CELLS]);
+            let covered_last = self
+                .covered_last
+                .entry(*page)
+                .or_insert_with(|| vec![false; CELLS * CELLS]);
+            covered_last.iter_mut().for_each(|cell| *cell = false);
+            for cell in &covered {
+                covered_last[*cell] = true;
+            }
             let covered: std::collections::HashSet<usize> = covered.into_iter().collect();
             for cell in 0..CELLS * CELLS {
                 if ever[cell] && !covered.contains(&cell) {
@@ -624,6 +690,43 @@ impl CoverageTracker {
                 self.visible_pages.push(*page);
             }
         }
+    }
+
+    /// 逐帧检查：一旦某页"盖满过"，它的可见区域就不允许再出现大片空白。
+    ///
+    /// 为什么必须**逐帧**：缩小过程中空白只出现在中间几帧（新一档渲染完就没了），
+    /// 只在"动作稳定后"检查会全部漏掉 —— 这正是"从高倍往回缩露白"的真实形态。
+    fn check_gaps(&mut self, frame: u64, app: &PdfReaderApp) -> Vec<String> {
+        let Some(session) = app.session.as_ref() else { return Vec::new() };
+        let mut violations = Vec::new();
+        for page in app.last_plan.keys() {
+            let Some(placement) = session.placement(*page) else { continue };
+            let Some(covered) = self.covered_last.get(&page.get()) else { continue };
+            let ratio = visible_covered_ratio(
+                placement,
+                session.viewport().scroll,
+                app.canvas_rect.width(),
+                app.canvas_rect.height(),
+                covered,
+            );
+            let Some(ratio) = ratio else { continue };
+            if ratio >= 0.95 {
+                self.fully_covered_ever.insert(page.get());
+                continue;
+            }
+            // 还没盖满过（例如刚打开、第一块还没到）：允许
+            if !self.fully_covered_ever.contains(&page.get()) {
+                continue;
+            }
+            if self.reported_gap.insert(page.get()) {
+                violations.push(format!(
+                    "第 {frame} 帧：页 {} 的可见区域只有 {:.0}% 被图层盖住（露白）",
+                    page.display_number(),
+                    ratio * 100.0
+                ));
+            }
+        }
+        violations
     }
 }
 
@@ -648,6 +751,7 @@ pub fn run(
         flips: FlipTracker::default(),
         violations: Vec::new(),
         notes: Vec::new(),
+        pending: Vec::new(),
         screen: options.screen,
         pending_pointer: None,
     };
@@ -660,6 +764,13 @@ pub fn run(
             .violations
             .push(format!("打开失败：{}（该脚本跳过）", script.pdf.display()));
         return report;
+    }
+    if let Some(zoom) = script.start_zoom {
+        let mut events = Vec::new();
+        if let Some(session) = app.session.as_mut() {
+            session.handle(ViewerCommand::SetZoom(zoom), &mut events);
+        }
+        app.events.extend(events);
     }
 
     for (id, action) in &script.actions {
@@ -814,6 +925,8 @@ struct Harness {
     violations: Vec<String>,
     /// 已经产生但还没归属到某个动作的观察（就绪兜底等）。
     notes: Vec<String>,
+    /// 逐帧产生、尚未归属到动作的违规。
+    pending: Vec<String>,
     screen: (f32, f32),
     /// 当前动作要求的指针位置（悬停链接时持续保持；`None` = 移出画布）。
     pending_pointer: Option<egui::Pos2>,
@@ -1040,6 +1153,8 @@ impl Harness {
             }
         }
         self.tracker.observe(stat.frame, &pages, &quads);
+        let gaps = self.tracker.check_gaps(stat.frame, app);
+        self.pending.extend(gaps);
 
         // 断言 ②：每次逗留某波段只允许"预览 → 瓦片"翻**一次**，且不得翻回去
         for (page, stamp) in &stat.plans {
@@ -1056,7 +1171,8 @@ impl Harness {
     }
 
     fn finish_action(&mut self, action: &ActionReport) -> (Vec<String>, Vec<String>) {
-        let mut violations = Vec::new();
+        let mut violations: Vec<String> = std::mem::take(&mut self.pending);
+        self.tracker.reported_gap.clear();
         if !action.settled {
             let tail = action
                 .frames_data

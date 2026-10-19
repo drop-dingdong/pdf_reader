@@ -140,6 +140,8 @@ PDF 页面坐标 --Rotation::map_point--> 旋转后页内坐标 --×Scale + 页�
 * **超采样**：`DEFAULT_OVERSCAN = 1.6`，渲染比例取波段上界，波段内缩放不重渲染。
 * **每帧限量**：`MAX_UPLOADS_PER_FRAME = 2`（按页计）；拖动期间 `allow_upload = false`。
 * **预览窗口**：缩放/旋转变更后 160ms 内不提交渲染（`ZOOM_PREVIEW_WINDOW`）。
+* **开场底料**：每页一张 ≤1.5 MP 的整页缩略图（`THUMBNAIL_MAX_PIXELS`），只在"这页没有任何整页图"时请求。
+* **纹理字节账**：`KeyedStore::bytes()` 是纹理层实际占用（`w×h×4` 之和），诊断与基线都用它。
 
 ## 9. 可测试性接缝
 

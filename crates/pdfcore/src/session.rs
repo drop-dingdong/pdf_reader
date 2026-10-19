@@ -41,6 +41,11 @@ pub const MIN_ZOOM: f32 = 0.1;
 pub const MAX_ZOOM: f32 = 8.0;
 /// 每次"放大/缩小"命令的步进倍率。
 pub const ZOOM_STEP: f32 = 1.25;
+/// "开场底料"的最大像素面积：一张整页缩略图不超过这个量级（D-110）。
+///
+/// 1.5 MP ≈ 6 MB（RGBA）：足以在 100–400% 下"糊但能看"，又不会为大页付出太多。
+pub const THUMBNAIL_MAX_PIXELS: f32 = 1_500_000.0;
+
 /// 预取半径（可见页前后各预取几页）。
 ///
 /// 取 2 而不是 1：翻页边界处的卡顿主要来自"下一页刚进入视口才开始渲染"，
@@ -236,6 +241,8 @@ pub struct DocumentSession {
     submitted_jobs: u64,
     /// 纹理**单边**上限（显卡能力；0 = 不限制）。超过它的页必须分块（D-108）。
     max_texture_side: u32,
+    /// "开场底料"的在飞任务：每页最多一个（D-110）。
+    thumbnail_jobs: HashMap<PageIndex, JobId>,
     visible_scratch: Vec<PageIndex>,
     /// D-02：分块策略（默认 `AbovePixels(4 MP)`，按**渲染**像素面积判断）。
     tiling: TilingPolicy,
@@ -276,6 +283,7 @@ impl DocumentSession {
             region_jobs: HashMap::new(),
             submitted_jobs: 0,
             max_texture_side: 0,
+            thumbnail_jobs: HashMap::new(),
             visible_scratch: Vec::new(),
             tiling: TilingPolicy::default(),
             overscan: DEFAULT_OVERSCAN,
@@ -488,6 +496,83 @@ impl DocumentSession {
             self.render_scale_of(placement),
             self.max_texture_side,
         ))
+    }
+
+    /// 该页"开场底料"应当使用的比例：满足"面积 ≤ [`THUMBNAIL_MAX_PIXELS`] 且单边 ≤ 纹理上限"，
+    /// 但**不超过波段 0 的渲染比例**（能复用就复用，见 [`DocumentSession::request_thumbnail`]）。
+    pub fn thumbnail_scale(&self, page: PageIndex) -> Option<Scale> {
+        let placement = self.layout.placement(page)?;
+        let size = placement.page_size.rotated(placement.rotation);
+        let area = (size.width * size.height).max(1.0);
+        let mut scale = (THUMBNAIL_MAX_PIXELS / area).sqrt().min(DEFAULT_OVERSCAN);
+        if self.max_texture_side > 0 {
+            let longest = size.width.max(size.height).max(1.0);
+            let cap = self.max_texture_side as f32 / longest;
+            scale = scale.min(cap);
+        }
+        let scale = scale.clamp(0.02, DEFAULT_OVERSCAN);
+        Some(Scale::from_zoom(scale))
+    }
+
+    /// 请求渲染该页的"开场底料"（一张**整页**低分辨率图，专门当底料）。
+    ///
+    /// 为什么需要它（D-110）：如果用户**一开始就在高倍**（或跳到没去过的页再往回缩），
+    /// 缓存里没有任何能盖满整页的旧图；此时缩小会让页面大片露白，直到新的一档渲染完。
+    /// 一张 1.5 MP 的缩略图（几 MB、一次十几毫秒）就能把这段空白填掉。
+    ///
+    /// 幂等：已有该比例的缓存、或已在飞就不重复提交。
+    pub fn request_thumbnail(&mut self, page: PageIndex) -> bool {
+        let Some(placement) = self.layout.placement(page).copied() else {
+            return false;
+        };
+        let Some(scale) = self.thumbnail_scale(page) else { return false };
+        let key = RenderKey::new(page, scale, placement.rotation);
+        if self.cache.get(&key).is_some()
+            || self.jobs.contains_key(&key)
+            || self.region_jobs.contains_key(&key)
+        {
+            return false;
+        }
+        let request = RenderRequest::new(page, scale, placement.rotation)
+            .with_priority(RenderPriority::Prefetch);
+        let job = self.scheduler.submit(request);
+        self.submitted_jobs += 1;
+        self.jobs.insert(key, job);
+        self.thumbnail_jobs.insert(page, job);
+        true
+    }
+
+    /// "开场底料"的键（已就绪或在飞时）。
+    pub fn thumbnail_key(&self, page: PageIndex) -> Option<RenderKey> {
+        let placement = self.layout.placement(page)?;
+        let scale = self.thumbnail_scale(page)?;
+        let key = RenderKey::new(page, scale, placement.rotation);
+        (self.cache.get(&key).is_some() || self.jobs.contains_key(&key)).then_some(key)
+    }
+
+    /// "开场底料"的位图（已渲染完才返回）。
+    pub fn thumbnail_image(&self, page: PageIndex) -> Option<Arc<RasterImage>> {
+        let key = self.thumbnail_key(page)?;
+        self.cache.get(&key)
+    }
+
+    /// 该页是否已经有**任何**整页位图（缩略图或某一波段的整页图）。
+    pub fn has_whole_page_image(&self, page: PageIndex) -> bool {
+        if self.thumbnail_image(page).is_some() {
+            return true;
+        }
+        match self.layout.placement(page) {
+            Some(placement) => !self.grid_of(placement).is_some()
+                && self
+                    .cache
+                    .get(&RenderKey::new(
+                        page,
+                        Scale::from_zoom(self.render_scale_of(placement)),
+                        placement.rotation,
+                    ))
+                    .is_some(),
+            None => false,
+        }
     }
 
     /// 为"**非视口用途**"（预览截图）请求一块页面区域：只渲染覆盖它的块。
@@ -852,6 +937,10 @@ impl DocumentSession {
                     self.submitted.remove(&key);
                     self.jobs.remove(&key);
                     self.region_jobs.remove(&key);
+                    if self.thumbnail_jobs.get(&key.page).is_some() {
+                        // 底料任务完成：从表里摘掉（幂等）
+                        self.thumbnail_jobs.remove(&key.page);
+                    }
                     events.push(SessionEvent::PageRendered(key));
                 }
                 RenderEvent::Failed { page, error } => {
@@ -922,6 +1011,7 @@ impl DocumentSession {
         self.jobs.clear();
         // 预览区域的任务也一并作废（缩放/旋转后旧比例的重建没有意义，会重新请求）
         self.region_jobs.clear();
+        self.thumbnail_jobs.clear();
     }
 
     /// 忘记某一页的所有在飞任务记录。
@@ -929,6 +1019,7 @@ impl DocumentSession {
         self.submitted.retain(|key| key.page != page);
         self.jobs.retain(|key, _| key.page != page);
         self.region_jobs.retain(|key, _| key.page != page);
+        self.thumbnail_jobs.remove(&page);
     }
 
     fn set_scroll(&mut self, target: Vec2, events: &mut Vec<SessionEvent>) {
@@ -1168,10 +1259,20 @@ impl DocumentSession {
         let current = self.state.current_page;
 
         // 1) 页已经不在视口里
+        // 底料的键（`thumbnail_scale` 对应的整页请求）不参与"比例过时"的取消：
+        // 它本来就不等于任何波段比例（D-110）。
+        let mut thumbnails: Vec<RenderKey> = self
+            .thumbnail_jobs
+            .keys()
+            .filter_map(|page| self.thumbnail_key(*page))
+            .collect();
+        thumbnails.sort_by_key(|key| (key.page.get(), key.scale_milli));
+
         let mut stale_pages: Vec<PageIndex> = self
             .jobs
             .keys()
             .filter(|key| !self.region_jobs.contains_key(*key))
+            .filter(|key| !thumbnails.contains(key))
             .map(|key| key.page)
             .filter(|page| *page != current && !visible.contains(page))
             .collect();
@@ -1192,6 +1293,7 @@ impl DocumentSession {
             .jobs
             .keys()
             .filter(|key| !self.region_jobs.contains_key(*key))
+            .filter(|key| !thumbnails.contains(key))
             .filter(|key| visible.contains(&key.page))
             .filter(|key| {
                 self.layout.placement(key.page).map_or(true, |placement| {

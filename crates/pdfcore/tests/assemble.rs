@@ -876,3 +876,87 @@ fn a_strip_page_tiles_because_of_the_texture_side_limit() {
     );
     assert!(grid.side > 1, "单边超限时至少切成 2 段");
 }
+
+/// D-110：开场底料 —— 一张"面积 ≤ 1.5 MP、单边 ≤ 纹理上限"的整页图，
+/// 且**不能**被"波段比例过时"的取消逻辑误杀。
+#[test]
+fn thumbnail_is_requested_once_and_survives_band_changes() {
+    let backend = MemoryBackend::new(vec![MemoryPage::new(
+        Size::new(612.0, 792.0),
+        Rotation::None,
+        vec!["Hello".to_string()],
+    )]);
+    let opened = backend.open(Source::Bytes(b"%PDF-1.4 thumb"), None).unwrap();
+    let mut session = DocumentSession::new(
+        opened,
+        Arc::new(MemoryCache::new()),
+        Arc::new(ImmediateScheduler::new(
+            backend.open(Source::Bytes(b"y"), None).unwrap().raster,
+        )),
+        Box::new(VerticalLayout),
+        Box::new(RangeSelection::new()),
+    )
+    .expect("装配会话");
+    session.handle(ViewerCommand::SetZoom(8.0), &mut Vec::new());
+
+    let scale = session.thumbnail_scale(PageIndex::FIRST).expect("应有建议比例");
+    // 612×792 = 0.48 M pt²；1.5 MP 允许 1.75 倍，但不超过波段 0 的 1.6
+    assert!((scale.0 - crate::DEFAULT_OVERSCAN).abs() < 1e-3, "比例 {scale:?} 应封顶在 1.6");
+    let (width, height) = (
+        (612.0 * scale.0).round(),
+        (792.0 * scale.0).round(),
+    );
+    assert!(width * height <= 1_600_000.0, "底料面积 {width}×{height} 应 ≤ 1.5 MP");
+
+    assert!(session.request_thumbnail(PageIndex::FIRST), "第一次应提交");
+    assert!(
+        !session.request_thumbnail(PageIndex::FIRST),
+        "同一页重复请求必须幂等（不重复渲染）"
+    );
+    session.pump(&mut Vec::new());
+    assert!(
+        session.thumbnail_image(PageIndex::FIRST).is_some(),
+        "同步调度器下应立即就绪"
+    );
+
+    // 换波段（触发 cancel_stale_jobs）：底料已经在缓存里，仍然可用
+    let mut events = Vec::new();
+    session.handle(ViewerCommand::SetZoom(2.0), &mut events);
+    session.handle(ViewerCommand::RequestVisible, &mut events);
+    session.pump(&mut events);
+    assert!(
+        session.thumbnail_image(PageIndex::FIRST).is_some(),
+        "底料不能被波段切换清掉（缓存里应仍在）"
+    );
+    assert!(session.thumbnail_key(PageIndex::FIRST).is_some());
+}
+
+/// 大页的底料按"面积上限"和"单边上限"一起缩。
+#[test]
+fn thumbnail_scale_respects_both_area_and_side_limits() {
+    // A0：2384×3370 pt ≈ 8 MP；1.5 MP 上限 → 约 0.43 倍
+    let backend = MemoryBackend::new(vec![MemoryPage::new(
+        Size::new(2383.94, 3370.39),
+        Rotation::None,
+        vec!["A0".to_string()],
+    )]);
+    let opened = backend.open(Source::Bytes(b"%PDF-1.4 a0"), None).unwrap();
+    let mut session = DocumentSession::new(
+        opened,
+        Arc::new(MemoryCache::new()),
+        Arc::new(ImmediateScheduler::new(
+            backend.open(Source::Bytes(b"y"), None).unwrap().raster,
+        )),
+        Box::new(VerticalLayout),
+        Box::new(RangeSelection::new()),
+    )
+    .expect("装配会话");
+    session.set_max_texture_side(1_024);
+    let scale = session.thumbnail_scale(PageIndex::FIRST).expect("应有建议比例");
+    let (width, height) = (
+        (2383.94 * scale.0).round(),
+        (3370.39 * scale.0).round(),
+    );
+    assert!(width * height <= 1_600_000.0, "{width}×{height} 面积超了");
+    assert!(width.max(height) <= 1_024.0, "{width}×{height} 单边超了");
+}

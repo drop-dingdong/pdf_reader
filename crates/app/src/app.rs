@@ -1013,6 +1013,13 @@ impl PdfReaderApp {
             session.page_count(),
         );
 
+        // 开场底料（D-110）：目标页如果**一张整页图都没有**（起步就在高倍、或刚跳到没去过的页），
+        // 请会话渲一张低分辨率整页图。它只当底料用，不会被当成"当前档已经清楚"。
+        for page in &targets {
+            if !session.has_whole_page_image(*page) && session.thumbnail_key(*page).is_none() {
+                session.request_thumbnail(*page);
+            }
+        }
         let mut uploaded = 0usize;
         if allow_upload {
             for page in &targets {
@@ -1062,6 +1069,15 @@ impl PdfReaderApp {
         // 整页路径
         if let Some(image) = session.image_for(page) {
             let key = RenderKey::new(page, render, placement.rotation);
+            if !self.textures.contains(&key) {
+                self.upload(ctx, key, &image);
+                count += 1;
+            }
+        }
+        // 开场底料（D-110）：一张低分辨率整页图，专门当兜底；与上面对整页纹理的判断互不影响
+        if let (Some(key), Some(image)) =
+            (session.thumbnail_key(page), session.thumbnail_image(page))
+        {
             if !self.textures.contains(&key) {
                 self.upload(ctx, key, &image);
                 count += 1;
