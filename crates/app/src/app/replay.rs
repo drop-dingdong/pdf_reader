@@ -1046,15 +1046,21 @@ impl Harness {
             previewing: app.previewing(),
             // 由结算循环按"和上一帧比有没有变化"回填（见 `busy`）
             busy: false,
+            // 只收**当前可见**的页：`last_plan` 是"最近一次绘制时的画法"，页滚出视口后它会变陈旧，
+            // 拿它做断言会误报（例如"页 1 仍停在白底页框"，其实页 1 早就不在屏幕上了）
             plans: app
                 .last_plan
                 .iter()
+                .filter(|(page, _)| app.visible.contains(page))
                 .map(|(page, stamp)| (page.get(), *stamp))
                 .collect(),
             ranges: app
                 .last_plan
                 .keys()
-                .filter_map(|page| app.session.as_ref()?.visible_tiles(*page).map(|range| (page.get(), range)))
+                .filter(|page| app.visible.contains(page))
+                .filter_map(|page| {
+                    app.session.as_ref()?.visible_tiles(*page).map(|range| (page.get(), range))
+                })
                 .collect(),
         };
 
@@ -1173,6 +1179,25 @@ impl Harness {
     fn finish_action(&mut self, action: &ActionReport) -> (Vec<String>, Vec<String>) {
         let mut violations: Vec<String> = std::mem::take(&mut self.pending);
         self.tracker.reported_gap.clear();
+        // 断言⑥：动作稳定后，可见页**不能停在糊的预览上** —— 该清晰的时候必须已经清晰。
+        // 这条是"上传集合漏了 A 类"的唯一可靠信号（实测过一次：瓦片从来没被上传，
+        // 画面永远是拉伸的旧图，而"露白/翻页/尺寸"三条断言全都不会报）。
+        if action.settled {
+            if let Some(frame) = action.frames_data.last() {
+                for (page, stamp) in &frame.plans {
+                    if matches!(stamp.plan, crate::view::PageDraw::Tiles)
+                        || matches!(stamp.plan, crate::view::PageDraw::Whole)
+                    {
+                        continue;
+                    }
+                    violations.push(format!(
+                        "动作 {} 稳定后，页 {page} 仍停在 {}（没有变成清晰的瓦片/整页图）",
+                        action.id,
+                        stamp.describe()
+                    ));
+                }
+            }
+        }
         if !action.settled {
             let tail = action
                 .frames_data

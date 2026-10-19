@@ -592,6 +592,13 @@ impl DocumentSession {
         scales
     }
 
+    /// 任意键对应的位图（已渲染完才有）。
+    ///
+    /// 对账循环用它上传 `desired` 里"现在缺、但位图已到"的纹理 —— 不再由"哪一页能画什么"决定。
+    pub fn image_for_key(&self, key: &RenderKey) -> Option<Arc<RasterImage>> {
+        self.cache.get(key)
+    }
+
     /// 该页是否已经有**任何**整页位图（缩略图或某一波段的整页图）。
     pub fn has_whole_page_image(&self, page: PageIndex) -> bool {
         if self.thumbnail_image(page).is_some() {

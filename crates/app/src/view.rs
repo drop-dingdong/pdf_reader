@@ -1343,13 +1343,20 @@ pub fn desired_textures(
         if desired.keep.insert(key) {
             let bytes = size_of(&key);
             match class {
-                TextureClass::Must => desired.must_bytes += bytes,
+                // A 是"让画面变清楚"的那一类：缺了必须传，否则永远停在糊的预览上
+                TextureClass::Must => {
+                    desired.must_bytes += bytes;
+                    if !present.contains(&key) {
+                        desired.upload.push(key);
+                    }
+                }
                 TextureClass::Bed => {
                     desired.bed_bytes += bytes;
                     if !present.contains(&key) {
                         desired.upload.push(key);
                     }
                 }
+                // C 只保留、永不上传（它只是缩放过场的顶替，缺了不影响正确性）
                 TextureClass::Old => desired.old_bytes += bytes,
             }
         }
@@ -1376,7 +1383,8 @@ pub fn desired_textures(
         desired.keep.retain(|key| must.contains(key));
         desired.bed_bytes = 0;
         desired.old_bytes = 0;
-        desired.upload.clear();
+        // 只允许上传 A：否则连"当前视口"都传不上去，画面永远是白的
+        desired.upload.retain(|key| must.contains(key));
         desired.dropped_bytes = before.saturating_sub(desired.must_bytes);
         return desired;
     }
@@ -1762,6 +1770,16 @@ impl<V> KeyedStore<V> {
     /// * **不能全留**：一次连续缩放会产生十几档比例，显存会无限增长。
     ///
     /// 旋转也必须匹配：旧旋转的图是横躺的，留着只会画错。
+    /// 现有键，**最新在前**（预算裁剪时先保新的）。图层的"删除步"用它做输入之一。
+    pub fn keys_newest_first(&self) -> Vec<RenderKey> {
+        self.order.iter().rev().copied().collect()
+    }
+
+    /// 只保留 `keep` 里的键（**对账的删除步**，D-112）。
+    pub fn keep_only(&mut self, keep: &HashSet<RenderKey>) {
+        self.retain(|key| keep.contains(key));
+    }
+
     /// 按 [`desired_textures`] 的结果裁剪纹理层（**唯一的裁剪入口**，D-112）。
     ///
     /// `size_of` 由调用方按几何给出（整页 = 渲染像素 × 4，块 = 块的像素 × 4），
@@ -2075,7 +2093,16 @@ mod tests {
         assert!(first.keep.contains(&whole(1.6)));
         assert!(first.keep.contains(&whole(2.56)));
         assert_eq!(first.bed_bytes, 2_000);
-        assert_eq!(first.upload, vec![whole(2.56)], "只有缺的那张要上传");
+        // upload = "缺的 A" + "缺的 B"：4 块瓦片（A 不在 GPU 里）+ 2560 整页（B 缺）
+        assert_eq!(first.upload.len(), 5, "{:?}", first.upload);
+        assert!(
+            first.upload.iter().any(|key| *key == whole(2.56)),
+            "缺的底料要上传"
+        );
+        assert!(
+            first.upload.iter().any(|key| *key == must(1, 0)),
+            "缺的可见块更要上传（否则画面永远糊着）"
+        );
         // C：最近一个旧波段（6554）里的现有键
         let old = RenderKey::tiled(page, Scale::from_zoom(6.5536), Rotation::None, TileSpec::new(0, 0));
         assert!(first.keep.contains(&old));
@@ -2086,7 +2113,8 @@ mod tests {
         assert_eq!(empty.must_bytes, first.must_bytes);
         assert_eq!(empty.bed_bytes, first.bed_bytes);
         assert_eq!(empty.old_bytes, 0);
-        assert_eq!(empty.upload.len(), 2, "两张底料都还不在 GPU 里");
+        // 4 块 A + 2 张底料都还不在 GPU 里
+        assert_eq!(empty.upload.len(), 6, "{:?}", empty.upload);
     }
 
     /// 预算在 `desired` 内部一次算完：A 豁免、B 优先于 C。

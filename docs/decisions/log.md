@@ -402,6 +402,29 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **状态**：有效。下一步（可选）：把"上传/转换按字节限流"与"开场底料按预算决定要不要"接上；
   目前"上传字节"仍无上限（用户已同意暂缓）。
 
+### D-112 纹理层改成"一个纯函数 + 对账循环"
+
+- **决定**：`view::desired_textures(facts, existing, budget, size_of) -> Desired` 成为**唯一**决定
+  "这一帧 GPU 里应当有哪些纹理"的地方（纯函数，每帧算，几微秒）；`ensure_textures` 只做三件事：
+  算 desired → `keep_only(desired.keep)` 删除 → 遍历 `desired.upload`（位图已到就传）。
+  `upload_page`（"缓存里有位图就传"）与 `retain_for_view` 的历史逻辑一起删除。
+  **不做缓存**：重算比一张瓦片的转换便宜约 1000 倍，而缓存需要维护七项输入的失效，
+  漏一项就是静默的白块/重传（用户拍板："旧的 desired 应当没用"）。
+- **理由**：原来是两个互不知情的策略（push 上传 / pull 保留），只靠"上传 ⊆ 保留"这个口头约定，
+  一不一致就每帧传了又删（实测 8.4MB→136MB、350MB 两次）。收成一个纯函数后，
+  "上传 ⊆ 保留"由构造保证，预算也只在同一处算，且**按几何算字节**（与"现在有没有"无关）。
+- **影响**：`PageFacts` 改为 `PageShape`（Whole / Tiles(range) / TilesHidden）+ 声明式 `whole_pages`；
+  `Desired` 带 keep/upload/三类字节数；`KeyedStore::{keep_only, keys_newest_first}`；
+  `DocumentSession::{whole_page_scales, image_for_key}`；`MAX_UPLOADS_PER_FRAME`（按页）
+  → `MAX_TEXTURE_UPLOADS_PER_FRAME = 40`（按张）。
+- **验证**（258 passed，0 warnings）：12 个回放脚本 0 违规，且 `提交/上传/纹理峰值` 与重构前**逐项一致**
+  （如 tiling_800 18/40.2/27.6、page_walk 6/71.7/52.3）—— 说明重构没有改变行为。
+  新增断言⑥："动作稳定后可见页不能停在糊的预览上"，它是这次重构中两个真 bug 的唯一发现者：
+  ① `upload` 漏了 A 类（瓦片从未上传，画面永远拉伸）——被脚本日志"从=旧图拉伸 到=旧图拉伸"暴露；
+  ② 超预算时把 `upload` 整个清空（连 A 也传不上去，页面全白）。
+- **回退**：两个提交分别回退（先 `desired` 纯函数，再对账循环）。
+- **状态**：有效。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

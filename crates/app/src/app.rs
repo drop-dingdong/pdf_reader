@@ -47,7 +47,7 @@ use crate::view::{
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
     view_rect_for, view_to_content, compose_region_snapshot, needs_underlay, plan_page, DrawInput,
-    KeyedStore, Desired, PageDraw, PageFacts, PageShape, PlanStamp, Preview,
+    desired_textures, KeyedStore, Desired, PageDraw, PageFacts, PageShape, PlanStamp, Preview,
 };
 
 /// 纹理层的**字节**预算（软上限，D-111）。
@@ -120,7 +120,11 @@ const LINK_OVERLAY_COLOR: Color32 = Color32::from_rgb(220, 40, 40);
 ///
 /// 一张整页位图的 RGBA 转换 + GPU 上传在毫秒量级；一帧内连传多张就会掉帧。
 /// 设上限后开销被摊到多帧，视觉上是"相邻页稍后补齐"，比"翻页顿一下"好得多。
-const MAX_UPLOADS_PER_FRAME: usize = 2;
+/// 每帧最多上传多少**张**纹理。
+///
+/// 原来是"每帧最多 2 **页**"（一个含糊的近似）；对账循环按"缺哪些键"逐张传，
+/// 所以这里换成张数：40 张 ≈ 高倍下两页的可见块数量（12~18 块/页 × 2）。
+const MAX_TEXTURE_UPLOADS_PER_FRAME: usize = 40;
 
 /// 缩放/旋转后进入"预览窗口"的时长：这段时间内不提交新渲染、只显示旧图拉伸。
 ///
@@ -1035,15 +1039,15 @@ impl PdfReaderApp {
         }
     }
 
-    /// 为可见页（以及相邻页）准备纹理，并裁剪不再需要的纹理。
+    /// 让纹理层与"这一帧该有的纹理"（[`desired_textures`]）对账（D-112）。
     ///
-    /// 两个细节都来自第二轮人工验收的"翻页边界处卡顿"：
-    /// 1. **提前上传相邻页**：会话已按 `PREFETCH_PAGE_RADIUS` 预渲染，这里把它们也传成纹理，
-    ///    于是"新页进入视口"那一刻不再有 4 MiB 量级的转换 + GPU 上传开销；
-    /// 2. **每帧限量上传**：一帧内同时上传多页会造成明显掉帧，因此设上限、分帧摊开。
+    /// 三个步骤，顺序固定：
+    /// 1. **算** `desired`：唯一决定"GPU 里该有哪些键"的地方（纯函数，每帧算，成本几微秒）；
+    /// 2. **删**：`present - keep` 立刻删除（不留旧图过夜）；
+    /// 3. **传**：`desired.upload` 里"位图已到"的那些传上去。
     ///
-    /// `allow_upload = false` 时只更新可见页与裁剪，**跳过转换与上传** ——
-    /// 拖动期间用它把"新页进入"那一帧约 150ms 的逐像素转换挪到松手之后（用户要求）。
+    /// 于是"上传集合 ⊆ 保留集合"由构造保证 —— 不会再出现"传上去、下一帧被裁、再传"的循环。
+    /// `allow_upload = false`（拖动期间）只做 1、2：**只删不传**，把逐像素转换挪到松手之后。
     fn ensure_textures(
         &mut self,
         ctx: &egui::Context,
@@ -1051,17 +1055,12 @@ impl PdfReaderApp {
         allow_upload: bool,
     ) -> usize {
         // 纹理单边上限来自后端（显卡能力）。告诉会话：单边超限的页会被强制分块（D-108）。
-        // 只在变化时写入 —— 它会改变网格，真实后端给出的值在会话期间是常量。
         let max_side = ctx.input(|input| input.max_texture_side as u32);
         if session.max_texture_side() != max_side {
             session.set_max_texture_side(max_side);
         }
         self.visible.clear();
         session.visible_pages(&mut self.visible);
-
-        // 上传目标 = 保留目标（**同一个集合**，见 `view::texture_pages`）：
-        // 曾经两者不一致（上传"可见页 ±1"、裁剪只留"可见页"），导致相邻页纹理
-        // 每帧被反复上传又丢弃 —— 200% 缩放下实测每帧 300ms 全耗在这里。
         let targets = texture_pages(
             &self.visible,
             session.state().current_page,
@@ -1075,30 +1074,15 @@ impl PdfReaderApp {
                 session.request_thumbnail(*page);
             }
         }
-        let mut uploaded = 0usize;
-        if allow_upload {
-            for page in &targets {
-                if uploaded >= MAX_UPLOADS_PER_FRAME {
-                    break;
-                }
-                uploaded += self.upload_page(ctx, session, *page);
-            }
-        }
 
-        // 裁剪（D-111）：按"必须 / 底料 / 旧内容"三类保留，并在字节预算内让位。
-        //   A 必须 = 当前波段的可见内容（不分块时是整页图，分块时是可见块）—— 永不淘汰；
-        //   B 底料 = 整页图（≤ 当前比例，含开场底料）；
-        //   C 旧内容 = 最近一个旧波段（缩放过场用它顶替）。
+        // ---- 1. 算 desired ----
         let facts: Vec<PageFacts> = targets
             .iter()
             .filter_map(|page| {
                 let placement = session.placement(*page)?;
-                let render_milli = RenderKey::new(
-                    *page,
-                    session.render_scale(*page),
-                    placement.rotation,
-                )
-                .scale_milli;
+                let render_milli =
+                    RenderKey::new(*page, session.render_scale(*page), placement.rotation)
+                        .scale_milli;
                 let shape = match session.tile_grid(*page) {
                     None => PageShape::Whole,
                     Some(_) => match session.visible_tiles(*page) {
@@ -1115,7 +1099,6 @@ impl PdfReaderApp {
                 })
             })
             .collect();
-        let max_side = session.max_texture_side();
         let page_sizes: Vec<(PageIndex, Rotation, Size)> = facts
             .iter()
             .filter_map(|fact| {
@@ -1123,130 +1106,103 @@ impl PdfReaderApp {
                 Some((fact.page, fact.rotation, placement.page_size))
             })
             .collect();
-        let report = self.textures.retain_for_view(&facts, |key| {
-            let Some((_, _, page_size)) = page_sizes
-                .iter()
-                .find(|(page, rotation, _)| *page == key.page && *rotation == key.rotation)
-            else {
-                return 0;
-            };
-            texture_key_bytes(*page_size, key.rotation, max_side, key)
-        });
-        self.last_retain = report.clone();
-        // 软上限：当前视口自身就超预算时只报告一次（提示"这台机器的显示需求超出预算"）
-        if report.over_budget && !self.budget_warned {
+        let existing = self.textures.keys_newest_first();
+        let desired = desired_textures(
+            &facts,
+            &existing,
+            self.textures.max_bytes(),
+            |key| {
+                let Some((_, _, page_size)) = page_sizes
+                    .iter()
+                    .find(|(page, rotation, _)| *page == key.page && *rotation == key.rotation)
+                else {
+                    return 0;
+                };
+                texture_key_bytes(*page_size, key.rotation, max_side, key)
+            },
+        );
+
+        // ---- 2. 删 ----
+        self.textures.keep_only(&desired.keep);
+
+        // ---- 3. 传 ----
+        let mut uploaded = 0usize;
+        if allow_upload {
+            for key in &desired.upload {
+                if uploaded >= MAX_TEXTURE_UPLOADS_PER_FRAME {
+                    break;
+                }
+                let Some(image) = session.image_for_key(key) else { continue };
+                self.note_uploaded(session, key, &image);
+                self.upload(ctx, *key, &image);
+                uploaded += 1;
+            }
+        }
+
+        // 软上限：当前视口自身就超预算时只报告一次（这台机器的显示需求超出预算）
+        if desired.over_budget && !self.budget_warned {
             self.budget_warned = true;
             if self.diag.enabled() {
                 self.diag.line(format!(
                     "[贴图] 纹理超出预算：当前视口需要 {:.1}MB > 预算 {:.0}MB（不淘汰当前视口，只提示）",
-                    report.must_bytes as f64 / (1024.0 * 1024.0),
+                    desired.must_bytes as f64 / (1024.0 * 1024.0),
                     self.textures.max_bytes() as f64 / (1024.0 * 1024.0)
                 ));
             }
         }
+        self.last_retain = desired;
         uploaded
     }
 
-    /// 上传某一页当前可用的位图（整页或瓦片），返回新上传的纹理数量。
-    fn upload_page(
+    /// `[贴图]` 诊断：记录"这一帧传了哪个键、多大"。
+    ///
+    /// 这条日志是 D-110 那次"每帧重传"被发现的唯一线索，所以对账循环里也必须保留。
+    fn note_uploaded(
         &mut self,
-        ctx: &egui::Context,
         session: &DocumentSession,
-        page: PageIndex,
-    ) -> usize {
-        let Some(placement) = session.placement(page).copied() else {
-            return 0;
-        };
-        // D-94：键与"块在页面里的位置"都用**波段渲染比例**，不能用显示比例
-        let render = session.render_scale(page);
+        key: &RenderKey,
+        image: &Arc<RasterImage>,
+    ) {
+        if !self.diag.enabled() {
+            return;
+        }
+        let Some(placement) = session.placement(key.page).copied() else { return };
         let scroll = session.viewport().scroll;
-        let mut count = 0;
-        // 整页路径
-        if let Some(image) = session.image_for(page) {
-            let key = RenderKey::new(page, render, placement.rotation);
-            if !self.textures.contains(&key) {
-                self.upload(ctx, key, &image);
-                count += 1;
-                if self.diag.enabled() {
-                    self.diag.line(format!(
-                        "[贴图] 页={} 整页图={}x{} 渲染比例={:.3} 键={}",
-                        page.display_number(),
-                        image.width,
-                        image.height,
-                        render.0,
-                        (render.0 * 1000.0).round() as u32
-                    ));
-                }
+        match key.tile {
+            None => self.diag.line(format!(
+                "[贴图] 页={} 整页图={}x{} 渲染比例={:.3} 键={}",
+                key.page.display_number(),
+                image.width,
+                image.height,
+                key.scale_milli as f32 / 1000.0,
+                key.scale_milli
+            )),
+            Some(tile) => {
+                let Some(grid) = session.tile_grid(key.page) else { return };
+                let (page_width, page_height) = grid.render_px();
+                let (x, y, width, height) = grid.tile_px(tile.col, tile.row);
+                let screen = tile_view_rect(
+                    &grid,
+                    &placement,
+                    tile.col,
+                    tile.row,
+                    session.render_scale(key.page).0,
+                    scroll,
+                );
+                self.diag.line(format!(
+                    "[贴图] 页={} col={} row={} 瓦片图={}x{} 页面px={}x{} 显示px={:.0}x{:.0} 瓦片px=({},{},{},{}) 屏幕=({:.1},{:.1},{:.0},{:.0}) scroll=({:.1},{:.1}) 渲染比例={:.3}",
+                    key.page.get(), tile.col, tile.row, image.width, image.height,
+                    page_width, page_height,
+                    placement.rect.width, placement.rect.height,
+                    x, y, width, height,
+                    screen.x, screen.y, screen.width, screen.height,
+                    scroll.x, scroll.y,
+                    key.scale_milli as f32 / 1000.0
+                ));
             }
         }
-        // 开场底料（D-110）：一张低分辨率整页图，专门当兜底；与上面对整页纹理的判断互不影响
-        if let (Some(key), Some(image)) =
-            (session.thumbnail_key(page), session.thumbnail_image(page))
-        {
-            // 底料是"可再生"的：先问预算，放不下就不传（否则会被保留策略裁掉再重传）
-            let cost = (image.width as u64) * (image.height as u64) * 4;
-            if !self.textures.contains(&key) && self.textures.can_admit(cost) {
-                self.upload(ctx, key, &image);
-                count += 1;
-                if self.diag.enabled() {
-                    self.diag.line(format!(
-                        "[贴图] 页={} 开场底料={}x{} 键={}",
-                        page.display_number(),
-                        image.width,
-                        image.height,
-                        key.scale_milli
-                    ));
-                }
-            }
-        }
-        // 分块路径：只传**可见范围**内的块 —— 与保留策略的 A 类一致。
-        // 若把"该波段缓存里的所有块"都传上去、而保留只留可见的那些，就会每帧重传一批被裁掉的块
-        // （这正是 D-110 里 "上传集合 ⊆ 保留集合" 那条约束）。
-        let visible_range = session.visible_tiles(page);
-        for (tile, image) in session.tiles_for(page) {
-            if let Some((col0, row0, col1, row1)) = visible_range {
-                if tile.col < col0 || tile.col > col1 || tile.row < row0 || tile.row > row1 {
-                    continue;
-                }
-            } else if session.tile_grid(page).is_some() {
-                continue;
-            }
-            let key = RenderKey::tiled(page, render, placement.rotation, tile);
-            if !self.textures.contains(&key) {
-                if self.diag.enabled() {
-                    // 贴图诊断：渲染尺寸 vs 页面像素尺寸 vs 屏幕摆放位置
-                    // 用于区分"内容错位"（后端渲染）与"摆放错位"（前端映射）。
-                    // 判据 4/5：同一波段内 `页面px` 只应出现一个值、且不应有新行。
-                    if let Some(grid) = session.tile_grid(page) {
-                        let (page_width, page_height) = grid.render_px();
-                        let (x, y, width, height) = grid.tile_px(tile.col, tile.row);
-                        let screen = tile_view_rect(
-                            &grid,
-                            &placement,
-                            tile.col,
-                            tile.row,
-                            render.0,
-                            scroll,
-                        );
-                        self.diag.line(format!(
-                            "[贴图] 页={} col={} row={} 瓦片图={}x{} 页面px={}x{} 显示px={:.0}x{:.0} 瓦片px=({},{},{},{}) 屏幕=({:.1},{:.1},{:.0},{:.0}) scroll=({:.1},{:.1}) 渲染比例={:.3}",
-                            page.get(), tile.col, tile.row, image.width, image.height,
-                            page_width, page_height,
-                            placement.rect.width, placement.rect.height,
-                            x, y, width, height,
-                            screen.x, screen.y, screen.width, screen.height,
-                            scroll.x, scroll.y, render.0
-                        ));
-                    }
-                }
-                self.upload(ctx, key, &image);
-                count += 1;
-            }
-        }
-        count
     }
 
-    /// 上传一张位图为纹理（已存在则跳过）。
     fn upload(&mut self, ctx: &egui::Context, key: RenderKey, image: &Arc<RasterImage>) {
         if self.textures.contains(&key) {
             return;
