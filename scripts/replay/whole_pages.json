@@ -1,0 +1,13 @@
+{
+  "name": "whole_pages",
+  "pdf": "a4_3p.pdf",
+  "actions": [
+    { "id": "resize",   "op": "resize", "width": 1100, "height": 900 },
+    { "id": "at_100",   "op": "zoom", "value": 1.0 },
+    { "id": "at_160",   "op": "zoom", "value": 1.6 },
+    { "id": "at_300",   "op": "zoom", "value": 3.0 },
+    { "id": "back_160", "op": "zoom", "value": 1.6 },
+    { "id": "back_100", "op": "zoom", "value": 1.0 },
+    { "id": "settle",   "op": "wait", "frames": 20 }
+  ]
+}

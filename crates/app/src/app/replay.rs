@@ -1305,6 +1305,7 @@ fn action_json(report: &Report, action: &ActionReport) -> String {
                 action.busy_cpu_ms_total
             ),
         ),
+        ("submitted", action.submitted.to_string()),
         ("upload_bytes", action.upload_bytes.to_string()),
         ("texture_bytes_peak", action.texture_bytes_peak.to_string()),
         (

@@ -1072,6 +1072,16 @@ impl PdfReaderApp {
             if !self.textures.contains(&key) {
                 self.upload(ctx, key, &image);
                 count += 1;
+                if self.diag.enabled() {
+                    self.diag.line(format!(
+                        "[贴图] 页={} 整页图={}x{} 渲染比例={:.3} 键={}",
+                        page.display_number(),
+                        image.width,
+                        image.height,
+                        render.0,
+                        (render.0 * 1000.0).round() as u32
+                    ));
+                }
             }
         }
         // 开场底料（D-110）：一张低分辨率整页图，专门当兜底；与上面对整页纹理的判断互不影响
@@ -1081,6 +1091,15 @@ impl PdfReaderApp {
             if !self.textures.contains(&key) {
                 self.upload(ctx, key, &image);
                 count += 1;
+                if self.diag.enabled() {
+                    self.diag.line(format!(
+                        "[贴图] 页={} 开场底料={}x{} 键={}",
+                        page.display_number(),
+                        image.width,
+                        image.height,
+                        key.scale_milli
+                    ));
+                }
             }
         }
         // 分块路径

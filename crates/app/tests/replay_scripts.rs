@@ -21,6 +21,9 @@ const CASES: &[(&str, Sample)] = &[
     ("preview_800.json", Sample::Preview),
     ("strip_page.json", Sample::Strip),
     ("start_high.json", Sample::A4),
+    // 两个"整页波段"之后再进分块波段：守住"上传集合必须是保留集合的子集"，
+    // 否则开场底料/整页图会被每帧重传（实测过一次 8.4MB → 136MB）
+    ("whole_pages.json", Sample::A4),
 ];
 
 /// 脚本目录（测试的工作目录是 crate 目录，不是工作区根）。
