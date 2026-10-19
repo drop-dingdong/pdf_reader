@@ -364,8 +364,8 @@ pub struct PlanStamp {
     pub plan: PageDraw,
     /// 该页当前的渲染波段（`scale_milli`）。
     pub band: u32,
-    /// 是否是"超时兜底"（画 `Tiles` 但可见范围还没齐）。
-    pub fallback: bool,
+    /// 是否"部分块"（画 `Tiles` 但可见范围还没齐：粘性模式的常规情况，或超时兜底）。
+    pub partial: bool,
     /// 可见范围内已就绪的块数。
     pub ready: usize,
     /// 可见范围内的块数。
@@ -384,7 +384,7 @@ impl PlanStamp {
 
     /// 诊断用的短名（兜底时带后缀）。
     pub fn describe(self) -> String {
-        if self.fallback {
+        if self.partial {
             format!("{}（兜底）", self.plan.label())
         } else {
             self.plan.label().to_string()
@@ -410,6 +410,12 @@ pub struct DrawInput {
     /// 起点选"第一块就绪"而不是"波段变化"：慢手势期间波段不断变化，
     /// 从波段变化计时会让第一块一到就超时，白块就又回来了。
     pub waited_ms: u64,
+    /// **该页在当前波段上一帧已经是 `Tiles`**（D-104）。
+    ///
+    /// "已经切到瓦片就不再退回预览"：波段内滚动会不断露出新块，
+    /// 若因为"新的可见范围没齐"就退回整页预览，用户会看到**整页**变糊一下（实测 40~100ms）。
+    /// 一旦进入瓦片模式，新块没就绪就由底料补上（D-98），已清晰的部分保持清晰。
+    pub showing_tiles: bool,
 }
 
 /// 决定一页这一帧怎么画 —— "旧内容 vs 新块"的**唯一**判据。
@@ -431,6 +437,12 @@ pub fn plan_page(input: &DrawInput) -> PageDraw {
             Preview::Tiles(scale) => PageDraw::TilePreview(scale),
             Preview::None => PageDraw::Blank,
         };
+    }
+    // 分块：**已经切到瓦片**就留在瓦片模式（D-104）。
+    // 波段内滚出新块时，缺的那块由底料补（D-98），不把整页退回预览 —— 那会让已经清晰的
+    // 区域也变糊。波段变化时 `showing_tiles` 自然为假（上一帧属于旧波段），仍走下面的门槛。
+    if input.showing_tiles {
+        return PageDraw::Tiles;
     }
     // 分块：可见范围一块不缺才切
     if input.total > 0 && input.ready >= input.total {
@@ -1725,6 +1737,7 @@ mod tests {
             total: 18,
             preview: Preview::Tiles(65_540),
             waited_ms: 0,
+            showing_tiles: false,
         }
     }
 
@@ -1738,6 +1751,44 @@ mod tests {
 
         let input = DrawInput { ready: 18, waited_ms: 0, ..draw_input() };
         assert_eq!(plan_page(&input), PageDraw::Tiles, "全齐才切到当前波段");
+    }
+
+    /// D-104：同一波段内**已经切到瓦片**后，滚出新块也不退回预览。
+    ///
+    /// 退回预览 = 整页变糊（实测真机 40~100ms）；正确做法是保留已清晰的块，
+    /// 缺的那块由底料补（D-98）。
+    #[test]
+    fn tiles_are_sticky_inside_a_band() {
+        let input = DrawInput { ready: 4, total: 6, showing_tiles: true, ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::Tiles, "已进入瓦片模式：留在瓦片 + 底料");
+
+        // 一块就绪都没有也一样粘住（底料在，页面不会露白）
+        let input = DrawInput { ready: 0, total: 6, showing_tiles: true, ..draw_input() };
+        assert_eq!(plan_page(&input), PageDraw::Tiles);
+    }
+
+    /// 粘性只在**同一波段**内成立：新波段第一帧仍要等可见范围全齐（D-97 的门槛不许被绕过）。
+    #[test]
+    fn a_new_band_still_waits_for_the_whole_range() {
+        let input = DrawInput { ready: 4, total: 6, showing_tiles: false, ..draw_input() };
+        assert_eq!(
+            plan_page(&input),
+            PageDraw::TilePreview(65_540),
+            "新波段（上一帧属于旧波段）仍先显示旧内容"
+        );
+    }
+
+    /// 粘性不能盖过"不分块"和"当前波段整页在"这两条更早的判据。
+    #[test]
+    fn stickiness_does_not_override_earlier_rules() {
+        let tiled_input = DrawInput { tiled: false, showing_tiles: true, ..draw_input() };
+        assert_eq!(
+            plan_page(&tiled_input),
+            PageDraw::TilePreview(65_540),
+            "不分块时按旧内容拉伸，与粘性无关"
+        );
+        let whole_input = DrawInput { has_whole_current: true, showing_tiles: true, ..draw_input() };
+        assert_eq!(plan_page(&whole_input), PageDraw::Whole);
     }
 
     /// 超时兜底：某块渲染失败/块特别多时，不许永远停在糊图。

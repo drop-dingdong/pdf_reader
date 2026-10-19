@@ -2176,6 +2176,11 @@ impl PdfReaderApp {
                     self.textures.preview_source(page, placement.rotation, whole_key.scale_milli);
                 // D-96：波段切换后"旧内容 vs 新块"的判据（缺一块就不翻页，另有超时兜底）
                 let waited_ms = self.note_band_wait(page, whole_key.scale_milli, ready);
+                // D-104：同一波段内已经切到瓦片就不再退回预览（否则波段内滚动会整页变糊）
+                let showing_tiles = self.last_plan.get(&page).map_or(false, |stamp| {
+                    stamp.band == whole_key.scale_milli
+                        && matches!(stamp.plan, PageDraw::Tiles)
+                });
                 let plan = plan_page(&DrawInput {
                     tiled: tile_area.is_some(),
                     has_whole_current: self.textures.contains(&whole_key),
@@ -2183,6 +2188,7 @@ impl PdfReaderApp {
                     total,
                     preview,
                     waited_ms,
+                    showing_tiles,
                 });
 
                 let mut drawn = (0u32, 0u32);
@@ -2307,7 +2313,7 @@ impl PdfReaderApp {
                 let stamp = PlanStamp {
                     plan,
                     band: whole_key.scale_milli,
-                    fallback: plan == PageDraw::Tiles && total > 0 && ready < total,
+                    partial: plan == PageDraw::Tiles && total > 0 && ready < total,
                     ready,
                     total,
                     waited_ms,

@@ -36,7 +36,16 @@ fn session_at_800() -> (DocumentSession, PageIndex, Arc<MemoryCache>) {
 }
 
 fn input(ready: usize, total: usize, preview: Preview, waited_ms: u64) -> DrawInput {
-    DrawInput { tiled: true, has_whole_current: false, ready, total, preview, waited_ms }
+    DrawInput {
+        tiled: true,
+        has_whole_current: false,
+        ready,
+        total,
+        preview,
+        waited_ms,
+        // 集成用例的意图是"首次进入该波段"，粘性由 view.rs 的单测覆盖
+        showing_tiles: false,
+    }
 }
 
 /// 把"当前已缓存的整页图/块"全部上传（模拟 app 的 `upload_page`：一次能把一页传完）。

@@ -343,24 +343,34 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
 
 // ------------------------------------------------------------------ 画法追踪
 
-/// 每个 `(页, 波段, 可见范围)` 的画法序列，检查"只翻一次、不得翻回去"。
+/// 每个 `(页, 波段)` 的一次**连续逗留**里的画法序列，检查"只翻一次、不得翻回去"。
+///
+/// 注意"逗留"：同一页可能先看 4096、再回 1600、再回到 4096（连续缩放/来回缩放），
+/// 每次重新进入某波段都应重新走一遍"预览 → 瓦片"，因此换波段时要清掉该页的历史。
 #[derive(Default)]
 struct FlipTracker {
-    history: HashMap<(u32, u32, (u32, u32, u32, u32)), Vec<PlanStamp>>,
+    history: HashMap<(u32, u32), Vec<PlanStamp>>,
+    /// 每页当前所在波段（用来发现"离开又回来"）。
+    band: HashMap<u32, u32>,
+}
+
+/// 一帧的判定结果。
+struct FlipOutcome {
+    /// 违规说明。
+    violations: Vec<String>,
+    /// 这一帧是否**刚刚**从预览翻到瓦片（断言 ④ 只在这个时刻检查就绪度）。
+    became_tiles: bool,
 }
 
 impl FlipTracker {
-    /// 记一帧；返回这一帧产生的违规说明。
-    fn observe(
-        &mut self,
-        page: u32,
-        stamp: PlanStamp,
-        range: (u32, u32, u32, u32),
-        frame: u64,
-    ) -> Vec<String> {
-        let history = self.history.entry((page, stamp.band, range)).or_default();
+    fn observe(&mut self, page: u32, stamp: PlanStamp, frame: u64) -> FlipOutcome {
+        // 换波段（含离开后又回来）→ 该页的历史作废，重新开始一段
+        if self.band.insert(page, stamp.band) != Some(stamp.band) {
+            self.history.retain(|(p, _), _| *p != page);
+        }
+        let history = self.history.entry((page, stamp.band)).or_default();
         if history.last() == Some(&stamp) {
-            return Vec::new();
+            return FlipOutcome { violations: Vec::new(), became_tiles: false };
         }
         let was_tiles = history
             .last()
@@ -379,16 +389,19 @@ impl FlipTracker {
             ));
         } else if !was_tiles && now_tiles && flipped_before {
             violations.push(format!(
-                "第 {frame} 帧：页 {page} 波段 {} 在可见范围 {range:?} 内第二次翻到瓦片",
+                "第 {frame} 帧：页 {page} 波段 {} 第二次翻到瓦片（同一波段只允许翻一次）",
                 stamp.band
             ));
         }
         history.push(stamp);
-        violations
+        FlipOutcome { violations, became_tiles: now_tiles && !was_tiles }
     }
 }
 
-/// 断言 ④：`Tiles` 时可见范围必须全就绪，除非已等满 [`READY_TIMEOUT_MS`]（或有旧内容都没得用）。
+/// 断言 ④：**翻到瓦片的那一刻**可见范围必须全就绪，除非已等满 [`READY_TIMEOUT_MS`]。
+///
+/// 只检查"翻页那一刻"：翻过去之后（D-104 的粘性模式）滚出新块时，缺的块由底料补，
+/// 已清晰的部分保持清晰 —— 那是设计允许的，不该报。
 fn premature_switch(page: u32, stamp: PlanStamp, frame: u64) -> Option<String> {
     if !matches!(stamp.plan, crate::view::PageDraw::Tiles) {
         return None;
@@ -802,20 +815,17 @@ impl Harness {
         }
         self.tracker.observe(stat.frame, &pages, &quads);
 
-        // 断言 ④（D-97 的编码）：画 `Tiles` 时可见范围必须**全就绪**，
-        // 只有等满 `READY_TIMEOUT_MS` 才允许"部分块 + 底料"的兜底。
-        // 少了这条，把"有一块就翻"的旧 bug 放回去也不会被抓住（真机上的白块）。
+        // 断言 ②：每次逗留某波段只允许"预览 → 瓦片"翻**一次**，且不得翻回去
         for (page, stamp) in &stat.plans {
-            if let Some(violation) = premature_switch(*page, *stamp, stat.frame) {
-                self.violations.push(violation);
+            let outcome = self.flips.observe(*page, *stamp, stat.frame);
+            self.violations.extend(outcome.violations);
+            // 断言 ④（D-97 的编码）：**翻页那一刻**必须全就绪，除非等满超时。
+            // 少了这条，把"有一块就翻"的旧 bug 放回去也不会被抓住（真机上的白块）。
+            if outcome.became_tiles {
+                if let Some(violation) = premature_switch(*page, *stamp, stat.frame) {
+                    self.violations.push(violation);
+                }
             }
-        }
-
-        // 断言 ②：每个 (页, 波段, 可见范围) 只允许"预览 → 瓦片"翻**一次**，且不得翻回去
-        for (page, stamp) in &stat.plans {
-            let range = stat.ranges.get(page).copied().unwrap_or((0, 0, 0, 0));
-            let violations = self.flips.observe(*page, *stamp, range, stat.frame);
-            self.violations.extend(violations);
         }
     }
 
@@ -853,9 +863,9 @@ impl Harness {
         if let Some(frame) = action
             .frames_data
             .iter()
-            .find(|frame| frame.plans.values().any(|stamp| stamp.fallback))
+            .find(|frame| frame.plans.values().any(|stamp| stamp.partial))
         {
-            if let Some((page, stamp)) = frame.plans.iter().find(|(_, stamp)| stamp.fallback) {
+            if let Some((page, stamp)) = frame.plans.iter().find(|(_, stamp)| stamp.partial) {
                 self.notes.push(format!(
                     "动作 {} 第 {} 帧：页 {page} 波段 {} 以 {}/{} 块进入瓦片模式（等待 {}ms，阈值 {READY_TIMEOUT_MS}ms）",
                     action.id, frame.frame, stamp.band, stamp.ready, stamp.total, stamp.waited_ms
@@ -969,7 +979,7 @@ mod tests {
     use crate::view::PageDraw;
 
     fn stamp(plan: PageDraw, preview: Preview, ready: usize, total: usize, waited: u64) -> PlanStamp {
-        PlanStamp { plan, band: 10486, fallback: false, ready, total, waited_ms: waited, preview }
+        PlanStamp { plan, band: 10486, partial: false, ready, total, waited_ms: waited, preview }
     }
 
     // ---------- 断言 ②：一次波段切换只翻一次 ----------
@@ -977,31 +987,29 @@ mod tests {
     #[test]
     fn preview_to_tiles_once_is_fine() {
         let mut flips = FlipTracker::default();
-        let range = (0, 0, 2, 2);
         assert!(flips
-            .observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0), range, 1)
+            .observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0), 1)
+            .violations
             .is_empty());
         assert!(flips
-            .observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 20), range, 2)
+            .observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 20), 2)
+            .violations
             .is_empty());
         // 稳定在瓦片上不再报
         assert!(flips
-            .observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 40), range, 3)
+            .observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 40), 3)
+            .violations
             .is_empty());
     }
 
     #[test]
     fn going_back_to_preview_is_a_violation() {
         let mut flips = FlipTracker::default();
-        let range = (0, 0, 2, 2);
-        flips.observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0), range, 1);
-        flips.observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 20), range, 2);
-        let violations = flips.observe(
-            0,
-            stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 60),
-            range,
-            3,
-        );
+        flips.observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0), 1);
+        flips.observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 20), 2);
+        let violations = flips
+            .observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 60), 3)
+            .violations;
         assert_eq!(violations.len(), 1, "瓦片退回预览必须报：{violations:?}");
         assert!(violations[0].contains("退回"), "{violations:?}");
     }
@@ -1009,33 +1017,29 @@ mod tests {
     #[test]
     fn flipping_to_tiles_twice_is_a_violation() {
         let mut flips = FlipTracker::default();
-        let range = (0, 0, 2, 2);
-        flips.observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0), range, 1);
-        flips.observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 20), range, 2);
-        flips.observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 60), range, 3);
-        let violations = flips.observe(
-            0,
-            stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 80),
-            range,
-            4,
-        );
+        flips.observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0), 1);
+        flips.observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 20), 2);
+        flips.observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 60), 3);
+        let violations = flips
+            .observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 80), 4)
+            .violations;
         assert_eq!(violations.len(), 1, "第二次翻到瓦片必须报：{violations:?}");
         assert!(violations[0].contains("第二次"), "{violations:?}");
     }
 
+    /// D-104：同一波段里滚出新块不再退回预览，因此"一个波段只翻一次"是硬规则。
     #[test]
-    fn a_changed_visible_range_starts_a_new_segment() {
+    fn a_new_band_is_a_new_segment() {
         let mut flips = FlipTracker::default();
-        // 滚动前：预览 → 瓦片
-        flips.observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0), (0, 0, 2, 2), 1);
-        flips.observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 20), (0, 0, 2, 2), 2);
-        // 滚动后可见范围变了：新块要现渲染，回到预览是允许的
-        assert!(flips
-            .observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 2, 6, 40), (1, 0, 3, 2), 3)
-            .is_empty());
-        assert!(flips
-            .observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 6, 6, 60), (1, 0, 3, 2), 4)
-            .is_empty());
+        flips.observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0), 1);
+        flips.observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 20), 2);
+        // 换波段：允许重新走一次"预览 → 瓦片"
+        let mut next = stamp(PageDraw::Stretch(1600), Preview::Tiles(65_540), 0, 12, 0);
+        next.band = 16_384;
+        assert!(flips.observe(0, next, 3).violations.is_empty());
+        let mut next_tiles = stamp(PageDraw::Tiles, Preview::Tiles(65_540), 12, 12, 20);
+        next_tiles.band = 16_384;
+        assert!(flips.observe(0, next_tiles, 4).violations.is_empty());
     }
 
     // ---------- 断言 ④：不得提前切到瓦片 ----------

@@ -148,10 +148,17 @@ PageDraw  = Whole | Stretch(scale) | TilePreview(scale) | Tiles | Blank
 | --- | --- | --- |
 | 1 | 当前波段的整页纹理在 | `Whole` |
 | 2 | 该页当前不分块 | 有整页旧图 → `Stretch`；只有旧块 → `TilePreview`；都没有 → `Blank` |
-| 3 | `total > 0 && ready >= total` | `Tiles`（可见范围一块不缺） |
-| 4 | `ready > 0` 且 `waited_ms >= READY_TIMEOUT_MS(400)` | `Tiles`（**兜底**：某块渲染失败时不永远停在糊图） |
-| 5 | 有旧内容 | `Stretch` / `TilePreview` |
-| 6 | 都没有 | `Tiles`（首次打开，白不可避免） |
+| 3 | **该页在本波段上一帧已经是 `Tiles`**（粘性，D-104） | `Tiles`（缺的块由底料补，已清晰的部分保持清晰） |
+| 4 | `total > 0 && ready >= total` | `Tiles`（可见范围一块不缺才进门） |
+| 5 | `ready > 0` 且 `waited_ms >= READY_TIMEOUT_MS(400)` | `Tiles`（**兜底**：某块渲染失败时不永远停在糊图） |
+| 6 | 有旧内容 | `Stretch` / `TilePreview` |
+| 7 | 都没有 | `Tiles`（首次打开，白不可避免） |
+
+第 3 条（D-104）解决的是"波段内滚动"：新露出的块没就绪时，若退回预览层，
+**整页**会短暂变糊（实测 40–100ms）；粘性规则让页面留在 `Tiles`，
+缺失处由底料（D-98）补上 —— 即"已清晰的部分保持清晰，新块先给低分辨率"。
+波段一变，上一帧的波段号不等于当前波段号，粘性自然失效，仍走第 4/5 条的进门门槛
+（D-97 的"不许提前切"因此不被绕过）。
 
 配套三个纯函数：
 
@@ -160,7 +167,7 @@ PageDraw  = Whole | Stretch(scale) | TilePreview(scale) | Tiles | Blank
 | `ready_tiles_in_view` | 与绘制循环**同一段** `grid.contains` 枚举，数出 `ready/total`（否则会"永远差一块"） |
 | `preview_source` | 整屏预览取谁：缩小方向优先整页图（旧块只覆盖缩之前那一片）；放大方向取更接近目标的；等距优先整页图 |
 | `underlay_source` | **覆盖优先**：有整页图就用整页图，否则旧块（打底用，必须能盖满） |
-| `needs_underlay` | `Stretch`/`TilePreview` 总是要底料；`Tiles` 只在 `ready < total` 时要 |
+| `needs_underlay` | `Stretch`/`TilePreview` 总是要底料；`Tiles` 只在 `ready < total` 时要（粘性模式下这就是常态，D-104） |
 
 绘制顺序（每页）：**纸张 → 底料 → 主图层（预览或当前波段的块）**。
 缺块处露出底料（糊的旧图），**不补白**。
