@@ -33,7 +33,9 @@ use crate::text::{
     Highlight, HighlightKind, PageText, SearchHit, SearchQuery, SelectionGranularity, TextPosition,
     TextSelection,
 };
-use crate::tiling::{render_scale_for, TileGrid, DEFAULT_OVERSCAN};
+use crate::tiling::{
+    band_for, render_scale_for, render_scale_for_band, TileGrid, DEFAULT_OVERSCAN,
+};
 
 /// 最小缩放倍数。
 pub const MIN_ZOOM: f32 = 0.1;
@@ -554,6 +556,40 @@ impl DocumentSession {
     pub fn thumbnail_image(&self, page: PageIndex) -> Option<Arc<RasterImage>> {
         let key = self.thumbnail_key(page)?;
         self.cache.get(&key)
+    }
+
+    /// 该页在当前缩放下"**可以作为整页图保留**的比例"（`scale_milli`，升序去重）。
+    ///
+    /// 用途：纹理层的 B 类（底料）要一个**纯**的清单 —— 不看"现在有什么"，
+    /// 只看"哪些比例上这页本来就不分块"（在那些比例上它天然是一张整页图），再加开场底料。
+    /// 这样"要保留的整页图"就不会因为缓存/纹理的来去而抖动（D-112）。
+    pub fn whole_page_scales(&self, page: PageIndex) -> Vec<u32> {
+        let Some(placement) = self.layout.placement(page) else {
+            return Vec::new();
+        };
+        let size = placement.page_size.rotated(placement.rotation);
+        let current_band = band_for(placement.scale.0, self.overscan);
+        let mut scales = Vec::new();
+        if let Some(scale) = self.thumbnail_scale(page) {
+            scales.push((scale.0 * 1000.0).round() as u32);
+        }
+        for band in 0..=current_band {
+            let render = render_scale_for_band(band, self.overscan);
+            let pixels = Size::new(size.width * render, size.height * render);
+            if self
+                .tiling
+                .requires_tiling_bounded(pixels, self.max_texture_side)
+            {
+                continue;
+            }
+            let milli = (render * 1000.0).round() as u32;
+            if milli <= (self.render_scale_of(&placement) * 1000.0).round() as u32 {
+                scales.push(milli);
+            }
+        }
+        scales.sort_unstable();
+        scales.dedup();
+        scales
     }
 
     /// 该页是否已经有**任何**整页位图（缩略图或某一波段的整页图）。

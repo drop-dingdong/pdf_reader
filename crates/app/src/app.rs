@@ -47,7 +47,7 @@ use crate::view::{
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
     view_rect_for, view_to_content, compose_region_snapshot, needs_underlay, plan_page, DrawInput,
-    KeyedStore, PageDraw, PageFacts, PlanStamp, Preview,
+    KeyedStore, Desired, PageDraw, PageFacts, PageShape, PlanStamp, Preview,
 };
 
 /// 纹理层的**字节**预算（软上限，D-111）。
@@ -58,6 +58,27 @@ use crate::view::{
 /// 只有"底料 / 旧内容"这些可再生的纹理才受它约束。
 /// 可用 `PDF_READER_TEXTURE_BUDGET_MB` 覆盖（0 = 不限制）。
 pub const TEXTURE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+
+/// 一个纹理键"应当占多少字节"（**按几何算**，不看位图是否存在）。
+///
+/// 整页 = 渲染像素 × 4；块 = 该渲染比例下网格里的块像素 × 4。
+/// 这样预算决策与"纹理现在有没有"无关，不会因为上传/删除而抖动（D-112）。
+fn texture_key_bytes(page_size: Size, rotation: Rotation, max_side: u32, key: &RenderKey) -> u64 {
+    let scale = key.scale_milli as f32 / 1000.0;
+    let size = page_size.rotated(rotation);
+    let grid = TileGrid::new_bounded(size, scale, max_side);
+    let (width, height) = match key.tile {
+        None => {
+            let (width, height) = grid.render_px();
+            (width as u64, height as u64)
+        }
+        Some(tile) => {
+            let (_, _, width, height) = grid.tile_px(tile.col, tile.row);
+            (width as u64, height as u64)
+        }
+    };
+    width.saturating_mul(height).saturating_mul(4)
+}
 
 /// 从环境变量 `PDF_READER_TEXTURE_BUDGET_MB` 读预算（缺省用 [`TEXTURE_BUDGET_BYTES`]）。
 fn texture_budget_bytes() -> u64 {
@@ -370,7 +391,7 @@ pub struct PdfReaderApp {
     /// 是否已经提示过"当前视口的纹理需求超出预算"（只提示一次，D-111）。
     budget_warned: bool,
     /// 上一帧的保留统计（A/B/C 各占多少字节），诊断用（D-111）。
-    last_retain: crate::view::RetainReport,
+    last_retain: Desired,
     /// 每帧临时持有的命令与事件缓冲（避免反复分配）。
     commands: Vec<ViewerCommand>,
     events: Vec<SessionEvent>,
@@ -563,7 +584,7 @@ impl PdfReaderApp {
             sidecar_migrated: false,
             sidecar_locked: None,
             budget_warned: false,
-            last_retain: crate::view::RetainReport::default(),
+            last_retain: Desired::default(),
             commands: Vec::new(),
             events: Vec::new(),
             visible: Vec::new(),
@@ -1078,18 +1099,40 @@ impl PdfReaderApp {
                     placement.rotation,
                 )
                 .scale_milli;
+                let shape = match session.tile_grid(*page) {
+                    None => PageShape::Whole,
+                    Some(_) => match session.visible_tiles(*page) {
+                        Some((col0, row0, col1, row1)) => PageShape::Tiles(col0, row0, col1, row1),
+                        None => PageShape::TilesHidden,
+                    },
+                };
                 Some(PageFacts {
                     page: *page,
                     rotation: placement.rotation,
                     render_milli,
-                    tiles: session.tile_grid(*page).map(|_| ()).and_then(|_| {
-                        session.visible_tiles(*page)
-                    }),
+                    shape,
+                    whole_pages: session.whole_page_scales(*page),
                 })
             })
             .collect();
-        let report = self.textures.retain_for_view(&facts);
-        self.last_retain = report;
+        let max_side = session.max_texture_side();
+        let page_sizes: Vec<(PageIndex, Rotation, Size)> = facts
+            .iter()
+            .filter_map(|fact| {
+                let placement = session.placement(fact.page)?;
+                Some((fact.page, fact.rotation, placement.page_size))
+            })
+            .collect();
+        let report = self.textures.retain_for_view(&facts, |key| {
+            let Some((_, _, page_size)) = page_sizes
+                .iter()
+                .find(|(page, rotation, _)| *page == key.page && *rotation == key.rotation)
+            else {
+                return 0;
+            };
+            texture_key_bytes(*page_size, key.rotation, max_side, key)
+        });
+        self.last_retain = report.clone();
         // 软上限：当前视口自身就超预算时只报告一次（提示"这台机器的显示需求超出预算"）
         if report.over_budget && !self.budget_warned {
             self.budget_warned = true;

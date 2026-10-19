@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use app::view::{PageFacts, plan_page, DrawInput, KeyedStore, PageDraw, Preview};
+use app::view::{plan_page, DrawInput, KeyedStore, PageDraw, Preview};
 use pdfcore::prelude::*;
 use pdfcore::testkit::{ImmediateScheduler, MemoryBackend, MemoryCache, MemoryPage};
 
@@ -64,6 +64,25 @@ fn upload_cached(
     }
 }
 
+/// 某一页的保留事实（测试里只要形状与整页比例，字节数一律按 0 算）。
+fn facts_for(session: &DocumentSession, page: PageIndex, milli: u32) -> app::view::PageFacts {
+    let placement = *session.placement(page).expect("布局");
+    let shape = match session.tile_grid(page) {
+        None => app::view::PageShape::Whole,
+        Some(_) => match session.visible_tiles(page) {
+            Some((col0, row0, col1, row1)) => app::view::PageShape::Tiles(col0, row0, col1, row1),
+            None => app::view::PageShape::TilesHidden,
+        },
+    };
+    app::view::PageFacts {
+        page,
+        rotation: placement.rotation,
+        render_milli: milli,
+        shape,
+        whole_pages: session.whole_page_scales(page),
+    }
+}
+
 /// 收尾：把这一帧的渲染结果取回并上传（供下一个缩放档当底料）。
 fn settle(session: &mut DocumentSession, store: &mut KeyedStore<&'static str>, page: PageIndex) {
     let mut events = Vec::new();
@@ -73,12 +92,7 @@ fn settle(session: &mut DocumentSession, store: &mut KeyedStore<&'static str>, p
     let render = session.render_scale(page);
     upload_cached(session, store, page, render, placement.rotation);
     let milli = RenderKey::new(page, render, placement.rotation).scale_milli;
-    store.retain_for_view(&[PageFacts {
-        page,
-        rotation: placement.rotation,
-        render_milli: milli,
-        tiles: session.visible_tiles(page),
-    }]);
+    store.retain_for_view(&[facts_for(session, page, milli)], |_| 0);
 }
 
 /// 到达某个缩放的**第一帧**：上传已缓存的 → 按新波段裁剪 → 返回可用的旧内容。
@@ -92,12 +106,7 @@ fn arrive(session: &mut DocumentSession, store: &mut KeyedStore<&'static str>, z
     let render = session.render_scale(page);
     let milli = RenderKey::new(page, render, placement.rotation).scale_milli;
     upload_cached(session, store, page, render, placement.rotation);
-    store.retain_for_view(&[PageFacts {
-        page,
-        rotation: placement.rotation,
-        render_milli: milli,
-        tiles: session.visible_tiles(page),
-    }]);
+    store.retain_for_view(&[facts_for(session, page, milli)], |_| 0);
     store.preview_source(page, placement.rotation, milli)
 }
 
