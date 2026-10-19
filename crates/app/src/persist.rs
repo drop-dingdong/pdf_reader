@@ -652,6 +652,8 @@ mod tests {
         assert_eq!(loaded.data.custom_images[0].scale, DEFAULT_SCALE);
     }
 
+    /// 非法/缺失的 `scale` 回退到 100%（不丢弃条目）。
+    #[test]
     fn invalid_scale_falls_back_to_the_default() {
         let data = SavedData::from_json(
             r#"{"version": 2, "custom_images": [
