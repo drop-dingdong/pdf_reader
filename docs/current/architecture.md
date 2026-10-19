@@ -141,7 +141,17 @@ PDF 页面坐标 --Rotation::map_point--> 旋转后页内坐标 --×Scale + 页�
 * **每帧限量**：`MAX_UPLOADS_PER_FRAME = 2`（按页计）；拖动期间 `allow_upload = false`。
 * **预览窗口**：缩放/旋转变更后 160ms 内不提交渲染（`ZOOM_PREVIEW_WINDOW`）。
 
-## 9. 已知限制（现状，不是 bug 清单）
+## 9. 可测试性接缝
+
+| 接缝 | 位置 | 为什么有它 |
+| --- | --- | --- |
+| `Clock`（system / manual） | `app/clock.rs` | 行为性截止时间可注入 → 回放可确定性复现"预览窗口/兜底/静默" |
+| `Diagnostics`（stderr / 内存） | `app/diag.rs` | 回放要把"某动作从开始到稳定"的输出分组收集 |
+| `PdfReaderApp::new_headless` | `app.rs` | 无窗口构造 |
+| `app::replay` | `app/replay.rs` | 脚本驱动真实 `App::ui`，逐帧采集 + 四条断言（见 [`testing.md`](testing.md) §4.5） |
+| `KeyedStore::iter` | `view.rs` | `TextureId` → `RenderKey`，让断言基于**真实绘制输出** |
+
+## 10. 已知限制（现状，不是 bug 清单）
 
 * 纹理层按**条目数**限额，没有显存字节预算；块大小随页面尺寸变化。
 * 上传/像素转换没有字节预算：一页一次可能上传几十块。

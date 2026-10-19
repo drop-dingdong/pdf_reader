@@ -24,6 +24,9 @@ use egui::{
 use pdfcore::prelude::*;
 
 use crate::persist;
+
+/// 无窗口回放器（脚本驱动真实 `App::ui`，用于回归断言与性能基线，见 D-103）。
+pub mod replay;
 use crate::view::{
     canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
     clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
@@ -44,7 +47,7 @@ use crate::view::{
     texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
     tile_view_rect, tile_view_rect_scaled,
     view_rect_for, view_to_content, compose_region_snapshot, needs_underlay, plan_page, DrawInput,
-    KeyedStore, PageDraw, Preview,
+    KeyedStore, PageDraw, PlanStamp, Preview,
 };
 
 /// 纹理缓存容量（条目数）。真正的淘汰依据是"是否可见 + 波段"（`retain_preview_scales`），
@@ -187,7 +190,7 @@ enum SidebarTab {
 
 /// 自定义 preview 的两种类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CustomKind {
+pub(crate) enum CustomKind {
     /// 文字预览（题目 + 内容）
     Text,
     /// 截图预览（题目 + 截图）
@@ -324,8 +327,8 @@ pub struct PdfReaderApp {
     textures: KeyedStore<egui::TextureHandle>,
     /// D-96：每页"当前波段从何时开始"（`(scale_milli, 起始时刻)`），用于就绪门槛的超时兜底。
     band_since: std::collections::HashMap<PageIndex, (u32, std::time::Instant)>,
-    /// D-96：每页上一帧的画法（`(标签, 波段)`），只在变化时打一行 `[画法]` 诊断。
-    last_plan: std::collections::HashMap<PageIndex, (String, u32)>,
+    /// 每页上一帧的画法（结构化）。既用于 `[画法]` 的边沿触发输出，也供回放器读取。
+    last_plan: std::collections::HashMap<PageIndex, PlanStamp>,
     /// 本次打开是否发生过**存档版本迁移**（旧版本 → 当前版本）：是则置脏，提示保存。
     sidecar_migrated: bool,
     /// 每帧临时持有的命令与事件缓冲（避免反复分配）。
@@ -439,7 +442,9 @@ pub struct PdfReaderApp {
     /// 存在的理由：像"800% 时看不到内容"这类问题只在真实窗口 + 真实 GPU 上出现，
     /// 无头测试无法复现；把每帧的绘制决策打到 stderr，用户就能把实况数据交回来
     /// （agent.md 规则 2：UI 相关验证交给用户，但要让用户能看到可诊断的信息）。
-    diagnose: bool,
+    diag: crate::diag::Diagnostics,
+    /// 行为性截止时间用的时钟（真实时间；回放器注入可推进的时钟）。
+    clock: crate::clock::Clock,
     /// 上次诊断输出的时间（限流到每秒一次）。
     last_report: std::time::Instant,
     /// 缩放/旋转"刚变过"的截止时间：在此之前不提交新渲染，全部可见页统一显示旧图拉伸。
@@ -469,7 +474,35 @@ impl PdfReaderApp {
     /// （人工验收反馈的现象）。关掉之后这些键由本应用统一解释为**文档缩放**。
     pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
         cc.egui_ctx.options_mut(|options| options.zoom_with_keyboard = false);
+        Self::with_clock(
+            crate::clock::Clock::system(),
+            crate::diag::Diagnostics::from_env(),
+            initial,
+        )
+    }
 
+    /// **无窗口**构造：自己提供时钟与诊断去处（回放器 / 集成测试用）。
+    ///
+    /// 与 [`PdfReaderApp::new`] 的唯一区别就是不碰 `CreationContext`；其余行为完全一致。
+    pub fn new_headless(
+        clock: crate::clock::Clock,
+        diag: crate::diag::Diagnostics,
+        initial: Option<PathBuf>,
+    ) -> Self {
+        let mut app = Self::with_clock(clock, diag, initial);
+        // 无窗口时没有窗口尺寸，给一个明确的默认视口（回放脚本也可以覆盖它）。
+        app.commands
+            .push(ViewerCommand::ResizeViewport(Size::new(1100.0, 900.0)));
+        app
+    }
+
+    fn with_clock(
+        clock: crate::clock::Clock,
+        diag: crate::diag::Diagnostics,
+        initial: Option<PathBuf>,
+    ) -> Self {
+        // 诊断限流与"启动时刻"都取注入时钟的当前值（回放时它由脚本推进）。
+        let boot = clock.now();
         let mut app = Self {
             session: None,
             navigation: None,
@@ -530,12 +563,13 @@ impl PdfReaderApp {
             click_highlight: None,
             message: String::new(),
             error: None,
-            diagnose: std::env::var_os("PDF_READER_DIAGNOSE").is_some(),
-            last_report: std::time::Instant::now(),
+            diag,
+            clock,
+            last_report: boot,
             preview_until: None,
             last_zoom: 1.0,
             last_rotation: Rotation::None,
-            started_at: std::time::Instant::now(),
+            started_at: boot,
             drag_started_at: None,
             last_pan_at: None,
             last_visible: Vec::new(),
@@ -993,7 +1027,7 @@ impl PdfReaderApp {
         for (tile, image) in session.tiles_for(page) {
             let key = RenderKey::tiled(page, render, placement.rotation, tile);
             if !self.textures.contains(&key) {
-                if self.diagnose {
+                if self.diag.enabled() {
                     // 贴图诊断：渲染尺寸 vs 页面像素尺寸 vs 屏幕摆放位置
                     // 用于区分"内容错位"（后端渲染）与"摆放错位"（前端映射）。
                     // 判据 4/5：同一波段内 `页面px` 只应出现一个值、且不应有新行。
@@ -1008,7 +1042,7 @@ impl PdfReaderApp {
                             render.0,
                             scroll,
                         );
-                        eprintln!(
+                        self.diag.line(format!(
                             "[贴图] 页={} col={} row={} 瓦片图={}x{} 页面px={}x{} 显示px={:.0}x{:.0} 瓦片px=({},{},{},{}) 屏幕=({:.1},{:.1},{:.0},{:.0}) scroll=({:.1},{:.1}) 渲染比例={:.3}",
                             page.get(), tile.col, tile.row, image.width, image.height,
                             page_width, page_height,
@@ -1016,7 +1050,7 @@ impl PdfReaderApp {
                             x, y, width, height,
                             screen.x, screen.y, screen.width, screen.height,
                             scroll.x, scroll.y, render.0
-                        );
+                        ));
                     }
                 }
                 self.upload(ctx, key, &image);
@@ -1629,8 +1663,8 @@ impl PdfReaderApp {
     ) -> Option<egui::TextureHandle> {
         let Some(placement) = session.placement(page).copied() else { return None };
         if !(page_rect.width > 0.0) || !(page_rect.height > 0.0) {
-            if self.diagnose {
-                eprintln!("[预览] 初次生成失败：{tag} 页={page:?} 区域为空 {page_rect:?}");
+            if self.diag.enabled() {
+                self.diag.line(format!("[预览] 初次生成失败：{tag} 页={page:?} 区域为空 {page_rect:?}"));
             }
             return None;
         }
@@ -1643,18 +1677,18 @@ impl PdfReaderApp {
         let Some(range) =
             grid.tiles_for_page_rect(page_rect, placement.page_size, placement.rotation)
         else {
-            if self.diagnose {
-                eprintln!(
+            if self.diag.enabled() {
+                self.diag.line(format!(
                     "[预览] 初次生成失败：{tag} 页={} 区域 {page_rect:?} 不在页面内",
                     page.display_number()
-                );
+                ));
             }
             return None;
         };
         let Some(tiles) = session.region_tiles(page, page_rect, render) else {
             let count = session.request_region(page, page_rect, render);
-            if self.diagnose {
-                eprintln!(
+            if self.diag.enabled() {
+                self.diag.line(format!(
                     "[预览] 初次生成：{tag} 页={} 区域pt=({:.1},{:.1},{:.1},{:.1}) 记录分辨率={:.0}% 渲染比例={:.3} 可见块={:?} 提交渲染={} 块（等待就绪）",
                     page.display_number(),
                     page_rect.x,
@@ -1665,7 +1699,7 @@ impl PdfReaderApp {
                     render.0,
                     range,
                     count
-                );
+                ));
             }
             return None;
         };
@@ -1679,17 +1713,17 @@ impl PdfReaderApp {
             &grid,
             &borrowed,
         ) else {
-            if self.diagnose {
-                eprintln!(
+            if self.diag.enabled() {
+                self.diag.line(format!(
                     "[预览] 初次生成失败：{tag} 页={} 区域 {page_rect:?} 的块都为空（块数 {}）",
                     page.display_number(),
                     borrowed.len()
-                );
+                ));
             }
             return None;
         };
-        if self.diagnose {
-            eprintln!(
+        if self.diag.enabled() {
+            self.diag.line(format!(
                 "[预览] 初次生成完成：{tag} 页={} 区域pt=({:.1},{:.1},{:.1},{:.1}) 记录分辨率={:.0}% 渲染比例={:.3} 尺寸={}x{}",
                 page.display_number(),
                 page_rect.x,
@@ -1700,7 +1734,7 @@ impl PdfReaderApp {
                 render.0,
                 image.size[0],
                 image.size[1]
-            );
+            ));
         }
         Some(ui.ctx().load_texture(texture_name, image, egui::TextureOptions::LINEAR))
     }
@@ -1836,7 +1870,7 @@ impl PdfReaderApp {
             let id = window.id;
             self.floats.push(window);
             // 一次性高亮（点击动作需要有限时长）+ 当帧也置为高亮
-            self.click_highlight = Some((id, std::time::Instant::now() + CLICK_HIGHLIGHT));
+            self.click_highlight = Some((id, self.clock.now() + CLICK_HIGHLIGHT));
             self.highlight_float = Some(id);
             self.message = "已唤出该自定义preview浮窗".to_string();
             return;
@@ -1848,7 +1882,7 @@ impl PdfReaderApp {
         let size = float_size_for_body(preview.body_size, FLOAT_TITLE_HEIGHT);
         let rect = self.float_rect_at_row(row, size);
         self.spawn_custom_float(index, rect);
-        self.click_highlight = Some((id, std::time::Instant::now() + CLICK_HIGHLIGHT));
+        self.click_highlight = Some((id, self.clock.now() + CLICK_HIGHLIGHT));
         self.message = "已生成该自定义preview浮窗".to_string();
     }
 
@@ -1963,15 +1997,15 @@ impl PdfReaderApp {
                 ) {
                     session.handle(command, &mut self.events);
                     view_changed = true;
-                    if self.diagnose {
+                    if self.diag.enabled() {
                         let after = session.viewport().scroll;
                         let viewport = session.viewport().size;
-                        eprintln!(
+                        self.diag.line(format!(
                             "[滚动] 滚轮 delta=({:.1},{:.1}) scroll ({:.1},{:.1})→({:.1},{:.1}) 视口={}x{} 横向布局={}",
                             scroll_delta.x, scroll_delta.y, scroll_before.x, scroll_before.y,
                             after.x, after.y, viewport.width, viewport.height,
                             self.horizontal_layout
-                        );
+                        ));
                     }
                 }
                 if let Some(command) = command_for_zoom_delta(zoom_delta, session.state().zoom) {
@@ -1980,7 +2014,7 @@ impl PdfReaderApp {
                 }
                 if view_changed {
                     // 视图刚被滚动/缩放 → 静默一段时间，期间不显示悬停预览（用户要求）
-                    self.scroll_quiet_until = Some(std::time::Instant::now() + HOVER_SCROLL_QUIET);
+                    self.scroll_quiet_until = Some(self.clock.now() + HOVER_SCROLL_QUIET);
                     ui.ctx().request_repaint();
                 }
             }
@@ -1996,13 +2030,13 @@ impl PdfReaderApp {
                 Tool::Pan => inverted_now,
             };
             if self.capture.is_none() && response.drag_started() {
-                self.drag_started_at = Some(std::time::Instant::now());
+                self.drag_started_at = Some(self.clock.now());
                 self.last_pan_at = None;
-                if self.diagnose {
-                    eprintln!(
+                if self.diag.enabled() {
+                    self.diag.line(format!(
                         "[时序] 拖动开始 t={:.6}s",
                         self.started_at.elapsed().as_secs_f64()
-                    );
+                    ));
                 }
                 if let Some(position) = response.interact_pointer_pos() {
                     let content =
@@ -2040,9 +2074,9 @@ impl PdfReaderApp {
                         let after = session.viewport().scroll;
                         // 拖动也是"视图在动" → 同样静默，避免预览在拖动中闪现
                         self.scroll_quiet_until =
-                            Some(std::time::Instant::now() + HOVER_SCROLL_QUIET);
-                        if self.diagnose && after != before {
-                            let now = std::time::Instant::now();
+                            Some(self.clock.now() + HOVER_SCROLL_QUIET);
+                        if self.diag.enabled() && after != before {
+                            let now = self.clock.now();
                             let since_start = self
                                 .drag_started_at
                                 .map(|start| now.duration_since(start).as_secs_f64() * 1000.0)
@@ -2051,25 +2085,25 @@ impl PdfReaderApp {
                                 .last_pan_at
                                 .map(|last| now.duration_since(last).as_secs_f64() * 1000.0)
                                 .unwrap_or(f64::NAN);
-                            eprintln!(
+                            self.diag.line(format!(
                                 "[时序] 拖动位移生效 t={:.6}s Δ起={:.1}ms Δ上次={:.1}ms scroll=({:.1},{:.1})",
                                 self.started_at.elapsed().as_secs_f64(),
                                 since_start,
                                 since_last,
                                 after.x,
                                 after.y
-                            );
+                            ));
                             self.last_pan_at = Some(now);
                             // "因为拖动而重新决定显示内容"= 可见页集合发生变化（要换/补位图）
                             let mut visible = Vec::new();
                             session.visible_pages(&mut visible);
                             if visible != self.last_visible {
-                                eprintln!(
+                                self.diag.line(format!(
                                     "[时序] 可见页集变化 t={:.6}s Δ起={:.1}ms 可见页={:?}",
                                     self.started_at.elapsed().as_secs_f64(),
                                     since_start,
                                     visible.iter().map(|page| page.display_number()).collect::<Vec<_>>()
-                                );
+                                ));
                                 self.last_visible = visible;
                             }
                         }
@@ -2269,35 +2303,37 @@ impl PdfReaderApp {
                     }
                 }
 
-                if self.diagnose {
+                // 画法记账：**无条件**更新（很便宜），供 `[画法]` 边沿触发与回放断言共用。
+                let stamp = PlanStamp {
+                    plan,
+                    band: whole_key.scale_milli,
+                    fallback: plan == PageDraw::Tiles && total > 0 && ready < total,
+                    ready,
+                    total,
+                    waited_ms,
+                    preview,
+                };
+                let previous = self.last_plan.insert(page, stamp).filter(|prev| *prev != stamp);
+                if let Some(previous) = previous.filter(|_| self.diag.enabled()) {
                     // 边沿触发：画法一变就立刻打一行（不受 1 秒节流），
                     // 白块到底是"没渲染好"还是"被旧内容挤掉"一眼可见（D-96）。
-                    let fallback = plan == PageDraw::Tiles && total > 0 && ready < total;
-                    let label = if fallback {
-                        format!("{}（兜底）", plan.label())
-                    } else {
-                        plan.label().to_string()
-                    };
-                    let previous = self.last_plan.get(&page).cloned();
-                    if previous.as_ref() != Some(&(label.clone(), whole_key.scale_milli)) {
-                        eprintln!(
-                            "[画法] p{} 波段={} 从={} 到={} 就绪={}/{} 等待={}ms 可见={:?} 预览={:?} 层={} 底料={:?}",
-                            page.display_number(),
-                            whole_key.scale_milli,
-                            previous
-                                .map(|(label, scale)| format!("{label}@{scale}"))
-                                .unwrap_or_else(|| "—".to_string()),
-                            label,
-                            ready,
-                            total,
-                            waited_ms,
-                            tile_area.as_ref().map(|(_, range)| *range),
-                            preview,
-                            layers,
-                            underlay
-                        );
-                        self.last_plan.insert(page, (label, whole_key.scale_milli));
-                    }
+                    let line = format!(
+                        "[画法] p{} 波段={} 从={} 到={} 就绪={}/{} 等待={}ms 可见={:?} 预览={:?} 层={} 底料={:?}",
+                        page.display_number(),
+                        stamp.band,
+                        previous.describe(),
+                        stamp.describe(),
+                        ready,
+                        total,
+                        waited_ms,
+                        tile_area.as_ref().map(|(_, range)| *range),
+                        preview,
+                        layers,
+                        underlay
+                    );
+                    self.diag.line(line);
+                }
+                if self.diag.enabled() {
                     report.push(format!(
                         "p{} 画法={} 块={}/{} 网格={} 渲染比例={:.3} 等待={}ms 预览={:?} 底料={:?} 视图矩形=({:.0},{:.0} {:.0}×{:.0})",
                         page.display_number(),
@@ -2318,12 +2354,13 @@ impl PdfReaderApp {
             }
 
             // 诊断输出（PDF_READER_DIAGNOSE=1）：每秒一次，足够定位"看不到内容"这类问题
-            if self.diagnose
-                && self.last_report.elapsed() >= std::time::Duration::from_secs(1)
+            if self.diag.enabled()
+                && self.clock.now().saturating_duration_since(self.last_report)
+                    >= std::time::Duration::from_secs(1)
             {
-                self.last_report = std::time::Instant::now();
+                self.last_report = self.clock.now();
                 let max_side = ui.ctx().input(|input| input.max_texture_side);
-                eprintln!(
+                self.diag.line(format!(
                     "[诊断] 缩放={:.0}% 视口={:.0}×{:.0} scroll=({:.1},{:.1}) 当前页={} 可见页={:?} \
                      纹理={} 缓存在飞={} 预览中={} max_texture_side={} | {}",
                     session.state().zoom * 100.0,
@@ -2338,7 +2375,7 @@ impl PdfReaderApp {
                     previewing,
                     max_side,
                     report.join(" | ")
-                );
+                ));
             }
 
             // 2) 高亮（选区 + 搜索命中）
@@ -2351,7 +2388,7 @@ impl PdfReaderApp {
             }
 
             // 链接热区诊断（PDF_READER_DIAGNOSE=1）：热区越界 = 坐标空间不一致
-            if self.diagnose {
+            if self.diag.enabled() {
                 if let Some(navigation) = &self.navigation {
                     for page in self.visible.clone() {
                         let Some(placement) = session.placement(page).copied() else { continue };
@@ -2361,7 +2398,7 @@ impl PdfReaderApp {
                         }
                         let size = placement.page_size;
                         let first = links[0].rect;
-                        eprintln!(
+                        self.diag.line(format!(
                             "[链接] p{} 页尺寸={:.1}×{:.1} 热区数={} 首个=({:.1},{:.1} {:.1}×{:.1}) 越界(粗查,只能发现大偏移)={}",
                             page.display_number(),
                             size.width,
@@ -2372,7 +2409,7 @@ impl PdfReaderApp {
                             first.width,
                             first.height,
                             if link_rect_in_page_bounds(first, size) { "否" } else { "是" }
-                        );
+                        ));
                     }
                 }
             }
@@ -2515,13 +2552,13 @@ impl PdfReaderApp {
             }
 
             // 拖动过程诊断：把 egui 报的状态与下一帧要执行的滚动量打出来（PDF_READER_DIAGNOSE=1）
-            if self.diagnose
+            if self.diag.enabled()
                 && (response.drag_started()
                     || response.dragged()
                     || response.drag_stopped()
                     || response.clicked())
             {
-                eprintln!(
+                self.diag.line(format!(
                     "[拖动] started={} dragged={} stopped={} clicked={} 模式={:?} 指针={:?} delta={:?} 当前scroll=({:.1},{:.1})",
                     response.drag_started(),
                     response.dragged(),
@@ -2532,19 +2569,19 @@ impl PdfReaderApp {
                     response.drag_delta(),
                     scroll.x,
                     scroll.y
-                );
+                ));
             }
             if response.drag_stopped() {
-                if self.diagnose {
+                if self.diag.enabled() {
                     let total = self
                         .drag_started_at
                         .map(|start| start.elapsed().as_secs_f64() * 1000.0)
                         .unwrap_or(0.0);
-                    eprintln!(
+                    self.diag.line(format!(
                         "[时序] 拖动结束 t={:.6}s 全程={:.1}ms",
                         self.started_at.elapsed().as_secs_f64(),
                         total
-                    );
+                    ));
                 }
                 self.drag = None;
                 self.drag_started_at = None;
@@ -2683,7 +2720,7 @@ impl PdfReaderApp {
         //    被浮窗盖住的链接不应再有悬停反馈。
         let scrolling = self
             .scroll_quiet_until
-            .map_or(false, |deadline| std::time::Instant::now() < deadline);
+            .map_or(false, |deadline| self.clock.now() < deadline);
         let float_rects: Vec<egui::Rect> = self.floats.iter().map(|window| window.rect).collect();
         let over_float = pointer.map_or(false, |position| pointer_over_any(position, &float_rects));
         if !hover_preview_allowed(scrolling, over_float) {
@@ -3137,14 +3174,14 @@ impl PdfReaderApp {
         }
         let page = preview_page;
         let Some(snapshot) = self.snapshot_for(ui, session, overlap) else {
-            if self.diagnose {
-                eprintln!(
+            if self.diag.enabled() {
+                self.diag.line(format!(
                     "[图片预览] 合成失败：页={:?} 选区={:?} 缩放={:.3} 可见页={:?}",
                     page,
                     overlap,
                     session.state().zoom,
                     self.visible
-                );
+                ));
             }
             self.message = "该区域还没有已渲染的像素（请稍候再试）".to_string();
             return;
@@ -3407,7 +3444,7 @@ impl PdfReaderApp {
                             ));
                         }
                     }
-                    eprintln!(
+                    self.diag.line(format!(
                         "[截图] 视图区域 ({:.1},{:.1} {:.1}×{:.1}){}",
                         selection.min.x,
                         selection.min.y,
@@ -3418,7 +3455,7 @@ impl PdfReaderApp {
                         } else {
                             format!(" | {}", parts.join(" | "))
                         }
-                    );
+                    ));
                     self.message = format!(
                         "截图区域已输出：{:.0}×{:.0}",
                         selection.width(),
@@ -3426,7 +3463,7 @@ impl PdfReaderApp {
                     );
                 }
                 None => {
-                    eprintln!("[截图] 未框选任何区域");
+                    self.diag.line(format!("[截图] 未框选任何区域"));
                     self.message = "截图模式：未框选区域".to_string();
                 }
             }
@@ -3708,7 +3745,7 @@ impl PdfReaderApp {
             // 高亮有两个来源：悬浮（每帧判定）与点击（一次性，带截止时刻）
             let clicked_highlight = self
                 .click_highlight
-                .map_or(false, |(target, until)| target == id && std::time::Instant::now() < until);
+                .map_or(false, |(target, until)| target == id && self.clock.now() < until);
             let highlighted = self.highlight_float == Some(id) || clicked_highlight;
             let (border, border_width, title_color) = if highlighted {
                 (Color32::from_rgb(255, 170, 60), 2.0, Color32::from_rgb(140, 96, 36))
@@ -3964,7 +4001,7 @@ impl eframe::App for PdfReaderApp {
         if (zoom_now - self.last_zoom).abs() > f32::EPSILON || rotation_now != self.last_rotation {
             self.last_zoom = zoom_now;
             self.last_rotation = rotation_now;
-            self.preview_until = Some(std::time::Instant::now() + ZOOM_PREVIEW_WINDOW);
+            self.preview_until = Some(self.clock.now() + ZOOM_PREVIEW_WINDOW);
         }
         let previewing = self.previewing();
 
@@ -4009,10 +4046,10 @@ impl eframe::App for PdfReaderApp {
         let after_draw = frame_start.elapsed();
 
         // 每帧耗时分解：拖动期间（或单帧明显慢时）打印，用来定位"不跟手"到底花在哪
-        if self.diagnose {
+        if self.diag.enabled() {
             let total_ms = after_draw.as_secs_f64() * 1000.0;
             if self.drag.is_some() || total_ms > 25.0 {
-                eprintln!(
+                self.diag.line(format!(
                     "[帧] 总={:.1}ms 输入+pump={:.1}ms 纹理={:.1}ms(转换={:.1} 上传={:.1}) 绘制={:.1}ms 纹理数={} 命中={} 可见页={} 大纲={} 在飞={}",
                     total_ms,
                     after_input.as_secs_f64() * 1000.0,
@@ -4028,7 +4065,7 @@ impl eframe::App for PdfReaderApp {
                         .map(|navigation| outline_node_count(&navigation.outline))
                         .unwrap_or(0),
                     session.pending_renders()
-                );
+                ));
             }
         }
 
@@ -4046,7 +4083,7 @@ impl eframe::App for PdfReaderApp {
         // 预览窗口结束后必须自己醒一次，去请求最终比例的渲染
         if previewing {
             if let Some(deadline) = self.preview_until {
-                ctx.request_repaint_after(deadline.saturating_duration_since(std::time::Instant::now()));
+                ctx.request_repaint_after(deadline.saturating_duration_since(self.clock.now()));
             }
         } else if pending > 0 {
             ctx.request_repaint();
@@ -4069,7 +4106,7 @@ impl PdfReaderApp {
     /// 波段不变就不重置：同波段内滚动时新块本来就要现渲染，
     /// 等过 [`view::READY_TIMEOUT_MS`] 后应显示"已就绪 + 补白"，而不是一直糊着（D-96）。
     fn note_band_wait(&mut self, page: PageIndex, scale_milli: u32, ready: usize) -> u64 {
-        let now = std::time::Instant::now();
+        let now = self.clock.now();
         if ready == 0 {
             self.band_since.remove(&page);
             return 0;
@@ -4087,7 +4124,7 @@ impl PdfReaderApp {
 
     fn previewing(&self) -> bool {
         self.preview_until
-            .map_or(false, |deadline| std::time::Instant::now() < deadline)
+            .map_or(false, |deadline| self.clock.now() < deadline)
     }
 
     /// 没有打开文档时的空状态界面。

@@ -103,7 +103,18 @@ ensure_textures(allow_upload)
 | 文本 | `text_position_at` / `highlight_selection` / `selected_text` / `search` |
 | 导航 | `navigation()`（打开时已解析）、`link_at` |
 
-## 9. 已知债务
+## 9. 可测试性接缝（D-103）
+
+| 接缝 | 作用 |
+| --- | --- |
+| `PdfReaderApp::new_headless(clock, diag, initial)` | 无 `CreationContext` 也能构造（回放/测试） |
+| `Clock`（`clock.rs`） | 行为性截止时间（160ms 预览窗口、400ms 兜底、250ms 静默、高亮消退）统一读它；测试注入可推进的手动时钟。**耗时测量**仍用真实 `Instant::now()` |
+| `Diagnostics`（`diag.rs`） | 诊断去处：stderr 或内存缓冲（按动作分组） |
+| `last_plan: HashMap<PageIndex, PlanStamp>` | 每帧每页的画法快照（无条件记录），`[画法]` 边沿触发与回放断言共用 |
+| `KeyedStore::iter()` | 把 egui 的 `TextureId` 反查成 `RenderKey`（回放器据此判断"哪些格子是清晰层"） |
+| `view::region_device_rect` | 预览区域的像素矩形（唯一来源：拼图与断言共用） |
+
+## 10. 已知债务
 
 * `app.rs` 单体偏大（~4.2k 行、一个 impl）：绘制/侧栏/浮窗/截图/存档胶水混在一处。
   新逻辑优先落 `view.rs`；拆分是待办（见 [`../decisions/log.md`](../decisions/log.md) 的开放项）。

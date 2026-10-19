@@ -354,6 +354,44 @@ impl PageDraw {
     }
 }
 
+/// 某一帧某页的"画法快照"。
+///
+/// 两个用途：`[画法]` 的**边沿触发**输出（只在变化时打一行），以及回放器读取
+/// "一次波段切换里画法翻了哪几次"（断言"只翻一次"）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanStamp {
+    /// 这一帧采用的画法。
+    pub plan: PageDraw,
+    /// 该页当前的渲染波段（`scale_milli`）。
+    pub band: u32,
+    /// 是否是"超时兜底"（画 `Tiles` 但可见范围还没齐）。
+    pub fallback: bool,
+    /// 可见范围内已就绪的块数。
+    pub ready: usize,
+    /// 可见范围内的块数。
+    pub total: usize,
+    /// 该波段第一块就绪以来经过的毫秒数（0 = 还没有任何块就绪）。
+    pub waited_ms: u64,
+    /// 这一帧可用的预览源（`None` = 没有任何旧内容）。
+    pub preview: Preview,
+}
+
+impl PlanStamp {
+    /// 用于"是否变化"的比较签名（**不含** `waited_ms`：它每帧都在变）。
+    pub fn stable_key(self) -> (String, u32, bool, usize, usize) {
+        (self.describe(), self.band, self.preview != Preview::None, self.ready, self.total)
+    }
+
+    /// 诊断用的短名（兜底时带后缀）。
+    pub fn describe(self) -> String {
+        if self.fallback {
+            format!("{}（兜底）", self.plan.label())
+        } else {
+            self.plan.label().to_string()
+        }
+    }
+}
+
 /// [`plan_page`] 的输入：全部是"已经知道的事实"，构造后即可单测。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DrawInput {
@@ -426,6 +464,58 @@ pub fn needs_underlay(plan: PageDraw, ready: usize, total: usize) -> bool {
     }
 }
 
+/// 页面空间矩形在**设备像素**里的整数矩形 `(x0, y0, 宽, 高)`。
+///
+/// 换算链：四角 `Rotation::map_point` → 显示坐标 → × 渲染比例 → 外接矩形 → 两端取整
+/// （与块边界同一套规则：两端各 `round` 一次）。
+///
+/// 这是"预览图应该多大、从哪个像素开始"的**唯一**来源：`compose_region_snapshot` 用它分配缓冲，
+/// 回放器的断言也用它比对实际纹理尺寸（D-103 的断言 ③）。
+pub fn region_device_rect(
+    page_rect: Rect,
+    page_size: Size,
+    rotation: Rotation,
+    render_scale: f32,
+) -> Option<(i64, i64, u32, u32)> {
+    if !(page_rect.width > 0.0) || !(page_rect.height > 0.0) {
+        return None;
+    }
+    let scale = if render_scale > 0.0 { render_scale } else { 1.0 };
+    let corners = [
+        Point::new(page_rect.x, page_rect.y),
+        Point::new(page_rect.right(), page_rect.y),
+        Point::new(page_rect.x, page_rect.bottom()),
+        Point::new(page_rect.right(), page_rect.bottom()),
+    ];
+    let mut min = Point::new(f32::MAX, f32::MAX);
+    let mut max = Point::new(f32::MIN, f32::MIN);
+    for corner in corners {
+        let display = rotation.map_point(corner, page_size);
+        let device = Point::new(display.x * scale, display.y * scale);
+        min = Point::new(min.x.min(device.x), min.y.min(device.y));
+        max = Point::new(max.x.max(device.x), max.y.max(device.y));
+    }
+    let x0 = min.x.round() as i64;
+    let y0 = min.y.round() as i64;
+    let width = (max.x.round() as i64 - x0).max(0);
+    let height = (max.y.round() as i64 - y0).max(0);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some((x0, y0, width as u32, height as u32))
+}
+
+/// 预览区域的**输出像素尺寸** = [`region_device_rect`] 的宽高。
+pub fn region_pixel_size(
+    page_rect: Rect,
+    page_size: Size,
+    rotation: Rotation,
+    render_scale: f32,
+) -> Option<(u32, u32)> {
+    region_device_rect(page_rect, page_size, rotation, render_scale)
+        .map(|(_, _, width, height)| (width, height))
+}
+
 /// 由"某页某区域、指定渲染比例的块"拼出一张预览图（D-101）。
 ///
 /// ## 与 [`compose_snapshot`] 的分工
@@ -447,29 +537,9 @@ pub fn compose_region_snapshot(
     if !(page_rect.width > 0.0) || !(page_rect.height > 0.0) {
         return None;
     }
-    let scale = if render_scale > 0.0 { render_scale } else { 1.0 };
-    // 页面空间矩形 → 旋转后的显示坐标 → 渲染像素（取外接矩形；90°/270° 会交换宽高）
-    let corners = [
-        Point::new(page_rect.x, page_rect.y),
-        Point::new(page_rect.right(), page_rect.y),
-        Point::new(page_rect.x, page_rect.bottom()),
-        Point::new(page_rect.right(), page_rect.bottom()),
-    ];
-    let mut min = Point::new(f32::MAX, f32::MAX);
-    let mut max = Point::new(f32::MIN, f32::MIN);
-    for corner in corners {
-        let display = rotation.map_point(corner, page_size);
-        let device = Point::new(display.x * scale, display.y * scale);
-        min = Point::new(min.x.min(device.x), min.y.min(device.y));
-        max = Point::new(max.x.max(device.x), max.y.max(device.y));
-    }
-    let x0 = min.x.round() as i64;
-    let y0 = min.y.round() as i64;
-    let width = (max.x.round() as i64 - x0).max(0) as usize;
-    let height = (max.y.round() as i64 - y0).max(0) as usize;
-    if width == 0 || height == 0 {
-        return None;
-    }
+    let (x0, y0, width, height) =
+        region_device_rect(page_rect, page_size, rotation, render_scale)?;
+    let (width, height) = (width as usize, height as usize);
     let mut rgba = vec![255u8; width * height * 4];
     let mut painted = false;
     for (tile, image) in tiles {
@@ -1090,6 +1160,11 @@ impl<V> KeyedStore<V> {
     /// 是否为空。
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// 只读遍历（回放/断言用：把 `TextureId` 反查成 `RenderKey`）。
+    pub fn iter(&self) -> impl Iterator<Item = (&RenderKey, &V)> {
+        self.entries.iter()
     }
 
     /// 是否存在。

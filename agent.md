@@ -30,5 +30,8 @@
 - [ ] 改动是否附带新增或更新的测试？
 - [ ] 全部测试是否通过？（`cargo test`）
 - [ ] 必须依赖 UI 的验证项是否已明确交给用户，并说明了「怎么看、看什么」？
+- [ ] 改动触及绘制/缓存/预览时，是否跑过回放器？
+      先 `cargo run -p app -- --sample a4 scripts/replay/a4_3p.pdf` 备样本，
+      再 `cargo run -p app -- --replay scripts/replay/tiling_800.json`（D-103，四条断言）
 - [ ] 现状文档（`docs/current/`）是否已同步？新决策是否已追加到 `docs/decisions/log.md`？
 - [ ] 是否已完成 `git commit`？

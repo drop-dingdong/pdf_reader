@@ -13,7 +13,12 @@
 #![warn(missing_docs)]
 
 pub mod app;
+pub mod clock;
+pub mod diag;
+pub(crate) mod json;
 pub mod persist;
 pub mod view;
+
+pub use app::replay;
 
 pub use app::PdfReaderApp;

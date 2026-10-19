@@ -1,3 +1,6 @@
 target/
 # PDFium 预编译动态库（用 scripts/fetch-pdfium.sh 获取，不入库）
 vendor/
+
+# 回放器样本（现场生成，不入库）
+scripts/replay/*.pdf

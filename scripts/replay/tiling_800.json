@@ -1,0 +1,14 @@
+{
+  "name": "tiling_800",
+  "pdf": "a4_3p.pdf",
+  "actions": [
+    { "id": "resize",   "op": "resize",    "width": 1100, "height": 900 },
+    { "id": "fit",      "op": "zoom",      "value": 1.0 },
+    { "id": "zoom_400", "op": "zoom",      "value": 4.0 },
+    { "id": "zoom_800", "op": "zoom",      "value": 8.0 },
+    { "id": "drag",     "op": "scroll_by", "dx": 420, "dy": 260 },
+    { "id": "back_400", "op": "zoom",      "value": 4.0 },
+    { "id": "back_100", "op": "zoom",      "value": 1.0 },
+    { "id": "settle",   "op": "wait",      "frames": 20 }
+  ]
+}

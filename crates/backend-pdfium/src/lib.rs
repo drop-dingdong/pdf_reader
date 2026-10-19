@@ -27,6 +27,8 @@
 #![warn(missing_docs)]
 
 pub mod backend;
+#[doc(hidden)]
+pub mod fixtures;
 pub mod document;
 pub mod error;
 pub mod library;
