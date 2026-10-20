@@ -425,6 +425,25 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **回退**：两个提交分别回退（先 `desired` 纯函数，再对账循环）。
 - **状态**：有效。
 
+### D-113 工程门禁：fmt / clippy / 结构基线 / 文档链接
+
+- **决定**：
+  * 全仓 `cargo fmt`（一次性、单独提交，并把该提交记入 `.git-blame-ignore-revs`）；
+  * clippy 清零并作为门禁：`cargo clippy --workspace --all-targets -- -D warnings`；
+  * **结构基线入库**（`perf/baseline/*.json`，`profile: structural`）：只记渲染请求数、上传字节、
+    纹理字节峰值、预览尺寸；时序与内存清零，因此跨机器可比，`compare` 见到它只比结构；
+  * `scripts/check.sh` = 以上三项 + 全部测试 + 文档链接检查；`scripts/check-docs.sh` 检查
+    相对链接可解析、且**代码注释**不再引用已移出的旧文档。
+- **理由**：用户问"CI 具体该怎么做，是不是强制代码风格就够了"。风格是最不值钱的一项；
+  真正能拦住回归的是"测试 + clippy + 结构基线"。而结构基线之所以能入库，是因为这些指标
+  与硬件无关（这也是 D-106 把指标分两档的直接收益）。
+- **影响**：`Baseline` 新增 `profile`（version 4）；CLI 新增 `--record-structural` / `--samples`；
+  `perf/` 从忽略改为只忽略非 baseline 内容；新增两个脚本。
+- **验证**：`./scripts/check.sh` 全绿（fmt、clippy 0、258 tests、4 份基线一致、文档 14 篇 0 失效链接）。
+- **已知缺口**：缺 PDFium 时真实 PDF/回放用例会**静默跳过**，CI 里必须用
+  `PDF_READER_REQUIRE_PDFIUM=1` 把它变成失败（`check.sh` 里已标 TODO）。
+- **状态**：有效。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

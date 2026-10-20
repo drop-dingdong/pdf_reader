@@ -20,7 +20,18 @@ use crate::image::RasterImage;
 use crate::render::{CacheStats, RenderCache, RenderKey};
 
 /// 默认容量上限：512 MiB（见 `docs/current/architecture.md` §8 的资源与性能要点）。
+///
+/// 可用环境变量 `PDF_READER_BITMAP_BUDGET_MB` 覆盖（0 = 不限制）—— 调内存/换机测试时用它，
+/// 不必改代码。
 pub const DEFAULT_CAPACITY_BYTES: u64 = 512 * 1024 * 1024;
+
+/// 实际使用的位图预算：环境变量优先，否则用 [`DEFAULT_CAPACITY_BYTES`]。
+fn default_capacity_bytes() -> u64 {
+    std::env::var("PDF_READER_BITMAP_BUDGET_MB")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or(DEFAULT_CAPACITY_BYTES, |mb| mb * 1024 * 1024)
+}
 
 #[derive(Debug, Default)]
 struct Inner {
@@ -50,7 +61,7 @@ impl LruCache {
 
     /// 用默认上限（512 MiB）构造。
     pub fn with_default_capacity() -> Self {
-        Self::new(DEFAULT_CAPACITY_BYTES)
+        Self::new(default_capacity_bytes())
     }
 
     /// 当前上限。

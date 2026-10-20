@@ -2602,7 +2602,7 @@ impl PdfReaderApp {
                 let max_side = ui.ctx().input(|input| input.max_texture_side);
                 self.diag.line(format!(
                     "[诊断] 缩放={:.0}% 视口={:.0}×{:.0} scroll=({:.1},{:.1}) 当前页={} 可见页={:?} \
-                     纹理={}条/{:.1}MB(A{:.1}/B{:.1}/C{:.1}) 预算={:.0}MB 缓存在飞={} 预览中={} max_texture_side={} | {}",
+                     纹理={}条/{:.1}MB(A{:.1}/B{:.1}/C{:.1}) 预算={:.0}MB 位图={}条/{:.1}MB 在飞={} 预览中={} max_texture_side={} | {}",
                     session.state().zoom * 100.0,
                     viewport.size.width,
                     viewport.size.height,
@@ -2616,6 +2616,8 @@ impl PdfReaderApp {
                     self.last_retain.bed_bytes as f64 / (1024.0 * 1024.0),
                     self.last_retain.old_bytes as f64 / (1024.0 * 1024.0),
                     self.textures.max_bytes() as f64 / (1024.0 * 1024.0),
+                    session.cache_bytes().1,
+                    session.cache_bytes().0 as f64 / (1024.0 * 1024.0),
                     session.pending_renders(),
                     previewing,
                     max_side,

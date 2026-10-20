@@ -341,6 +341,12 @@ impl DocumentSession {
     }
 
     /// 后台是否还有排队或正在渲染的任务（UI 据此决定要不要持续重绘）。
+    /// 位图缓存的占用（字节, 条目数）—— 诊断用。
+    pub fn cache_bytes(&self) -> (u64, usize) {
+        let stats = self.cache.stats();
+        (stats.bytes, stats.entries)
+    }
+
     /// 纹理单边上限（0 = 不限制）。
     pub fn max_texture_side(&self) -> u32 {
         self.max_texture_side

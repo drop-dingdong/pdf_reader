@@ -133,7 +133,8 @@ PDF 页面坐标 --Rotation::map_point--> 旋转后页内坐标 --×Scale + 页�
 
 ## 8. 资源与性能要点
 
-* **两级缓存**：CPU 位图 `LruCache`（512 MiB，按字节 LRU）与 GPU 纹理 `view::KeyedStore`
+* **两级缓存**：CPU 位图 `LruCache`（512 MiB，`PDF_READER_BITMAP_BUDGET_MB` 可覆盖，按字节 LRU）
+  与 GPU 纹理 `view::KeyedStore`
   （128 条目 + 每页三档保留）。详见 [`rendering.md`](rendering.md) §7。
 * **渲染预算**：`TilingPolicy::AbovePixels(4 MP)`（按**渲染**像素面积）决定整页还是分块；
   一块约 512px 的目标边长（`TARGET_TILE_PX`）。

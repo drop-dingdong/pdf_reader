@@ -124,7 +124,8 @@ let screen  = canvas.min + view;
 
 ### 7.1 CPU 位图层（`LruCache`，`RenderCache` 的默认实现）
 
-* 512 MiB 上限，按字节 LRU；**不按波段裁剪**——没超限就一直留着（缩回旧波段可秒回）。
+* 512 MiB 上限（`PDF_READER_BITMAP_BUDGET_MB` 可覆盖，0 = 不限制），按字节 LRU；
+  **不按波段裁剪**——没超限就一直留着（缩回旧波段可秒回）。
 * 单张超限时保留最后一张（避免"存进去立刻被丢"的抖动）。
 
 ### 7.2 GPU 纹理层（`app::view::KeyedStore`）
