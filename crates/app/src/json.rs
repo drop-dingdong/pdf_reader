@@ -49,7 +49,7 @@ impl Json {
     }
 }
 
-impl<'a> Json {
+impl Json {
     fn get_from<'b>(items: &'b [(String, Json)], key: &str) -> Option<&'b Json> {
         items.iter().find(|(name, _)| name == key).map(|(_, value)| value)
     }

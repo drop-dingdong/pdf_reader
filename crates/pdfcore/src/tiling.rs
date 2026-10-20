@@ -309,8 +309,8 @@ fn ratio(display_scale: f32, render_scale: f32) -> f32 {
 fn index_at(edges: &[u32], value: f32, is_high: bool) -> u32 {
     let last = edges.len().saturating_sub(2) as u32;
     let mut result = 0u32;
-    for index in 0..edges.len().saturating_sub(1) {
-        let start = edges[index] as f32;
+    for (index, edge) in edges.iter().enumerate().take(edges.len().saturating_sub(1)) {
+        let start = *edge as f32;
         let inside = if is_high { start < value } else { start <= value };
         if inside {
             result = index as u32;
@@ -427,7 +427,7 @@ mod tests {
                     let rect = grid.display_rect(page, col, row, display, render);
                     let hit = rect
                         .intersection(view)
-                        .map_or(false, |overlap| overlap.width > 0.0 && overlap.height > 0.0);
+                        .is_some_and(|overlap| overlap.width > 0.0 && overlap.height > 0.0);
                     assert!(hit, "探测给出 ({col},{row}) 却与视口不相交");
                 }
             }
@@ -439,7 +439,7 @@ mod tests {
                 let rect = grid.display_rect(page, col, row, display, render);
                 let hit = rect
                     .intersection(view)
-                    .map_or(false, |overlap| overlap.width > 0.0 && overlap.height > 0.0);
+                    .is_some_and(|overlap| overlap.width > 0.0 && overlap.height > 0.0);
                 assert!(!hit, "范围外的 ({col},{row}) 却与视口相交：{view:?}");
             }
             checked += 1;
@@ -552,7 +552,7 @@ mod tests {
                             let tile_rect = grid.tile_page_rect(col, row, page, rotation);
                             let overlap = tile_rect
                                 .intersection(rect)
-                                .map_or(false, |hit| hit.width > 0.0 && hit.height > 0.0);
+                                .is_some_and(|hit| hit.width > 0.0 && hit.height > 0.0);
                             assert!(
                                 overlap,
                                 "探测给出 ({col},{row}) 却与 {rect:?} 不相交（rotation={rotation:?}）"
@@ -567,7 +567,7 @@ mod tests {
                         let tile_rect = grid.tile_page_rect(col, row, page, rotation);
                         let overlap = tile_rect
                             .intersection(rect)
-                            .map_or(false, |hit| hit.width > 0.0 && hit.height > 0.0);
+                            .is_some_and(|hit| hit.width > 0.0 && hit.height > 0.0);
                         assert!(
                             !overlap,
                             "范围外的 ({col},{row}) 却与 {rect:?} 相交（rotation={rotation:?}）"

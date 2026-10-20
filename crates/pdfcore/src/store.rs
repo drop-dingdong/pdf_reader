@@ -135,8 +135,13 @@ impl Default for AppSettings {
 impl AppSettings {
     /// 从存储读取；任何字段缺失或损坏都退化为默认值（设置损坏不应阻止应用启动）。
     pub fn load(store: &dyn KeyValueStore) -> Self {
-        let mut settings = Self::default();
-        settings.last_directory = store.get(KEY_LAST_DIR).filter(|s| !s.is_empty()).map(PathBuf::from);
+        let mut settings = Self {
+            last_directory: store
+                .get(KEY_LAST_DIR)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+            ..Self::default()
+        };
         if let Some(zoom) = store.get(KEY_ZOOM).and_then(|raw| raw.parse::<f32>().ok()) {
             if zoom.is_finite() && zoom > 0.0 {
                 settings.zoom = zoom;
@@ -200,11 +205,13 @@ mod tests {
     #[test]
     fn settings_round_trip_through_store() {
         let store = MemoryStore::new();
-        let mut settings = AppSettings::default();
-        settings.zoom = 1.75;
-        settings.layout_mode = PageLayoutMode::SinglePage;
-        settings.reading_direction = ReadingDirection::RightToLeft;
-        settings.last_directory = Some(PathBuf::from("/home/user/docs"));
+        let mut settings = AppSettings {
+            zoom: 1.75,
+            layout_mode: PageLayoutMode::SinglePage,
+            reading_direction: ReadingDirection::RightToLeft,
+            last_directory: Some(PathBuf::from("/home/user/docs")),
+            ..AppSettings::default()
+        };
         settings.recent_files.add("/home/user/docs/book.pdf");
         settings.save(&store).unwrap();
 

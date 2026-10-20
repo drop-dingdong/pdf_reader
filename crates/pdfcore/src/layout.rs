@@ -743,7 +743,7 @@ mod tests {
     /// 这正是"缩小时页面中心一直往左上漂"的根因。
     #[test]
     fn content_smaller_than_viewport_is_centered() {
-        let layout = VerticalLayout.compute(&vec![PageGeometry::new(Size::new(100.0, 200.0), Rotation::None)], &params(1.0));
+        let layout = VerticalLayout.compute(&[PageGeometry::new(Size::new(100.0, 200.0), Rotation::None)], &params(1.0));
         // 单页 + 留白 5：内容 (110, 210)
         assert_eq!(layout.content_size, Size::new(110.0, 210.0));
 

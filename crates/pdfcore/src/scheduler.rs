@@ -45,6 +45,7 @@ struct Shared {
     next_job: AtomicU64,
 }
 
+#[derive(Default)]
 struct State {
     queue: BinaryHeap<QueuedJob>,
     /// 排队中 + 正在渲染的键（用于去重）。
@@ -55,11 +56,6 @@ struct State {
     in_flight: usize,
 }
 
-impl Default for State {
-    fn default() -> Self {
-        Self { queue: BinaryHeap::new(), active: HashSet::new(), tokens: HashMap::new(), in_flight: 0 }
-    }
-}
 
 /// 队列中的任务。排序规则：**优先级小的先出**，同优先级按提交顺序 FIFO。
 struct QueuedJob {

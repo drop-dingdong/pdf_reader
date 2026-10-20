@@ -332,7 +332,7 @@ impl Rotation {
     /// 由 PDF `/Rotate` 值构造（自动取模 360；非法值返回 `None`）。
     // 不使用 `rem_euclid`：它在 const 上下文中的稳定性依版本而异，这里手工取模更保险。
     pub const fn from_degrees(degrees: i32) -> Option<Self> {
-        let normalized = ((degrees % 360) + 360) % 360;
+        let normalized = degrees.rem_euclid(360);
         match normalized {
             0 => Some(Self::None),
             90 => Some(Self::Clockwise90),

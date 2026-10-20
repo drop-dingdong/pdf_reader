@@ -11,6 +11,9 @@
 //!
 //! 模块划分：[`app`] 是 egui 胶水（需要真实窗口），[`view`] 是可单测的纯逻辑。
 #![warn(missing_docs)]
+// 我们刻意用 `!(a > b)` 表达"NaN 也算不满足"（`!(width > 0.0)` 同时挡住 NaN 与 0），
+// clippy 建议的 `partial_cmp` 写法更长也更难读；这条 lint 对本项目是噪音。
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 pub mod app;
 pub mod clock;

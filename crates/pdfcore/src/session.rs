@@ -583,7 +583,7 @@ impl DocumentSession {
                 continue;
             }
             let milli = (render * 1000.0).round() as u32;
-            if milli <= (self.render_scale_of(&placement) * 1000.0).round() as u32 {
+            if milli <= (self.render_scale_of(placement) * 1000.0).round() as u32 {
                 scales.push(milli);
             }
         }
@@ -980,7 +980,7 @@ impl DocumentSession {
                     self.submitted.remove(&key);
                     self.jobs.remove(&key);
                     self.region_jobs.remove(&key);
-                    if self.thumbnail_jobs.get(&key.page).is_some() {
+                    if self.thumbnail_jobs.contains_key(&key.page) {
                         // 底料任务完成：从表里摘掉（幂等）
                         self.thumbnail_jobs.remove(&key.page);
                     }

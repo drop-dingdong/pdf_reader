@@ -119,11 +119,9 @@ pub fn sidecar_path(pdf: &Path) -> PathBuf {
 /// 实际纹理尺寸必须相同（= 区域 × 10.486，两端取整）。
 fn preview_sidecar() -> String {
     // 区域 150×80pt（A4 第 1 页中部），800% → 约 1573×839 px，需要 4×2 = 8 块
-    format!(
-        "{{\n  \"version\": 2,\n  \"custom_images\": [\n    {{\"page\": 0, \
+    "{\n  \"version\": 2,\n  \"custom_images\": [\n    {\"page\": 0, \
          \"point\": [150, 680], \"rect\": [72, 640, 150, 80], \
-         \"body\": [320, 200], \"scale\": 8.0, \"title\": \"回放预览\"}}\n  ]\n}}\n"
-    )
+         \"body\": [320, 200], \"scale\": 8.0, \"title\": \"回放预览\"}\n  ]\n}\n".to_string()
 }
 
 #[cfg(test)]

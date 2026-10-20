@@ -48,6 +48,7 @@ use crate::view::{
     tile_view_rect, tile_view_rect_scaled,
     view_rect_for, view_to_content, compose_region_snapshot, needs_underlay, plan_page, DrawInput,
     desired_textures, KeyedStore, Desired, PageDraw, PageFacts, PageShape, PlanStamp, Preview,
+    SnapshotLayer,
 };
 
 /// 纹理层的**字节**预算（软上限，D-111）。
@@ -271,9 +272,11 @@ struct CustomDialog {
 /// 按用户要求记录：Pin 结束时的**页号 + 页内坐标**、以该坐标为中心的**零尺寸矩形**
 /// （与链接对应）、以及题目/内容或截图。位置类字段暂时只被"保存"而未被读取 ——
 /// 它们是给"自定义 preview 与链接/被引用点挂接"的下一版准备的。
-#[allow(dead_code)]
 struct CustomPreview {
     page: PageIndex,
+    /// 记录时的页内坐标。**只写不读**：当前只用于写回存档（D-49 的"位置类字段"），
+    /// 后续"自定义 preview 与链接/被引用点挂接"会读它。
+    #[allow(dead_code)]
     point: Point,
     /// 以 `point` 为中心、**零尺寸**的矩形（与链接对应用）
     rect: Rect,
@@ -1807,6 +1810,8 @@ impl PdfReaderApp {
     /// 3. 缺块 → `request_region` 提交覆盖该区域的块，本帧返回 `None`（调用方下帧重试）。
     ///
     /// 这样"初次生成"不再依赖"用户是否在这个缩放下走过那块地方"。
+    // 8 个参数都是"这次生成预览需要的事实"，打包成结构体只会把调用点变长
+    #[allow(clippy::too_many_arguments)]
     fn preview_texture(
         &mut self,
         ui: &mut egui::Ui,
@@ -1817,8 +1822,12 @@ impl PdfReaderApp {
         texture_name: String,
         tag: &str,
     ) -> Option<egui::TextureHandle> {
-        let Some(placement) = session.placement(page).copied() else { return None };
-        if !(page_rect.width > 0.0) || !(page_rect.height > 0.0) {
+        let placement = session.placement(page).copied()?;
+        if page_rect.width.is_nan()
+            || page_rect.height.is_nan()
+            || page_rect.width <= 0.0
+            || page_rect.height <= 0.0
+        {
             if self.diag.enabled() {
                 self.diag.line(format!("[预览] 初次生成失败：{tag} 页={page:?} 区域为空 {page_rect:?}"));
             }
@@ -1923,7 +1932,7 @@ impl PdfReaderApp {
             let missing = self
                 .custom_previews
                 .get(index)
-                .map_or(false, |preview| {
+                .is_some_and(|preview| {
                     preview.kind == CustomKind::Image && preview.snapshot.is_none()
                 });
             if missing {
@@ -2002,13 +2011,13 @@ impl PdfReaderApp {
                 }
             }
         }
-        if self.custom_hover.map_or(false, |(hovered, _)| hovered == index) {
+        if self.custom_hover.is_some_and(|(hovered, _)| hovered == index) {
             self.custom_hover = None;
         }
-        if self.editing_title.as_ref().map_or(false, |(editing, _)| *editing == index) {
+        if self.editing_title.as_ref().is_some_and(|(editing, _)| *editing == index) {
             self.editing_title = None;
         }
-        if self.editing_body.as_ref().map_or(false, |(editing, _)| *editing == index) {
+        if self.editing_body.as_ref().is_some_and(|(editing, _)| *editing == index) {
             self.editing_body = None;
         }
         self.data_dirty = true;
@@ -2083,7 +2092,7 @@ impl PdfReaderApp {
     fn draw_canvas(&mut self, ui: &mut egui::Ui, session: &mut DocumentSession) {
         // 搜索栏放在**中央区域**的底部：只占画布宽度（不会跑到侧栏下方），
         // 且位于状态栏之上（用户建议）。
-        self.draw_search_bar_in_center(ui, &session);
+        self.draw_search_bar_in_center(ui, session);
         egui::CentralPanel::default().show(ui, |ui| {
             // 同时用"显式矩形 + interact"处理这两个区域，而**不是** `allocate_painter`：
             // 后者会按布局流占用空间 —— 上一版用 `allocate_painter(5px × 整高)` 画拖拽条，
@@ -2128,7 +2137,7 @@ impl PdfReaderApp {
             let pointer_over_canvas = ui
                 .ctx()
                 .pointer_hover_pos()
-                .map_or(false, |position| canvas.contains(position));
+                .is_some_and(|position| canvas.contains(position));
             // Pin 状态（自定义 preview 选点）：十字光标 + 状态栏提示
             if self.custom_pin.is_some() {
                 if pointer_over_canvas {
@@ -2341,7 +2350,7 @@ impl PdfReaderApp {
                 // D-96：波段切换后"旧内容 vs 新块"的判据（缺一块就不翻页，另有超时兜底）
                 let waited_ms = self.note_band_wait(page, whole_key.scale_milli, ready);
                 // D-104：同一波段内已经切到瓦片就不再退回预览（否则波段内滚动会整页变糊）
-                let showing_tiles = self.last_plan.get(&page).map_or(false, |stamp| {
+                let showing_tiles = self.last_plan.get(&page).is_some_and(|stamp| {
                     stamp.band == whole_key.scale_milli
                         && matches!(stamp.plan, PageDraw::Tiles)
                 });
@@ -2852,32 +2861,6 @@ impl PdfReaderApp {
         });
     }
 
-    /// 添加一个"测试浮窗"（带任意文字），位置按已有浮窗数量级联偏移。
-    ///
-    /// 入口按钮已按用户要求从界面移除（代码保留，便于以后挂到菜单里恢复）。
-    #[allow(dead_code)]
-    fn add_test_float(&mut self) {
-        let id = self.next_float_id;
-        self.next_float_id += 1;
-        let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(24.0 + cascade, 24.0 + cascade),
-            EVec2::new(280.0, 150.0),
-        );
-        self.floats.push(Float {
-            id,
-            title: format!("测试浮窗 #{id}"),
-            content: FloatContent::Text(format!(
-                "这是第 {id} 个测试浮窗。\n目前只显示文字。\n\n可以拖动标题栏移动、\n拖右下角改变大小、\n点右上角 ✕ 关闭。"
-            )),
-            origin: None,
-            custom: None,
-            body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
-            rect,
-        });
-        self.message = format!("已添加测试浮窗 #{id}");
-    }
-
     /// 悬停预览浮窗：检测鼠标下的页内链接 → 找到对应被引用点 → 必要时**渲染一次**截图 →
     /// 画一个临时浮窗。指针离开链接与浮窗后消失；点击它则转为永久浮窗。
     fn update_hover_preview(
@@ -2895,9 +2878,9 @@ impl PdfReaderApp {
         //    被浮窗盖住的链接不应再有悬停反馈。
         let scrolling = self
             .scroll_quiet_until
-            .map_or(false, |deadline| self.clock.now() < deadline);
+            .is_some_and(|deadline| self.clock.now() < deadline);
         let float_rects: Vec<egui::Rect> = self.floats.iter().map(|window| window.rect).collect();
-        let over_float = pointer.map_or(false, |position| pointer_over_any(position, &float_rects));
+        let over_float = pointer.is_some_and(|position| pointer_over_any(position, &float_rects));
         if !hover_preview_allowed(scrolling, over_float) {
             self.hover_tip = None;
             return;
@@ -2931,7 +2914,7 @@ impl PdfReaderApp {
 
         // 指针不在链接上时：只有还在浮窗上才保留
         let keep_existing = match (&self.hover_tip, pointer) {
-            (Some(tip), Some(pointer)) => tip.rect.map_or(false, |rect| rect.contains(pointer)),
+            (Some(tip), Some(pointer)) => tip.rect.is_some_and(|rect| rect.contains(pointer)),
             _ => false,
         };
         // 该目的地的浮窗**已经固定且仍在显示** → 不再弹临时预览，
@@ -2997,7 +2980,6 @@ impl PdfReaderApp {
             .and_then(|mark| mark.snapshot.clone())
             .is_none()
         {
-            return;
         }
     }
 
@@ -3638,7 +3620,7 @@ impl PdfReaderApp {
                     );
                 }
                 None => {
-                    self.diag.line(format!("[截图] 未框选任何区域"));
+                    self.diag.line("[截图] 未框选任何区域".to_string());
                     self.message = "截图模式：未框选区域".to_string();
                 }
             }
@@ -3731,8 +3713,7 @@ impl PdfReaderApp {
         session: &DocumentSession,
         content_rect: Rect,
     ) -> Option<egui::ColorImage> {
-        let mut owned: Vec<(Rect, Option<Arc<RasterImage>>, Vec<(Rect, Arc<RasterImage>)>)> =
-            Vec::new();
+        let mut owned: Vec<SnapshotLayer> = Vec::new();
         // **跨页**：凡与选区相交的页都参与拼合（不依赖 visible 集合，也不只取最大重叠那一页）
         let all_pages: Vec<(usize, Rect)> = (0..session.page_count() as usize)
             .filter_map(|index| {
@@ -3920,7 +3901,7 @@ impl PdfReaderApp {
             // 高亮有两个来源：悬浮（每帧判定）与点击（一次性，带截止时刻）
             let clicked_highlight = self
                 .click_highlight
-                .map_or(false, |(target, until)| target == id && self.clock.now() < until);
+                .is_some_and(|(target, until)| target == id && self.clock.now() < until);
             let highlighted = self.highlight_float == Some(id) || clicked_highlight;
             let (border, border_width, title_color) = if highlighted {
                 (Color32::from_rgb(255, 170, 60), 2.0, Color32::from_rgb(140, 96, 36))
@@ -3980,10 +3961,10 @@ impl PdfReaderApp {
             }
             // 文字预览的浮窗：正在原位编辑时跳过正文绘制（编辑框由
             // `draw_float_body_editing` 单独绘制，见下）
-            let editing_inline = self.floats[index].custom.map_or(false, |custom_index| {
+            let editing_inline = self.floats[index].custom.is_some_and(|custom_index| {
                 self.custom_previews
                     .get(custom_index)
-                    .map_or(false, |preview| preview.kind == CustomKind::Text)
+                    .is_some_and(|preview| preview.kind == CustomKind::Text)
                     && self.editing_body.as_ref().map(|(editing, _)| *editing) == Some(custom_index)
             });
             if editing_inline {
@@ -4299,7 +4280,7 @@ impl PdfReaderApp {
 
     fn previewing(&self) -> bool {
         self.preview_until
-            .map_or(false, |deadline| self.clock.now() < deadline)
+            .is_some_and(|deadline| self.clock.now() < deadline)
     }
 
     /// 没有打开文档时的空状态界面。
@@ -4353,6 +4334,8 @@ fn paint_placeholder(painter: &egui::Painter, rect: egui::Rect) {
 ///
 /// `preview` 里的比例来自同一份 `KeyedStore`，正常不会落空；万一同帧被裁剪，
 /// 只是少画一层，不 panic。
+// 8 个参数：画笔 + 画布原点 + 纹理层 + 页面放置 + 两个比例 + 是否标记 + 诊断开关
+#[allow(clippy::too_many_arguments)]
 fn paint_preview(
     painter: &egui::Painter,
     canvas_min: egui::Pos2,
@@ -4438,9 +4421,3 @@ fn canvas_to_content(canvas: egui::Rect, screen_position: egui::Pos2, scroll: Ve
     )
 }
 
-
-/// 让 `Align2` 与 `FontId` 在需要时可用（保持导入稳定）。
-#[allow(dead_code)]
-fn _unused_imports() -> (Align2, egui::FontId) {
-    (Align2::CENTER_CENTER, egui::FontId::proportional(12.0))
-}

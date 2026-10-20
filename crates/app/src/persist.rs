@@ -178,13 +178,15 @@ impl SavedData {
     pub fn from_json(text: &str) -> Parsed<Self> {
         let value = Json::parse(text)?;
         let root = value.as_object().ok_or("根节点不是对象")?;
-        let mut data = SavedData::default();
         // 缺 `version` 字段 = v1（本模块在 v2 之前确实写过 `"version": 1`，也兼容没有它的文件）
-        data.version = root
-            .field("version")
-            .and_then(|value| value.as_number())
-            .map(|value| value.round().max(1.0) as u32)
-            .unwrap_or(1);
+        let mut data = SavedData {
+            version: root
+                .field("version")
+                .and_then(|value| value.as_number())
+                .map(|value| value.round().max(1.0) as u32)
+                .unwrap_or(1),
+            ..SavedData::default()
+        };
         if let Some(links) = root.field("links") {
             for page in links.as_array().ok_or("links 不是数组")? {
                 let mut page_links = Vec::new();

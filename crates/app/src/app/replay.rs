@@ -564,7 +564,7 @@ impl FlipTracker {
         }
         let was_tiles = history
             .last()
-            .map_or(false, |last| matches!(last.plan, crate::view::PageDraw::Tiles));
+            .is_some_and(|last| matches!(last.plan, crate::view::PageDraw::Tiles));
         let now_tiles = matches!(stamp.plan, crate::view::PageDraw::Tiles);
         let flipped_before = history
             .iter()
@@ -674,14 +674,20 @@ impl CoverageTracker {
                 covered_last[*cell] = true;
             }
             let covered: std::collections::HashSet<usize> = covered.into_iter().collect();
-            for cell in 0..CELLS * CELLS {
-                if ever[cell] && !covered.contains(&cell) {
-                    self.violations.push(format!(
-                        "第 {frame} 帧：页 {page} 的格子 {cell} 曾经清晰，现在没有任何图层（=纸白）"
-                    ));
-                    // 只报一次
-                    ever[cell] = false;
-                }
+            // 先收集"该报的格子"，再改 `ever`（避免同时不可变/可变借用）
+            let lost: Vec<usize> = ever
+                .iter()
+                .enumerate()
+                .filter(|(cell, sharp)| **sharp && !covered.contains(cell))
+                .map(|(cell, _)| cell)
+                .take(CELLS * CELLS)
+                .collect();
+            for cell in lost {
+                self.violations.push(format!(
+                    "第 {frame} 帧：页 {page} 的格子 {cell} 曾经清晰，现在没有任何图层（=纸白）"
+                ));
+                // 只报一次
+                ever[cell] = false;
             }
             for cell in &sharp {
                 ever[*cell] = true;
@@ -1001,7 +1007,7 @@ impl Harness {
             ..Default::default()
         };
         // 指针：上一帧动作可能要求悬停某链接；这里用"当前动作"的位置（持续保持）
-        if let Some(position) = self.pending_pointer.clone() {
+        if let Some(position) = self.pending_pointer {
             input.events.push(egui::Event::PointerMoved(position));
             input.events.push(egui::Event::PointerButton {
                 pos: position,
@@ -1027,9 +1033,7 @@ impl Harness {
         // 上传字节：egui 只是排队，这里统计"打算上传多少"，不代表真实 GPU 耗时
         let upload_bytes = output
             .textures_delta
-            .set
-            .iter()
-            .flat_map(|(_, deltas)| deltas.iter())
+            .set.values().flat_map(|deltas| deltas.iter())
             .map(|delta| delta.image.width() * delta.image.height() * 4)
             .sum::<usize>() as u64;
 

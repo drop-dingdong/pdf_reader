@@ -5,6 +5,7 @@
 //! 按 agent.md 规则 2 交由用户验收。
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use egui::{Key, Modifiers, Vec2 as EguiVec2};
 use pdfcore::prelude::*;
@@ -201,6 +202,9 @@ pub struct SnapshotPage<'a> {
     pub tiles: Vec<(Rect, &'a RasterImage)>,
 }
 
+/// 合成快照时的一层内容：区域 + 整页图 + 该区域内的块。
+pub type SnapshotLayer = (Rect, Option<Arc<RasterImage>>, Vec<(Rect, Arc<RasterImage>)>);
+
 /// 把 `content_rect` 覆盖到的**已渲染像素**拷成一张自包含图像（截图快照）。
 ///
 /// ## 为什么存成内存快照，而不是"引用已渲染纹理的对应区域"
@@ -235,7 +239,7 @@ pub fn compose_snapshot(pages: &[SnapshotPage<'_>], content_rect: Rect) -> Optio
         if overlap.width <= 0.0 || overlap.height <= 0.0 {
             return false;
         }
-        let stride = image.format.bytes_per_pixel() as usize;
+        let stride = image.format.bytes_per_pixel();
         let origin = content_rect.min();
         let dest_left = ((overlap.x - origin.x).round().max(0.0)) as usize;
         let dest_top = ((overlap.y - origin.y).round().max(0.0)) as usize;
@@ -295,7 +299,7 @@ pub fn compose_snapshot(pages: &[SnapshotPage<'_>], content_rect: Rect) -> Optio
         }
 
         for (tile_rect, image) in &page.tiles {
-            painted |= blit_fitted(*image, *tile_rect, content_rect, &mut rgba, (width, height));
+            painted |= blit_fitted(image, *tile_rect, content_rect, &mut rgba, (width, height));
         }
     }
 
@@ -594,7 +598,7 @@ pub fn compose_region_snapshot(
         if tile_width == 0 || tile_height == 0 {
             continue;
         }
-        let stride = image.format.bytes_per_pixel() as usize;
+        let stride = image.format.bytes_per_pixel();
         let data = image.data();
         // 块与目标区域的交叠（两者都是渲染像素，直接按整数拷贝）
         let left = (tile_x as i64).max(x0);
@@ -676,7 +680,7 @@ pub fn pages_intersecting(
         .into_iter()
         .filter(|(_, rect)| {
             rect.intersection(content_rect)
-                .map_or(false, |overlap| overlap.width > 0.0 && overlap.height > 0.0)
+                .is_some_and(|overlap| overlap.width > 0.0 && overlap.height > 0.0)
         })
         .collect()
 }
@@ -1419,12 +1423,12 @@ pub fn desired_textures(
     desired.bed_bytes = bed
         .iter()
         .filter(|key| desired.keep.contains(*key))
-        .map(|key| size_of(key))
+        .map(&size_of)
         .sum();
     desired.old_bytes = old_keys
         .iter()
         .filter(|key| desired.keep.contains(*key))
-        .map(|key| size_of(key))
+        .map(size_of)
         .sum();
     desired.upload.retain(|key| desired.keep.contains(key));
     desired.dropped_bytes = before.saturating_sub(desired.keep_bytes());
@@ -2756,7 +2760,7 @@ mod tests {
     fn largest_overlap_page_picks_the_dominant_page() {
         let page_a = Rect::new(0.0, 0.0, 100.0, 100.0);
         let page_b = Rect::new(0.0, 110.0, 100.0, 100.0);
-        let pages = vec![(0usize, page_a), (1usize, page_b)];
+        let pages = [(0usize, page_a), (1usize, page_b)];
 
         // 选区内 A 占 60 高、B 占 20 高 → 取 A
         let selection = Rect::new(0.0, 40.0, 100.0, 90.0);
@@ -2788,7 +2792,7 @@ mod tests {
         let page_a = Rect::new(0.0, 0.0, 100.0, 100.0);
         let page_b = Rect::new(0.0, 110.0, 100.0, 100.0); // 与 A 之间有 10pt 页间距
         let page_c = Rect::new(0.0, 400.0, 100.0, 100.0);
-        let pages = vec![(0usize, page_a), (1usize, page_b), (2usize, page_c)];
+        let pages = [(0usize, page_a), (1usize, page_b), (2usize, page_c)];
 
         // 选区跨越 A 与 B（含间距）
         let selection = Rect::new(0.0, 80.0, 100.0, 60.0);

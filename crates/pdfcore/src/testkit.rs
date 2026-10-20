@@ -588,7 +588,7 @@ impl PdfBackend for MemoryBackend {
 
     fn open(&self, source: Source<'_>, password: Option<&str>) -> Result<OpenedDocument> {
         match source {
-            Source::Bytes(bytes) if bytes.is_empty() => {
+            Source::Bytes([]) => {
                 return Err(CoreError::CorruptDocument("空的字节流".to_string()))
             }
             Source::Path(path) if path.as_os_str().is_empty() => {

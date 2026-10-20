@@ -61,10 +61,10 @@ fn counter_clockwise_rotation_closes_the_loop() {
     let mut session = session_with_worker_scheduler(cache, 1);
     let start = session.state().user_rotation;
     for _ in 0..4 {
-        let _ = session.handle(ViewerCommand::RotateCounterClockwise, &mut Vec::new());
+        session.handle(ViewerCommand::RotateCounterClockwise, &mut Vec::new());
     }
     assert_eq!(session.state().user_rotation, start, "四次逆时针应回到初始方向");
-    let _ = session.handle(ViewerCommand::RotateCounterClockwise, &mut Vec::new());
+    session.handle(ViewerCommand::RotateCounterClockwise, &mut Vec::new());
     assert_ne!(session.state().user_rotation, start, "一次逆时针应改变方向");
 }
 
