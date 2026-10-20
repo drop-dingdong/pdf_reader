@@ -26,12 +26,20 @@ pub struct Clock {
 impl Clock {
     /// 真实时钟（默认）。
     pub fn system() -> Self {
-        Self { start: Instant::now(), offset: Arc::new(Mutex::new(Duration::ZERO)), manual: false }
+        Self {
+            start: Instant::now(),
+            offset: Arc::new(Mutex::new(Duration::ZERO)),
+            manual: false,
+        }
     }
 
     /// 手动时钟：`now()` 只在 [`Clock::advance`] 之后前进（从创建时刻起算）。
     pub fn manual() -> Self {
-        Self { start: Instant::now(), offset: Arc::new(Mutex::new(Duration::ZERO)), manual: true }
+        Self {
+            start: Instant::now(),
+            offset: Arc::new(Mutex::new(Duration::ZERO)),
+            manual: true,
+        }
     }
 
     /// 当前时刻。
@@ -78,7 +86,11 @@ mod tests {
         clock.advance(Duration::from_millis(160));
         assert_eq!(clock.now(), start + Duration::from_millis(160));
         clock.advance(Duration::from_millis(240));
-        assert_eq!(clock.now(), start + Duration::from_millis(400), "推进是累加的");
+        assert_eq!(
+            clock.now(),
+            start + Duration::from_millis(400),
+            "推进是累加的"
+        );
         assert!(clock.is_manual());
     }
 

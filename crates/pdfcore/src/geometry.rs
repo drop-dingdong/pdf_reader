@@ -126,7 +126,10 @@ pub struct Size {
 
 impl Size {
     /// 零尺寸。
-    pub const ZERO: Self = Self { width: 0.0, height: 0.0 };
+    pub const ZERO: Self = Self {
+        width: 0.0,
+        height: 0.0,
+    };
 
     /// 构造。
     pub const fn new(width: f32, height: f32) -> Self {
@@ -173,11 +176,21 @@ pub struct Rect {
 
 impl Rect {
     /// 空矩形。
-    pub const ZERO: Self = Self { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+    pub const ZERO: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        height: 0.0,
+    };
 
     /// 由左上角与宽高构造。
     pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// 由左上角与右下角构造。
@@ -239,14 +252,20 @@ impl Rect {
             return None;
         }
         let min = Point::new(self.x.max(other.x), self.y.max(other.y));
-        let max = Point::new(self.right().min(other.right()), self.bottom().min(other.bottom()));
+        let max = Point::new(
+            self.right().min(other.right()),
+            self.bottom().min(other.bottom()),
+        );
         Some(Self::from_min_max(min, max))
     }
 
     /// 并集（外接矩形）。
     pub fn union(self, other: Self) -> Self {
         let min = Point::new(self.x.min(other.x), self.y.min(other.y));
-        let max = Point::new(self.right().max(other.right()), self.bottom().max(other.bottom()));
+        let max = Point::new(
+            self.right().max(other.right()),
+            self.bottom().max(other.bottom()),
+        );
         Self::from_min_max(min, max)
     }
 
@@ -281,16 +300,31 @@ pub struct Insets {
 
 impl Insets {
     /// 全零。
-    pub const ZERO: Self = Self { top: 0.0, right: 0.0, bottom: 0.0, left: 0.0 };
+    pub const ZERO: Self = Self {
+        top: 0.0,
+        right: 0.0,
+        bottom: 0.0,
+        left: 0.0,
+    };
 
     /// 四边同值。
     pub const fn all(value: f32) -> Self {
-        Self { top: value, right: value, bottom: value, left: value }
+        Self {
+            top: value,
+            right: value,
+            bottom: value,
+            left: value,
+        }
     }
 
     /// 分别指定。
     pub const fn new(top: f32, right: f32, bottom: f32, left: f32) -> Self {
-        Self { top, right, bottom, left }
+        Self {
+            top,
+            right,
+            bottom,
+            left,
+        }
     }
 
     /// 左右之和。
@@ -386,9 +420,7 @@ impl Rotation {
             // 顺时针 180°：左下角 → 显示右上角，y 同样需要翻转。
             Self::Clockwise180 => Point::new(page_size.width - point.x, point.y),
             // 顺时针 270°：右下角 → 显示左上角。
-            Self::Clockwise270 => {
-                Point::new(page_size.height - point.y, page_size.width - point.x)
-            }
+            Self::Clockwise270 => Point::new(page_size.height - point.y, page_size.width - point.x),
         }
     }
 
@@ -398,9 +430,7 @@ impl Rotation {
             Self::None => Point::new(point.x, page_size.height - point.y),
             Self::Clockwise90 => Point::new(point.y, point.x),
             Self::Clockwise180 => Point::new(page_size.width - point.x, point.y),
-            Self::Clockwise270 => {
-                Point::new(page_size.width - point.y, page_size.height - point.x)
-            }
+            Self::Clockwise270 => Point::new(page_size.width - point.y, page_size.height - point.x),
         }
     }
 }
@@ -410,8 +440,8 @@ mod tests {
     use super::*;
 
     const SIZES: [Size; 3] = [
-        Size::new(612.0, 792.0),  // US Letter 纵向
-        Size::new(792.0, 612.0),  // 横向
+        Size::new(612.0, 792.0),   // US Letter 纵向
+        Size::new(792.0, 612.0),   // 横向
         Size::new(595.28, 841.89), // A4
     ];
 
@@ -430,7 +460,10 @@ mod tests {
         assert!(Rotation::Clockwise270.swaps_dimensions());
 
         let s = Size::new(10.0, 20.0);
-        assert_eq!(Rotation::Clockwise90.apply_to_size(s), Size::new(20.0, 10.0));
+        assert_eq!(
+            Rotation::Clockwise90.apply_to_size(s),
+            Size::new(20.0, 10.0)
+        );
         assert_eq!(Rotation::Clockwise180.apply_to_size(s), s);
     }
 
@@ -527,7 +560,10 @@ mod tests {
         assert!(a.intersects(b));
         assert_eq!(a.intersection(b), Some(Rect::new(5.0, 5.0, 5.0, 5.0)));
         assert_eq!(a.union(b), Rect::new(0.0, 0.0, 15.0, 15.0));
-        assert!(!a.intersects(Rect::new(10.0, 0.0, 5.0, 5.0)), "边界接触不算相交");
+        assert!(
+            !a.intersects(Rect::new(10.0, 0.0, 5.0, 5.0)),
+            "边界接触不算相交"
+        );
         assert!(a.contains(Point::new(0.0, 0.0)));
         assert!(!a.contains(Point::new(10.0, 10.0)), "右/下边界为开区间");
         assert_eq!(a.inset(Insets::all(1.0)), Rect::new(1.0, 1.0, 8.0, 8.0));

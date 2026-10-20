@@ -28,27 +28,20 @@ use crate::persist;
 /// 无窗口回放器（脚本驱动真实 `App::ui`，用于回归断言与性能基线，见 D-103）。
 pub mod replay;
 use crate::view::{
-    canvas_rect_for, command_for_key, command_for_scroll, command_for_zoom_delta,
-    clamp_float_rect, color_image, commands_for_destination, default_dest_rect,
-    body_size_of, destination_points, drag_float_rect, find_dest_index, find_float_for_custom,
-    float_rect_at_row, float_size_for_body, overflow_layout,
-    pages_intersecting,
-    body_size_changed, checkbox_row, fit_height_zoom, page_index_from_text,
-    parse_zoom_percent, save_button_label, zoom_percent_text, CUSTOM_SYMBOL_DELETE, CUSTOM_SYMBOL_EDIT,
-    CUSTOM_SYMBOL_IMAGE,
-    CUSTOM_SYMBOL_TEXT,
-    pin_exits_on_mode_change,
-    zero_rect_at,
-    find_float_for_target, fit_inside,
-    compose_snapshot, hover_preview_allowed, move_to_last,
-    page_rect_to_screen, pointer_over_any,
-    screen_rect_to_content, tip_rect_for, veil_bands, view_rect_to_page_rect, SnapshotPage,
-    flatten_outline, link_overlay_visible, link_rect_in_page_bounds, outline_node_count,
-    texture_pages, wheel_targets_canvas, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
-    tile_view_rect, tile_view_rect_scaled,
-    view_rect_for, view_to_content, compose_region_snapshot, needs_underlay, plan_page, DrawInput,
-    desired_textures, KeyedStore, Desired, PageDraw, PageFacts, PageShape, PlanStamp, Preview,
-    SnapshotLayer,
+    body_size_changed, body_size_of, canvas_rect_for, checkbox_row, clamp_float_rect, color_image,
+    command_for_key, command_for_scroll, command_for_zoom_delta, commands_for_destination,
+    compose_region_snapshot, compose_snapshot, default_dest_rect, desired_textures,
+    destination_points, drag_float_rect, find_dest_index, find_float_for_custom,
+    find_float_for_target, fit_height_zoom, fit_inside, flatten_outline, float_rect_at_row,
+    float_size_for_body, hover_preview_allowed, link_overlay_visible, link_rect_in_page_bounds,
+    move_to_last, needs_underlay, outline_node_count, overflow_layout, page_index_from_text,
+    page_rect_to_screen, pages_intersecting, parse_zoom_percent, pin_exits_on_mode_change,
+    plan_page, pointer_over_any, save_button_label, screen_rect_to_content, texture_pages,
+    tile_view_rect, tile_view_rect_scaled, tip_rect_for, veil_bands, view_rect_for,
+    view_rect_to_page_rect, view_to_content, wheel_targets_canvas, zero_rect_at, zoom_percent_text,
+    Desired, DrawInput, KeyedStore, PageDraw, PageFacts, PageShape, PlanStamp, Preview,
+    SnapshotLayer, SnapshotPage, CUSTOM_SYMBOL_DELETE, CUSTOM_SYMBOL_EDIT, CUSTOM_SYMBOL_IMAGE,
+    CUSTOM_SYMBOL_TEXT, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
 };
 
 /// 纹理层的**字节**预算（软上限，D-111）。
@@ -174,7 +167,9 @@ enum Sidecar {
 /// 读取同目录存档。解析失败只打一行日志、当作没有；更新版本则返回 [`Sidecar::Locked`]。
 fn load_sidecar(pdf: &std::path::Path) -> Sidecar {
     let target = persist::sidecar_path(pdf);
-    let Ok(text) = std::fs::read_to_string(&target) else { return Sidecar::Missing };
+    let Ok(text) = std::fs::read_to_string(&target) else {
+        return Sidecar::Missing;
+    };
     match persist::load(&text) {
         Ok(loaded) => Sidecar::Ready(loaded),
         Err(persist::LoadError::NewerVersion { found, supported }) => {
@@ -541,7 +536,8 @@ impl PdfReaderApp {
     /// （`Options::zoom_with_keyboard`）：否则按 `Ctrl`+`+` 会**同时**放大 UI 与文档页面
     /// （人工验收反馈的现象）。关掉之后这些键由本应用统一解释为**文档缩放**。
     pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
-        cc.egui_ctx.options_mut(|options| options.zoom_with_keyboard = false);
+        cc.egui_ctx
+            .options_mut(|options| options.zoom_with_keyboard = false);
         Self::with_clock(
             crate::clock::Clock::system(),
             crate::diag::Diagnostics::from_env(),
@@ -667,12 +663,17 @@ impl PdfReaderApp {
     /// **把命中位置放到视口中心**（第二轮验收的统一跳转语义）：
     /// 跳页是"顶部对齐"，搜索命中则是"居中"，因为用户关心的是那一行文字而不是页首。
     fn goto_hit(&mut self, index: usize) {
-        let Some(hit) = self.hits.get(index) else { return };
+        let Some(hit) = self.hits.get(index) else {
+            return;
+        };
         self.active_hit = Some(index);
         let page = hit.page;
         self.commands.push(ViewerCommand::GoToPage(page));
         if let Some(rect) = hit.rects.first() {
-            self.commands.push(ViewerCommand::CenterOnPagePoint { page, point: rect.center() });
+            self.commands.push(ViewerCommand::CenterOnPagePoint {
+                page,
+                point: rect.center(),
+            });
         }
     }
 
@@ -859,9 +860,8 @@ impl PdfReaderApp {
                                                 else {
                                                     return None;
                                                 };
-                                                let marks = self
-                                                    .dest_marks
-                                                    .get(page.get() as usize)?;
+                                                let marks =
+                                                    self.dest_marks.get(page.get() as usize)?;
                                                 let positions: Vec<Point> =
                                                     marks.iter().map(|mark| mark.point).collect();
                                                 find_dest_index(&positions, *point)
@@ -875,7 +875,9 @@ impl PdfReaderApp {
                         // 存档里的被引用点与自定义 preview 数据 → 覆盖/追加
                         if let Some(saved) = &saved {
                             for (page_index, page_marks) in saved.dest_marks.iter().enumerate() {
-                                let Some(marks) = self.dest_marks.get_mut(page_index) else { continue };
+                                let Some(marks) = self.dest_marks.get_mut(page_index) else {
+                                    continue;
+                                };
                                 for (index, saved_mark) in page_marks.iter().enumerate() {
                                     if let Some(mark) = marks.get_mut(index) {
                                         mark.rect = saved_mark.rect;
@@ -922,7 +924,10 @@ impl PdfReaderApp {
                         } else if self.sidecar_migrated {
                             // 旧版本存档被升级过：置脏，让"保存自定义数据"写回当前版本
                             self.data_dirty = true;
-                            self.message = format!("已打开：{title}（存档已升级到 v{}，请保存）", persist::CURRENT_VERSION);
+                            self.message = format!(
+                                "已打开：{title}（存档已升级到 v{}，请保存）",
+                                persist::CURRENT_VERSION
+                            );
                         } else {
                             self.message = format!("已打开：{title}");
                         }
@@ -969,9 +974,12 @@ impl PdfReaderApp {
                 .events
                 .iter()
                 .filter_map(|event| match event {
-                    egui::Event::Key { key, pressed: true, modifiers, .. } => {
-                        Some((*key, *modifiers))
-                    }
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => Some((*key, *modifiers)),
                     _ => None,
                 })
                 .collect()
@@ -979,7 +987,10 @@ impl PdfReaderApp {
         // 复制：egui 把 Ctrl/Cmd+C 翻译成 `Event::Copy`（**不是** Key 事件），
         // 因此必须单独识别它 —— 这就是第二轮验收里"复制按钮可用但 Ctrl+C 无反应"的原因。
         let copy_event = ctx.input(|input| {
-            input.events.iter().any(|event| matches!(event, egui::Event::Copy))
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Copy))
         });
         if copy_event {
             self.commands.push(ViewerCommand::CopySelection);
@@ -1110,20 +1121,15 @@ impl PdfReaderApp {
             })
             .collect();
         let existing = self.textures.keys_newest_first();
-        let desired = desired_textures(
-            &facts,
-            &existing,
-            self.textures.max_bytes(),
-            |key| {
-                let Some((_, _, page_size)) = page_sizes
-                    .iter()
-                    .find(|(page, rotation, _)| *page == key.page && *rotation == key.rotation)
-                else {
-                    return 0;
-                };
-                texture_key_bytes(*page_size, key.rotation, max_side, key)
-            },
-        );
+        let desired = desired_textures(&facts, &existing, self.textures.max_bytes(), |key| {
+            let Some((_, _, page_size)) = page_sizes
+                .iter()
+                .find(|(page, rotation, _)| *page == key.page && *rotation == key.rotation)
+            else {
+                return 0;
+            };
+            texture_key_bytes(*page_size, key.rotation, max_side, key)
+        });
 
         // ---- 2. 删 ----
         self.textures.keep_only(&desired.keep);
@@ -1135,7 +1141,9 @@ impl PdfReaderApp {
                 if uploaded >= MAX_TEXTURE_UPLOADS_PER_FRAME {
                     break;
                 }
-                let Some(image) = session.image_for_key(key) else { continue };
+                let Some(image) = session.image_for_key(key) else {
+                    continue;
+                };
                 self.note_uploaded(session, key, &image);
                 self.upload(ctx, *key, &image);
                 uploaded += 1;
@@ -1169,7 +1177,9 @@ impl PdfReaderApp {
         if !self.diag.enabled() {
             return;
         }
-        let Some(placement) = session.placement(key.page).copied() else { return };
+        let Some(placement) = session.placement(key.page).copied() else {
+            return;
+        };
         let scroll = session.viewport().scroll;
         match key.tile {
             None => self.diag.line(format!(
@@ -1181,7 +1191,9 @@ impl PdfReaderApp {
                 key.scale_milli
             )),
             Some(tile) => {
-                let Some(grid) = session.tile_grid(key.page) else { return };
+                let Some(grid) = session.tile_grid(key.page) else {
+                    return;
+                };
                 let (page_width, page_height) = grid.render_px();
                 let (x, y, width, height) = grid.tile_px(tile.col, tile.row);
                 let screen = tile_view_rect(
@@ -1287,12 +1299,11 @@ impl PdfReaderApp {
                     match self.sidecar_locked {
                         // 存档属于更新版本：不读也不写（D-107），按钮直接禁用并说明原因
                         Some((found, supported)) => {
-                            ui.add_enabled(false, egui::Button::new(label)).on_disabled_hover_text(
-                                format!(
+                            ui.add_enabled(false, egui::Button::new(label))
+                                .on_disabled_hover_text(format!(
                                     "同目录存档是 v{found}，本程序只支持到 v{supported}：\
                                      为了不覆盖它，保存已禁用"
-                                ),
-                            );
+                                ));
                         }
                         None => {
                             if ui.button(label).clicked() {
@@ -1332,21 +1343,39 @@ impl PdfReaderApp {
             // ---- 第 2 行：页 / 缩放 / 旋转 / 预览模式（左） + 引用显示样式（右）----
             ui.horizontal(|ui| {
                 // 全屏切换（现阶段纯文字）
-                let fullscreen_label = if self.fullscreen { "退出全屏" } else { "全屏" };
-                if ui.button(fullscreen_label).on_hover_text("全屏/退出全屏（F11）").clicked() {
+                let fullscreen_label = if self.fullscreen {
+                    "退出全屏"
+                } else {
+                    "全屏"
+                };
+                if ui
+                    .button(fullscreen_label)
+                    .on_hover_text("全屏/退出全屏（F11）")
+                    .clicked()
+                {
                     let ctx = ui.ctx().clone();
                     self.toggle_fullscreen(&ctx);
                 }
                 egui::ComboBox::from_id_salt("layout-direction")
-                    .selected_text(if self.horizontal_layout { "横向" } else { "纵向" })
+                    .selected_text(if self.horizontal_layout {
+                        "横向"
+                    } else {
+                        "纵向"
+                    })
                     .show_ui(ui, |ui| {
                         // 无条件提交：即使标记已经是该值，也强制重排一次，
                         // 这样"状态错位"（UI 说横向、实际纵向）点一下就能纠正。
-                        if ui.selectable_label(!self.horizontal_layout, "纵向").clicked() {
+                        if ui
+                            .selectable_label(!self.horizontal_layout, "纵向")
+                            .clicked()
+                        {
                             self.horizontal_layout = false;
                             self.pending_layout = Some(false);
                         }
-                        if ui.selectable_label(self.horizontal_layout, "横向").clicked() {
+                        if ui
+                            .selectable_label(self.horizontal_layout, "横向")
+                            .clicked()
+                        {
                             self.horizontal_layout = true;
                             self.pending_layout = Some(true);
                         }
@@ -1377,10 +1406,8 @@ impl PdfReaderApp {
                                 self.page_edit = None;
                             }
                             None => {
-                                self.error = Some(format!(
-                                    "页码需在 1–{} 之间",
-                                    session.page_count()
-                                ));
+                                self.error =
+                                    Some(format!("页码需在 1–{} 之间", session.page_count()));
                                 self.page_edit = None;
                             }
                         }
@@ -1424,10 +1451,7 @@ impl PdfReaderApp {
                     }
                 } else {
                     if ui
-                        .add(
-                            egui::Label::new(zoom_percent_text(zoom))
-                                .sense(egui::Sense::click()),
-                        )
+                        .add(egui::Label::new(zoom_percent_text(zoom)).sense(egui::Sense::click()))
                         .on_hover_text("双击可直接输入缩放百分比")
                         .double_clicked()
                     {
@@ -1473,7 +1497,10 @@ impl PdfReaderApp {
 
                 // 预览模式：平移 / 选字
                 for tool in [Tool::Pan, Tool::Select] {
-                    if ui.selectable_label(self.tool == tool, tool.label()).clicked() {
+                    if ui
+                        .selectable_label(self.tool == tool, tool.label())
+                        .clicked()
+                    {
                         self.tool = tool;
                         if pin_exits_on_mode_change(tool == Tool::Select, false) {
                             self.custom_pin = None;
@@ -1585,7 +1612,9 @@ impl PdfReaderApp {
             return;
         }
         let navigation = self.navigation.clone();
-        let width = self.sidebar_width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        let width = self
+            .sidebar_width
+            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
         // 尺寸由我们自己控制（`exact_size`），可拖拽的分隔条在画布左侧 —— 见 `draw_canvas`。
         //
         // 不用 egui 内建拖拽的原因：面板状态以 `parent_ui.scope_id().with_salt(id)` 为键持久化，
@@ -1629,7 +1658,9 @@ impl PdfReaderApp {
                 let row_height = OUTLINE_ROW_HEIGHT;
                 egui::ScrollArea::vertical().show_rows(ui, row_height, rows.len(), |ui, range| {
                     for index in range {
-                        let Some((depth, title, destination)) = rows.get(index) else { continue };
+                        let Some((depth, title, destination)) = rows.get(index) else {
+                            continue;
+                        };
                         ui.horizontal(|ui| {
                             ui.add_space(*depth as f32 * 12.0);
                             let clickable = destination.is_some();
@@ -1667,7 +1698,9 @@ impl PdfReaderApp {
         let count = self.custom_previews.len();
         egui::ScrollArea::vertical().show_rows(ui, row_height, count, |ui, range| {
             for index in range {
-                let Some(preview) = self.custom_previews.get(index) else { continue };
+                let Some(preview) = self.custom_previews.get(index) else {
+                    continue;
+                };
                 // 行首：类型符号 + 标题（长标题截断）+ 右侧页码
                 let symbol = match preview.kind {
                     CustomKind::Text => CUSTOM_SYMBOL_TEXT,
@@ -1687,15 +1720,9 @@ impl PdfReaderApp {
                 // 1) 先占位（整行宽度），2) 再画，3) 最后在该矩形上注册交互。
                 // 顺序很重要：交互最后注册才会盖在内容之上、稳定收到点击。
                 let width = ui.available_width();
-                let (rect, _) = ui.allocate_exact_size(
-                    EVec2::new(width, row_height),
-                    Sense::hover(),
-                );
-                let response = ui.interact(
-                    rect,
-                    Id::unique(("pin-row", index)),
-                    Sense::click(),
-                );
+                let (rect, _) =
+                    ui.allocate_exact_size(EVec2::new(width, row_height), Sense::hover());
+                let response = ui.interact(rect, Id::unique(("pin-row", index)), Sense::click());
                 if response.hovered() {
                     ui.painter().rect_filled(
                         rect,
@@ -1735,7 +1762,10 @@ impl PdfReaderApp {
                     ui.visuals().text_color(),
                 );
                 painter.text(
-                    egui::pos2(rect.max.x - go_width - edit_width - delete_width, rect.center().y),
+                    egui::pos2(
+                        rect.max.x - go_width - edit_width - delete_width,
+                        rect.center().y,
+                    ),
                     Align2::RIGHT_CENTER,
                     &page_label,
                     egui::FontId::proportional(11.0),
@@ -1756,7 +1786,10 @@ impl PdfReaderApp {
                 );
                 // ✎ 修改题目；❎ 删除条目（都在 → 之前注册，命中优先级更高）
                 let edit_rect = egui::Rect::from_center_size(
-                    egui::pos2(go_rect.min.x - edit_width * 0.5 - delete_width, rect.center().y),
+                    egui::pos2(
+                        go_rect.min.x - edit_width * 0.5 - delete_width,
+                        rect.center().y,
+                    ),
                     EVec2::new(edit_width, row_height),
                 );
                 let delete_rect = egui::Rect::from_center_size(
@@ -1764,7 +1797,10 @@ impl PdfReaderApp {
                     EVec2::new(delete_width, row_height),
                 );
                 if ui
-                    .put(edit_rect, egui::Button::new(CUSTOM_SYMBOL_EDIT).frame(false))
+                    .put(
+                        edit_rect,
+                        egui::Button::new(CUSTOM_SYMBOL_EDIT).frame(false),
+                    )
                     .clicked()
                 {
                     if let Some(preview) = self.custom_previews.get(index) {
@@ -1772,7 +1808,10 @@ impl PdfReaderApp {
                     }
                 }
                 if ui
-                    .put(delete_rect, egui::Button::new(CUSTOM_SYMBOL_DELETE).frame(false))
+                    .put(
+                        delete_rect,
+                        egui::Button::new(CUSTOM_SYMBOL_DELETE).frame(false),
+                    )
                     .clicked()
                 {
                     self.delete_custom_preview(index);
@@ -1829,11 +1868,17 @@ impl PdfReaderApp {
             || page_rect.height <= 0.0
         {
             if self.diag.enabled() {
-                self.diag.line(format!("[预览] 初次生成失败：{tag} 页={page:?} 区域为空 {page_rect:?}"));
+                self.diag.line(format!(
+                    "[预览] 初次生成失败：{tag} 页={page:?} 区域为空 {page_rect:?}"
+                ));
             }
             return None;
         }
-        let display_scale = if scale > 0.0 && scale.is_finite() { scale } else { 1.0 };
+        let display_scale = if scale > 0.0 && scale.is_finite() {
+            scale
+        } else {
+            1.0
+        };
         // 记录的比例可能让预览图超出纹理单边上限（大区域 + 高倍）：按超采样步长降档（D-108）
         let render_value = crate::view::preview_render_scale(
             page_rect,
@@ -1843,10 +1888,7 @@ impl PdfReaderApp {
             session.max_texture_side(),
         );
         let render = Scale::from_zoom(render_value);
-        let grid = TileGrid::new(
-            placement.page_size.rotated(placement.rotation),
-            render.0,
-        );
+        let grid = TileGrid::new(placement.page_size.rotated(placement.rotation), render.0);
         let Some(range) =
             grid.tiles_for_page_rect(page_rect, placement.page_size, placement.rotation)
         else {
@@ -1876,8 +1918,10 @@ impl PdfReaderApp {
             }
             return None;
         };
-        let borrowed: Vec<(TileSpec, &RasterImage)> =
-            tiles.iter().map(|(tile, image)| (*tile, image.as_ref())).collect();
+        let borrowed: Vec<(TileSpec, &RasterImage)> = tiles
+            .iter()
+            .map(|(tile, image)| (*tile, image.as_ref()))
+            .collect();
         let Some(image) = compose_region_snapshot(
             page_rect,
             placement.page_size,
@@ -1909,7 +1953,10 @@ impl PdfReaderApp {
                 image.size[1]
             ));
         }
-        Some(ui.ctx().load_texture(texture_name, image, egui::TextureOptions::LINEAR))
+        Some(
+            ui.ctx()
+                .load_texture(texture_name, image, egui::TextureOptions::LINEAR),
+        )
     }
 
     /// 为"**正在显示**、但还缺预览图"的自定义图片 preview 重试生成。
@@ -1929,12 +1976,9 @@ impl PdfReaderApp {
         shown.sort_unstable();
         shown.dedup();
         for index in shown {
-            let missing = self
-                .custom_previews
-                .get(index)
-                .is_some_and(|preview| {
-                    preview.kind == CustomKind::Image && preview.snapshot.is_none()
-                });
+            let missing = self.custom_previews.get(index).is_some_and(|preview| {
+                preview.kind == CustomKind::Image && preview.snapshot.is_none()
+            });
             if missing {
                 self.ensure_custom_snapshot(ui, session, index);
             }
@@ -1948,7 +1992,9 @@ impl PdfReaderApp {
         session: &mut DocumentSession,
         index: usize,
     ) {
-        let Some(preview) = self.custom_previews.get(index) else { return };
+        let Some(preview) = self.custom_previews.get(index) else {
+            return;
+        };
         if preview.kind != CustomKind::Image || preview.snapshot.is_some() {
             return;
         }
@@ -1971,7 +2017,9 @@ impl PdfReaderApp {
 
     /// 按某个自定义 preview 的数据生成它的**正式浮窗**（正文尺寸取 `body_size`）。
     fn spawn_custom_float(&mut self, index: usize, rect: egui::Rect) {
-        let Some(preview) = self.custom_previews.get(index) else { return };
+        let Some(preview) = self.custom_previews.get(index) else {
+            return;
+        };
         // 权威尺寸直接取记录值：与记录完全一致，天然不会误判"已修改"
         let body = preview.body_size;
         let id = self.next_float_id;
@@ -2011,13 +2059,24 @@ impl PdfReaderApp {
                 }
             }
         }
-        if self.custom_hover.is_some_and(|(hovered, _)| hovered == index) {
+        if self
+            .custom_hover
+            .is_some_and(|(hovered, _)| hovered == index)
+        {
             self.custom_hover = None;
         }
-        if self.editing_title.as_ref().is_some_and(|(editing, _)| *editing == index) {
+        if self
+            .editing_title
+            .as_ref()
+            .is_some_and(|(editing, _)| *editing == index)
+        {
             self.editing_title = None;
         }
-        if self.editing_body.as_ref().is_some_and(|(editing, _)| *editing == index) {
+        if self
+            .editing_body
+            .as_ref()
+            .is_some_and(|(editing, _)| *editing == index)
+        {
             self.editing_body = None;
         }
         self.data_dirty = true;
@@ -2048,7 +2107,9 @@ impl PdfReaderApp {
             self.message = "已唤出该自定义preview浮窗".to_string();
             return;
         }
-        let Some(preview) = self.custom_previews.get(index) else { return };
+        let Some(preview) = self.custom_previews.get(index) else {
+            return;
+        };
         let id = self.next_float_id;
         self.next_float_id += 1;
         // 正文尺寸使用该条目**储存的 body_size**（用户要求）
@@ -2890,11 +2951,17 @@ impl PdfReaderApp {
 
         if let (Some(pointer), Some(navigation)) = (pointer, self.navigation.clone()) {
             'outer: for page in self.visible.clone() {
-                let Some(placement) = session.placement(page).copied() else { continue };
-                let Some(registered) = self.link_marks.get(page.get() as usize) else { continue };
+                let Some(placement) = session.placement(page).copied() else {
+                    continue;
+                };
+                let Some(registered) = self.link_marks.get(page.get() as usize) else {
+                    continue;
+                };
                 for (index, link) in navigation.links_on(page).iter().enumerate() {
                     // 链接 → 被引用点：**直接取登记表**（建表时已解析）
-                    let Some(Some(target)) = registered.get(index).copied() else { continue };
+                    let Some(Some(target)) = registered.get(index).copied() else {
+                        continue;
+                    };
                     let content = placement.rect_to_content(link.rect);
                     let screen = egui::Rect::from_min_size(
                         canvas.min + EVec2::new(content.x - scroll.x, content.y - scroll.y),
@@ -2933,7 +3000,11 @@ impl PdfReaderApp {
 
         match found {
             Some((target, anchor)) => {
-                self.hover_tip = Some(HoverTip { target, anchor, rect: None });
+                self.hover_tip = Some(HoverTip {
+                    target,
+                    anchor,
+                    rect: None,
+                });
             }
             None if keep_existing => {}
             None => {
@@ -2943,7 +3014,9 @@ impl PdfReaderApp {
         }
 
         // 需要时**按记录的分辨率**生成一次（之后复用；缺像素则提交渲染、下帧重试）
-        let Some(tip) = self.hover_tip.as_ref() else { return };
+        let Some(tip) = self.hover_tip.as_ref() else {
+            return;
+        };
         let (page, index) = tip.target;
         let pending = self
             .dest_marks
@@ -2979,13 +3052,14 @@ impl PdfReaderApp {
             .and_then(|marks| marks.get(index))
             .and_then(|mark| mark.snapshot.clone())
             .is_none()
-        {
-        }
+        {}
     }
 
     /// 绘制临时预览浮窗并处理"点击固定"（本函数在所有固定浮窗之后调用 → 位于最上层）。
     fn draw_hover_preview(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
-        let Some(tip) = self.hover_tip.as_ref() else { return };
+        let Some(tip) = self.hover_tip.as_ref() else {
+            return;
+        };
         let (page, index) = tip.target;
         let anchor = tip.anchor;
         let Some(texture) = self
@@ -3009,11 +3083,7 @@ impl PdfReaderApp {
         let link_rect = egui::Rect::from_center_size(anchor, self.hover_link_size);
         let rect = tip_rect_for(link_rect, wanted, canvas);
         // 临时预览：**点击或拖动都固定**；拖动时把位移带到新浮窗上（用户要求）
-        let response = ui.interact(
-            rect,
-            Id::unique("hover-tip"),
-            Sense::click_and_drag(),
-        );
+        let response = ui.interact(rect, Id::unique("hover-tip"), Sense::click_and_drag());
         let painter = ui.painter();
         painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(30, 32, 36));
         painter.rect_stroke(
@@ -3024,7 +3094,11 @@ impl PdfReaderApp {
         );
         let title_rect =
             egui::Rect::from_min_size(rect.min, EVec2::new(rect.width(), FLOAT_TITLE_HEIGHT));
-        painter.rect_filled(title_rect, CornerRadius::same(4), Color32::from_rgb(54, 58, 66));
+        painter.rect_filled(
+            title_rect,
+            CornerRadius::same(4),
+            Color32::from_rgb(54, 58, 66),
+        );
         let tip_title = format!("引用点预览 · 第 {} 页（点击固定）", page.display_number());
         let tip_job = overflow_layout(
             &tip_title,
@@ -3080,7 +3154,9 @@ impl PdfReaderApp {
 
     /// 侧栏 Pin 条目被悬浮时，在主视图**右侧**显示该条目的临时浮窗（离开条目即关闭）。
     fn draw_sidebar_hover_float(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
-        let Some((index, row)) = self.custom_hover else { return };
+        let Some((index, row)) = self.custom_hover else {
+            return;
+        };
         let Some(preview) = self.custom_previews.get(index) else {
             self.custom_hover = None;
             return;
@@ -3113,7 +3189,11 @@ impl PdfReaderApp {
         );
         let title_rect =
             egui::Rect::from_min_size(rect.min, EVec2::new(rect.width(), FLOAT_TITLE_HEIGHT));
-        painter.rect_filled(title_rect, CornerRadius::same(4), Color32::from_rgb(54, 58, 66));
+        painter.rect_filled(
+            title_rect,
+            CornerRadius::same(4),
+            Color32::from_rgb(54, 58, 66),
+        );
         let job = overflow_layout(
             &title,
             egui::FontId::proportional(13.0),
@@ -3154,11 +3234,9 @@ impl PdfReaderApp {
                     rows,
                 );
                 let galley = painter.layout_job(job);
-                painter.with_clip_rect(body).galley(
-                    body.min,
-                    galley,
-                    Color32::from_gray(225),
-                );
+                painter
+                    .with_clip_rect(body)
+                    .galley(body.min, galley, Color32::from_gray(225));
             }
             (None, None) => {
                 painter.text(
@@ -3193,7 +3271,9 @@ impl PdfReaderApp {
             window.rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 4.0),
             window.rect.max - EVec2::new(8.0, 8.0),
         );
-        let Some((_, draft)) = self.editing_body.take() else { return };
+        let Some((_, draft)) = self.editing_body.take() else {
+            return;
+        };
         let mut text = draft;
         let response = ui.put(
             body_rect,
@@ -3288,7 +3368,6 @@ impl PdfReaderApp {
                 self.message = "已更新题目".to_string();
             }
         }
-
     }
 
     /// 把截图结果存进某个**自定义图片预览**。
@@ -3305,7 +3384,9 @@ impl PdfReaderApp {
         let all_pages: Vec<(usize, Rect)> = (0..session.page_count() as usize)
             .filter_map(|page_index| {
                 let page = PageIndex::new(page_index as u32);
-                session.placement(page).map(|placement| (page_index, placement.rect))
+                session
+                    .placement(page)
+                    .map(|placement| (page_index, placement.rect))
             })
             .collect();
         // 必须与本 preview **自己所在的页**求交：否则 rect 与 page 不匹配，
@@ -3361,7 +3442,9 @@ impl PdfReaderApp {
                 )
             })
             .unwrap_or(overlap);
-        let Some(preview) = self.custom_previews.get_mut(index) else { return };
+        let Some(preview) = self.custom_previews.get_mut(index) else {
+            return;
+        };
         preview.snapshot = Some(texture);
         preview.rect = page_rect;
         preview.body_size = egui::vec2(overlap.width, overlap.height);
@@ -3385,11 +3468,19 @@ impl PdfReaderApp {
     }
 
     /// Pin 状态：在页面某处点击 → 结束选点并弹出对应的输入对话框。
-    fn finish_pin(&mut self, session: &DocumentSession, canvas: egui::Rect, scroll: Vec2, pointer: egui::Pos2) {
+    fn finish_pin(
+        &mut self,
+        session: &DocumentSession,
+        canvas: egui::Rect,
+        scroll: Vec2,
+        pointer: egui::Pos2,
+    ) {
         let Some(kind) = self.custom_pin else { return };
         let content = canvas_to_content(canvas, pointer, scroll);
         for page in self.visible.clone() {
-            let Some(placement) = session.placement(page).copied() else { continue };
+            let Some(placement) = session.placement(page).copied() else {
+                continue;
+            };
             if !placement.rect.contains(content) {
                 continue;
             }
@@ -3408,7 +3499,9 @@ impl PdfReaderApp {
 
     /// 自定义 preview 的输入对话框（文字：题目+内容；图片：题目）。
     fn draw_custom_dialog(&mut self, ctx: &egui::Context) {
-        let Some(dialog) = self.custom_dialog.as_ref() else { return };
+        let Some(dialog) = self.custom_dialog.as_ref() else {
+            return;
+        };
         let kind = dialog.kind;
         let page = dialog.page;
         let point = dialog.point;
@@ -3551,7 +3644,8 @@ impl PdfReaderApp {
         let selection = self.capture.as_ref().and_then(|state| state.rect);
         let veil_color = Color32::from_rgba_unmultiplied(225, 225, 225, 110);
         for band in veil_bands(canvas, selection) {
-            ui.painter().rect_filled(band, CornerRadius::ZERO, veil_color);
+            ui.painter()
+                .rect_filled(band, CornerRadius::ZERO, veil_color);
         }
         if let Some(selection) = selection {
             ui.painter().rect_stroke(
@@ -3564,14 +3658,16 @@ impl PdfReaderApp {
 
         // ---- Enter / Esc ----
         let (enter, escape) = ui.ctx().input(|input| {
-            (input.key_pressed(egui::Key::Enter), input.key_pressed(egui::Key::Escape))
+            (
+                input.key_pressed(egui::Key::Enter),
+                input.key_pressed(egui::Key::Escape),
+            )
         });
         if enter {
             match selection {
                 Some(selection) => {
                     // 屏幕矩形 → 内容空间矩形（供快照与页面空间换算使用）
-                    let selection_rect =
-                        screen_rect_to_content(canvas.min, selection, scroll);
+                    let selection_rect = screen_rect_to_content(canvas.min, selection, scroll);
                     match self.capture.as_ref().map(|state| state.target) {
                         // 1a) 由被引用点标识进入：回写该点的矩形与截图，并用浮窗展示新图
                         Some(CaptureTarget::DestMark(page, index)) => {
@@ -3586,7 +3682,9 @@ impl PdfReaderApp {
                     }
                     let mut parts: Vec<String> = Vec::new();
                     for page in self.visible.clone() {
-                        let Some(placement) = session.placement(page).copied() else { continue };
+                        let Some(placement) = session.placement(page).copied() else {
+                            continue;
+                        };
                         // 注意：`selection_rect` 已是**内容空间**，故这里传零滚动
                         if let Some(page_rect) =
                             view_rect_to_page_rect(&placement, selection_rect, Vec2::ZERO)
@@ -3643,7 +3741,9 @@ impl PdfReaderApp {
         index: usize,
         content_rect: Rect,
     ) {
-        let Some(placement) = session.placement(page).copied() else { return };
+        let Some(placement) = session.placement(page).copied() else {
+            return;
+        };
         // 只保留与目标页重叠的部分（区域可能跨页/跨留白）
         let Some(overlap) = content_rect.intersection(placement.rect) else {
             self.message = "截图区域与该被引用点所在页没有重叠，未保存".to_string();
@@ -3718,7 +3818,9 @@ impl PdfReaderApp {
         let all_pages: Vec<(usize, Rect)> = (0..session.page_count() as usize)
             .filter_map(|index| {
                 let page = PageIndex::new(index as u32);
-                session.placement(page).map(|placement| (index, placement.rect))
+                session
+                    .placement(page)
+                    .map(|placement| (index, placement.rect))
             })
             .collect();
         for (index, page_rect) in pages_intersecting(all_pages, content_rect) {
@@ -3754,7 +3856,10 @@ impl PdfReaderApp {
             .map(|(rect, whole, tiles)| SnapshotPage {
                 rect: *rect,
                 whole: whole.as_deref(),
-                tiles: tiles.iter().map(|(rect, image)| (*rect, image.as_ref())).collect(),
+                tiles: tiles
+                    .iter()
+                    .map(|(rect, image)| (*rect, image.as_ref()))
+                    .collect(),
             })
             .collect();
         compose_snapshot(&sources, content_rect)
@@ -3855,7 +3960,10 @@ impl PdfReaderApp {
 
             // 右下角把手：拖动改大小（不小于最小尺寸）
             let handle_rect = egui::Rect::from_min_size(
-                egui::pos2(rect.right() - FLOAT_HANDLE_SIZE, rect.bottom() - FLOAT_HANDLE_SIZE),
+                egui::pos2(
+                    rect.right() - FLOAT_HANDLE_SIZE,
+                    rect.bottom() - FLOAT_HANDLE_SIZE,
+                ),
                 EVec2::splat(FLOAT_HANDLE_SIZE),
             );
             let handle = ui.interact(handle_rect, Id::unique(("float-resize", id)), Sense::drag());
@@ -3876,7 +3984,8 @@ impl PdfReaderApp {
             // 右上角关闭按钮：**画成带底色的圆**，悬停/按下变红 —— 否则只有一个"✕"太不显眼
             let close_center = egui::pos2(title_rect.right() - 13.0, title_rect.center().y);
             let close_rect = egui::Rect::from_center_size(close_center, EVec2::splat(18.0));
-            let close_response = ui.interact(close_rect, Id::unique(("float-close", id)), Sense::click());
+            let close_response =
+                ui.interact(close_rect, Id::unique(("float-close", id)), Sense::click());
             let close_color = if close_response.is_pointer_button_down_on() {
                 Color32::from_rgb(170, 45, 45)
             } else if close_response.hovered() {
@@ -3904,7 +4013,11 @@ impl PdfReaderApp {
                 .is_some_and(|(target, until)| target == id && self.clock.now() < until);
             let highlighted = self.highlight_float == Some(id) || clicked_highlight;
             let (border, border_width, title_color) = if highlighted {
-                (Color32::from_rgb(255, 170, 60), 2.0, Color32::from_rgb(140, 96, 36))
+                (
+                    Color32::from_rgb(255, 170, 60),
+                    2.0,
+                    Color32::from_rgb(140, 96, 36),
+                )
             } else {
                 (Color32::from_gray(130), 1.0, Color32::from_rgb(54, 58, 66))
             };
@@ -3936,15 +4049,19 @@ impl PdfReaderApp {
                 Color32::WHITE,
             );
             // 缩放手柄示意
-            painter.rect_filled(handle_rect.shrink(5.0), CornerRadius::ZERO, Color32::from_gray(120));
+            painter.rect_filled(
+                handle_rect.shrink(5.0),
+                CornerRadius::ZERO,
+                Color32::from_gray(120),
+            );
             // 自定义 preview 的浮窗：内容从记录里**每帧刷新**，这样"快照迟到"也能自动补上
             if let Some(custom_index) = self.floats[index].custom {
                 if let Some(preview) = self.custom_previews.get(custom_index) {
                     let fresh = match (preview.kind, preview.snapshot.clone()) {
                         (CustomKind::Image, Some(texture)) => Some(FloatContent::Image(texture)),
-                        (CustomKind::Text, _) => Some(FloatContent::Text(
-                            preview.text.clone().unwrap_or_default(),
-                        )),
+                        (CustomKind::Text, _) => {
+                            Some(FloatContent::Text(preview.text.clone().unwrap_or_default()))
+                        }
                         _ => None,
                     };
                     if let Some(fresh) = fresh {
@@ -4031,13 +4148,17 @@ impl PdfReaderApp {
     /// （[`crate::view::commands_for_destination`]：有落点 → 居中，无落点 → 顶部对齐）。
     fn follow_link(&mut self, session: &DocumentSession, content: Point) -> bool {
         for page in self.visible.clone() {
-            let Some(placement) = session.placement(page).copied() else { continue };
+            let Some(placement) = session.placement(page).copied() else {
+                continue;
+            };
             if !placement.rect.contains(content) {
                 continue;
             }
             let page_point = placement.content_to_page(content);
             // 找出命中的链接下标（登记表与 links_on 同构，因此能直接查）
-            let Some(navigation) = self.navigation.clone() else { return false };
+            let Some(navigation) = self.navigation.clone() else {
+                return false;
+            };
             let hit = navigation
                 .links_on(page)
                 .iter()
@@ -4082,7 +4203,9 @@ impl PdfReaderApp {
 
     /// 加密文档的密码输入框（用模态窗口阻断背后交互）。
     fn draw_password_prompt(&mut self, ctx: &egui::Context) {
-        let Some(path) = self.password_for.clone() else { return };
+        let Some(path) = self.password_for.clone() else {
+            return;
+        };
         egui::Modal::new(Id::unique("pdf-password")).show(ctx, |ui| {
             ui.set_width(320.0);
             ui.heading("文档已加密");
@@ -4092,7 +4215,8 @@ impl PdfReaderApp {
                     .password(true)
                     .hint_text("密码"),
             );
-            let submitted = response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+            let submitted =
+                response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
             ui.horizontal(|ui| {
                 if ui.button("打开").clicked() || submitted {
                     let password = self.password_input.clone();
@@ -4396,7 +4520,9 @@ fn paint_highlight(
     scroll: Vec2,
     canvas_min: egui::Pos2,
 ) {
-    let Some(placement) = session.placement(highlight.page).copied() else { return };
+    let Some(placement) = session.placement(highlight.page).copied() else {
+        return;
+    };
     let color = match highlight.kind {
         HighlightKind::Selection => Color32::from_rgba_unmultiplied(0, 120, 255, 90),
         HighlightKind::SearchMatch => Color32::from_rgba_unmultiplied(255, 220, 0, 80),
@@ -4416,8 +4542,10 @@ fn paint_highlight(
 /// 画布坐标 → 内容坐标。
 fn canvas_to_content(canvas: egui::Rect, screen_position: egui::Pos2, scroll: Vec2) -> Point {
     view_to_content(
-        Point::new(screen_position.x - canvas.min.x, screen_position.y - canvas.min.y),
+        Point::new(
+            screen_position.x - canvas.min.x,
+            screen_position.y - canvas.min.y,
+        ),
         scroll,
     )
 }
-

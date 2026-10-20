@@ -21,7 +21,10 @@ pub struct Diagnostics {
 impl Diagnostics {
     /// 按环境变量 `PDF_READER_DIAGNOSE` 决定（存在即打开）。
     pub fn from_env() -> Self {
-        Self { enabled: std::env::var_os("PDF_READER_DIAGNOSE").is_some(), captured: None }
+        Self {
+            enabled: std::env::var_os("PDF_READER_DIAGNOSE").is_some(),
+            captured: None,
+        }
     }
 
     /// 关闭。
@@ -31,7 +34,10 @@ impl Diagnostics {
 
     /// 打开并**收集**（不写 stderr）。回放器用这个。
     pub fn capturing() -> Self {
-        Self { enabled: true, captured: Some(Vec::new()) }
+        Self {
+            enabled: true,
+            captured: Some(Vec::new()),
+        }
     }
 
     /// 是否打开。
@@ -58,7 +64,10 @@ impl Diagnostics {
 
     /// 取走已收集的内容（收集模式下清空缓冲；stderr 模式返回空）。
     pub fn take(&mut self) -> Vec<String> {
-        self.captured.as_mut().map(std::mem::take).unwrap_or_default()
+        self.captured
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     /// 当前缓冲的行数（诊断/断言用）。

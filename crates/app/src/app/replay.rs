@@ -37,11 +37,11 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use pdfcore::prelude::*;
 
+use super::{CustomKind, PdfReaderApp};
 use crate::clock::Clock;
 use crate::diag::Diagnostics;
 use crate::json::{Json, JsonLookup};
 use crate::view::{PlanStamp, Preview, READY_TIMEOUT_MS};
-use super::{CustomKind, PdfReaderApp};
 
 /// 页坐标格子数（每轴）。与 `TileGrid` 的 32×32 上限对齐到 16×16，够粗也够细。
 const CELLS: usize = 16;
@@ -300,7 +300,10 @@ impl Report {
 
     /// 全部忙帧的 CPU 时间合计（毫秒）。
     pub fn busy_cpu_ms_total(&self) -> f64 {
-        self.actions.iter().map(|action| action.busy_cpu_ms_total).sum()
+        self.actions
+            .iter()
+            .map(|action| action.busy_cpu_ms_total)
+            .sum()
     }
 
     /// 全部动作的墙钟合计（毫秒）。
@@ -354,7 +357,9 @@ impl Report {
 fn resident_kb() -> u64 {
     #[cfg(target_os = "linux")]
     {
-        let Ok(text) = std::fs::read_to_string("/proc/self/statm") else { return 0 };
+        let Ok(text) = std::fs::read_to_string("/proc/self/statm") else {
+            return 0;
+        };
         let pages: u64 = text
             .split_whitespace()
             .nth(1)
@@ -372,7 +377,8 @@ fn resident_kb() -> u64 {
 
 /// 读取并解析一个脚本文件；`pdf` 为相对路径时按**脚本所在目录**解析。
 pub fn load_script(path: &Path) -> std::result::Result<Script, String> {
-    let text = std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let mut script = parse_script(&text)?;
     if script.pdf.is_relative() {
         if let Some(parent) = path.parent() {
@@ -426,20 +432,38 @@ pub fn run_script_file_with(
 /// `pdf` 为相对路径时按**脚本文件所在目录**解析。
 pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
     let root = Json::parse(text)?;
-    let root = root.as_object().ok_or_else(|| "脚本根节点不是对象".to_string())?;
-    let name = root.field("name").and_then(|v| v.as_str()).unwrap_or("script").to_string();
-    let pdf = root.field("pdf").and_then(|v| v.as_str()).ok_or_else(|| "脚本缺 pdf".to_string())?;
-    let list = root.field("actions").ok_or_else(|| "脚本缺 actions".to_string())?.as_array().ok_or_else(|| "actions 不是数组".to_string())?;
+    let root = root
+        .as_object()
+        .ok_or_else(|| "脚本根节点不是对象".to_string())?;
+    let name = root
+        .field("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("script")
+        .to_string();
+    let pdf = root
+        .field("pdf")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "脚本缺 pdf".to_string())?;
+    let list = root
+        .field("actions")
+        .ok_or_else(|| "脚本缺 actions".to_string())?
+        .as_array()
+        .ok_or_else(|| "actions 不是数组".to_string())?;
     let start_zoom = root.field("start_zoom").and_then(|value| value.as_number());
     let mut actions = Vec::with_capacity(list.len());
     for (index, item) in list.iter().enumerate() {
-        let object = item.as_object().ok_or_else(|| format!("actions[{index}] 不是对象"))?;
+        let object = item
+            .as_object()
+            .ok_or_else(|| format!("actions[{index}] 不是对象"))?;
         let id = object
             .field("id")
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| format!("action_{index}"));
-        let op = object.field("op").and_then(|v| v.as_str()).ok_or_else(|| "动作缺 op".to_string())?;
+        let op = object
+            .field("op")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "动作缺 op".to_string())?;
         let number = |key: &str| -> std::result::Result<f32, String> {
             object
                 .field(key)
@@ -447,11 +471,24 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
                 .ok_or_else(|| format!("{id}: 缺数字字段 {key}"))
         };
         let action = match op {
-            "resize" => Action::Resize { width: number("width")?, height: number("height")? },
-            "zoom" => Action::Zoom { value: number("value")? },
-            "scroll_by" => Action::ScrollBy { dx: number("dx")?, dy: number("dy")? },
-            "set_scroll" => Action::SetScroll { x: number("x")?, y: number("y")? },
-            "go_to_page" => Action::GoToPage { page: number("page")? as u32 },
+            "resize" => Action::Resize {
+                width: number("width")?,
+                height: number("height")?,
+            },
+            "zoom" => Action::Zoom {
+                value: number("value")?,
+            },
+            "scroll_by" => Action::ScrollBy {
+                dx: number("dx")?,
+                dy: number("dy")?,
+            },
+            "set_scroll" => Action::SetScroll {
+                x: number("x")?,
+                y: number("y")?,
+            },
+            "go_to_page" => Action::GoToPage {
+                page: number("page")? as u32,
+            },
             "hover_link" => Action::HoverLink {
                 page: number("page")? as u32,
                 link: number("link").unwrap_or(0.0) as usize,
@@ -460,12 +497,19 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
                 index: number("index").unwrap_or(0.0) as usize,
             },
             "unhover" => Action::Unhover,
-            "wait" => Action::Wait { frames: number("frames").unwrap_or(3.0) as u64 },
+            "wait" => Action::Wait {
+                frames: number("frames").unwrap_or(3.0) as u64,
+            },
             other => return Err(format!("{id}: 未知动作 {other}")),
         };
         actions.push((id, action));
     }
-    Ok(Script { name, pdf: PathBuf::from(pdf), actions, start_zoom })
+    Ok(Script {
+        name,
+        pdf: PathBuf::from(pdf),
+        actions,
+        start_zoom,
+    })
 }
 
 /// 分位数：返回 `(p50, p95, p99, max)`（空输入返回全 0）。
@@ -560,7 +604,10 @@ impl FlipTracker {
         }
         let history = self.history.entry((page, stamp.band)).or_default();
         if history.last() == Some(&stamp) {
-            return FlipOutcome { violations: Vec::new(), became_tiles: false };
+            return FlipOutcome {
+                violations: Vec::new(),
+                became_tiles: false,
+            };
         }
         let was_tiles = history
             .last()
@@ -584,7 +631,10 @@ impl FlipTracker {
             ));
         }
         history.push(stamp);
-        FlipOutcome { violations, became_tiles: now_tiles && !was_tiles }
+        FlipOutcome {
+            violations,
+            became_tiles: now_tiles && !was_tiles,
+        }
     }
 }
 
@@ -631,7 +681,8 @@ impl CoverageTracker {
     fn reset_band(&mut self, page: u32, band: u32) {
         // 波段变化：该页其它波段的记录不再参与比较（旧内容已作废）
         self.sharp_now.retain(|(p, _), _| *p != page);
-        self.sharp_now.insert((page, band), vec![false; CELLS * CELLS]);
+        self.sharp_now
+            .insert((page, band), vec![false; CELLS * CELLS]);
     }
 
     /// 提交一帧：`quads` 是 `(页, 是否清晰, 覆盖格子)`。
@@ -703,11 +754,17 @@ impl CoverageTracker {
     /// 为什么必须**逐帧**：缩小过程中空白只出现在中间几帧（新一档渲染完就没了），
     /// 只在"动作稳定后"检查会全部漏掉 —— 这正是"从高倍往回缩露白"的真实形态。
     fn check_gaps(&mut self, frame: u64, app: &PdfReaderApp) -> Vec<String> {
-        let Some(session) = app.session.as_ref() else { return Vec::new() };
+        let Some(session) = app.session.as_ref() else {
+            return Vec::new();
+        };
         let mut violations = Vec::new();
         for page in app.last_plan.keys() {
-            let Some(placement) = session.placement(*page) else { continue };
-            let Some(covered) = self.covered_last.get(&page.get()) else { continue };
+            let Some(placement) = session.placement(*page) else {
+                continue;
+            };
+            let Some(covered) = self.covered_last.get(&page.get()) else {
+                continue;
+            };
             let ratio = visible_covered_ratio(
                 placement,
                 session.viewport().scroll,
@@ -764,7 +821,11 @@ pub fn run(
 
     // 打开文档：直接走 app 自己的入口（与命令行/拖放同一条路径）
     app.open(&script.pdf, None);
-    let mut report = Report { script: script.name.clone(), actions: Vec::new(), violations: Vec::new() };
+    let mut report = Report {
+        script: script.name.clone(),
+        actions: Vec::new(),
+        violations: Vec::new(),
+    };
     if app.session.is_none() {
         report
             .violations
@@ -907,7 +968,9 @@ pub fn run(
         violations.extend(harness.assert_preview_sizes(app));
         action_report.violations = violations;
         action_report.notes = notes;
-        report.violations.extend(action_report.violations.iter().cloned());
+        report
+            .violations
+            .extend(action_report.violations.iter().cloned());
         report.actions.push(action_report);
     }
 
@@ -940,12 +1003,17 @@ struct Harness {
 
 impl Harness {
     fn apply_action(&mut self, app: &mut crate::PdfReaderApp, action: &Action) {
-        let Some(session) = app.session.as_mut() else { return };
+        let Some(session) = app.session.as_mut() else {
+            return;
+        };
         let mut events = Vec::new();
         match action {
             Action::Resize { width, height } => {
                 self.screen = (*width, *height);
-                session.handle(ViewerCommand::ResizeViewport(Size::new(*width, *height)), &mut events);
+                session.handle(
+                    ViewerCommand::ResizeViewport(Size::new(*width, *height)),
+                    &mut events,
+                );
             }
             Action::Zoom { value } => session.handle(ViewerCommand::SetZoom(*value), &mut events),
             Action::ScrollBy { dx, dy } => {
@@ -1033,7 +1101,9 @@ impl Harness {
         // 上传字节：egui 只是排队，这里统计"打算上传多少"，不代表真实 GPU 耗时
         let upload_bytes = output
             .textures_delta
-            .set.values().flat_map(|deltas| deltas.iter())
+            .set
+            .values()
+            .flat_map(|deltas| deltas.iter())
             .map(|delta| delta.image.width() * delta.image.height() * 4)
             .sum::<usize>() as u64;
 
@@ -1044,8 +1114,14 @@ impl Harness {
             upload_bytes,
             textures: app.textures.len(),
             texture_bytes: app.textures.bytes(),
-            pending: app.session.as_ref().map_or(0, |session| session.pending_renders()),
-            submitted: app.session.as_ref().map_or(0, |session| session.submitted_jobs()),
+            pending: app
+                .session
+                .as_ref()
+                .map_or(0, |session| session.pending_renders()),
+            submitted: app
+                .session
+                .as_ref()
+                .map_or(0, |session| session.submitted_jobs()),
             rss_kb: resident_kb(),
             previewing: app.previewing(),
             // 由结算循环按"和上一帧比有没有变化"回填（见 `busy`）
@@ -1063,7 +1139,10 @@ impl Harness {
                 .keys()
                 .filter(|page| app.visible.contains(page))
                 .filter_map(|page| {
-                    app.session.as_ref()?.visible_tiles(*page).map(|range| (page.get(), range))
+                    app.session
+                        .as_ref()?
+                        .visible_tiles(*page)
+                        .map(|range| (page.get(), range))
                 })
                 .collect(),
         };
@@ -1076,27 +1155,35 @@ impl Harness {
     }
 
     /// 从**真实绘制输出**反推每页的覆盖格子与清晰层，喂给断言 ①。
-    fn observe(
-        &mut self,
-        app: &crate::PdfReaderApp,
-        output: &egui::FullOutput,
-        stat: &FrameStat,
-    ) {
-        let Some(session) = app.session.as_ref() else { return };
+    fn observe(&mut self, app: &crate::PdfReaderApp, output: &egui::FullOutput, stat: &FrameStat) {
+        let Some(session) = app.session.as_ref() else {
+            return;
+        };
         // TextureId → RenderKey
         let mut by_id: HashMap<egui::TextureId, (PageIndex, u32, bool)> = HashMap::new();
         for (key, handle) in app.textures.iter() {
-            let current = RenderKey::new(key.page, session.render_scale(key.page), key.rotation)
-                .scale_milli;
-            by_id.insert(handle.id(), (key.page, key.scale_milli, key.scale_milli == current));
+            let current =
+                RenderKey::new(key.page, session.render_scale(key.page), key.rotation).scale_milli;
+            by_id.insert(
+                handle.id(),
+                (key.page, key.scale_milli, key.scale_milli == current),
+            );
         }
-        let primitives = self.ctx.tessellate(output.shapes.clone(), output.pixels_per_point);
+        let primitives = self
+            .ctx
+            .tessellate(output.shapes.clone(), output.pixels_per_point);
         let mut quads: Vec<(u32, bool, Vec<usize>)> = Vec::new();
         let mut pages: Vec<u32> = Vec::new();
         for primitive in primitives {
-            let egui::epaint::Primitive::Mesh(mesh) = primitive.primitive else { continue };
-            let Some((page, _band, sharp)) = by_id.get(&mesh.texture_id).copied() else { continue };
-            let Some(placement) = session.placement(page) else { continue };
+            let egui::epaint::Primitive::Mesh(mesh) = primitive.primitive else {
+                continue;
+            };
+            let Some((page, _band, sharp)) = by_id.get(&mesh.texture_id).copied() else {
+                continue;
+            };
+            let Some(placement) = session.placement(page) else {
+                continue;
+            };
             // 屏幕矩形 → 内容 → 页坐标
             let (mut min_x, mut min_y) = (f32::MAX, f32::MAX);
             let (mut max_x, mut max_y) = (f32::MIN, f32::MIN);
@@ -1225,7 +1312,13 @@ impl Harness {
                 })
                 .collect::<Vec<_>>()
                 .join("; ");
-            let hint = if action.frames_data.iter().rev().take(3).all(|frame| frame.previewing) {
+            let hint = if action
+                .frames_data
+                .iter()
+                .rev()
+                .take(3)
+                .all(|frame| frame.previewing)
+            {
                 "；这段时间一帧都没出预览窗口（窗口内不提交渲染），说明帧跑得比 160ms 快得多"
             } else {
                 ""
@@ -1254,14 +1347,20 @@ impl Harness {
 
     /// 断言 ③：预览纹理的尺寸必须等于 `区域 × 渲染比例`（允许 ±1 的边缘取整）。
     fn assert_preview_sizes(&self, app: &crate::PdfReaderApp) -> Vec<String> {
-        let Some(session) = app.session.as_ref() else { return Vec::new() };
+        let Some(session) = app.session.as_ref() else {
+            return Vec::new();
+        };
         let mut violations = Vec::new();
         for preview in &app.custom_previews {
             if preview.kind != CustomKind::Image {
                 continue;
             }
-            let Some(texture) = &preview.snapshot else { continue };
-            let Some(placement) = session.placement(preview.page) else { continue };
+            let Some(texture) = &preview.snapshot else {
+                continue;
+            };
+            let Some(placement) = session.placement(preview.page) else {
+                continue;
+            };
             let render = crate::view::preview_render_scale(
                 preview.rect,
                 placement.page_size,
@@ -1283,7 +1382,9 @@ impl Harness {
                 continue;
             };
             let actual = texture.size();
-            if expected.0.abs_diff(actual[0] as u32) > 1 || expected.1.abs_diff(actual[1] as u32) > 1 {
+            if expected.0.abs_diff(actual[0] as u32) > 1
+                || expected.1.abs_diff(actual[1] as u32) > 1
+            {
                 violations.push(format!(
                     "图片预览（页 {}）尺寸 {}×{} ≠ 区域×分辨率 {:?}（记录分辨率={:.0}%）",
                     preview.page.display_number(),
@@ -1358,7 +1459,10 @@ fn action_json(report: &Report, action: &ActionReport) -> String {
 }
 
 fn serde_free_array(items: &[String]) -> String {
-    let body: Vec<String> = items.iter().map(|item| format!("\"{}\"", escape(item))).collect();
+    let body: Vec<String> = items
+        .iter()
+        .map(|item| format!("\"{}\"", escape(item)))
+        .collect();
     format!("[{}]", body.join(","))
 }
 
@@ -1383,8 +1487,22 @@ mod tests {
     use super::*;
     use crate::view::PageDraw;
 
-    fn stamp(plan: PageDraw, preview: Preview, ready: usize, total: usize, waited: u64) -> PlanStamp {
-        PlanStamp { plan, band: 10486, partial: false, ready, total, waited_ms: waited, preview }
+    fn stamp(
+        plan: PageDraw,
+        preview: Preview,
+        ready: usize,
+        total: usize,
+        waited: u64,
+    ) -> PlanStamp {
+        PlanStamp {
+            plan,
+            band: 10486,
+            partial: false,
+            ready,
+            total,
+            waited_ms: waited,
+            preview,
+        }
     }
 
     /// JSONL 必须是合法 JSON 且字段对得上（曾经因为位置参数错位写出过 `"settled":5`）。
@@ -1434,11 +1552,33 @@ mod tests {
         let line = text.lines().next().expect("应有一行");
         let value = crate::json::Json::parse(line).expect("JSONL 必须是合法 JSON");
         let object = value.as_object().expect("一行是对象");
-        assert_eq!(object.field("frames").and_then(|v| v.as_number()), Some(42.0));
-        assert_eq!(object.field("busy_frames").and_then(|v| v.as_number()), Some(3.0));
-        assert_eq!(object.field("settled").and_then(|v| v.as_str()), None, "布尔不是字符串");
-        assert_eq!(object.field("previews").and_then(|v| v.as_array()).map(|a| a.len()), Some(1));
-        assert_eq!(object.field("notes").and_then(|v| v.as_array()).map(|a| a.len()), Some(1));
+        assert_eq!(
+            object.field("frames").and_then(|v| v.as_number()),
+            Some(42.0)
+        );
+        assert_eq!(
+            object.field("busy_frames").and_then(|v| v.as_number()),
+            Some(3.0)
+        );
+        assert_eq!(
+            object.field("settled").and_then(|v| v.as_str()),
+            None,
+            "布尔不是字符串"
+        );
+        assert_eq!(
+            object
+                .field("previews")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(1)
+        );
+        assert_eq!(
+            object
+                .field("notes")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(1)
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1448,7 +1588,11 @@ mod tests {
     fn preview_to_tiles_once_is_fine() {
         let mut flips = FlipTracker::default();
         assert!(flips
-            .observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0), 1)
+            .observe(
+                0,
+                stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0),
+                1
+            )
             .violations
             .is_empty());
         assert!(flips
@@ -1465,10 +1609,18 @@ mod tests {
     #[test]
     fn going_back_to_preview_is_a_violation() {
         let mut flips = FlipTracker::default();
-        flips.observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0), 1);
+        flips.observe(
+            0,
+            stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0),
+            1,
+        );
         flips.observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 20), 2);
         let violations = flips
-            .observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 60), 3)
+            .observe(
+                0,
+                stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 60),
+                3,
+            )
             .violations;
         assert_eq!(violations.len(), 1, "瓦片退回预览必须报：{violations:?}");
         assert!(violations[0].contains("退回"), "{violations:?}");
@@ -1477,9 +1629,17 @@ mod tests {
     #[test]
     fn flipping_to_tiles_twice_is_a_violation() {
         let mut flips = FlipTracker::default();
-        flips.observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0), 1);
+        flips.observe(
+            0,
+            stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0),
+            1,
+        );
         flips.observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 20), 2);
-        flips.observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 60), 3);
+        flips.observe(
+            0,
+            stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 60),
+            3,
+        );
         let violations = flips
             .observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 80), 4)
             .violations;
@@ -1491,7 +1651,11 @@ mod tests {
     #[test]
     fn a_new_band_is_a_new_segment() {
         let mut flips = FlipTracker::default();
-        flips.observe(0, stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0), 1);
+        flips.observe(
+            0,
+            stamp(PageDraw::Stretch(1600), Preview::Whole(1600), 0, 4, 0),
+            1,
+        );
         flips.observe(0, stamp(PageDraw::Tiles, Preview::Whole(1600), 4, 4, 20), 2);
         // 换波段：允许重新走一次"预览 → 瓦片"
         let mut next = stamp(PageDraw::Stretch(1600), Preview::Tiles(65_540), 0, 12, 0);
@@ -1517,14 +1681,23 @@ mod tests {
 
     #[test]
     fn tiles_after_the_timeout_are_allowed() {
-        let late = stamp(PageDraw::Tiles, Preview::Whole(1600), 9, 12, READY_TIMEOUT_MS);
+        let late = stamp(
+            PageDraw::Tiles,
+            Preview::Whole(1600),
+            9,
+            12,
+            READY_TIMEOUT_MS,
+        );
         assert!(premature_switch(0, late, 7).is_none(), "等满超时后允许兜底");
     }
 
     #[test]
     fn first_generation_without_old_content_is_allowed() {
         let fresh = stamp(PageDraw::Tiles, Preview::None, 0, 12, 0);
-        assert!(premature_switch(0, fresh, 1).is_none(), "没有旧内容时只能画瓦片");
+        assert!(
+            premature_switch(0, fresh, 1).is_none(),
+            "没有旧内容时只能画瓦片"
+        );
     }
 
     #[test]
@@ -1545,7 +1718,11 @@ mod tests {
         // 第 2 帧：格子 5 没有任何图层 → 纸白
         tracker.observe(2, &[0], &[(0, true, vec![7])]);
         assert_eq!(tracker.violations.len(), 1, "{:?}", tracker.violations);
-        assert!(tracker.violations[0].contains("曾经清晰"), "{:?}", tracker.violations);
+        assert!(
+            tracker.violations[0].contains("曾经清晰"),
+            "{:?}",
+            tracker.violations
+        );
     }
 
     #[test]

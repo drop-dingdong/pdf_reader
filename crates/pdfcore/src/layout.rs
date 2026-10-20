@@ -36,12 +36,20 @@ pub struct PageGeometry {
 impl PageGeometry {
     /// 构造（原点为 `(0, 0)`，适用于绝大多数 PDF）。
     pub const fn new(size: Size, rotation: Rotation) -> Self {
-        Self { size, rotation, origin: Point::ORIGIN }
+        Self {
+            size,
+            rotation,
+            origin: Point::ORIGIN,
+        }
     }
 
     /// 构造并指定**渲染盒原点**（见 [`PageGeometry::origin`]）。
     pub const fn with_origin(size: Size, rotation: Rotation, origin: Point) -> Self {
-        Self { size, rotation, origin }
+        Self {
+            size,
+            rotation,
+            origin,
+        }
     }
 
     /// 叠加用户旋转后的**实际**旋转。
@@ -130,7 +138,12 @@ impl Viewport {
 
     /// 视口在内容空间中覆盖的矩形。
     pub fn content_rect(&self) -> Rect {
-        Rect::new(self.scroll.x, self.scroll.y, self.size.width, self.size.height)
+        Rect::new(
+            self.scroll.x,
+            self.scroll.y,
+            self.size.width,
+            self.size.height,
+        )
     }
 
     /// 视口中心在内容空间中的坐标（D-05：捕获锚点的起点）。
@@ -186,7 +199,13 @@ impl PagePlacement {
         rotation: Rotation,
         page_size: Size,
     ) -> Self {
-        Self { page, rect, scale, rotation, page_size }
+        Self {
+            page,
+            rect,
+            scale,
+            rotation,
+            page_size,
+        }
     }
 
     /// 旋转后的显示尺寸（内容空间像素）。
@@ -200,7 +219,10 @@ impl PagePlacement {
     /// [`crate::tiling::TileGrid`] 一次算出整数，避免两侧各取整一次导致接缝错位。
     /// 这里保留给"按显示像素比对"的调用方（如 UI 的尺寸判断与测试）。
     pub fn pixel_size(&self) -> Size {
-        Size::new(self.rect.width.round().max(0.0), self.rect.height.round().max(0.0))
+        Size::new(
+            self.rect.width.round().max(0.0),
+            self.rect.height.round().max(0.0),
+        )
     }
 
     /// **PDF 页面坐标 → 内容空间坐标**（文字高亮、链接热区都要用它）。
@@ -261,7 +283,9 @@ impl DocumentLayout {
     /// 目前是线性查找：每帧只需对"可见的几页 + 命中测试"调用，数千页规模下开销可忽略。
     /// 若将来支持十万页文档，可在此处换成按 `rect.y` 排序后的二分查找，调用方不受影响。
     pub fn placement(&self, page: PageIndex) -> Option<&PagePlacement> {
-        self.placements.iter().find(|placement| placement.page == page)
+        self.placements
+            .iter()
+            .find(|placement| placement.page == page)
     }
 
     /// 布局中的页数。
@@ -292,7 +316,12 @@ pub trait PageLayout: Send + Sync {
     ///
     /// 用 `out: &mut Vec` 而不是返回 `Vec` 的原因：UI 每帧都要调用它，
     /// 复用同一个缓冲区可以避免每帧分配（立即模式 GUI 里这点开销会被放大到 60 次/秒）。
-    fn visible_pages(&self, layout: &DocumentLayout, viewport: &Viewport, out: &mut Vec<PageIndex>) {
+    fn visible_pages(
+        &self,
+        layout: &DocumentLayout,
+        viewport: &Viewport,
+        out: &mut Vec<PageIndex>,
+    ) {
         out.clear();
         let window = viewport.content_rect();
         for placement in &layout.placements {
@@ -399,7 +428,11 @@ pub struct VerticalLayout;
 
 impl PageLayout for VerticalLayout {
     fn compute(&self, pages: &[PageGeometry], params: &LayoutParams) -> DocumentLayout {
-        let scale = if params.scale.is_valid() { params.scale } else { Scale::IDENTITY };
+        let scale = if params.scale.is_valid() {
+            params.scale
+        } else {
+            Scale::IDENTITY
+        };
         let margin = params.margin;
         let gap = params.page_gap.max(0.0);
 
@@ -411,7 +444,10 @@ impl PageLayout for VerticalLayout {
                 (page.size.rotated(rotation).scale(scale.0), rotation)
             })
             .collect();
-        let inner_width = displayed.iter().map(|(size, _)| size.width).fold(0.0_f32, f32::max);
+        let inner_width = displayed
+            .iter()
+            .map(|(size, _)| size.width)
+            .fold(0.0_f32, f32::max);
 
         // 第二遍：逐页摆放。
         let mut y = margin.top;
@@ -432,7 +468,11 @@ impl PageLayout for VerticalLayout {
             }
         }
 
-        let content_height = if pages.is_empty() { margin.vertical() } else { y + margin.bottom };
+        let content_height = if pages.is_empty() {
+            margin.vertical()
+        } else {
+            y + margin.bottom
+        };
         DocumentLayout {
             content_size: Size::new(margin.left + inner_width + margin.right, content_height),
             placements,
@@ -449,7 +489,11 @@ pub struct HorizontalLayout;
 
 impl PageLayout for HorizontalLayout {
     fn compute(&self, pages: &[PageGeometry], params: &LayoutParams) -> DocumentLayout {
-        let scale = if params.scale.is_valid() { params.scale } else { Scale::IDENTITY };
+        let scale = if params.scale.is_valid() {
+            params.scale
+        } else {
+            Scale::IDENTITY
+        };
         let margin = params.margin;
         let gap = params.page_gap.max(0.0);
 
@@ -461,7 +505,10 @@ impl PageLayout for HorizontalLayout {
             })
             .collect();
         // 交叉轴取所有页中最大高度，用于垂直居中。
-        let inner_height = displayed.iter().map(|(size, _)| size.height).fold(0.0_f32, f32::max);
+        let inner_height = displayed
+            .iter()
+            .map(|(size, _)| size.height)
+            .fold(0.0_f32, f32::max);
 
         let mut x = margin.left;
         let mut placements = Vec::with_capacity(pages.len());
@@ -481,7 +528,11 @@ impl PageLayout for HorizontalLayout {
             }
         }
 
-        let content_width = if pages.is_empty() { margin.horizontal() } else { x + margin.right };
+        let content_width = if pages.is_empty() {
+            margin.horizontal()
+        } else {
+            x + margin.right
+        };
         DocumentLayout {
             content_size: Size::new(content_width, margin.top + inner_height + margin.bottom),
             placements,
@@ -526,7 +577,10 @@ mod tests {
         // 同一行：y 相同
         assert_eq!(placements[0].rect.y, placements[1].rect.y);
         // 内容宽度 = 留白 + 三页 + 两个间距
-        assert_eq!(layout.content_size.width, 5.0 + 200.0 * 3.0 + 10.0 * 2.0 + 5.0);
+        assert_eq!(
+            layout.content_size.width,
+            5.0 + 200.0 * 3.0 + 10.0 * 2.0 + 5.0
+        );
     }
 
     /// 高度不同的页：交叉轴按最大高度居中。
@@ -548,8 +602,14 @@ mod tests {
 
         // 100x200 @2x → 200x400；页间距 10；留白 5
         assert_eq!(layout.placements[0].rect, Rect::new(5.0, 5.0, 200.0, 400.0));
-        assert_eq!(layout.placements[1].rect, Rect::new(5.0, 415.0, 200.0, 400.0));
-        assert_eq!(layout.placements[2].rect, Rect::new(5.0, 825.0, 200.0, 400.0));
+        assert_eq!(
+            layout.placements[1].rect,
+            Rect::new(5.0, 415.0, 200.0, 400.0)
+        );
+        assert_eq!(
+            layout.placements[2].rect,
+            Rect::new(5.0, 825.0, 200.0, 400.0)
+        );
         assert_eq!(layout.content_size, Size::new(210.0, 1230.0));
     }
 
@@ -592,7 +652,10 @@ mod tests {
             Some(PageIndex::new(1))
         );
         // 落在页间距里 → 无命中
-        assert_eq!(VerticalLayout.page_at(&layout, Point::new(50.0, 210.0)), None);
+        assert_eq!(
+            VerticalLayout.page_at(&layout, Point::new(50.0, 210.0)),
+            None
+        );
     }
 
     #[test]
@@ -621,7 +684,10 @@ mod tests {
         let tall_viewport = Size::new(120.0, 620.0);
         let scroll = VerticalLayout.scroll_to_page(&layout, PageIndex::new(2), tall_viewport);
         let max = VerticalLayout.max_scroll(&layout, tall_viewport);
-        assert!((scroll.y - max.y).abs() < 1e-3, "夹取到最大偏移，实际 {scroll:?}");
+        assert!(
+            (scroll.y - max.y).abs() < 1e-3,
+            "夹取到最大偏移，实际 {scroll:?}"
+        );
     }
 
     #[test]
@@ -639,7 +705,10 @@ mod tests {
 
     #[test]
     fn user_rotation_stacks_on_page_rotation() {
-        let pages = vec![PageGeometry::new(Size::new(100.0, 200.0), Rotation::Clockwise90)];
+        let pages = vec![PageGeometry::new(
+            Size::new(100.0, 200.0),
+            Rotation::Clockwise90,
+        )];
         let mut p = params(1.0);
         p.user_rotation = Rotation::Clockwise90;
         let layout = VerticalLayout.compute(&pages, &p);
@@ -743,14 +812,23 @@ mod tests {
     /// 这正是"缩小时页面中心一直往左上漂"的根因。
     #[test]
     fn content_smaller_than_viewport_is_centered() {
-        let layout = VerticalLayout.compute(&[PageGeometry::new(Size::new(100.0, 200.0), Rotation::None)], &params(1.0));
+        let layout = VerticalLayout.compute(
+            &[PageGeometry::new(Size::new(100.0, 200.0), Rotation::None)],
+            &params(1.0),
+        );
         // 单页 + 留白 5：内容 (110, 210)
         assert_eq!(layout.content_size, Size::new(110.0, 210.0));
 
         let viewport = Size::new(300.0, 500.0);
         let scroll = VerticalLayout.clamp_scroll(&layout, viewport, Vec2::ZERO);
-        assert!((scroll.x - (300.0 - 110.0) * -0.5).abs() < 1e-3, "got {scroll:?}");
-        assert!((scroll.y - (500.0 - 210.0) * -0.5).abs() < 1e-3, "got {scroll:?}");
+        assert!(
+            (scroll.x - (300.0 - 110.0) * -0.5).abs() < 1e-3,
+            "got {scroll:?}"
+        );
+        assert!(
+            (scroll.y - (500.0 - 210.0) * -0.5).abs() < 1e-3,
+            "got {scroll:?}"
+        );
 
         // 页中心应正好落在视口中心
         let page = layout.placement(PageIndex::new(0)).expect("第 1 页");

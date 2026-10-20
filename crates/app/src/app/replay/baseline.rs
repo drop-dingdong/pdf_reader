@@ -48,7 +48,11 @@ impl Machine {
             ram_mb: total_ram_mb(),
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
-            build: if cfg!(debug_assertions) { "debug".into() } else { "release".into() },
+            build: if cfg!(debug_assertions) {
+                "debug".into()
+            } else {
+                "release".into()
+            },
         }
     }
 
@@ -137,7 +141,10 @@ impl Baseline {
                 upload_bytes: action.upload_bytes,
                 textures_peak: action.textures_peak,
                 texture_bytes_peak: action.texture_bytes_peak,
-                preview: action.previews.first().map(|(_, width, height)| (*width, *height)),
+                preview: action
+                    .previews
+                    .first()
+                    .map(|(_, width, height)| (*width, *height)),
             })
             .collect();
         let cpu_ms = report.busy_frame_percentiles();
@@ -170,7 +177,11 @@ impl Baseline {
         let _ = writeln!(out, "  }},");
         let _ = writeln!(out, "  \"actions\": [");
         for (index, action) in self.actions.iter().enumerate() {
-            let comma = if index + 1 == self.actions.len() { "" } else { "," };
+            let comma = if index + 1 == self.actions.len() {
+                ""
+            } else {
+                ","
+            };
             let preview = match action.preview {
                 Some((width, height)) => format!("[{width}, {height}]"),
                 None => "null".to_string(),
@@ -196,11 +207,7 @@ impl Baseline {
             out,
             "  \"cpu_ms\": {{\"p50\": {p50:.3}, \"p95\": {p95:.3}, \"p99\": {p99:.3}, \"max\": {max:.3}}},"
         );
-        let _ = writeln!(
-            out,
-            "  \"cpu_ms_total\": {:.3},",
-            self.cpu_ms_total
-        );
+        let _ = writeln!(out, "  \"cpu_ms_total\": {:.3},", self.cpu_ms_total);
         let _ = writeln!(out, "  \"wall_ms_total\": {:.1},", self.wall_ms_total);
         let _ = writeln!(out, "  \"busy_frames\": {},", self.busy_frames);
         let _ = writeln!(out, "  \"rss_peak_kb\": {}", self.rss_peak_kb);
@@ -366,11 +373,17 @@ pub struct Finding {
 
 impl Finding {
     fn gate(message: impl Into<String>) -> Self {
-        Self { severity: Severity::Gate, message: message.into() }
+        Self {
+            severity: Severity::Gate,
+            message: message.into(),
+        }
     }
 
     fn warn(message: impl Into<String>) -> Self {
-        Self { severity: Severity::Warn, message: message.into() }
+        Self {
+            severity: Severity::Warn,
+            message: message.into(),
+        }
     }
 }
 
@@ -418,7 +431,9 @@ pub fn compare(baseline: &Baseline, report: &Report, machine: &Machine) -> Vec<F
         )));
     }
     for (index, expected) in baseline.actions.iter().enumerate() {
-        let Some(actual) = report.actions.get(index) else { break };
+        let Some(actual) = report.actions.get(index) else {
+            break;
+        };
         if expected.id != actual.id {
             findings.push(Finding::gate(format!(
                 "第 {index} 个动作对不上：基线 {}，当前 {}",
@@ -451,7 +466,11 @@ pub fn compare(baseline: &Baseline, report: &Report, machine: &Machine) -> Vec<F
                 BYTE_TOLERANCE_RATIO * 100.0
             )));
         }
-        if !within(expected.upload_bytes, actual.upload_bytes, BYTE_TOLERANCE_RATIO) {
+        if !within(
+            expected.upload_bytes,
+            actual.upload_bytes,
+            BYTE_TOLERANCE_RATIO,
+        ) {
             findings.push(Finding::gate(format!(
                 "动作 {} 的上传字节 {} 偏离基线 {} 超过 {:.0}%",
                 expected.id,
@@ -460,7 +479,10 @@ pub fn compare(baseline: &Baseline, report: &Report, machine: &Machine) -> Vec<F
                 BYTE_TOLERANCE_RATIO * 100.0
             )));
         }
-        let actual_preview = actual.previews.first().map(|(_, width, height)| (*width, *height));
+        let actual_preview = actual
+            .previews
+            .first()
+            .map(|(_, width, height)| (*width, *height));
         if expected.preview != actual_preview {
             findings.push(Finding::gate(format!(
                 "动作 {} 的预览尺寸 {:?} ≠ 基线 {:?}",
@@ -483,7 +505,11 @@ pub fn compare(baseline: &Baseline, report: &Report, machine: &Machine) -> Vec<F
     }
     // "这个动作一共烧了多少 CPU / 等了多久"比单帧分位数更稳，也更接近手感
     for (name, actual, expected) in [
-        ("忙帧 CPU 合计", report.busy_cpu_ms_total(), baseline.cpu_ms_total),
+        (
+            "忙帧 CPU 合计",
+            report.busy_cpu_ms_total(),
+            baseline.cpu_ms_total,
+        ),
         ("墙钟合计", report.wall_ms_total(), baseline.wall_ms_total),
     ] {
         if expected > 0.0 && actual > expected * (1.0 + TIMING_WARN_RATIO) {
@@ -541,7 +567,10 @@ fn total_ram_mb() -> u64 {
         if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
             for line in text.lines() {
                 if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    if let Some(kb) = rest.split_whitespace().next().and_then(|v| v.parse::<u64>().ok())
+                    if let Some(kb) = rest
+                        .split_whitespace()
+                        .next()
+                        .and_then(|v| v.parse::<u64>().ok())
                     {
                         return kb / 1024;
                     }
@@ -584,7 +613,11 @@ mod tests {
     }
 
     fn report(actions: Vec<ActionReport>) -> Report {
-        Report { script: "demo".to_string(), actions, violations: Vec::new() }
+        Report {
+            script: "demo".to_string(),
+            actions,
+            violations: Vec::new(),
+        }
     }
 
     fn machine() -> Machine {
@@ -637,7 +670,10 @@ mod tests {
     fn upload_byte_drift_within_tolerance_is_ignored_but_big_drift_is_not() {
         let baseline = Baseline::record(&report(vec![action("a", 1, 1000)]), machine());
         let small = report(vec![action("a", 1, 1050)]);
-        assert!(compare(&baseline, &small, &machine()).is_empty(), "5% 内应放过");
+        assert!(
+            compare(&baseline, &small, &machine()).is_empty(),
+            "5% 内应放过"
+        );
         let big = report(vec![action("a", 1, 1500)]);
         assert!(
             compare(&baseline, &big, &machine())
@@ -681,8 +717,10 @@ mod tests {
         let empty = Baseline::record(&report(vec![action("a", 0, 0)]), machine());
         let findings = compare(&empty, &report(vec![action("a", 0, 0)]), &machine());
         assert!(
-            findings.iter().any(|finding| finding.severity == Severity::Gate
-                && finding.message.contains("没有任何渲染请求")),
+            findings
+                .iter()
+                .any(|finding| finding.severity == Severity::Gate
+                    && finding.message.contains("没有任何渲染请求")),
             "{findings:?}"
         );
     }

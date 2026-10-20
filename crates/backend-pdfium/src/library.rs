@@ -85,7 +85,10 @@ fn candidate_directories() -> Vec<String> {
         for _ in 0..3 {
             let Some(current) = directory else { break };
             candidates.push(with_separator(
-                current.join("vendor").join(format!("pdfium-{platform}")).join("lib"),
+                current
+                    .join("vendor")
+                    .join(format!("pdfium-{platform}"))
+                    .join("lib"),
             ));
             directory = current.parent();
         }
@@ -117,7 +120,11 @@ mod tests {
 
     #[test]
     fn platform_tag_is_known() {
-        assert_ne!(platform_tag(), "unknown", "未识别的平台会导致找不到 vendor 目录");
+        assert_ne!(
+            platform_tag(),
+            "unknown",
+            "未识别的平台会导致找不到 vendor 目录"
+        );
     }
 
     #[test]
@@ -125,7 +132,9 @@ mod tests {
         // 不设置 PDFIUM_PATH 时，必须至少包含仓库内的 vendor 路径（开发机默认布局）
         let candidates = candidate_directories();
         assert!(
-            candidates.iter().any(|path| path.contains(&format!("pdfium-{}", platform_tag()))),
+            candidates
+                .iter()
+                .any(|path| path.contains(&format!("pdfium-{}", platform_tag()))),
             "候选目录应包含 vendor/pdfium-<平台>/lib，实际：{candidates:?}"
         );
     }
@@ -144,7 +153,10 @@ mod tests {
         }
         // 若系统里恰好有 libpdfium，则允许成功
         if let Err(message) = result {
-            assert!(message.contains("无法加载 PDFium"), "错误文案应可操作：{message}");
+            assert!(
+                message.contains("无法加载 PDFium"),
+                "错误文案应可操作：{message}"
+            );
         }
     }
 }

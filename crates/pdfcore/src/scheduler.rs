@@ -56,7 +56,6 @@ struct State {
     in_flight: usize,
 }
 
-
 /// 队列中的任务。排序规则：**优先级小的先出**，同优先级按提交顺序 FIFO。
 struct QueuedJob {
     priority: RenderPriority,
@@ -110,7 +109,10 @@ impl WorkerScheduler {
             })
             .collect();
 
-        Self { shared, workers: Mutex::new(workers) }
+        Self {
+            shared,
+            workers: Mutex::new(workers),
+        }
     }
 
     /// 按后端声明的并发上限构造（**推荐用法**）。
@@ -155,11 +157,16 @@ fn worker_loop(shared: Arc<Shared>) {
         let key = job.request.key();
         let event = if job.request.cancel.is_cancelled() {
             // 未付出渲染代价 → 直接补发取消事件（保证调用方的在飞集合能被清理）
-            RenderEvent::Cancelled { page: job.request.page }
+            RenderEvent::Cancelled {
+                page: job.request.page,
+            }
         } else {
             match shared.raster.render(&job.request) {
                 Ok(image) => RenderEvent::Rendered { key, image },
-                Err(error) => RenderEvent::Failed { page: job.request.page, error },
+                Err(error) => RenderEvent::Failed {
+                    page: job.request.page,
+                    error,
+                },
             }
         };
 
@@ -187,7 +194,12 @@ impl RenderScheduler for WorkerScheduler {
         let sequence = job.0;
         state.active.insert(key);
         state.tokens.insert(job, request.cancel.clone());
-        state.queue.push(QueuedJob { priority: request.priority, sequence, job, request });
+        state.queue.push(QueuedJob {
+            priority: request.priority,
+            sequence,
+            job,
+            request,
+        });
         drop(state);
 
         self.shared.wake.notify_one();
@@ -265,7 +277,10 @@ mod tests {
 
     impl Gate {
         fn closed() -> Self {
-            Self { open: StdMutex::new(false), condvar: Condvar::new() }
+            Self {
+                open: StdMutex::new(false),
+                condvar: Condvar::new(),
+            }
         }
         fn wait(&self) {
             let mut open = self.open.lock().unwrap();
@@ -374,7 +389,9 @@ mod tests {
         let job = scheduler.submit(request(3, RenderPriority::Visible));
         assert_ne!(job, JobId(0));
 
-        wait_until("任务完成", Duration::from_secs(2), || scheduler.pending() == 0);
+        wait_until("任务完成", Duration::from_secs(2), || {
+            scheduler.pending() == 0
+        });
         let events = scheduler.drain_events(8);
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -393,7 +410,9 @@ mod tests {
         let scheduler = WorkerScheduler::new(raster.clone(), 1);
 
         let first = scheduler.submit(request(1, RenderPriority::Visible));
-        wait_until("第一个任务已开始", Duration::from_secs(2), || raster.started_count() == 1);
+        wait_until("第一个任务已开始", Duration::from_secs(2), || {
+            raster.started_count() == 1
+        });
         // 同一页同一缩放同一旋转 → 应被去重，不入队
         let second = scheduler.submit(request(1, RenderPriority::Interactive));
         assert_eq!(second, JobId(0), "重复提交应返回可忽略的任务号");
@@ -414,7 +433,9 @@ mod tests {
 
         // 先占住唯一的工作线程
         scheduler.submit(request(9, RenderPriority::Visible));
-        wait_until("占位任务已开始", Duration::from_secs(2), || raster.started_count() == 1);
+        wait_until("占位任务已开始", Duration::from_secs(2), || {
+            raster.started_count() == 1
+        });
 
         // 依次提交：低优先级先提交，高优先级后提交
         scheduler.submit(request(3, RenderPriority::Background));
@@ -426,7 +447,12 @@ mod tests {
 
         assert_eq!(
             raster.finished(),
-            vec![PageIndex::new(9), PageIndex::new(1), PageIndex::new(2), PageIndex::new(3)],
+            vec![
+                PageIndex::new(9),
+                PageIndex::new(1),
+                PageIndex::new(2),
+                PageIndex::new(3)
+            ],
             "同优先级 FIFO，跨优先级按 rank 升序"
         );
     }
@@ -438,7 +464,9 @@ mod tests {
         let scheduler = WorkerScheduler::new(raster.clone(), 1);
 
         scheduler.submit(request(9, RenderPriority::Visible)); // 占位
-        wait_until("占位任务已开始", Duration::from_secs(2), || raster.started_count() == 1);
+        wait_until("占位任务已开始", Duration::from_secs(2), || {
+            raster.started_count() == 1
+        });
         let doomed = scheduler.submit(request(5, RenderPriority::Visible));
 
         scheduler.cancel(doomed);
@@ -453,7 +481,10 @@ mod tests {
             RenderEvent::Cancelled { page } if page.get() == 5 => Some(()),
             _ => None,
         });
-        assert!(cancelled.is_some(), "必须补发 Cancelled 事件（否则调用方在飞集合泄漏）：{events:?}");
+        assert!(
+            cancelled.is_some(),
+            "必须补发 Cancelled 事件（否则调用方在飞集合泄漏）：{events:?}"
+        );
     }
 
     #[test]
@@ -463,7 +494,9 @@ mod tests {
         let scheduler = WorkerScheduler::new(raster.clone(), 1);
 
         scheduler.submit(request(9, RenderPriority::Visible)); // 占位
-        wait_until("占位任务已开始", Duration::from_secs(2), || raster.started_count() == 1);
+        wait_until("占位任务已开始", Duration::from_secs(2), || {
+            raster.started_count() == 1
+        });
 
         scheduler.submit(request(4, RenderPriority::Visible));
         scheduler.submit(request(5, RenderPriority::Visible));
@@ -472,7 +505,10 @@ mod tests {
         drain_all(&scheduler);
 
         let finished = raster.finished();
-        assert!(!finished.contains(&PageIndex::new(4)), "页 4 的任务应全部取消");
+        assert!(
+            !finished.contains(&PageIndex::new(4)),
+            "页 4 的任务应全部取消"
+        );
         assert!(finished.contains(&PageIndex::new(5)), "页 5 不受影响");
     }
 
@@ -485,7 +521,11 @@ mod tests {
         let scheduler = WorkerScheduler::new(raster.clone(), 2);
         scheduler.submit(request(1, RenderPriority::Visible));
         scheduler.submit(request(2, RenderPriority::Visible));
-        wait_until("两个任务应并发开始", Duration::from_secs(2), || raster.started_count() == 2);
+        wait_until(
+            "两个任务应并发开始",
+            Duration::from_secs(2),
+            || raster.started_count() == 2,
+        );
         assert_eq!(scheduler.pending(), 2);
         gate.open();
         drain_all(&scheduler);
@@ -497,8 +537,10 @@ mod tests {
         // PDFium 声明 max_concurrency = 1：即便提交多个任务，同一时刻也只有一个在渲染
         let gate = Arc::new(Gate::closed());
         let raster = Arc::new(TestRaster::new(gate.clone()));
-        let scheduler =
-            WorkerScheduler::with_capabilities(raster.clone(), crate::document::Capabilities::full());
+        let scheduler = WorkerScheduler::with_capabilities(
+            raster.clone(),
+            crate::document::Capabilities::full(),
+        );
 
         for page in 0..4 {
             scheduler.submit(request(page, RenderPriority::Visible));
@@ -538,11 +580,16 @@ mod tests {
         let raster = Arc::new(TestRaster::new(gate));
         let scheduler = WorkerScheduler::new(raster.clone(), 2);
         scheduler.submit(request(1, RenderPriority::Visible));
-        wait_until("任务完成", Duration::from_secs(2), || scheduler.pending() == 0);
+        wait_until("任务完成", Duration::from_secs(2), || {
+            scheduler.pending() == 0
+        });
 
         let start = Instant::now();
         drop(scheduler);
-        assert!(start.elapsed() < Duration::from_secs(2), "Drop 应join 工作线程而不是挂住");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "Drop 应join 工作线程而不是挂住"
+        );
     }
 
     #[test]
@@ -552,7 +599,9 @@ mod tests {
         let scheduler = WorkerScheduler::new(raster.clone(), 1);
 
         scheduler.submit(request(9, RenderPriority::Visible)); // 占位（已进入渲染，无法中断）
-        wait_until("占位任务已开始", Duration::from_secs(2), || raster.started_count() == 1);
+        wait_until("占位任务已开始", Duration::from_secs(2), || {
+            raster.started_count() == 1
+        });
         for page in 0..3 {
             scheduler.submit(request(page, RenderPriority::Visible));
         }

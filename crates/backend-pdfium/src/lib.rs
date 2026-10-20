@@ -30,10 +30,10 @@
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 pub mod backend;
-#[doc(hidden)]
-pub mod fixtures;
 pub mod document;
 pub mod error;
+#[doc(hidden)]
+pub mod fixtures;
 pub mod library;
 pub mod raster;
 pub mod text;

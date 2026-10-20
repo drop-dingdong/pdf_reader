@@ -74,18 +74,17 @@ pub mod ids;
 pub mod image;
 pub mod layout;
 pub mod render;
-pub mod tiling;
 pub mod scheduler;
 pub mod session;
 pub mod store;
 pub mod testkit;
 pub mod text;
+pub mod tiling;
 
 /// 常用类型的一次性导入。
 pub mod prelude {
     // 运行期"电池"：默认的调度器与缓存实现（纯 std，可直接用于桌面 app）
     pub use crate::cache::{LruCache, DEFAULT_CAPACITY_BYTES};
-    pub use crate::scheduler::WorkerScheduler;
     pub use crate::document::{
         Capabilities, Destination, Document, DocumentInfo, Link, NavigationIndex, OpenedDocument,
         OutlineNode, PdfBackend, Permissions, Source,
@@ -99,17 +98,21 @@ pub mod prelude {
         ReadingDirection, ScrollAnchor, VerticalLayout, Viewport,
     };
     pub use crate::render::{
-        CancelToken, CacheStats, PageRaster, RenderCache, RenderEvent, RenderKey, RenderPriority,
+        CacheStats, CancelToken, PageRaster, RenderCache, RenderEvent, RenderKey, RenderPriority,
         RenderRegion, RenderRequest, RenderScheduler, Scale, TileSpec, TilingPolicy,
     };
-    pub use crate::tiling::{
-        render_scale_for, band_for, reuse_is_enough, render_scale_for_band, TileGrid,
-        DEFAULT_OVERSCAN, TARGET_TILE_PX,
+    pub use crate::scheduler::WorkerScheduler;
+    pub use crate::session::{
+        DocumentSession, SessionEvent, SidebarTab, ViewerCommand, ViewerState,
     };
-    pub use crate::session::{DocumentSession, SessionEvent, SidebarTab, ViewerCommand, ViewerState};
     pub use crate::store::{AppSettings, KeyValueStore, RecentFiles};
     pub use crate::text::{
         Highlight, HighlightKind, PageText, RangeSelection, SearchHit, SearchQuery, Selection,
-        SelectionGranularity, TextChar, TextLayer, TextPosition, TextRange, TextSelection, TextSpan,
+        SelectionGranularity, TextChar, TextLayer, TextPosition, TextRange, TextSelection,
+        TextSpan,
+    };
+    pub use crate::tiling::{
+        band_for, render_scale_for, render_scale_for_band, reuse_is_enough, TileGrid,
+        DEFAULT_OVERSCAN, TARGET_TILE_PX,
     };
 }

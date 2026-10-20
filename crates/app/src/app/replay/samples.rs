@@ -67,15 +67,20 @@ impl Sample {
 
     /// 全部样本（脚本自检用）。
     pub fn all() -> [Self; 6] {
-        [Self::A4, Self::Rotated, Self::Large, Self::Many, Self::Preview, Self::Strip]
+        [
+            Self::A4,
+            Self::Rotated,
+            Self::Large,
+            Self::Many,
+            Self::Preview,
+            Self::Strip,
+        ]
     }
 
     /// PDF 字节。
     pub fn pdf_bytes(self) -> Vec<u8> {
         match self {
-            Self::A4 | Self::Preview => {
-                backend_pdfium::fixtures::many_page_pdf(3, 595.28, 841.89)
-            }
+            Self::A4 | Self::Preview => backend_pdfium::fixtures::many_page_pdf(3, 595.28, 841.89),
             Self::Rotated => backend_pdfium::fixtures::two_page_pdf(),
             // A0：2384×3370 pt，100% 时 2384×3370 px ≈ 8MP > 4MP，必然分块
             Self::Large => backend_pdfium::fixtures::many_page_pdf(1, 2383.94, 3370.39),
@@ -121,7 +126,8 @@ fn preview_sidecar() -> String {
     // 区域 150×80pt（A4 第 1 页中部），800% → 约 1573×839 px，需要 4×2 = 8 块
     "{\n  \"version\": 2,\n  \"custom_images\": [\n    {\"page\": 0, \
          \"point\": [150, 680], \"rect\": [72, 640, 150, 80], \
-         \"body\": [320, 200], \"scale\": 8.0, \"title\": \"回放预览\"}\n  ]\n}\n".to_string()
+         \"body\": [320, 200], \"scale\": 8.0, \"title\": \"回放预览\"}\n  ]\n}\n"
+        .to_string()
 }
 
 #[cfg(test)]
@@ -135,7 +141,11 @@ mod tests {
             assert!(!sample.file_name().is_empty());
         }
         assert_eq!(Sample::parse("nope"), None);
-        assert_eq!(Sample::parse("two-page"), Some(Sample::Rotated), "旧名字仍可用");
+        assert_eq!(
+            Sample::parse("two-page"),
+            Some(Sample::Rotated),
+            "旧名字仍可用"
+        );
     }
 
     #[test]

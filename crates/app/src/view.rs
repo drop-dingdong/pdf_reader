@@ -35,7 +35,10 @@ pub fn command_for_key(key: Key, modifiers: Modifiers, page_count: u32) -> Optio
     match key {
         Key::ArrowDown => Some(ViewerCommand::ScrollBy(Vec2::new(0.0, KEY_SCROLL_STEP))),
         Key::ArrowUp => Some(ViewerCommand::ScrollBy(Vec2::new(0.0, -KEY_SCROLL_STEP))),
-        Key::Space => Some(ViewerCommand::ScrollBy(Vec2::new(0.0, KEY_SCROLL_STEP * 4.0))),
+        Key::Space => Some(ViewerCommand::ScrollBy(Vec2::new(
+            0.0,
+            KEY_SCROLL_STEP * 4.0,
+        ))),
         Key::PageDown => Some(ViewerCommand::NextPage),
         Key::PageUp => Some(ViewerCommand::PrevPage),
         Key::Home => Some(ViewerCommand::GoToPage(PageIndex::FIRST)),
@@ -65,7 +68,11 @@ pub fn command_for_scroll(
         if delta.y.abs() < 0.5 {
             return None;
         }
-        let factor = if delta.y > 0.0 { WHEEL_ZOOM_FACTOR } else { 1.0 / WHEEL_ZOOM_FACTOR };
+        let factor = if delta.y > 0.0 {
+            WHEEL_ZOOM_FACTOR
+        } else {
+            1.0 / WHEEL_ZOOM_FACTOR
+        };
         Some(ViewerCommand::SetZoom(current_zoom * factor))
     } else if delta.x.abs() > 0.0 || delta.y.abs() > 0.0 {
         Some(ViewerCommand::ScrollBy(Vec2::new(-delta.x, -delta.y)))
@@ -122,8 +129,16 @@ pub fn tile_view_rect_scaled(
     old_page: Size,
     new_page: Size,
 ) -> Rect {
-    let sx = if old_page.width > 0.0 { new_page.width / old_page.width } else { 1.0 };
-    let sy = if old_page.height > 0.0 { new_page.height / old_page.height } else { 1.0 };
+    let sx = if old_page.width > 0.0 {
+        new_page.width / old_page.width
+    } else {
+        1.0
+    };
+    let sy = if old_page.height > 0.0 {
+        new_page.height / old_page.height
+    } else {
+        1.0
+    };
     Rect::new(
         page_rect.x + pixels.x * sx,
         page_rect.y + pixels.y * sy,
@@ -163,7 +178,10 @@ pub fn commands_for_destination(destination: &Destination) -> Vec<ViewerCommand>
         Destination::Page { page, offset } => {
             let mut commands = vec![ViewerCommand::GoToPage(*page)];
             if let Some(point) = offset {
-                commands.push(ViewerCommand::CenterOnPagePoint { page: *page, point: *point });
+                commands.push(ViewerCommand::CenterOnPagePoint {
+                    page: *page,
+                    point: *point,
+                });
             }
             commands
         }
@@ -203,7 +221,11 @@ pub struct SnapshotPage<'a> {
 }
 
 /// 合成快照时的一层内容：区域 + 整页图 + 该区域内的块。
-pub type SnapshotLayer = (Rect, Option<Arc<RasterImage>>, Vec<(Rect, Arc<RasterImage>)>);
+pub type SnapshotLayer = (
+    Rect,
+    Option<Arc<RasterImage>>,
+    Vec<(Rect, Arc<RasterImage>)>,
+);
 
 /// 把 `content_rect` 覆盖到的**已渲染像素**拷成一张自包含图像（截图快照）。
 ///
@@ -215,7 +237,10 @@ pub type SnapshotLayer = (Rect, Option<Arc<RasterImage>>, Vec<(Rect, Arc<RasterI
 /// 代价只有一次区域像素拷贝（区域 ≤ 一屏），采样为最近邻（预览用，不追求重采样质量）。
 /// 未被页面覆盖或**尚未就绪**的地方保持白色。
 /// 完全没有可用像素时返回 `None`（调用方据此提示）。
-pub fn compose_snapshot(pages: &[SnapshotPage<'_>], content_rect: Rect) -> Option<egui::ColorImage> {
+pub fn compose_snapshot(
+    pages: &[SnapshotPage<'_>],
+    content_rect: Rect,
+) -> Option<egui::ColorImage> {
     let width = content_rect.width.ceil().max(1.0) as usize;
     let height = content_rect.height.ceil().max(1.0) as usize;
     // 白底：页面未覆盖处（页间距、页边距）与未就绪处都留白
@@ -235,7 +260,9 @@ pub fn compose_snapshot(pages: &[SnapshotPage<'_>], content_rect: Rect) -> Optio
         if dest.width <= 0.0 || dest.height <= 0.0 || image.width == 0 || image.height == 0 {
             return false;
         }
-        let Some(overlap) = dest.intersection(content_rect) else { return false };
+        let Some(overlap) = dest.intersection(content_rect) else {
+            return false;
+        };
         if overlap.width <= 0.0 || overlap.height <= 0.0 {
             return false;
         }
@@ -288,7 +315,9 @@ pub fn compose_snapshot(pages: &[SnapshotPage<'_>], content_rect: Rect) -> Optio
 
     let mut painted = false;
     for page in pages {
-        let Some(overlap) = page.rect.intersection(content_rect) else { continue };
+        let Some(overlap) = page.rect.intersection(content_rect) else {
+            continue;
+        };
         if overlap.width <= 0.0 || overlap.height <= 0.0 {
             continue;
         }
@@ -306,7 +335,12 @@ pub fn compose_snapshot(pages: &[SnapshotPage<'_>], content_rect: Rect) -> Optio
     if !painted {
         return None;
     }
-    Some(color_image(PixelFormat::Rgba8, &rgba, width as u32, height as u32))
+    Some(color_image(
+        PixelFormat::Rgba8,
+        &rgba,
+        width as u32,
+        height as u32,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -383,7 +417,13 @@ pub struct PlanStamp {
 impl PlanStamp {
     /// 用于"是否变化"的比较签名（**不含** `waited_ms`：它每帧都在变）。
     pub fn stable_key(self) -> (String, u32, bool, usize, usize) {
-        (self.describe(), self.band, self.preview != Preview::None, self.ready, self.total)
+        (
+            self.describe(),
+            self.band,
+            self.preview != Preview::None,
+            self.ready,
+            self.total,
+        )
     }
 
     /// 诊断用的短名（兜底时带后缀）。
@@ -531,7 +571,11 @@ pub fn region_device_rect(
     if !(page_rect.width > 0.0) || !(page_rect.height > 0.0) {
         return None;
     }
-    let scale = if render_scale > 0.0 { render_scale } else { 1.0 };
+    let scale = if render_scale > 0.0 {
+        render_scale
+    } else {
+        1.0
+    };
     let corners = [
         Point::new(page_rect.x, page_rect.y),
         Point::new(page_rect.right(), page_rect.y),
@@ -588,8 +632,7 @@ pub fn compose_region_snapshot(
     if !(page_rect.width > 0.0) || !(page_rect.height > 0.0) {
         return None;
     }
-    let (x0, y0, width, height) =
-        region_device_rect(page_rect, page_size, rotation, render_scale)?;
+    let (x0, y0, width, height) = region_device_rect(page_rect, page_size, rotation, render_scale)?;
     let (width, height) = (width as usize, height as usize);
     let mut rgba = vec![255u8; width * height * 4];
     let mut painted = false;
@@ -632,7 +675,12 @@ pub fn compose_region_snapshot(
     if !painted {
         return None;
     }
-    Some(color_image(PixelFormat::Rgba8, &rgba, width as u32, height as u32))
+    Some(color_image(
+        PixelFormat::Rgba8,
+        &rgba,
+        width as u32,
+        height as u32,
+    ))
 }
 
 /// 把图像按**保持长宽比**的方式放进 `area`（居中，不拉伸变形）。
@@ -656,7 +704,9 @@ pub fn largest_overlap_page(
 ) -> Option<(usize, Rect)> {
     let mut best: Option<(usize, Rect, f32)> = None;
     for (index, page_rect) in pages {
-        let Some(overlap) = page_rect.intersection(content_rect) else { continue };
+        let Some(overlap) = page_rect.intersection(content_rect) else {
+            continue;
+        };
         if overlap.width <= 0.0 || overlap.height <= 0.0 {
             continue;
         }
@@ -818,7 +868,11 @@ pub fn overflow_layout(
 ) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::single_section(
         text.to_owned(),
-        egui::TextFormat { font_id: font, color, ..Default::default() },
+        egui::TextFormat {
+            font_id: font,
+            color,
+            ..Default::default()
+        },
     );
     job.wrap = egui::text::TextWrapping {
         max_width: max_width.max(0.0),
@@ -973,11 +1027,17 @@ pub fn veil_bands(area: egui::Rect, hole: Option<egui::Rect>) -> Vec<egui::Rect>
     let mut bands = Vec::with_capacity(4);
     // 上
     if hole.min.y > area.min.y {
-        bands.push(egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, hole.min.y)));
+        bands.push(egui::Rect::from_min_max(
+            area.min,
+            egui::pos2(area.max.x, hole.min.y),
+        ));
     }
     // 下
     if hole.max.y < area.max.y {
-        bands.push(egui::Rect::from_min_max(egui::pos2(area.min.x, hole.max.y), area.max));
+        bands.push(egui::Rect::from_min_max(
+            egui::pos2(area.min.x, hole.max.y),
+            area.max,
+        ));
     }
     // 左
     if hole.min.x > area.min.x {
@@ -1033,9 +1093,18 @@ pub fn clamp_float_rect(rect: egui::Rect, area: egui::Rect, min_size: egui::Vec2
     let max_width = area.width().max(0.0);
     let max_height = area.height().max(0.0);
     let width = rect.width().max(min_size.x.min(max_width)).min(max_width);
-    let height = rect.height().max(min_size.y.min(max_height)).min(max_height);
-    let x = rect.min.x.clamp(area.min.x, (area.max.x - width).max(area.min.x));
-    let y = rect.min.y.clamp(area.min.y, (area.max.y - height).max(area.min.y));
+    let height = rect
+        .height()
+        .max(min_size.y.min(max_height))
+        .min(max_height);
+    let x = rect
+        .min
+        .x
+        .clamp(area.min.x, (area.max.x - width).max(area.min.x));
+    let y = rect
+        .min
+        .y
+        .clamp(area.min.y, (area.max.y - height).max(area.min.y));
     egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(width, height))
 }
 
@@ -1067,10 +1136,16 @@ pub fn destination_points(links_by_page: &[Vec<Link>], page_count: usize) -> Vec
     let mut out: Vec<Vec<Point>> = vec![Vec::new(); page_count];
     for links in links_by_page {
         for link in links {
-            let Destination::Page { page, offset: Some(point) } = &link.destination else {
+            let Destination::Page {
+                page,
+                offset: Some(point),
+            } = &link.destination
+            else {
                 continue;
             };
-            let Some(bucket) = out.get_mut(page.get() as usize) else { continue };
+            let Some(bucket) = out.get_mut(page.get() as usize) else {
+                continue;
+            };
             let quantized = quantize_dest_point(*point);
             if !bucket.contains(&quantized) {
                 bucket.push(quantized);
@@ -1096,23 +1171,22 @@ pub fn wheel_targets_canvas(pointer_over_canvas: bool) -> bool {
 /// 这里一遍完成，且避免每像素 `extend_from_slice` 的调用开销。
 /// PDFium 的 BGRA 是**预乘 alpha**，故用 `from_rgba_premultiplied`
 /// （页面区域 alpha 恒为 255，两者等价）。
-pub fn color_image(
-    format: PixelFormat,
-    data: &[u8],
-    width: u32,
-    height: u32,
-) -> egui::ColorImage {
+pub fn color_image(format: PixelFormat, data: &[u8], width: u32, height: u32) -> egui::ColorImage {
     let (w, h) = (width as usize, height as usize);
     let mut pixels = Vec::with_capacity(w * h);
     match format {
         PixelFormat::Bgra8 => {
             for px in data.chunks_exact(4).take(w * h) {
-                pixels.push(egui::Color32::from_rgba_premultiplied(px[2], px[1], px[0], px[3]));
+                pixels.push(egui::Color32::from_rgba_premultiplied(
+                    px[2], px[1], px[0], px[3],
+                ));
             }
         }
         PixelFormat::Rgba8 => {
             for px in data.chunks_exact(4).take(w * h) {
-                pixels.push(egui::Color32::from_rgba_premultiplied(px[0], px[1], px[2], px[3]));
+                pixels.push(egui::Color32::from_rgba_premultiplied(
+                    px[0], px[1], px[2], px[3],
+                ));
             }
         }
         PixelFormat::Gray8 => {
@@ -1328,13 +1402,17 @@ pub fn desired_textures(
                 continue;
             }
             let distance = key.scale_milli.abs_diff(fact.render_milli);
-            if nearest.map_or(true, |current| distance < current.abs_diff(fact.render_milli)) {
+            if nearest.map_or(true, |current| {
+                distance < current.abs_diff(fact.render_milli)
+            }) {
                 nearest = Some(key.scale_milli);
             }
         }
         if let Some(scale) = nearest {
             for key in existing {
-                if key.page == fact.page && key.rotation == fact.rotation && key.scale_milli == scale
+                if key.page == fact.page
+                    && key.rotation == fact.rotation
+                    && key.scale_milli == scale
                 {
                     old.push(*key);
                 }
@@ -1417,9 +1495,9 @@ pub fn desired_textures(
         }
     }
     let before = desired.keep_bytes();
-    desired.keep.retain(|key| {
-        must.contains(key) || kept_bed.contains(key) || kept_old.contains(key)
-    });
+    desired
+        .keep
+        .retain(|key| must.contains(key) || kept_bed.contains(key) || kept_old.contains(key));
     desired.bed_bytes = bed
         .iter()
         .filter(|key| desired.keep.contains(*key))
@@ -1559,7 +1637,9 @@ impl<V> KeyedStore<V> {
         self.bytes += cost;
         self.touch(key);
         while self.entries.len() > self.capacity {
-            let Some(oldest) = self.order.pop_front() else { break };
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
             if let Some(value) = self.entries.remove(&oldest) {
                 self.bytes = self.bytes.saturating_sub(bytes_of(&value));
             }
@@ -1644,7 +1724,9 @@ impl<V> KeyedStore<V> {
                 continue;
             }
             let distance = key.scale_milli.abs_diff(target_scale_milli);
-            if best.map_or(true, |current| distance < current.abs_diff(target_scale_milli)) {
+            if best.map_or(true, |current| {
+                distance < current.abs_diff(target_scale_milli)
+            }) {
                 best = Some(key.scale_milli);
             }
         }
@@ -1880,9 +1962,16 @@ mod tests {
         assert!(rect.right() <= page_rect.right() + 1.0, "块不得超出页面");
 
         // 反面：除以**显示比例**的实现会把块压到页面左上角（第三轮全黑）
-        let wrong =
-            Rect::new(page_rect.x + x as f32 / display, page_rect.y + y as f32 / display, 0.0, 0.0);
-        assert!(rect.x > wrong.x + 100.0, "块位置一旦除以显示比例就会被压到左上角");
+        let wrong = Rect::new(
+            page_rect.x + x as f32 / display,
+            page_rect.y + y as f32 / display,
+            0.0,
+            0.0,
+        );
+        assert!(
+            rect.x > wrong.x + 100.0,
+            "块位置一旦除以显示比例就会被压到左上角"
+        );
     }
 
     #[test]
@@ -1905,7 +1994,10 @@ mod tests {
             Some(ViewerCommand::GoToPage(PageIndex::new(9)))
         );
         assert_eq!(command_for_key(Key::End, none, 0), None, "空文档不应越界");
-        assert_eq!(command_for_key(Key::Num0, none, 3), Some(ViewerCommand::SetZoom(1.0)));
+        assert_eq!(
+            command_for_key(Key::Num0, none, 3),
+            Some(ViewerCommand::SetZoom(1.0))
+        );
         assert_eq!(
             command_for_key(Key::ArrowDown, none, 3),
             Some(ViewerCommand::ScrollBy(Vec2::new(0.0, KEY_SCROLL_STEP)))
@@ -1948,7 +2040,11 @@ mod tests {
     #[test]
     fn zoom_delta_maps_ctrl_wheel_and_pinch() {
         assert_eq!(command_for_zoom_delta(1.0, 2.0), None, "无缩放时不产生命令");
-        assert_eq!(command_for_zoom_delta(f32::NAN, 2.0), None, "异常值必须被忽略");
+        assert_eq!(
+            command_for_zoom_delta(f32::NAN, 2.0),
+            None,
+            "异常值必须被忽略"
+        );
 
         match command_for_zoom_delta(1.1, 2.0) {
             Some(ViewerCommand::SetZoom(zoom)) => assert!((zoom - 2.2).abs() < 1e-4),
@@ -1980,7 +2076,13 @@ mod tests {
         render_milli: u32,
         shape: PageShape,
     ) -> PageFacts {
-        PageFacts { page, rotation, render_milli, shape, whole_pages: Vec::new() }
+        PageFacts {
+            page,
+            rotation,
+            render_milli,
+            shape,
+            whole_pages: Vec::new(),
+        }
     }
 
     #[test]
@@ -2004,7 +2106,10 @@ mod tests {
 
         // retain 摘除后重算
         store.retain(|key| key.page.get() % 2 == 0);
-        assert_eq!(store.bytes(), store.iter().map(|(_, value)| *value).sum::<u64>());
+        assert_eq!(
+            store.bytes(),
+            store.iter().map(|(_, value)| *value).sum::<u64>()
+        );
 
         // 清空归零
         store.clear();
@@ -2017,7 +2122,12 @@ mod tests {
     fn retain_respects_the_byte_budget_by_class() {
         let page = PageIndex::new(0);
         let tile = |scale: f32, col: u32| {
-            RenderKey::tiled(page, Scale::from_zoom(scale), Rotation::None, TileSpec::new(col, 0))
+            RenderKey::tiled(
+                page,
+                Scale::from_zoom(scale),
+                Rotation::None,
+                TileSpec::new(col, 0),
+            )
         };
         let whole = |scale: f32| RenderKey::new(page, Scale::from_zoom(scale), Rotation::None);
 
@@ -2076,7 +2186,12 @@ mod tests {
         // 纹理层现在只有一张 1600 整页 + 一张 6554 的旧块
         let existing = vec![
             RenderKey::new(page, Scale::from_zoom(1.6), Rotation::None),
-            RenderKey::tiled(page, Scale::from_zoom(6.5536), Rotation::None, TileSpec::new(0, 0)),
+            RenderKey::tiled(
+                page,
+                Scale::from_zoom(6.5536),
+                Rotation::None,
+                TileSpec::new(0, 0),
+            ),
         ];
         let size = |key: &RenderKey| if key.tile.is_none() { 1_000 } else { 100 };
 
@@ -2085,7 +2200,14 @@ mod tests {
         assert_eq!(first, second, "纯函数：同样输入必须同样输出");
 
         // A：可见范围 (1,0)-(2,1) 共 2×2 = 4 块
-        let must = |col, row| RenderKey::tiled(page, Scale::from_zoom(4.096), Rotation::None, TileSpec::new(col, row));
+        let must = |col, row| {
+            RenderKey::tiled(
+                page,
+                Scale::from_zoom(4.096),
+                Rotation::None,
+                TileSpec::new(col, row),
+            )
+        };
         for col in 1..=2 {
             for row in 0..=1 {
                 assert!(first.keep.contains(&must(col, row)), "A 缺 ({col},{row})");
@@ -2108,7 +2230,12 @@ mod tests {
             "缺的可见块更要上传（否则画面永远糊着）"
         );
         // C：最近一个旧波段（6554）里的现有键
-        let old = RenderKey::tiled(page, Scale::from_zoom(6.5536), Rotation::None, TileSpec::new(0, 0));
+        let old = RenderKey::tiled(
+            page,
+            Scale::from_zoom(6.5536),
+            Rotation::None,
+            TileSpec::new(0, 0),
+        );
         assert!(first.keep.contains(&old));
         assert_eq!(first.old_bytes, 100);
 
@@ -2134,7 +2261,12 @@ mod tests {
         }];
         let existing = vec![
             RenderKey::new(page, Scale::from_zoom(1.6), Rotation::None),
-            RenderKey::tiled(page, Scale::from_zoom(6.5536), Rotation::None, TileSpec::new(0, 0)),
+            RenderKey::tiled(
+                page,
+                Scale::from_zoom(6.5536),
+                Rotation::None,
+                TileSpec::new(0, 0),
+            ),
         ];
         let size = |key: &RenderKey| if key.tile.is_none() { 1_000 } else { 100 };
 
@@ -2198,8 +2330,13 @@ mod tests {
             for _ in 0..(width * height) {
                 data.extend_from_slice(&[fill, fill, fill, 255]);
             }
-            RasterImage::new(width, height, PixelFormat::Bgra8, std::sync::Arc::from(data))
-                .expect("位图")
+            RasterImage::new(
+                width,
+                height,
+                PixelFormat::Bgra8,
+                std::sync::Arc::from(data),
+            )
+            .expect("位图")
         };
         // 612×792 @2 倍 → 1224×1584，2×2 网格，每块 612×792
         let page = Size::new(612.0, 792.0);
@@ -2207,10 +2344,7 @@ mod tests {
         assert_eq!(grid.side, 2);
         let a = make(612, 792, 10);
         let b = make(612, 792, 20);
-        let tiles = vec![
-            (TileSpec::new(0, 1), &a),
-            (TileSpec::new(1, 1), &b),
-        ];
+        let tiles = vec![(TileSpec::new(0, 1), &a), (TileSpec::new(1, 1), &b)];
         // 页面下半部分 → 1224×792 的图，左半 10、右半 20
         let rect = Rect::new(0.0, 0.0, 612.0, 396.0);
         let image = compose_region_snapshot(rect, page, Rotation::None, 2.0, &grid, &tiles)
@@ -2264,11 +2398,14 @@ mod tests {
         // 上限 4096：需要降档，降完必须放得下
         let clamped = preview_render_scale(rect, page, Rotation::None, 10.486, 4096);
         assert!(clamped < 10.486, "应降档：{clamped}");
-        let (width, height) = region_pixel_size(rect, page, Rotation::None, clamped)
-            .expect("区域有效");
+        let (width, height) =
+            region_pixel_size(rect, page, Rotation::None, clamped).expect("区域有效");
         assert!(width.max(height) <= 4096, "降档后 {width}×{height} 仍超限");
         // 0 = 不限制
-        assert_eq!(preview_render_scale(rect, page, Rotation::None, 10.486, 0), 10.486);
+        assert_eq!(
+            preview_render_scale(rect, page, Rotation::None, 10.486, 0),
+            10.486
+        );
     }
 
     // ------------------------------------------------ D-96：整页级就绪门槛
@@ -2288,12 +2425,28 @@ mod tests {
     /// **关键回归**：只要还缺一块，就不许翻页 —— 否则就是"几块清晰 + 大片白"。
     #[test]
     fn plan_page_waits_for_every_visible_tile() {
-        let input = DrawInput { ready: 17, waited_ms: 100, ..draw_input() };
-        assert_eq!(plan_page(&input), PageDraw::TilePreview(65_540), "缺一块仍用旧内容顶住");
-        let input = DrawInput { ready: 2, waited_ms: 0, ..draw_input() };
+        let input = DrawInput {
+            ready: 17,
+            waited_ms: 100,
+            ..draw_input()
+        };
+        assert_eq!(
+            plan_page(&input),
+            PageDraw::TilePreview(65_540),
+            "缺一块仍用旧内容顶住"
+        );
+        let input = DrawInput {
+            ready: 2,
+            waited_ms: 0,
+            ..draw_input()
+        };
         assert_eq!(plan_page(&input), PageDraw::TilePreview(65_540));
 
-        let input = DrawInput { ready: 18, waited_ms: 0, ..draw_input() };
+        let input = DrawInput {
+            ready: 18,
+            waited_ms: 0,
+            ..draw_input()
+        };
         assert_eq!(plan_page(&input), PageDraw::Tiles, "全齐才切到当前波段");
     }
 
@@ -2303,18 +2456,37 @@ mod tests {
     /// 缺的那块由底料补（D-98）。
     #[test]
     fn tiles_are_sticky_inside_a_band() {
-        let input = DrawInput { ready: 4, total: 6, showing_tiles: true, ..draw_input() };
-        assert_eq!(plan_page(&input), PageDraw::Tiles, "已进入瓦片模式：留在瓦片 + 底料");
+        let input = DrawInput {
+            ready: 4,
+            total: 6,
+            showing_tiles: true,
+            ..draw_input()
+        };
+        assert_eq!(
+            plan_page(&input),
+            PageDraw::Tiles,
+            "已进入瓦片模式：留在瓦片 + 底料"
+        );
 
         // 一块就绪都没有也一样粘住（底料在，页面不会露白）
-        let input = DrawInput { ready: 0, total: 6, showing_tiles: true, ..draw_input() };
+        let input = DrawInput {
+            ready: 0,
+            total: 6,
+            showing_tiles: true,
+            ..draw_input()
+        };
         assert_eq!(plan_page(&input), PageDraw::Tiles);
     }
 
     /// 粘性只在**同一波段**内成立：新波段第一帧仍要等可见范围全齐（D-97 的门槛不许被绕过）。
     #[test]
     fn a_new_band_still_waits_for_the_whole_range() {
-        let input = DrawInput { ready: 4, total: 6, showing_tiles: false, ..draw_input() };
+        let input = DrawInput {
+            ready: 4,
+            total: 6,
+            showing_tiles: false,
+            ..draw_input()
+        };
         assert_eq!(
             plan_page(&input),
             PageDraw::TilePreview(65_540),
@@ -2325,58 +2497,119 @@ mod tests {
     /// 粘性不能盖过"不分块"和"当前波段整页在"这两条更早的判据。
     #[test]
     fn stickiness_does_not_override_earlier_rules() {
-        let tiled_input = DrawInput { tiled: false, showing_tiles: true, ..draw_input() };
+        let tiled_input = DrawInput {
+            tiled: false,
+            showing_tiles: true,
+            ..draw_input()
+        };
         assert_eq!(
             plan_page(&tiled_input),
             PageDraw::TilePreview(65_540),
             "不分块时按旧内容拉伸，与粘性无关"
         );
-        let whole_input = DrawInput { has_whole_current: true, showing_tiles: true, ..draw_input() };
+        let whole_input = DrawInput {
+            has_whole_current: true,
+            showing_tiles: true,
+            ..draw_input()
+        };
         assert_eq!(plan_page(&whole_input), PageDraw::Whole);
     }
 
     /// 超时兜底：某块渲染失败/块特别多时，不许永远停在糊图。
     #[test]
     fn plan_page_falls_back_to_partial_tiles_after_the_timeout() {
-        let input = DrawInput { ready: 5, waited_ms: READY_TIMEOUT_MS - 1, ..draw_input() };
-        assert_eq!(plan_page(&input), PageDraw::TilePreview(65_540), "超时前继续顶住");
-        let input = DrawInput { ready: 5, waited_ms: READY_TIMEOUT_MS, ..draw_input() };
+        let input = DrawInput {
+            ready: 5,
+            waited_ms: READY_TIMEOUT_MS - 1,
+            ..draw_input()
+        };
+        assert_eq!(
+            plan_page(&input),
+            PageDraw::TilePreview(65_540),
+            "超时前继续顶住"
+        );
+        let input = DrawInput {
+            ready: 5,
+            waited_ms: READY_TIMEOUT_MS,
+            ..draw_input()
+        };
         assert_eq!(plan_page(&input), PageDraw::Tiles, "超时后画已就绪部分");
         // 一块都没有时超时也没有意义（没有内容可画）
-        let input = DrawInput { ready: 0, waited_ms: 9_999, ..draw_input() };
+        let input = DrawInput {
+            ready: 0,
+            waited_ms: 9_999,
+            ..draw_input()
+        };
         assert_eq!(plan_page(&input), PageDraw::TilePreview(65_540));
     }
 
     /// 旧内容优先级：整页图 > 旧块；都没有时才允许补白。
     #[test]
     fn plan_page_prefers_whole_page_preview_then_tiles_then_blank() {
-        let input = DrawInput { ready: 3, preview: Preview::Whole(25_600), ..draw_input() };
+        let input = DrawInput {
+            ready: 3,
+            preview: Preview::Whole(25_600),
+            ..draw_input()
+        };
         assert_eq!(plan_page(&input), PageDraw::Stretch(25_600));
-        let input = DrawInput { ready: 3, preview: Preview::Tiles(65_540), ..draw_input() };
+        let input = DrawInput {
+            ready: 3,
+            preview: Preview::Tiles(65_540),
+            ..draw_input()
+        };
         assert_eq!(plan_page(&input), PageDraw::TilePreview(65_540));
-        let input = DrawInput { ready: 3, preview: Preview::None, ..draw_input() };
+        let input = DrawInput {
+            ready: 3,
+            preview: Preview::None,
+            ..draw_input()
+        };
         assert_eq!(plan_page(&input), PageDraw::Tiles, "没有旧内容时只能补白");
     }
 
     /// 不分块（整页路径）不受就绪门槛影响：有整页图看整页，只有旧内容就顶住。
     #[test]
     fn plan_page_keeps_the_whole_page_path_unchanged() {
-        let input = DrawInput { tiled: false, has_whole_current: true, ..draw_input() };
+        let input = DrawInput {
+            tiled: false,
+            has_whole_current: true,
+            ..draw_input()
+        };
         assert_eq!(plan_page(&input), PageDraw::Whole);
-        let input = DrawInput { tiled: false, preview: Preview::Whole(16_000), ..draw_input() };
+        let input = DrawInput {
+            tiled: false,
+            preview: Preview::Whole(16_000),
+            ..draw_input()
+        };
         assert_eq!(plan_page(&input), PageDraw::Stretch(16_000));
-        let input = DrawInput { tiled: false, preview: Preview::Tiles(16_000), ..draw_input() };
+        let input = DrawInput {
+            tiled: false,
+            preview: Preview::Tiles(16_000),
+            ..draw_input()
+        };
         assert_eq!(plan_page(&input), PageDraw::TilePreview(16_000));
-        let input = DrawInput { tiled: false, preview: Preview::None, ..draw_input() };
+        let input = DrawInput {
+            tiled: false,
+            preview: Preview::None,
+            ..draw_input()
+        };
         assert_eq!(plan_page(&input), PageDraw::Blank);
     }
 
     /// 退化输入（可见范围为空的极端情形）不得 panic，也不得永远停在预览。
     #[test]
     fn plan_page_handles_an_empty_range() {
-        let input = DrawInput { ready: 0, total: 0, ..draw_input() };
+        let input = DrawInput {
+            ready: 0,
+            total: 0,
+            ..draw_input()
+        };
         assert_eq!(plan_page(&input), PageDraw::TilePreview(65_540));
-        let input = DrawInput { ready: 0, total: 0, preview: Preview::None, ..draw_input() };
+        let input = DrawInput {
+            ready: 0,
+            total: 0,
+            preview: Preview::None,
+            ..draw_input()
+        };
         assert_eq!(plan_page(&input), PageDraw::Tiles);
     }
 
@@ -2445,12 +2678,21 @@ mod tests {
         // 只有整页图 / 只有块 / 都没有
         let mut store = KeyedStore::new(16);
         store.insert(whole(1.6), "whole");
-        assert_eq!(store.preview_source(page, Rotation::None, 10_486), Preview::Whole(1_600));
+        assert_eq!(
+            store.preview_source(page, Rotation::None, 10_486),
+            Preview::Whole(1_600)
+        );
         let mut store = KeyedStore::new(16);
         store.insert(tile(6.5536, 0), "tile");
-        assert_eq!(store.preview_source(page, Rotation::None, 10_486), Preview::Tiles(6_554));
+        assert_eq!(
+            store.preview_source(page, Rotation::None, 10_486),
+            Preview::Tiles(6_554)
+        );
         let store: KeyedStore<&str> = KeyedStore::new(16);
-        assert_eq!(store.preview_source(page, Rotation::None, 10_486), Preview::None);
+        assert_eq!(
+            store.preview_source(page, Rotation::None, 10_486),
+            Preview::None
+        );
 
         // 缩小方向：整页图来自更低波段、块来自更高波段 → 用整页图（覆盖整个视口）
         let mut store = KeyedStore::new(16);
@@ -2476,7 +2718,10 @@ mod tests {
         let mut store = KeyedStore::new(16);
         store.insert(whole(2.0), "whole");
         store.insert(tile(4.0, 0), "tile");
-        assert_eq!(store.preview_source(page, Rotation::None, 3_000), Preview::Whole(2_000));
+        assert_eq!(
+            store.preview_source(page, Rotation::None, 3_000),
+            Preview::Whole(2_000)
+        );
     }
 
     /// **回归（D-99）**：预览层也必须叠在底料之上 —— 连续放大时旧波段可能只有一两块，
@@ -2494,7 +2739,10 @@ mod tests {
             !needs_underlay(PageDraw::Tiles, 8, 8),
             "块全齐时块已把底料盖满，不必再画"
         );
-        assert!(!needs_underlay(PageDraw::Whole, 0, 0), "当前波段整页图无需底料");
+        assert!(
+            !needs_underlay(PageDraw::Whole, 0, 0),
+            "当前波段整页图无需底料"
+        );
         assert!(!needs_underlay(PageDraw::Blank, 0, 0));
     }
 
@@ -2532,7 +2780,10 @@ mod tests {
             Preview::Tiles(6_554)
         );
         let store: KeyedStore<&str> = KeyedStore::new(16);
-        assert_eq!(store.underlay_source(page, Rotation::None, 10_486), Preview::None);
+        assert_eq!(
+            store.underlay_source(page, Rotation::None, 10_486),
+            Preview::None
+        );
     }
 
     /// 保留规则：当前 + 最近的其它波段 + 当前以下最近的"整页图"所在波段。
@@ -2588,7 +2839,15 @@ mod tests {
         store.insert(tile(4.096, 0), "a");
         store.insert(tile(6.5536, 0), "b");
         store.insert(tile(10.48576, 0), "c");
-        store.retain_for_view(&[facts(page, Rotation::None, 10_486, PageShape::Tiles(0, 0, 1, 1))], |_| 0);
+        store.retain_for_view(
+            &[facts(
+                page,
+                Rotation::None,
+                10_486,
+                PageShape::Tiles(0, 0, 1, 1),
+            )],
+            |_| 0,
+        );
         assert!(store.contains(&tile(10.48576, 0)));
         assert!(store.contains(&tile(6.5536, 0)));
         assert!(!store.contains(&tile(4.096, 0)));
@@ -2607,11 +2866,20 @@ mod tests {
         store.insert(scaled(1, 2.0, Rotation::None), "other-page");
 
         // 目标 2.1 → 最接近的整页图是 2.0
-        assert_eq!(store.best_page_texture(PageIndex::new(0), Rotation::None, 2100), Some(&"two"));
+        assert_eq!(
+            store.best_page_texture(PageIndex::new(0), Rotation::None, 2100),
+            Some(&"two")
+        );
         // 目标 1.1 → 1.0
-        assert_eq!(store.best_page_texture(PageIndex::new(0), Rotation::None, 1100), Some(&"one"));
+        assert_eq!(
+            store.best_page_texture(PageIndex::new(0), Rotation::None, 1100),
+            Some(&"one")
+        );
         // 其它页不参与
-        assert_eq!(store.best_page_texture(PageIndex::new(2), Rotation::None, 2000), None);
+        assert_eq!(
+            store.best_page_texture(PageIndex::new(2), Rotation::None, 2000),
+            None
+        );
         // 旋转不同不可顶替（否则画面会横躺）
         assert_eq!(
             store.best_page_texture(PageIndex::new(0), Rotation::Clockwise90, 2000),
@@ -2637,11 +2905,19 @@ mod tests {
         );
         assert!(store.has_tiles(&whole), "同页同缩放的瓦片应被识别");
         assert!(
-            !store.has_tiles(&RenderKey::new(PageIndex::new(1), Scale::from_zoom(2.0), Rotation::None)),
+            !store.has_tiles(&RenderKey::new(
+                PageIndex::new(1),
+                Scale::from_zoom(2.0),
+                Rotation::None
+            )),
             "其它页的瓦片不算"
         );
         assert!(
-            !store.has_tiles(&RenderKey::new(PageIndex::new(0), Scale::from_zoom(1.5), Rotation::None)),
+            !store.has_tiles(&RenderKey::new(
+                PageIndex::new(0),
+                Scale::from_zoom(1.5),
+                Rotation::None
+            )),
             "其它缩放的瓦片不算"
         );
     }
@@ -2689,32 +2965,64 @@ mod tests {
         store.insert(tile(2.0, 0, 0), "current");
 
         // 当前档 2.0 → 最近的"有瓦片的其它档"是 1.0
-        assert_eq!(store.best_tile_scale(PageIndex::new(0), Rotation::None, 2000), Some(1000));
+        assert_eq!(
+            store.best_tile_scale(PageIndex::new(0), Rotation::None, 2000),
+            Some(1000)
+        );
         // 当前档 1.0 → 2.0
-        assert_eq!(store.best_tile_scale(PageIndex::new(0), Rotation::None, 1000), Some(2000));
+        assert_eq!(
+            store.best_tile_scale(PageIndex::new(0), Rotation::None, 1000),
+            Some(2000)
+        );
         // 其它页 / 其它旋转都没有
-        assert_eq!(store.best_tile_scale(PageIndex::new(1), Rotation::None, 2000), None);
-        assert_eq!(store.best_tile_scale(PageIndex::new(0), Rotation::Clockwise90, 2000), None);
+        assert_eq!(
+            store.best_tile_scale(PageIndex::new(1), Rotation::None, 2000),
+            None
+        );
+        assert_eq!(
+            store.best_tile_scale(PageIndex::new(0), Rotation::Clockwise90, 2000),
+            None
+        );
 
         let old = store.tiles_at(PageIndex::new(0), Rotation::None, 1000);
         assert_eq!(old.len(), 2, "旧档应有 2 块");
         assert!(old
             .iter()
             .any(|(tile, value)| *tile == TileSpec::new(0, 0) && **value == "old-a"));
-        assert_eq!(store.tiles_at(PageIndex::new(0), Rotation::None, 2000).len(), 1);
+        assert_eq!(
+            store
+                .tiles_at(PageIndex::new(0), Rotation::None, 2000)
+                .len(),
+            1
+        );
     }
 
     /// 诊断助手：判断热区是否越界（越界即坐标空间不一致的证据）。
     #[test]
     fn link_rect_in_page_bounds_detects_coordinate_space_mismatch() {
         let page = Size::new(612.0, 792.0);
-        assert!(link_rect_in_page_bounds(Rect::new(72.0, 700.0, 200.0, 20.0), page));
+        assert!(link_rect_in_page_bounds(
+            Rect::new(72.0, 700.0, 200.0, 20.0),
+            page
+        ));
         // 浮点余量：贴边不算越界
-        assert!(link_rect_in_page_bounds(Rect::new(0.0, 0.0, 612.0, 792.0), page));
+        assert!(link_rect_in_page_bounds(
+            Rect::new(0.0, 0.0, 612.0, 792.0),
+            page
+        ));
         // 典型的"整体偏移"：MediaBox 原点不为 0 时，热区会跑到页外
-        assert!(!link_rect_in_page_bounds(Rect::new(72.0, 800.0, 200.0, 20.0), page));
-        assert!(!link_rect_in_page_bounds(Rect::new(-40.0, 100.0, 20.0, 20.0), page));
-        assert!(!link_rect_in_page_bounds(Rect::new(600.0, 100.0, 100.0, 20.0), page));
+        assert!(!link_rect_in_page_bounds(
+            Rect::new(72.0, 800.0, 200.0, 20.0),
+            page
+        ));
+        assert!(!link_rect_in_page_bounds(
+            Rect::new(-40.0, 100.0, 20.0, 20.0),
+            page
+        ));
+        assert!(!link_rect_in_page_bounds(
+            Rect::new(600.0, 100.0, 100.0, 20.0),
+            page
+        ));
     }
 
     /// 链接跳转语义：有落点 → 先跳页再居中；无落点 → 只跳页（顶部对齐）。
@@ -2735,7 +3043,10 @@ mod tests {
             ]
         );
 
-        let page_only = Destination::Page { page: PageIndex::new(1), offset: None };
+        let page_only = Destination::Page {
+            page: PageIndex::new(1),
+            offset: None,
+        };
         assert_eq!(
             commands_for_destination(&page_only),
             vec![ViewerCommand::GoToPage(PageIndex::new(1))],
@@ -2752,7 +3063,10 @@ mod tests {
         assert!(!link_overlay_visible(true, 0.5, 0.75), "缩放低于阈值时不画");
         assert!(link_overlay_visible(true, 0.75, 0.75), "正好达到阈值就画");
         assert!(link_overlay_visible(true, 3.0, 0.75));
-        assert!(!link_overlay_visible(true, f32::NAN, 0.75), "异常缩放值不画");
+        assert!(
+            !link_overlay_visible(true, f32::NAN, 0.75),
+            "异常缩放值不画"
+        );
     }
 
     /// 自定义图片 preview：跨页框选时只保留**重叠面积最大**的那一页及其交叠矩形。
@@ -2764,25 +3078,31 @@ mod tests {
 
         // 选区内 A 占 60 高、B 占 20 高 → 取 A
         let selection = Rect::new(0.0, 40.0, 100.0, 90.0);
-        let (index, overlap) = largest_overlap_page(pages.iter().copied(), selection).expect("应命中");
+        let (index, overlap) =
+            largest_overlap_page(pages.iter().copied(), selection).expect("应命中");
         assert_eq!(index, 0, "取重叠更大的 A 页");
         assert_eq!(overlap, Rect::new(0.0, 40.0, 100.0, 60.0), "只保留交叠部分");
 
         // 反过来：B 占得多 → 取 B
         let selection = Rect::new(0.0, 90.0, 100.0, 60.0);
-        let (index, overlap) = largest_overlap_page(pages.iter().copied(), selection).expect("应命中");
+        let (index, overlap) =
+            largest_overlap_page(pages.iter().copied(), selection).expect("应命中");
         assert_eq!(index, 1);
         assert_eq!(overlap, Rect::new(0.0, 110.0, 100.0, 40.0));
 
         // 完全落在页间距 → 没有页
-        assert!(largest_overlap_page(pages.iter().copied(), Rect::new(0.0, 104.0, 100.0, 4.0)).is_none());
+        assert!(
+            largest_overlap_page(pages.iter().copied(), Rect::new(0.0, 104.0, 100.0, 4.0))
+                .is_none()
+        );
 
         // 面积并列时取先出现者（页面顺序），结果确定
         let tie = vec![
             (0usize, Rect::new(0.0, 0.0, 100.0, 50.0)),
             (1usize, Rect::new(0.0, 50.0, 100.0, 50.0)),
         ];
-        let (index, _) = largest_overlap_page(tie, Rect::new(0.0, 0.0, 100.0, 100.0)).expect("应命中");
+        let (index, _) =
+            largest_overlap_page(tie, Rect::new(0.0, 0.0, 100.0, 100.0)).expect("应命中");
         assert_eq!(index, 0);
     }
 
@@ -2840,8 +3160,14 @@ mod tests {
         // 中间某行 → 贴左缘（画布左 + 16），垂直与行居中
         let row = egui::Rect::from_min_size(egui::pos2(0.0, 300.0), egui::vec2(260.0, 18.0));
         let rect = float_rect_at_row(canvas, row, size, min);
-        assert!((rect.min.x - (canvas.min.x + 16.0)).abs() < 1e-3, "紧贴侧边栏");
-        assert!((rect.center().y - row.center().y).abs() < 1e-3, "与条目行垂直居中");
+        assert!(
+            (rect.min.x - (canvas.min.x + 16.0)).abs() < 1e-3,
+            "紧贴侧边栏"
+        );
+        assert!(
+            (rect.center().y - row.center().y).abs() < 1e-3,
+            "与条目行垂直居中"
+        );
 
         // 顶部行 → 会被夹回视图内（不会超出上边）
         let top = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(260.0, 18.0));
@@ -2888,9 +3214,18 @@ mod tests {
     fn body_size_changed_ignores_subpixel_noise() {
         let stored = egui::vec2(320.0, 200.0);
         assert!(!body_size_changed(stored, egui::vec2(320.0, 200.0)));
-        assert!(!body_size_changed(stored, egui::vec2(320.3, 199.8)), "亚像素误差不算修改");
-        assert!(body_size_changed(stored, egui::vec2(330.0, 200.0)), "明显变宽算修改");
-        assert!(body_size_changed(stored, egui::vec2(320.0, 190.0)), "明显变矮算修改");
+        assert!(
+            !body_size_changed(stored, egui::vec2(320.3, 199.8)),
+            "亚像素误差不算修改"
+        );
+        assert!(
+            body_size_changed(stored, egui::vec2(330.0, 200.0)),
+            "明显变宽算修改"
+        );
+        assert!(
+            body_size_changed(stored, egui::vec2(320.0, 190.0)),
+            "明显变矮算修改"
+        );
     }
 
     /// 保存按钮文案随"是否有未保存修改"变化。
@@ -2904,12 +3239,24 @@ mod tests {
     /// 侧栏行首类型符号：码点必须与用户指定的完全一致。
     #[test]
     fn custom_preview_symbols_are_the_requested_codepoints() {
-        assert_eq!(CUSTOM_SYMBOL_TEXT.chars().next().map(u32::from), Some(0x1F5B9));
-        assert_eq!(CUSTOM_SYMBOL_IMAGE.chars().next().map(u32::from), Some(0x1F5BB));
+        assert_eq!(
+            CUSTOM_SYMBOL_TEXT.chars().next().map(u32::from),
+            Some(0x1F5B9)
+        );
+        assert_eq!(
+            CUSTOM_SYMBOL_IMAGE.chars().next().map(u32::from),
+            Some(0x1F5BB)
+        );
         assert_eq!(CUSTOM_SYMBOL_TEXT.chars().count(), 1);
         assert_eq!(CUSTOM_SYMBOL_IMAGE.chars().count(), 1);
-        assert_eq!(CUSTOM_SYMBOL_EDIT.chars().next().map(u32::from), Some(0x270E));
-        assert_eq!(CUSTOM_SYMBOL_DELETE.chars().next().map(u32::from), Some(0x274E));
+        assert_eq!(
+            CUSTOM_SYMBOL_EDIT.chars().next().map(u32::from),
+            Some(0x270E)
+        );
+        assert_eq!(
+            CUSTOM_SYMBOL_DELETE.chars().next().map(u32::from),
+            Some(0x274E)
+        );
     }
 
     /// 侧栏 Pin 列表 → 正式浮窗的查找。
@@ -3010,8 +3357,16 @@ mod tests {
 
         assert_eq!(find_float_for_target(&origins, (page, 1)), Some(2));
         assert_eq!(find_float_for_target(&origins, (page, 0)), Some(1));
-        assert_eq!(find_float_for_target(&origins, (page, 9)), None, "没固定过就没有");
-        assert_eq!(find_float_for_target(&origins, (PageIndex::new(3), 0)), None, "页不同不算");
+        assert_eq!(
+            find_float_for_target(&origins, (page, 9)),
+            None,
+            "没固定过就没有"
+        );
+        assert_eq!(
+            find_float_for_target(&origins, (PageIndex::new(3), 0)),
+            None,
+            "页不同不算"
+        );
         assert_eq!(find_float_for_target(&[], (page, 0)), None);
     }
 
@@ -3019,8 +3374,14 @@ mod tests {
     #[test]
     fn hover_preview_is_blocked_while_scrolling_and_under_floats() {
         assert!(hover_preview_allowed(false, false), "正常情况应出现");
-        assert!(!hover_preview_allowed(true, false), "滚动/缩放静默窗口内不出现");
-        assert!(!hover_preview_allowed(false, true), "指针在浮窗上不出现（浮窗屏蔽主视图）");
+        assert!(
+            !hover_preview_allowed(true, false),
+            "滚动/缩放静默窗口内不出现"
+        );
+        assert!(
+            !hover_preview_allowed(false, true),
+            "指针在浮窗上不出现（浮窗屏蔽主视图）"
+        );
         assert!(!hover_preview_allowed(true, true));
 
         let rects = [
@@ -3029,8 +3390,14 @@ mod tests {
         ];
         assert!(pointer_over_any(egui::pos2(50.0, 30.0), &rects));
         assert!(pointer_over_any(egui::pos2(250.0, 220.0), &rects));
-        assert!(!pointer_over_any(egui::pos2(150.0, 150.0), &rects), "浮窗之间不算遮挡");
-        assert!(!pointer_over_any(egui::pos2(50.0, 30.0), &[]), "没有浮窗时不遮挡");
+        assert!(
+            !pointer_over_any(egui::pos2(150.0, 150.0), &rects),
+            "浮窗之间不算遮挡"
+        );
+        assert!(
+            !pointer_over_any(egui::pos2(50.0, 30.0), &[]),
+            "没有浮窗时不遮挡"
+        );
     }
 
     /// 临时预览浮窗：左上角放在链接框中心（保证与链接框重叠，鼠标移动路径连续）。
@@ -3042,7 +3409,10 @@ mod tests {
 
         let tip = tip_rect_for(link, size, canvas);
         assert_eq!(tip.min, link.center(), "左上角 = 链接框中心");
-        assert!(tip.intersects(link), "必须与链接框重叠（否则鼠标一移开预览就消失）");
+        assert!(
+            tip.intersects(link),
+            "必须与链接框重叠（否则鼠标一移开预览就消失）"
+        );
         assert!(link.contains(tip.min), "锚点落在链接框内");
 
         // 靠近右下边界时会夹取回区域内
@@ -3056,10 +3426,16 @@ mod tests {
     fn dest_lookup_uses_the_same_quantization_as_the_table() {
         let link = |page: u32, point: Point| Link {
             rect: Rect::new(0.0, 0.0, 10.0, 10.0),
-            destination: Destination::Page { page: PageIndex::new(page), offset: Some(point) },
+            destination: Destination::Page {
+                page: PageIndex::new(page),
+                offset: Some(point),
+            },
         };
         let links = vec![
-            vec![link(1, Point::new(10.0, 20.0)), link(1, Point::new(300.0, 400.0))],
+            vec![
+                link(1, Point::new(10.0, 20.0)),
+                link(1, Point::new(300.0, 400.0)),
+            ],
             Vec::new(),
         ];
         let points = destination_points(&links, 2);
@@ -3069,11 +3445,17 @@ mod tests {
         // 用"略偏一点"的同一点去查，仍应命中（量化到同一格）
         assert_eq!(find_dest_index(first_page, Point::new(10.2, 20.2)), Some(0));
         assert_eq!(find_dest_index(first_page, Point::new(10.0, 20.0)), Some(0));
-        assert_eq!(find_dest_index(first_page, Point::new(300.0, 400.0)), Some(1));
+        assert_eq!(
+            find_dest_index(first_page, Point::new(300.0, 400.0)),
+            Some(1)
+        );
         // 另一个点 → 未命中
         assert_eq!(find_dest_index(first_page, Point::new(50.0, 60.0)), None);
         // 量化函数本身：0.4 → 0.5，0.2 → 0.0
-        assert_eq!(quantize_dest_point(Point::new(10.4, 20.2)), Point::new(10.5, 20.0));
+        assert_eq!(
+            quantize_dest_point(Point::new(10.4, 20.2)),
+            Point::new(10.5, 20.0)
+        );
     }
 
     /// 被引用点的默认矩形：以该点为中心、尺寸固定；页面矩形→屏幕矩形要能来回对上。
@@ -3098,7 +3480,10 @@ mod tests {
             egui::pos2(300.0, 40.0),
         );
         // 内容空间 = 页内 + 页原点 = (40,60,50,20)；屏幕 = 内容 − 滚动 + 画布原点
-        assert_eq!(screen, egui::Rect::from_min_size(egui::pos2(335.0, 93.0), egui::vec2(50.0, 20.0)));
+        assert_eq!(
+            screen,
+            egui::Rect::from_min_size(egui::pos2(335.0, 93.0), egui::vec2(50.0, 20.0))
+        );
     }
 
     /// 回归：屏幕坐标 → 内容空间必须减去画布原点；且框选区域截到的内容必然**落在当前可见范围内**。
@@ -3106,7 +3491,8 @@ mod tests {
     fn screen_rect_to_content_subtracts_the_canvas_origin() {
         // 画布左上角在屏幕 (265, 40)（左侧有 260px 侧栏 + 5px 拖拽条）
         let canvas_min = egui::pos2(265.0, 40.0);
-        let selection = egui::Rect::from_min_size(egui::pos2(365.0, 140.0), egui::vec2(100.0, 50.0));
+        let selection =
+            egui::Rect::from_min_size(egui::pos2(365.0, 140.0), egui::vec2(100.0, 50.0));
         let scroll = Vec2::new(1000.0, 2000.0);
 
         let content = screen_rect_to_content(canvas_min, selection, scroll);
@@ -3140,8 +3526,13 @@ mod tests {
             for _ in 0..(width * height) {
                 data.extend_from_slice(&[fill, fill, fill, 255]); // BGRA：灰
             }
-            RasterImage::new(width, height, PixelFormat::Bgra8, std::sync::Arc::from(data))
-                .expect("位图")
+            RasterImage::new(
+                width,
+                height,
+                PixelFormat::Bgra8,
+                std::sync::Arc::from(data),
+            )
+            .expect("位图")
         };
 
         // 整页来源：页 4×4 放在内容空间 (10,10)，整页填 100
@@ -3184,14 +3575,26 @@ mod tests {
         assert_eq!(snapshot.pixels[511].r(), 50);
         assert_eq!(snapshot.pixels[512].r(), 200, "右块覆盖 x≥512");
         assert_eq!(snapshot.pixels[1024 * 10].r(), 50, "第二行左侧仍是左块");
-        assert_eq!(snapshot.pixels[1024 * 10 + 512].r(), 200, "第二行右侧仍是右块");
+        assert_eq!(
+            snapshot.pixels[1024 * 10 + 512].r(),
+            200,
+            "第二行右侧仍是右块"
+        );
 
         // 多页 + 页间距：中间留白
         let top = make(2, 2, 10);
         let bottom = make(2, 2, 20);
         let stacked = vec![
-            SnapshotPage { rect: Rect::new(0.0, 0.0, 2.0, 2.0), whole: Some(&top), tiles: Vec::new() },
-            SnapshotPage { rect: Rect::new(0.0, 3.0, 2.0, 2.0), whole: Some(&bottom), tiles: Vec::new() },
+            SnapshotPage {
+                rect: Rect::new(0.0, 0.0, 2.0, 2.0),
+                whole: Some(&top),
+                tiles: Vec::new(),
+            },
+            SnapshotPage {
+                rect: Rect::new(0.0, 3.0, 2.0, 2.0),
+                whole: Some(&bottom),
+                tiles: Vec::new(),
+            },
         ];
         let snapshot = compose_snapshot(&stacked, Rect::new(0.0, 0.0, 2.0, 5.0)).expect("应有内容");
         assert_eq!(snapshot.size, [2, 5]);
@@ -3211,8 +3614,13 @@ mod tests {
             for _ in 0..(width * height) {
                 data.extend_from_slice(&[fill, fill, fill, 255]);
             }
-            RasterImage::new(width, height, PixelFormat::Bgra8, std::sync::Arc::from(data))
-                .expect("位图")
+            RasterImage::new(
+                width,
+                height,
+                PixelFormat::Bgra8,
+                std::sync::Arc::from(data),
+            )
+            .expect("位图")
         };
 
         // 页内容 100×100，整页位图按 1.6 倍渲染成 160×160
@@ -3222,7 +3630,8 @@ mod tests {
             whole: Some(&whole),
             tiles: Vec::new(),
         }];
-        let snapshot = compose_snapshot(&pages, Rect::new(0.0, 0.0, 100.0, 100.0)).expect("应有内容");
+        let snapshot =
+            compose_snapshot(&pages, Rect::new(0.0, 0.0, 100.0, 100.0)).expect("应有内容");
         assert_eq!(snapshot.size, [100, 100]);
         assert!(
             snapshot.pixels.iter().all(|pixel| pixel.r() == 90),
@@ -3286,7 +3695,10 @@ mod tests {
         // 四块面积之和 = 总面积 − 选区面积
         let covered: f32 = bands.iter().map(|band| band.width() * band.height()).sum();
         let expected = area.width() * area.height() - hole.width() * hole.height();
-        assert!((covered - expected).abs() < 1e-3, "覆盖面积 {covered} vs {expected}");
+        assert!(
+            (covered - expected).abs() < 1e-3,
+            "覆盖面积 {covered} vs {expected}"
+        );
 
         // 选区贴住左边 → 只剩 3 块（左块宽度为 0，不产生）
         let edge = egui::Rect::from_min_size(egui::pos2(0.0, 20.0), egui::vec2(40.0, 30.0));
@@ -3310,38 +3722,66 @@ mod tests {
         );
 
         // 滚动为 0 时，视图矩形 (30,40,50,20) → 内容 (30,40,50,20) → 页内 (20,20)
-        let page_rect = view_rect_to_page_rect(&placement, Rect::new(30.0, 40.0, 50.0, 20.0), Vec2::ZERO)
-            .expect("应命中页面");
+        let page_rect =
+            view_rect_to_page_rect(&placement, Rect::new(30.0, 40.0, 50.0, 20.0), Vec2::ZERO)
+                .expect("应命中页面");
         assert!((page_rect.x - 20.0).abs() < 1e-3);
         assert!((page_rect.width - 50.0).abs() < 1e-3);
 
         // 滚动会平移内容：scroll=(10,10) 时同一视图矩形对应的页内区域右移下移
-        let scrolled = view_rect_to_page_rect(&placement, Rect::new(30.0, 40.0, 50.0, 20.0), Vec2::new(10.0, 10.0))
-            .expect("应命中页面");
+        let scrolled = view_rect_to_page_rect(
+            &placement,
+            Rect::new(30.0, 40.0, 50.0, 20.0),
+            Vec2::new(10.0, 10.0),
+        )
+        .expect("应命中页面");
         assert!((scrolled.x - 30.0).abs() < 1e-3, "实际 {}", scrolled.x);
 
         // 完全在页外 → None
-        assert!(view_rect_to_page_rect(&placement, Rect::new(500.0, 500.0, 10.0, 10.0), Vec2::ZERO).is_none());
+        assert!(view_rect_to_page_rect(
+            &placement,
+            Rect::new(500.0, 500.0, 10.0, 10.0),
+            Vec2::ZERO
+        )
+        .is_none());
     }
 
     /// 引用点：按目标页分组、按位置去重、无形坐标的目标不产生标记。
     #[test]
     fn destination_points_group_by_page_and_dedupe_by_position() {
-        let link = |destination: Destination| Link { rect: Rect::new(0.0, 0.0, 10.0, 10.0), destination };
+        let link = |destination: Destination| Link {
+            rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+            destination,
+        };
         let links_by_page = vec![
             vec![
                 // 两个链接指向**同一点** → 只记一次
-                link(Destination::Page { page: PageIndex::new(1), offset: Some(Point::new(10.0, 20.0)) }),
-                link(Destination::Page { page: PageIndex::new(1), offset: Some(Point::new(10.2, 20.2)) }),
+                link(Destination::Page {
+                    page: PageIndex::new(1),
+                    offset: Some(Point::new(10.0, 20.0)),
+                }),
+                link(Destination::Page {
+                    page: PageIndex::new(1),
+                    offset: Some(Point::new(10.2, 20.2)),
+                }),
                 // 另一个点 → 另记一次
-                link(Destination::Page { page: PageIndex::new(1), offset: Some(Point::new(300.0, 400.0)) }),
+                link(Destination::Page {
+                    page: PageIndex::new(1),
+                    offset: Some(Point::new(300.0, 400.0)),
+                }),
                 // 只有页、没有坐标 → 不产生标记
-                link(Destination::Page { page: PageIndex::new(2), offset: None }),
+                link(Destination::Page {
+                    page: PageIndex::new(2),
+                    offset: None,
+                }),
                 // 外部 URI → 忽略
                 link(Destination::Uri("https://example.com".into())),
             ],
             // 第 2 页上的链接也可以指向第 1 页（同样落在同一个 0.5pt 网格上 → 仍视为同一点）
-            vec![link(Destination::Page { page: PageIndex::new(1), offset: Some(Point::new(10.2, 20.2)) })],
+            vec![link(Destination::Page {
+                page: PageIndex::new(1),
+                offset: Some(Point::new(10.2, 20.2)),
+            })],
         ];
 
         let points = destination_points(&links_by_page, 3);
@@ -3378,11 +3818,17 @@ mod tests {
 
         // 太小 → 抬到最小尺寸
         let clamped = clamp_float_rect(rect(200.0, 100.0, 10.0, 10.0), area, FLOAT_MIN_SIZE);
-        assert_eq!((clamped.width(), clamped.height()), (FLOAT_MIN_SIZE.x, FLOAT_MIN_SIZE.y));
+        assert_eq!(
+            (clamped.width(), clamped.height()),
+            (FLOAT_MIN_SIZE.x, FLOAT_MIN_SIZE.y)
+        );
 
         // 比区域还大 → 收缩到区域尺寸
         let clamped = clamp_float_rect(rect(100.0, 50.0, 5000.0, 5000.0), area, FLOAT_MIN_SIZE);
-        assert_eq!((clamped.width(), clamped.height()), (area.width(), area.height()));
+        assert_eq!(
+            (clamped.width(), clamped.height()),
+            (area.width(), area.height())
+        );
 
         // 区域本身比最小尺寸还小 → 不得出现负尺寸
         let tiny = rect(0.0, 0.0, 40.0, 30.0);
@@ -3395,7 +3841,10 @@ mod tests {
     #[test]
     fn wheel_targets_canvas_only_when_the_pointer_is_over_it() {
         assert!(wheel_targets_canvas(true), "指针在画布上 → 滚动文档");
-        assert!(!wheel_targets_canvas(false), "指针在侧栏/工具栏上 → 不滚动文档");
+        assert!(
+            !wheel_targets_canvas(false),
+            "指针在侧栏/工具栏上 → 不滚动文档"
+        );
     }
 
     /// 位图 → ColorImage：一遍完成、通道顺序正确、尺寸匹配。
@@ -3436,7 +3885,10 @@ mod tests {
     fn flatten_outline_keeps_order_depth_and_destination() {
         let leaf = |title: &str, page: u32| OutlineNode {
             title: title.to_string(),
-            destination: Some(Destination::Page { page: PageIndex::new(page), offset: None }),
+            destination: Some(Destination::Page {
+                page: PageIndex::new(page),
+                offset: None,
+            }),
             children: Vec::new(),
         };
         let mut root = leaf("章 1", 0);
@@ -3446,18 +3898,18 @@ mod tests {
         let rows = flatten_outline(&nodes);
         assert_eq!(rows.len(), outline_node_count(&nodes), "行数应等于节点总数");
         assert_eq!(
-            rows.iter().map(|(depth, title, _)| (*depth, title.as_str())).collect::<Vec<_>>(),
-            vec![
-                (0, "章 1"),
-                (1, "节 1.1"),
-                (1, "节 1.2"),
-                (0, "章 2"),
-            ],
+            rows.iter()
+                .map(|(depth, title, _)| (*depth, title.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "章 1"), (1, "节 1.1"), (1, "节 1.2"), (0, "章 2"),],
             "深度优先、父在前、层级正确"
         );
         assert_eq!(
             rows[1].2,
-            Some(Destination::Page { page: PageIndex::new(1), offset: None }),
+            Some(Destination::Page {
+                page: PageIndex::new(1),
+                offset: None
+            }),
             "目标必须保留（点击跳转要用）"
         );
         assert!(flatten_outline(&[]).is_empty());
@@ -3474,7 +3926,11 @@ mod tests {
         let mut root = leaf("章 1");
         root.children = vec![leaf("节 1.1"), leaf("节 1.2")];
         let nodes = vec![root, leaf("章 2")];
-        assert_eq!(outline_node_count(&nodes), 4, "根 1 + 它的 2 个子节点 + 根 2 = 4");
+        assert_eq!(
+            outline_node_count(&nodes),
+            4,
+            "根 1 + 它的 2 个子节点 + 根 2 = 4"
+        );
         assert_eq!(outline_node_count(&[]), 0);
     }
 
@@ -3495,15 +3951,30 @@ mod tests {
             vec![PageIndex::FIRST, PageIndex::new(1)]
         );
         let last = PageIndex::new(9);
-        assert_eq!(texture_pages(&[last], last, 10), vec![PageIndex::new(8), last]);
+        assert_eq!(
+            texture_pages(&[last], last, 10),
+            vec![PageIndex::new(8), last]
+        );
 
         // 当前页不在可见集合里时也要保留
         let pages = texture_pages(&[PageIndex::new(4)], PageIndex::new(7), 10);
         assert!(pages.contains(&PageIndex::new(7)), "当前页必须保留");
 
         // 多页可见时不重复
-        let pages = texture_pages(&[PageIndex::new(4), PageIndex::new(5)], PageIndex::new(4), 10);
-        assert_eq!(pages, vec![PageIndex::new(3), PageIndex::new(4), PageIndex::new(5), PageIndex::new(6)]);
+        let pages = texture_pages(
+            &[PageIndex::new(4), PageIndex::new(5)],
+            PageIndex::new(4),
+            10,
+        );
+        assert_eq!(
+            pages,
+            vec![
+                PageIndex::new(3),
+                PageIndex::new(4),
+                PageIndex::new(5),
+                PageIndex::new(6)
+            ]
+        );
         assert_eq!(pages.len(), 4, "不得有重复项");
     }
 
@@ -3519,7 +3990,11 @@ mod tests {
         assert_eq!(canvas.min.x, 265.0, "画布应从拖拽条右侧开始");
         assert_eq!(canvas.min.y, 40.0);
         assert_eq!(canvas.width(), 835.0, "只让出拖拽条的宽度");
-        assert_eq!(canvas.height(), 800.0, "高度必须保持满高（这正是当时的缺陷）");
+        assert_eq!(
+            canvas.height(),
+            800.0,
+            "高度必须保持满高（这正是当时的缺陷）"
+        );
 
         // 侧栏隐藏时不让位
         assert_eq!(canvas_rect_for(full, 0.0), full);
@@ -3527,7 +4002,10 @@ mod tests {
         // 区域比拖拽条还窄时不得出现负尺寸
         let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(3.0, 10.0));
         let canvas = canvas_rect_for(tiny, 5.0);
-        assert!(canvas.width() >= 0.0 && canvas.height() >= 0.0, "实际 {canvas:?}");
+        assert!(
+            canvas.width() >= 0.0 && canvas.height() >= 0.0,
+            "实际 {canvas:?}"
+        );
         assert_eq!(canvas.height(), 10.0, "仍要保持满高");
     }
 
@@ -3559,16 +4037,25 @@ mod tests {
             |_| 0,
         );
 
-        assert!(store.contains(&key(page, 2.0, Rotation::None)), "当前比例必须保留");
+        assert!(
+            store.contains(&key(page, 2.0, Rotation::None)),
+            "当前比例必须保留"
+        );
         assert!(
             store.contains(&key(page, 1.5, Rotation::None)),
             "最近的旧比例必须保留（缩放过场要用它顶替，否则闪白）"
         );
-        assert!(!store.contains(&key(page, 1.25, Rotation::None)), "更旧的档应丢弃");
+        assert!(
+            !store.contains(&key(page, 1.25, Rotation::None)),
+            "更旧的档应丢弃"
+        );
         assert!(!store.contains(&key(page, 1.0, Rotation::None)));
         assert!(!store.contains(&key(page, 3.0, Rotation::None)));
         // 高于当前比例的**整页图**没有用（缩小用不到），丢掉
-        store.insert(RenderKey::new(page, Scale::from_zoom(3.0), Rotation::None), 3.0);
+        store.insert(
+            RenderKey::new(page, Scale::from_zoom(3.0), Rotation::None),
+            3.0,
+        );
         store.retain_for_view(
             &[
                 facts(page, Rotation::None, 2000, PageShape::Tiles(0, 0, 0, 0)),
@@ -3580,7 +4067,10 @@ mod tests {
             !store.contains(&RenderKey::new(page, Scale::from_zoom(3.0), Rotation::None)),
             "高于当前比例的整页图应丢弃"
         );
-        assert!(!store.contains(&key(page, 2.0, Rotation::Clockwise90)), "旧旋转必须丢弃");
+        assert!(
+            !store.contains(&key(page, 2.0, Rotation::Clockwise90)),
+            "旧旋转必须丢弃"
+        );
         assert!(
             !store.contains(&key(PageIndex::new(2), 2.0, Rotation::None)),
             "不在保留列表里的页应丢弃"

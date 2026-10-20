@@ -14,7 +14,9 @@ use pdfcore::testkit::{ImmediateScheduler, MemoryBackend, MemoryCache, MemoryPag
 /// 装配一个会话：等价于 UI 启动时做的那几行。
 fn assemble() -> DocumentSession {
     let backend = MemoryBackend::demo();
-    let opened = backend.open(Source::Bytes(b"%PDF-1.4 fake"), None).expect("打开假文档");
+    let opened = backend
+        .open(Source::Bytes(b"%PDF-1.4 fake"), None)
+        .expect("打开假文档");
 
     let cache: Arc<dyn RenderCache> = Arc::new(MemoryCache::new());
     let scheduler: Arc<dyn RenderScheduler> =
@@ -40,11 +42,17 @@ fn content_max_scroll_y(session: &DocumentSession) -> f32 {
 fn center_on_page_point_puts_the_point_at_the_view_center() {
     let mut session = assemble();
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)),
+        &mut events,
+    );
 
     let target = Point::new(300.0, 400.0);
     session.handle(
-        ViewerCommand::CenterOnPagePoint { page: PageIndex::FIRST, point: target },
+        ViewerCommand::CenterOnPagePoint {
+            page: PageIndex::FIRST,
+            point: target,
+        },
         &mut events,
     );
 
@@ -56,7 +64,11 @@ fn center_on_page_point_puts_the_point_at_the_view_center() {
         (view.x - 350.0).abs() < 0.5 && (view.y - 400.0).abs() < 0.5,
         "目标点应位于视口中心，实际 {view:?}"
     );
-    assert_eq!(session.state().current_page, PageIndex::FIRST, "当前页应跟随更新");
+    assert_eq!(
+        session.state().current_page,
+        PageIndex::FIRST,
+        "当前页应跟随更新"
+    );
 }
 
 /// 第二轮验收：UI 枚举"要画哪些瓦片"必须与实际提交渲染的范围一致
@@ -81,10 +93,15 @@ fn visible_tiles_matches_the_requested_range() {
 
     session.set_tiling_policy(TilingPolicy::Always);
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(300.0, 300.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(300.0, 300.0)),
+        &mut events,
+    );
     session.handle(ViewerCommand::SetScroll(Vec2::ZERO), &mut events);
 
-    let (col0, row0, col1, row1) = session.visible_tiles(PageIndex::FIRST).expect("强制分块后应有范围");
+    let (col0, row0, col1, row1) = session
+        .visible_tiles(PageIndex::FIRST)
+        .expect("强制分块后应有范围");
     assert_eq!((col0, row0), (0, 0));
     assert_eq!((col1, row1), (0, 0), "300×300 视口只覆盖左上角一块");
 
@@ -105,7 +122,10 @@ fn assemble_a_reader_from_traits() {
     assert!(session.capabilities().text_layer);
 
     // 1) 给视口一个真实尺寸（否则没有可见页），然后请求渲染
-    session.handle(ViewerCommand::ResizeViewport(Size::new(800.0, 900.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(800.0, 900.0)),
+        &mut events,
+    );
     session.handle(ViewerCommand::RequestVisible, &mut events);
     session.pump(&mut events);
 
@@ -113,12 +133,19 @@ fn assemble_a_reader_from_traits() {
     //    因此比显示比例大 —— 多出来的像素供波段内缩放时下采样，避免重渲染）
     let render = render_scale_for(1.0, DEFAULT_OVERSCAN);
     assert!(render > 1.0, "波段上界应大于显示比例（超采样）");
-    let image = session.image_for(PageIndex::new(0)).expect("首页应已渲染并写入缓存");
+    let image = session
+        .image_for(PageIndex::new(0))
+        .expect("首页应已渲染并写入缓存");
     assert_eq!(
         (image.width, image.height),
-        ((612.0 * render).round() as u32, (792.0 * render).round() as u32)
+        (
+            (612.0 * render).round() as u32,
+            (792.0 * render).round() as u32
+        )
     );
-    assert!(events.iter().any(|event| matches!(event, SessionEvent::PageRendered(_))));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SessionEvent::PageRendered(_))));
 }
 
 #[test]
@@ -138,7 +165,10 @@ fn cache_prevents_duplicate_renders() {
     .unwrap();
 
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(800.0, 900.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(800.0, 900.0)),
+        &mut events,
+    );
     session.handle(ViewerCommand::RequestVisible, &mut events);
     session.pump(&mut events);
     let after_first = cache.stats().entries;
@@ -156,7 +186,10 @@ fn cache_prevents_duplicate_renders() {
 fn navigation_updates_current_page_and_scroll() {
     let mut session = assemble();
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(800.0, 600.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(800.0, 600.0)),
+        &mut events,
+    );
     assert_eq!(session.state().current_page, PageIndex::FIRST);
 
     session.handle(ViewerCommand::NextPage, &mut events);
@@ -170,14 +203,20 @@ fn navigation_updates_current_page_and_scroll() {
     // 越界跳页应报错而不是 panic
     events.clear();
     session.handle(ViewerCommand::GoToPage(PageIndex::new(99)), &mut events);
-    assert!(matches!(events.last(), Some(SessionEvent::Error(CoreError::PageOutOfRange { .. }))));
+    assert!(matches!(
+        events.last(),
+        Some(SessionEvent::Error(CoreError::PageOutOfRange { .. }))
+    ));
 }
 
 #[test]
 fn zoom_recomputes_layout_and_invalidates_bitmaps() {
     let mut session = assemble();
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(800.0, 900.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(800.0, 900.0)),
+        &mut events,
+    );
     session.handle(ViewerCommand::RequestVisible, &mut events);
     session.pump(&mut events);
     let before = session.placement(PageIndex::new(0)).unwrap().rect.size();
@@ -204,22 +243,34 @@ fn zoom_recomputes_layout_and_invalidates_bitmaps() {
 fn per_page_rotation_flows_into_layout_and_render_request() {
     let mut session = assemble();
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(800.0, 600.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(800.0, 600.0)),
+        &mut events,
+    );
     session.handle(ViewerCommand::GoToPage(PageIndex::new(2)), &mut events);
     session.pump(&mut events);
 
     let placement = *session.placement(PageIndex::new(2)).unwrap();
-    assert_eq!(placement.rotation, Rotation::Clockwise90, "第 3 页自带 /Rotate 90");
+    assert_eq!(
+        placement.rotation,
+        Rotation::Clockwise90,
+        "第 3 页自带 /Rotate 90"
+    );
     // 612x792 旋转后应为 792x612
     assert!((placement.rect.width - 792.0).abs() < 0.5);
     assert!((placement.rect.height - 612.0).abs() < 0.5);
 
     // 渲染结果必须与布局**同朝向**（宽高互换），尺寸按渲染比例放大（D-94）
     let render = render_scale_for(1.0, DEFAULT_OVERSCAN);
-    let image = session.image_for(PageIndex::new(2)).expect("第 3 页应已渲染");
+    let image = session
+        .image_for(PageIndex::new(2))
+        .expect("第 3 页应已渲染");
     assert_eq!(
         (image.width, image.height),
-        ((792.0 * render).round() as u32, (612.0 * render).round() as u32),
+        (
+            (792.0 * render).round() as u32,
+            (612.0 * render).round() as u32
+        ),
         "旋转页必须是显示朝向且按渲染比例渲染"
     );
 }
@@ -228,7 +279,10 @@ fn per_page_rotation_flows_into_layout_and_render_request() {
 fn text_selection_and_clipboard_events() {
     let mut session = assemble();
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(800.0, 900.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(800.0, 900.0)),
+        &mut events,
+    );
 
     // 选中第一页的 "Hello"：先点第一个字符，再拖到第 5 个字符（index 4）的末尾
     session.handle(
@@ -247,14 +301,20 @@ fn text_selection_and_clipboard_events() {
     // 复制：会话通过事件把文本交回 UI，自身不依赖剪贴板 API
     events.clear();
     session.handle(ViewerCommand::CopySelection, &mut events);
-    assert_eq!(events, vec![SessionEvent::CopyToClipboard("Hello".to_string())]);
+    assert_eq!(
+        events,
+        vec![SessionEvent::CopyToClipboard("Hello".to_string())]
+    );
 }
 
 #[test]
 fn word_granularity_expands_selection() {
     let mut session = assemble();
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(800.0, 900.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(800.0, 900.0)),
+        &mut events,
+    );
 
     // 模拟双击：先把粒度设为 Word，再发送点击位置（第 8 个字符落在 "world" 内部）
     session.handle(
@@ -265,7 +325,11 @@ fn word_granularity_expands_selection() {
         ViewerCommand::SelectBegin(TextPosition::new(PageIndex::new(0), 8)),
         &mut events,
     );
-    assert_eq!(session.selected_text(), "world", "单击位置落在词内，应扩展为整词");
+    assert_eq!(
+        session.selected_text(),
+        "world",
+        "单击位置落在词内，应扩展为整词"
+    );
 
     session.handle(ViewerCommand::SelectAll, &mut events);
     let all = session.selected_text();
@@ -278,14 +342,21 @@ fn word_granularity_expands_selection() {
 fn hit_testing_maps_mouse_to_text_position() {
     let mut session = assemble();
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(800.0, 900.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(800.0, 900.0)),
+        &mut events,
+    );
 
     // 第一页第一行首字符的中心：页内坐标 (36+3, 792-14+5)
     let placement = *session.placement(PageIndex::new(0)).unwrap();
     let content_point = placement.page_to_content(Point::new(39.0, 783.0));
     let position = session.text_position_at(content_point).expect("应命中字符");
     assert_eq!(position.page, PageIndex::new(0));
-    assert!(position.index < 5, "应落在 'Hello' 之内，实际 {}", position.index);
+    assert!(
+        position.index < 5,
+        "应落在 'Hello' 之内，实际 {}",
+        position.index
+    );
 
     // 点在没有页面的空白处（内容左上角之外）→ 无命中
     assert_eq!(session.text_position_at(Point::new(-50.0, -50.0)), None);
@@ -294,7 +365,9 @@ fn hit_testing_maps_mouse_to_text_position() {
 #[test]
 fn search_and_outline_come_from_the_backend() {
     let session = assemble();
-    let hits = session.search(&SearchQuery::new("page")).expect("假后端支持搜索");
+    let hits = session
+        .search(&SearchQuery::new("page"))
+        .expect("假后端支持搜索");
     assert_eq!(hits.len(), 2);
 
     let highlighted = session.highlights_for_search(&hits, Some(0));
@@ -305,21 +378,36 @@ fn search_and_outline_come_from_the_backend() {
     assert_eq!(navigation.outline.len(), 3);
     assert_eq!(
         navigation.outline[0].destination,
-        Some(Destination::Page { page: PageIndex::FIRST, offset: None })
+        Some(Destination::Page {
+            page: PageIndex::FIRST,
+            offset: None
+        })
     );
 
     // D-08：页内链接与命名目标都在打开时解析完毕，点击时 0 次后端调用
     assert_eq!(navigation.links_on(PageIndex::new(0)).len(), 1);
     assert_eq!(
         navigation.links_on(PageIndex::new(0))[0].destination,
-        Destination::Page { page: PageIndex::new(1), offset: Some(Point::new(36.0, 20.0)) },
+        Destination::Page {
+            page: PageIndex::new(1),
+            offset: Some(Point::new(36.0, 20.0))
+        },
         "演示文档的链接带具体落点（用于验证链接跳转居中）"
     );
-    assert!(navigation.links_on(PageIndex::new(2)).is_empty(), "最后一页没有下一页链接");
-    assert!(navigation.links_on(PageIndex::new(99)).is_empty(), "越界页应返回空切片而不是 panic");
+    assert!(
+        navigation.links_on(PageIndex::new(2)).is_empty(),
+        "最后一页没有下一页链接"
+    );
+    assert!(
+        navigation.links_on(PageIndex::new(99)).is_empty(),
+        "越界页应返回空切片而不是 panic"
+    );
     assert_eq!(
         navigation.named_destinations.get("chapter-2"),
-        Some(&Destination::Page { page: PageIndex::new(1), offset: None })
+        Some(&Destination::Page {
+            page: PageIndex::new(1),
+            offset: None
+        })
     );
     assert_eq!(
         navigation.unresolved,
@@ -350,7 +438,10 @@ fn backend_without_text_layer_still_works() {
     .unwrap();
 
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(800.0, 900.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(800.0, 900.0)),
+        &mut events,
+    );
     session.handle(ViewerCommand::RequestVisible, &mut events);
     session.pump(&mut events);
 
@@ -400,8 +491,12 @@ fn session_consumes_bulk_page_geometries_only() {
         info: opened.document.info().clone(),
         geometries: opened.document.page_geometries().unwrap(),
     });
-    let rebuilt =
-        OpenedDocument::new(document, opened.raster.clone(), None, Capabilities::minimal());
+    let rebuilt = OpenedDocument::new(
+        document,
+        opened.raster.clone(),
+        None,
+        Capabilities::minimal(),
+    );
 
     // 能构造成功本身就证明只用了批量接口（否则 BulkOnlyDocument 会 panic）
     let session = DocumentSession::new(
@@ -456,7 +551,10 @@ fn tiling_routes_to_tiles_and_limits_requests_to_the_viewport() {
     session.set_tiling_policy(TilingPolicy::Always);
     let mut events = Vec::new();
     session.handle(ViewerCommand::SetZoom(4.0), &mut events);
-    session.handle(ViewerCommand::ResizeViewport(Size::new(300.0, 300.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(300.0, 300.0)),
+        &mut events,
+    );
     // 视口左上角对齐页面左上角（页在内容空间从留白 (12,12) 开始）
     session.handle(ViewerCommand::SetScroll(Vec2::new(12.0, 12.0)), &mut events);
     session.handle(ViewerCommand::RequestVisible, &mut events);
@@ -466,10 +564,20 @@ fn tiling_routes_to_tiles_and_limits_requests_to_the_viewport() {
     assert!(session.image_for(PageIndex::FIRST).is_none());
 
     let grid = session.tile_grid(PageIndex::FIRST).expect("分块时应有网格");
-    assert!(grid.side >= 2, "4 倍下必须分成多块，实际 {}×{}", grid.side, grid.side);
-    let (col0, row0, col1, row1) =
-        session.visible_tiles(PageIndex::FIRST).expect("应有视口块范围");
-    assert_eq!((col0, row0, col1, row1), (0, 0, 0, 0), "300×300 视口只覆盖左上角一块");
+    assert!(
+        grid.side >= 2,
+        "4 倍下必须分成多块，实际 {}×{}",
+        grid.side,
+        grid.side
+    );
+    let (col0, row0, col1, row1) = session
+        .visible_tiles(PageIndex::FIRST)
+        .expect("应有视口块范围");
+    assert_eq!(
+        (col0, row0, col1, row1),
+        (0, 0, 0, 0),
+        "300×300 视口只覆盖左上角一块"
+    );
 
     let tiles = session.tiles_for(PageIndex::FIRST);
     assert_eq!(tiles.len(), 1, "只应渲染视口覆盖的那一块");
@@ -520,13 +628,24 @@ fn zoom_keeps_the_view_center_anchored() {
 
     let mut events = Vec::new();
     session.handle(ViewerCommand::SetZoom(1.5), &mut events);
-    session.handle(ViewerCommand::ResizeViewport(Size::new(900.0, 1000.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(900.0, 1000.0)),
+        &mut events,
+    );
     session.handle(ViewerCommand::SetScroll(Vec2::ZERO), &mut events);
 
     let before = session.capture_anchor().expect("视口中心应落在页 0 上");
     assert_eq!(before.page, PageIndex::new(0));
-    assert!((before.page_point.x - 292.0).abs() < 0.01, "got {:?}", before.page_point);
-    assert!((before.page_point.y - 466.67).abs() < 0.01, "got {:?}", before.page_point);
+    assert!(
+        (before.page_point.x - 292.0).abs() < 0.01,
+        "got {:?}",
+        before.page_point
+    );
+    assert!(
+        (before.page_point.y - 466.67).abs() < 0.01,
+        "got {:?}",
+        before.page_point
+    );
 
     // 放大到 2.0：视野中心必须仍是同一个页内位置
     session.handle(ViewerCommand::SetZoom(2.0), &mut events);
@@ -539,8 +658,16 @@ fn zoom_keeps_the_view_center_anchored() {
     );
 
     // 对应的滚动偏移与文档推算一致： (146.00, 162.67)
-    assert!((session.viewport().scroll.x - 146.0).abs() < 0.5, "got {:?}", session.viewport().scroll);
-    assert!((session.viewport().scroll.y - 162.67).abs() < 0.5, "got {:?}", session.viewport().scroll);
+    assert!(
+        (session.viewport().scroll.x - 146.0).abs() < 0.5,
+        "got {:?}",
+        session.viewport().scroll
+    );
+    assert!(
+        (session.viewport().scroll.y - 162.67).abs() < 0.5,
+        "got {:?}",
+        session.viewport().scroll
+    );
 
     // 再缩回去也必须回到原处（可逆）
     session.handle(ViewerCommand::SetZoom(1.5), &mut events);
@@ -561,11 +688,17 @@ fn zoom_keeps_the_view_center_anchored() {
 fn anchor_fallback_keeps_scroll_when_center_is_between_pages() {
     let mut session = assemble();
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)),
+        &mut events,
+    );
 
     // zoom=1 时页 0 矩形 y 12..804、页 1 起点 y=816；让中心落在 810（页间距内）
     session.handle(ViewerCommand::SetScroll(Vec2::new(0.0, 410.0)), &mut events);
-    assert!(session.capture_anchor().is_none(), "中心落在页间距，应捕获失败");
+    assert!(
+        session.capture_anchor().is_none(),
+        "中心落在页间距，应捕获失败"
+    );
 
     let before = session.viewport().scroll;
     session.handle(ViewerCommand::SetZoom(1.5), &mut events); // 不得 panic
@@ -601,7 +734,10 @@ fn zooming_cancels_in_flight_renders_at_the_old_scale() {
     // 关闭超采样：渲染比例 = 显示比例，于是"旧比例/新比例"就是 1.0/2.0，断言更直白
     session.set_overscan(1.0);
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)),
+        &mut events,
+    );
 
     // 提交但不取回：此刻 scale=1 的任务处于"在飞"状态
     session.handle(ViewerCommand::RequestVisible, &mut events);
@@ -627,7 +763,10 @@ fn zooming_cancels_in_flight_renders_at_the_old_scale() {
         "旧比例不应产出渲染结果（否则白渲染一次）：{rendered:?}"
     );
     assert!(rendered.contains(&new), "新比例必须渲染：{rendered:?}");
-    assert!(session.image_for(PageIndex::FIRST).is_some(), "新比例的位图应已入缓存");
+    assert!(
+        session.image_for(PageIndex::FIRST).is_some(),
+        "新比例的位图应已入缓存"
+    );
 }
 
 /// 绘制映射必须与布局映射重合：任取页内一点，按布局算出的内容坐标，
@@ -641,7 +780,10 @@ fn tile_placement_agrees_with_layout_coordinates() {
     let mut events = Vec::new();
     session.set_tiling_policy(TilingPolicy::Always);
     session.handle(ViewerCommand::SetZoom(4.0), &mut events);
-    session.handle(ViewerCommand::ResizeViewport(Size::new(400.0, 400.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(400.0, 400.0)),
+        &mut events,
+    );
 
     let page = PageIndex::FIRST;
     let placement = *session.placement(page).expect("第 1 页布局");
@@ -671,9 +813,8 @@ fn tile_placement_agrees_with_layout_coordinates() {
                 break;
             }
         }
-        let (col, row, rect) = found.unwrap_or_else(|| {
-            panic!("页内点 {page_point:?} → 内容 {content:?} 必须落在某一块内")
-        });
+        let (col, row, rect) = found
+            .unwrap_or_else(|| panic!("页内点 {page_point:?} → 内容 {content:?} 必须落在某一块内"));
 
         // 该点在"整页渲染像素"里的位置：布局换算一次
         let expected_x = (content.x - placement.rect.x) / u;
@@ -726,7 +867,10 @@ fn zooming_inside_a_band_does_not_render_again() {
     session.set_tiling_policy(TilingPolicy::Always);
     let mut events = Vec::new();
     session.handle(ViewerCommand::SetZoom(1.0), &mut events);
-    session.handle(ViewerCommand::ResizeViewport(Size::new(300.0, 300.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(300.0, 300.0)),
+        &mut events,
+    );
     session.handle(ViewerCommand::SetScroll(Vec2::new(12.0, 12.0)), &mut events);
 
     session.handle(ViewerCommand::RequestVisible, &mut events);
@@ -777,7 +921,10 @@ fn zooming_inside_a_band_does_not_render_again() {
         "波段内渲染比例必须保持不变"
     );
     assert_eq!(
-        session.tile_grid(PageIndex::FIRST).expect("分块网格").render_px(),
+        session
+            .tile_grid(PageIndex::FIRST)
+            .expect("分块网格")
+            .render_px(),
         grid_at_100.render_px(),
         "波段内整页像素尺寸必须不变（否则日志里会出现第二个 页面px）"
     );
@@ -799,7 +946,9 @@ fn zooming_inside_a_band_does_not_render_again() {
     session.pump(&mut events);
     assert_ne!(session.render_scale(PageIndex::FIRST), render_at_100);
     assert!(
-        events.iter().any(|event| matches!(event, SessionEvent::PageRendered(_))),
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::PageRendered(_))),
         "跨波段后必须重新渲染：{events:?}"
     );
 }
@@ -811,21 +960,32 @@ fn zooming_inside_a_band_does_not_render_again() {
 fn link_hit_testing_returns_the_destination_with_its_offset() {
     let mut session = assemble();
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(700.0, 800.0)),
+        &mut events,
+    );
 
     // 演示文档每页有一条"跳到下一页"的热区：左留白起、页面顶部往下 24pt 处、160×18
     let placement = *session.placement(PageIndex::FIRST).expect("第 1 页布局");
     let page_size = placement.page_size;
     let inside = Point::new(40.0, page_size.height - 12.0);
-    let destination = session.link_at(PageIndex::FIRST, inside).expect("应命中链接");
+    let destination = session
+        .link_at(PageIndex::FIRST, inside)
+        .expect("应命中链接");
     assert_eq!(
         destination,
-        Destination::Page { page: PageIndex::new(1), offset: Some(Point::new(36.0, 20.0)) },
+        Destination::Page {
+            page: PageIndex::new(1),
+            offset: Some(Point::new(36.0, 20.0))
+        },
         "链接目标应带具体落点"
     );
 
     // 热区之外不命中
-    assert_eq!(session.link_at(PageIndex::FIRST, Point::new(40.0, 20.0)), None);
+    assert_eq!(
+        session.link_at(PageIndex::FIRST, Point::new(40.0, 20.0)),
+        None
+    );
     // 最后一页没有链接
     let last = session.page_count() - 1;
     assert_eq!(session.link_at(PageIndex::new(last), inside), None);
@@ -843,7 +1003,9 @@ fn a_strip_page_tiles_because_of_the_texture_side_limit() {
         Rotation::None,
         vec!["long".to_string()],
     )]);
-    let opened = backend.open(Source::Bytes(b"%PDF-1.4 strip"), None).unwrap();
+    let opened = backend
+        .open(Source::Bytes(b"%PDF-1.4 strip"), None)
+        .unwrap();
     let mut session = DocumentSession::new(
         opened,
         Arc::new(MemoryCache::new()),
@@ -858,7 +1020,10 @@ fn a_strip_page_tiles_because_of_the_texture_side_limit() {
     // 不设上限：3 MP < 4 MP → 整页一张（旧行为）
     session.set_max_texture_side(0);
     session.handle(ViewerCommand::SetZoom(1.0), &mut Vec::new());
-    session.handle(ViewerCommand::ResizeViewport(Size::new(400.0, 600.0)), &mut Vec::new());
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(400.0, 600.0)),
+        &mut Vec::new(),
+    );
     assert!(
         session.tile_grid(PageIndex::FIRST).is_none(),
         "面积没超阈值时不应分块"
@@ -886,7 +1051,9 @@ fn thumbnail_is_requested_once_and_survives_band_changes() {
         Rotation::None,
         vec!["Hello".to_string()],
     )]);
-    let opened = backend.open(Source::Bytes(b"%PDF-1.4 thumb"), None).unwrap();
+    let opened = backend
+        .open(Source::Bytes(b"%PDF-1.4 thumb"), None)
+        .unwrap();
     let mut session = DocumentSession::new(
         opened,
         Arc::new(MemoryCache::new()),
@@ -899,14 +1066,19 @@ fn thumbnail_is_requested_once_and_survives_band_changes() {
     .expect("装配会话");
     session.handle(ViewerCommand::SetZoom(8.0), &mut Vec::new());
 
-    let scale = session.thumbnail_scale(PageIndex::FIRST).expect("应有建议比例");
+    let scale = session
+        .thumbnail_scale(PageIndex::FIRST)
+        .expect("应有建议比例");
     // 612×792 = 0.48 M pt²；1.5 MP 允许 1.75 倍，但不超过波段 0 的 1.6
-    assert!((scale.0 - crate::DEFAULT_OVERSCAN).abs() < 1e-3, "比例 {scale:?} 应封顶在 1.6");
-    let (width, height) = (
-        (612.0 * scale.0).round(),
-        (792.0 * scale.0).round(),
+    assert!(
+        (scale.0 - crate::DEFAULT_OVERSCAN).abs() < 1e-3,
+        "比例 {scale:?} 应封顶在 1.6"
     );
-    assert!(width * height <= 1_600_000.0, "底料面积 {width}×{height} 应 ≤ 1.5 MP");
+    let (width, height) = ((612.0 * scale.0).round(), (792.0 * scale.0).round());
+    assert!(
+        width * height <= 1_600_000.0,
+        "底料面积 {width}×{height} 应 ≤ 1.5 MP"
+    );
 
     assert!(session.request_thumbnail(PageIndex::FIRST), "第一次应提交");
     assert!(
@@ -952,11 +1124,10 @@ fn thumbnail_scale_respects_both_area_and_side_limits() {
     )
     .expect("装配会话");
     session.set_max_texture_side(1_024);
-    let scale = session.thumbnail_scale(PageIndex::FIRST).expect("应有建议比例");
-    let (width, height) = (
-        (2383.94 * scale.0).round(),
-        (3370.39 * scale.0).round(),
-    );
+    let scale = session
+        .thumbnail_scale(PageIndex::FIRST)
+        .expect("应有建议比例");
+    let (width, height) = ((2383.94 * scale.0).round(), (3370.39 * scale.0).round());
     assert!(width * height <= 1_600_000.0, "{width}×{height} 面积超了");
     assert!(width.max(height) <= 1_024.0, "{width}×{height} 单边超了");
 }

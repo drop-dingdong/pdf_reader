@@ -56,7 +56,10 @@ impl Default for RecentFiles {
 impl RecentFiles {
     /// 新建。
     pub fn new(capacity: usize) -> Self {
-        Self { entries: Vec::new(), capacity: capacity.max(1) }
+        Self {
+            entries: Vec::new(),
+            capacity: capacity.max(1),
+        }
     }
 
     /// 当前列表（最近打开的在前）。
@@ -219,8 +222,14 @@ mod tests {
         assert_eq!(loaded.zoom, 1.75);
         assert_eq!(loaded.layout_mode, PageLayoutMode::SinglePage);
         assert_eq!(loaded.reading_direction, ReadingDirection::RightToLeft);
-        assert_eq!(loaded.last_directory, Some(PathBuf::from("/home/user/docs")));
-        assert_eq!(loaded.recent_files.entries()[0], PathBuf::from("/home/user/docs/book.pdf"));
+        assert_eq!(
+            loaded.last_directory,
+            Some(PathBuf::from("/home/user/docs"))
+        );
+        assert_eq!(
+            loaded.recent_files.entries()[0],
+            PathBuf::from("/home/user/docs/book.pdf")
+        );
     }
 
     #[test]

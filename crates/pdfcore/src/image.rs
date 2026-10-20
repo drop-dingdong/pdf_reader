@@ -57,7 +57,12 @@ impl RasterImage {
         if data.len() < expected {
             return None;
         }
-        Some(Self { width, height, format, data })
+        Some(Self {
+            width,
+            height,
+            format,
+            data,
+        })
     }
 
     /// 期望的字节数。

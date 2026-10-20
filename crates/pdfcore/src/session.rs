@@ -336,7 +336,8 @@ impl DocumentSession {
     /// UI 在绘制前调用它来准备纹理；结果与 [`ViewerCommand::RequestVisible`] 提交渲染时
     /// 使用的是**同一套判断**（都走 [`PageLayout::visible_pages`]）。
     pub fn visible_pages(&self, out: &mut Vec<PageIndex>) {
-        self.layout_engine.visible_pages(&self.layout, &self.viewport, out);
+        self.layout_engine
+            .visible_pages(&self.layout, &self.viewport, out);
     }
 
     /// 后台是否还有排队或正在渲染的任务（UI 据此决定要不要持续重绘）。
@@ -490,7 +491,10 @@ impl DocumentSession {
     fn grid_of(&self, placement: &PagePlacement) -> Option<TileGrid> {
         let pixels = self.render_pixel_size(placement);
         // 面积超阈值**或**单边超过纹理上限都要分块（D-108）
-        if !self.tiling.requires_tiling_bounded(pixels, self.max_texture_side) {
+        if !self
+            .tiling
+            .requires_tiling_bounded(pixels, self.max_texture_side)
+        {
             return None;
         }
         Some(TileGrid::new_bounded(
@@ -527,7 +531,9 @@ impl DocumentSession {
         let Some(placement) = self.layout.placement(page).copied() else {
             return false;
         };
-        let Some(scale) = self.thumbnail_scale(page) else { return false };
+        let Some(scale) = self.thumbnail_scale(page) else {
+            return false;
+        };
         let key = RenderKey::new(page, scale, placement.rotation);
         if self.cache.get(&key).is_some()
             || self.jobs.contains_key(&key)
@@ -605,15 +611,17 @@ impl DocumentSession {
             return true;
         }
         match self.layout.placement(page) {
-            Some(placement) => !self.grid_of(placement).is_some()
-                && self
-                    .cache
-                    .get(&RenderKey::new(
-                        page,
-                        Scale::from_zoom(self.render_scale_of(placement)),
-                        placement.rotation,
-                    ))
-                    .is_some(),
+            Some(placement) => {
+                !self.grid_of(placement).is_some()
+                    && self
+                        .cache
+                        .get(&RenderKey::new(
+                            page,
+                            Scale::from_zoom(self.render_scale_of(placement)),
+                            placement.rotation,
+                        ))
+                        .is_some()
+            }
             None => false,
         }
     }
@@ -735,7 +743,10 @@ impl DocumentSession {
         let center = self.viewport.center_content_point();
         let page = self.layout_engine.page_at(&self.layout, center)?;
         let placement = self.layout.placement(page)?;
-        Some(ScrollAnchor { page, page_point: placement.content_to_page(center) })
+        Some(ScrollAnchor {
+            page,
+            page_point: placement.content_to_page(center),
+        })
     }
 
     /// 把锚点重新放回视口中心（`scroll_to_anchor` 内部已做夹取）。
@@ -786,7 +797,11 @@ impl DocumentSession {
     }
 
     /// 把搜索命中转成高亮；`active` 为当前跳转到的那一条（用更醒目的配色）。
-    pub fn highlights_for_search(&self, hits: &[SearchHit], active: Option<usize>) -> Vec<Highlight> {
+    pub fn highlights_for_search(
+        &self,
+        hits: &[SearchHit],
+        active: Option<usize>,
+    ) -> Vec<Highlight> {
         hits.iter()
             .enumerate()
             .map(|(index, hit)| Highlight {
@@ -839,12 +854,17 @@ impl DocumentSession {
         let placement = *self.layout.placement(page)?;
         let page_point = placement.content_to_page(content_point);
         let text = self.page_text(page)?;
-        text.hit_test(page_point).map(|index| TextPosition::new(page, index))
+        text.hit_test(page_point)
+            .map(|index| TextPosition::new(page, index))
     }
 
     /// 当前页在 100% 缩放下的显示尺寸（用于 FitWidth 之外的适配模式）。
     pub fn current_page_displayed_size(&self) -> Option<Size> {
-        Some(self.pages.get(self.state.current_page.get() as usize)?.displayed_size(self.state.user_rotation))
+        Some(
+            self.pages
+                .get(self.state.current_page.get() as usize)?
+                .displayed_size(self.state.user_rotation),
+        )
     }
 
     // ---------------------------------------------------------------- 命令处理
@@ -914,7 +934,12 @@ impl DocumentSession {
             ViewerCommand::RotateCounterClockwise => {
                 // 连续三次顺时针 == 一次逆时针，用既有表示避免新增旋转种类
                 let ninety = Rotation::Clockwise90;
-                self.state.user_rotation = self.state.user_rotation.compose(ninety).compose(ninety).compose(ninety);
+                self.state.user_rotation = self
+                    .state
+                    .user_rotation
+                    .compose(ninety)
+                    .compose(ninety)
+                    .compose(ninety);
                 self.invalidate_render();
                 self.relayout_keeping_anchor(events);
             }
@@ -945,7 +970,10 @@ impl DocumentSession {
             ViewerCommand::SelectAll => {
                 if self.page_count() > 0 {
                     let last = PageIndex::new(self.page_count() - 1);
-                    let end = self.page_text(last).map(|text| text.len() as u32).unwrap_or(0);
+                    let end = self
+                        .page_text(last)
+                        .map(|text| text.len() as u32)
+                        .unwrap_or(0);
                     self.selection.begin(TextPosition::new(PageIndex::FIRST, 0));
                     self.selection.extend(TextPosition::new(last, end));
                     events.push(SessionEvent::SelectionChanged);
@@ -959,7 +987,10 @@ impl DocumentSession {
             }
             ViewerCommand::CenterOnPagePoint { page, point } => {
                 // 直接复用 D-05 的锚点机制：把该页内点放到视口中心
-                self.restore_anchor(ScrollAnchor { page, page_point: point });
+                self.restore_anchor(ScrollAnchor {
+                    page,
+                    page_point: point,
+                });
                 events.push(SessionEvent::ScrollChanged(self.viewport.scroll));
                 self.sync_current_page(events);
             }
@@ -1028,11 +1059,9 @@ impl DocumentSession {
             Some(anchor) => self.restore_anchor(anchor),
             None => {
                 let target = self.viewport.scroll;
-                self.viewport.scroll = self.layout_engine.clamp_scroll(
-                    &self.layout,
-                    self.viewport.size,
-                    target,
-                );
+                self.viewport.scroll =
+                    self.layout_engine
+                        .clamp_scroll(&self.layout, self.viewport.size, target);
             }
         }
     }
@@ -1066,7 +1095,9 @@ impl DocumentSession {
     }
 
     fn set_scroll(&mut self, target: Vec2, events: &mut Vec<SessionEvent>) {
-        let clamped = self.layout_engine.clamp_scroll(&self.layout, self.viewport.size, target);
+        let clamped = self
+            .layout_engine
+            .clamp_scroll(&self.layout, self.viewport.size, target);
         if clamped == self.viewport.scroll {
             return;
         }
@@ -1085,7 +1116,8 @@ impl DocumentSession {
         }
         self.state.current_page = page;
         self.viewport.scroll =
-            self.layout_engine.scroll_to_page(&self.layout, page, self.viewport.size);
+            self.layout_engine
+                .scroll_to_page(&self.layout, page, self.viewport.size);
         events.push(SessionEvent::CurrentPageChanged(page));
         events.push(SessionEvent::ScrollChanged(self.viewport.scroll));
         // 目标页优先渲染，用户翻页后不必等调度器轮询
@@ -1109,7 +1141,10 @@ impl DocumentSession {
     }
 
     fn fit_width(&mut self, events: &mut Vec<SessionEvent>) {
-        let Some(geometry) = self.pages.get(self.state.current_page.get() as usize).copied()
+        let Some(geometry) = self
+            .pages
+            .get(self.state.current_page.get() as usize)
+            .copied()
         else {
             return;
         };
@@ -1258,7 +1293,8 @@ impl DocumentSession {
     /// 把可见页（以及前后各一页预取）交给调度器。
     fn submit_visible(&mut self) {
         let mut visible = std::mem::take(&mut self.visible_scratch);
-        self.layout_engine.visible_pages(&self.layout, &self.viewport, &mut visible);
+        self.layout_engine
+            .visible_pages(&self.layout, &self.viewport, &mut visible);
 
         // 先取消"已滚出视口且不是当前页"的在飞任务，再提交新任务：
         // PDFium 只能串行渲染，队列里堆着看不见的页会直接拖慢用户正在看的那一页。

@@ -39,18 +39,23 @@ impl TextLayer for PdfiumTextLayer {
             let ch = character.unicode_char().unwrap_or('\u{FFFD}');
             // 包围盒在 PDF 页面空间（左下原点）—— 与 pdfcore 的约定一致，不做任何翻转
             let raw = character.tight_bounds().map(to_rect).unwrap_or(Rect::ZERO);
-            let bbox = Rect::new(
-                raw.x - origin.x,
-                raw.y - origin.y,
-                raw.width,
-                raw.height,
-            );
+            let bbox = Rect::new(raw.x - origin.x, raw.y - origin.y, raw.width, raw.height);
             buffer.push(ch);
-            chars.push(TextChar { ch, bbox, origin: Point::new(bbox.x, bbox.y), span: 0 });
+            chars.push(TextChar {
+                ch,
+                bbox,
+                origin: Point::new(bbox.x, bbox.y),
+                span: 0,
+            });
         }
 
         let spans = single_span(chars.len());
-        Ok(Arc::new(PageText { page, text: buffer, chars, spans }))
+        Ok(Arc::new(PageText {
+            page,
+            text: buffer,
+            chars,
+            spans,
+        }))
     }
 
     fn search(&self, query: &SearchQuery) -> Result<Vec<SearchHit>> {
@@ -89,7 +94,11 @@ impl TextLayer for PdfiumTextLayer {
                     }
                 }
                 let range = TextRange::new(start as u32, (start + needle.len()) as u32);
-                hits.push(SearchHit { page, range, rects: text.rects_for_range(range) });
+                hits.push(SearchHit {
+                    page,
+                    range,
+                    rects: text.rects_for_range(range),
+                });
                 if let Some(limit) = query.limit {
                     if hits.len() >= limit {
                         return Ok(hits);
@@ -109,7 +118,10 @@ fn single_span(total: usize) -> Vec<TextSpan> {
     if total == 0 {
         Vec::new()
     } else {
-        vec![TextSpan { range: TextRange::new(0, total as u32), font_size: 0.0 }]
+        vec![TextSpan {
+            range: TextRange::new(0, total as u32),
+            font_size: 0.0,
+        }]
     }
 }
 

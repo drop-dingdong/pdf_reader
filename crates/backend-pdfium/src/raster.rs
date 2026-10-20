@@ -37,7 +37,10 @@ impl PageRaster for PdfiumRaster {
             .geometries
             .get(request.page.get() as usize)
             .copied()
-            .ok_or(CoreError::PageOutOfRange { page: request.page, page_count })?;
+            .ok_or(CoreError::PageOutOfRange {
+                page: request.page,
+                page_count,
+            })?;
         let page = self.0.page(request.page)?;
 
         let scale = request.scale.0;
@@ -93,7 +96,8 @@ impl PageRaster for PdfiumRaster {
             .set_origin(origin.0, origin.1)
             .rotate(to_pdfium_rotation(request.rotation), false);
 
-        page.render_into_bitmap_with_config(&mut bitmap, &config).map_err(to_core_error)?;
+        page.render_into_bitmap_with_config(&mut bitmap, &config)
+            .map_err(to_core_error)?;
 
         // 块诊断：拼合错位时用它对照"块的页面矩形 / 期望与实得尺寸 / PDFium 原点 / 比例"
         if std::env::var_os("PDF_READER_DIAGNOSE").is_some() {
@@ -208,7 +212,10 @@ mod tests {
     use super::*;
 
     fn region(page_rect: Rect, pixel_size: (u32, u32)) -> RenderRegion {
-        RenderRegion { page_rect, pixel_size }
+        RenderRegion {
+            page_rect,
+            pixel_size,
+        }
     }
 
     /// 不旋转：页面空间矩形直接按"y 翻转 × 比例"落到像素上。

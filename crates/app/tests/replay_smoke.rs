@@ -29,10 +29,22 @@ fn replay_runs_a_script_and_reports_per_action() {
         name: "smoke".to_string(),
         pdf,
         actions: vec![
-            ("resize".to_string(), Action::Resize { width: 1100.0, height: 900.0 }),
+            (
+                "resize".to_string(),
+                Action::Resize {
+                    width: 1100.0,
+                    height: 900.0,
+                },
+            ),
             ("zoom_100".to_string(), Action::Zoom { value: 1.0 }),
             ("zoom_800".to_string(), Action::Zoom { value: 8.0 }),
-            ("scroll".to_string(), Action::ScrollBy { dx: 300.0, dy: 200.0 }),
+            (
+                "scroll".to_string(),
+                Action::ScrollBy {
+                    dx: 300.0,
+                    dy: 200.0,
+                },
+            ),
             ("page3".to_string(), Action::GoToPage { page: 2 }),
             ("back".to_string(), Action::Zoom { value: 1.0 }),
         ],
@@ -51,11 +63,7 @@ fn replay_runs_a_script_and_reports_per_action() {
             "动作 {} 应在帧数上限内稳定；违规：{:?}",
             action.id, report.violations
         );
-        assert!(
-            action.frames >= 1,
-            "动作 {} 至少跑一帧",
-            action.id
-        );
+        assert!(action.frames >= 1, "动作 {} 至少跑一帧", action.id);
     }
     // 高倍缩放动作应产生逐帧诊断（贴图/画法），并被按动作分组收集
     let zoom_800 = report
@@ -106,7 +114,10 @@ fn script_json_parses_actions() {
     assert_eq!(script.actions.len(), 7);
     assert_eq!(script.actions[1].1, Action::Zoom { value: 8.0 });
     assert_eq!(script.actions[3].1, Action::GoToPage { page: 3 });
-    assert!(replay::parse_script("{\"pdf\": \"x\"}").is_err(), "缺 actions 应报错");
+    assert!(
+        replay::parse_script("{\"pdf\": \"x\"}").is_err(),
+        "缺 actions 应报错"
+    );
     assert!(
         replay::parse_script("{\"pdf\": \"x\", \"actions\": [{\"op\": \"nope\"}]}").is_err(),
         "未知动作应报错"

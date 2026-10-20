@@ -42,7 +42,10 @@ pub struct LruCache {
 impl LruCache {
     /// 以给定的字节上限构造（0 会被视为上限 1，保证"至少能放一张图"的语义不至于失效）。
     pub fn new(capacity_bytes: u64) -> Self {
-        Self { inner: Mutex::new(Inner::default()), capacity_bytes: capacity_bytes.max(1) }
+        Self {
+            inner: Mutex::new(Inner::default()),
+            capacity_bytes: capacity_bytes.max(1),
+        }
     }
 
     /// 用默认上限（512 MiB）构造。
@@ -74,7 +77,9 @@ impl LruCache {
     /// 于是每帧都重新渲染"的抖动，比超一点内存更糟）。
     fn evict(inner: &mut Inner, capacity_bytes: u64) {
         while inner.bytes > capacity_bytes && inner.images.len() > 1 {
-            let Some(oldest) = inner.order.pop_front() else { break };
+            let Some(oldest) = inner.order.pop_front() else {
+                break;
+            };
             if let Some(image) = inner.images.remove(&oldest) {
                 inner.bytes = inner.bytes.saturating_sub(image.byte_len() as u64);
             }
@@ -161,7 +166,11 @@ mod tests {
 
     fn key(page: u32, scale: f32, tile: Option<(u32, u32)>) -> RenderKey {
         match tile {
-            None => RenderKey::new(PageIndex::new(page), Scale::from_zoom(scale), Rotation::None),
+            None => RenderKey::new(
+                PageIndex::new(page),
+                Scale::from_zoom(scale),
+                Rotation::None,
+            ),
             Some((col, row)) => RenderKey::tiled(
                 PageIndex::new(page),
                 Scale::from_zoom(scale),
@@ -213,7 +222,10 @@ mod tests {
         cache.insert(key(2, 1.0, None), image(4000));
 
         assert!(cache.get(&key(1, 1.0, None)).is_none(), "页 1 应被淘汰");
-        assert!(cache.get(&key(0, 1.0, None)).is_some(), "页 0 因刚被访问而保留");
+        assert!(
+            cache.get(&key(0, 1.0, None)).is_some(),
+            "页 0 因刚被访问而保留"
+        );
     }
 
     #[test]

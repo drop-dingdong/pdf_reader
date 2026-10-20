@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use pdfcore::prelude::*;
 use pdfium_render::prelude::{
-    PdfBookmark, PdfDestination, PdfDestinationViewSettings, PdfDocument, PdfDocumentMetadataTagType,
-    PdfPage, PdfPageIndex, PdfPageRenderRotation, PdfPoints, PdfRect, Pdfium,
+    PdfBookmark, PdfDestination, PdfDestinationViewSettings, PdfDocument,
+    PdfDocumentMetadataTagType, PdfPage, PdfPageIndex, PdfPageRenderRotation, PdfPoints, PdfRect,
+    Pdfium,
 };
 
 use crate::error::to_core_error;
@@ -49,16 +50,27 @@ impl SharedDocument {
         let info = collect_info(&document, page_count);
         let navigation = Arc::new(collect_navigation(&document, page_count, &geometries));
 
-        Ok(Self { document, info, geometries, navigation })
+        Ok(Self {
+            document,
+            info,
+            geometries,
+            navigation,
+        })
     }
 
     /// 取某页，并做边界检查（越界返回 [`CoreError::PageOutOfRange`]）。
     pub(crate) fn page(&self, index: PageIndex) -> Result<PdfPage<'_>> {
         let page_count = self.geometries.len() as u32;
         if index.get() >= page_count {
-            return Err(CoreError::PageOutOfRange { page: index, page_count });
+            return Err(CoreError::PageOutOfRange {
+                page: index,
+                page_count,
+            });
         }
-        self.document.pages().get(index.get() as PdfPageIndex).map_err(to_core_error)
+        self.document
+            .pages()
+            .get(index.get() as PdfPageIndex)
+            .map_err(to_core_error)
     }
 }
 
@@ -81,7 +93,10 @@ impl Document for PdfiumDocument {
 
 // ------------------------------------------------------------------ 采集
 
-fn collect_geometries(document: &PdfDocument<'static>, page_count: u32) -> Result<Arc<[PageGeometry]>> {
+fn collect_geometries(
+    document: &PdfDocument<'static>,
+    page_count: u32,
+) -> Result<Arc<[PageGeometry]>> {
     let mut geometries = Vec::with_capacity(page_count as usize);
     for index in 0..page_count {
         let page = document
@@ -102,7 +117,10 @@ fn collect_geometries(document: &PdfDocument<'static>, page_count: u32) -> Resul
         // 而渲染按这个盒子 —— 原点不为 0 的 PDF 上，所有页面空间几何都会整体偏移，
         // 因此这里记录下来，供文本与链接坐标归一化（见 PageGeometry::origin）。
         let origin = match page.boundaries().bounding() {
-            Ok(boundary) => Point::new(points(boundary.bounds.left()), points(boundary.bounds.bottom())),
+            Ok(boundary) => Point::new(
+                points(boundary.bounds.left()),
+                points(boundary.bounds.bottom()),
+            ),
             Err(_) => Point::ORIGIN,
         };
         geometries.push(PageGeometry::with_origin(size, rotation, origin));
@@ -112,16 +130,25 @@ fn collect_geometries(document: &PdfDocument<'static>, page_count: u32) -> Resul
 
 fn collect_info(document: &PdfDocument<'static>, page_count: u32) -> DocumentInfo {
     let metadata = document.metadata();
-    let tag = |kind: PdfDocumentMetadataTagType| metadata.get(kind).map(|tag| tag.value().to_string());
+    let tag =
+        |kind: PdfDocumentMetadataTagType| metadata.get(kind).map(|tag| tag.value().to_string());
 
     let permissions_api = document.permissions();
     // 未加密文档的权限查询会失败（pdfium 返回 -1），因此缺省视为"允许"。
     let permissions = Permissions {
         print: permissions_api.can_print_high_quality().unwrap_or(true)
-            || permissions_api.can_print_only_low_quality().unwrap_or(false),
-        copy_text: permissions_api.can_extract_text_and_graphics().unwrap_or(true),
-        modify: permissions_api.can_modify_document_content().unwrap_or(true),
-        annotate: permissions_api.can_add_or_modify_text_annotations().unwrap_or(true),
+            || permissions_api
+                .can_print_only_low_quality()
+                .unwrap_or(false),
+        copy_text: permissions_api
+            .can_extract_text_and_graphics()
+            .unwrap_or(true),
+        modify: permissions_api
+            .can_modify_document_content()
+            .unwrap_or(true),
+        annotate: permissions_api
+            .can_add_or_modify_text_annotations()
+            .unwrap_or(true),
     };
     // 有安全处理器（security handler）= 文档加密。未加密时该查询失败，正好用作判据。
     let encrypted = permissions_api.security_handler_revision().is_ok();
@@ -175,13 +202,17 @@ fn collect_navigation(
         let mut links = Vec::new();
         if let Ok(page) = document.pages().get(index as PdfPageIndex) {
             for link in page.links().iter() {
-                let Some(destination) = link.destination().and_then(|dest| to_destination(&dest)) else {
+                let Some(destination) = link.destination().and_then(|dest| to_destination(&dest))
+                else {
                     continue;
                 };
                 let Ok(rect) = link.rect() else { continue };
                 // 归一化到渲染盒坐标系，否则原点不为 0 的 PDF 上热区会整体偏移
                 let normalized = normalize(to_rect(rect), geometries, PageIndex::new(index));
-                links.push(Link { rect: normalized, destination });
+                links.push(Link {
+                    rect: normalized,
+                    destination,
+                });
             }
         }
         links_by_page.push(links);
@@ -198,7 +229,9 @@ fn collect_navigation(
 fn bookmark_to_node(bookmark: &PdfBookmark<'_>) -> OutlineNode {
     OutlineNode {
         title: bookmark.title().unwrap_or_default(),
-        destination: bookmark.destination().and_then(|dest| to_destination(&dest)),
+        destination: bookmark
+            .destination()
+            .and_then(|dest| to_destination(&dest)),
         children: bookmark
             .iter_direct_children()
             .map(|child| bookmark_to_node(&child))
@@ -215,7 +248,10 @@ fn to_destination(destination: &PdfDestination<'_>) -> Option<Destination> {
         }
         _ => None,
     };
-    Some(Destination::Page { page: PageIndex::new(page.max(0) as u32), offset })
+    Some(Destination::Page {
+        page: PageIndex::new(page.max(0) as u32),
+        offset,
+    })
 }
 
 // ------------------------------------------------------------------ 小工具
@@ -252,7 +288,12 @@ pub(crate) fn to_pdfium_rotation(rotation: Rotation) -> PdfPageRenderRotation {
 pub(crate) fn to_rect(rect: PdfRect) -> Rect {
     let left = points(rect.left());
     let bottom = points(rect.bottom());
-    Rect::new(left, bottom, points(rect.right()) - left, points(rect.top()) - bottom)
+    Rect::new(
+        left,
+        bottom,
+        points(rect.right()) - left,
+        points(rect.top()) - bottom,
+    )
 }
 
 #[cfg(test)]

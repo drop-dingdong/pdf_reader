@@ -35,7 +35,10 @@ impl TextRange {
         if start <= end {
             Self { start, end }
         } else {
-            Self { start: end, end: start }
+            Self {
+                start: end,
+                end: start,
+            }
         }
     }
 
@@ -61,7 +64,10 @@ impl TextRange {
 
     /// 取并集（用于把两次选择合并）。
     pub fn union(self, other: Self) -> Self {
-        Self { start: self.start.min(other.start), end: self.end.max(other.end) }
+        Self {
+            start: self.start.min(other.start),
+            end: self.end.max(other.end),
+        }
     }
 }
 
@@ -478,7 +484,8 @@ pub trait TextSelection: Send {
 
     /// 是否没有有效选择。
     fn is_empty(&self) -> bool {
-        self.selection().map_or(true, |selection| selection.is_empty())
+        self.selection()
+            .map_or(true, |selection| selection.is_empty())
     }
 
     /// 计算高亮矩形。
@@ -496,7 +503,11 @@ pub trait TextSelection: Send {
             };
             let rects = text.rects_for_range(range);
             if !rects.is_empty() {
-                out.push(Highlight { page, rects, kind: HighlightKind::Selection });
+                out.push(Highlight {
+                    page,
+                    rects,
+                    kind: HighlightKind::Selection,
+                });
             }
         }
         out
@@ -625,7 +636,10 @@ mod tests {
             page: PageIndex(page),
             text,
             chars,
-            spans: vec![TextSpan { range: TextRange::new(0, len), font_size: 10.0 }],
+            spans: vec![TextSpan {
+                range: TextRange::new(0, len),
+                font_size: 10.0,
+            }],
         }
     }
 
@@ -643,14 +657,25 @@ mod tests {
         let page = make_page(0, &["Hello world", "Second line"]);
         assert_eq!(page.word_range_at(1), TextRange::new(0, 5));
         assert_eq!(page.word_range_at(7), TextRange::new(6, 11));
-        assert_eq!(page.word_range_at(5), TextRange::new(5, 6), "空格自身成区间");
-        assert_eq!(page.line_range_at(1), TextRange::new(0, 11), "换行符终止整行");
+        assert_eq!(
+            page.word_range_at(5),
+            TextRange::new(5, 6),
+            "空格自身成区间"
+        );
+        assert_eq!(
+            page.line_range_at(1),
+            TextRange::new(0, 11),
+            "换行符终止整行"
+        );
         assert_eq!(page.line_range_at(13), TextRange::new(12, 23));
         assert_eq!(
             page.range_at(7, SelectionGranularity::Word),
             TextRange::new(6, 11)
         );
-        assert_eq!(page.range_at(7, SelectionGranularity::Char), TextRange::new(7, 8));
+        assert_eq!(
+            page.range_at(7, SelectionGranularity::Char),
+            TextRange::new(7, 8)
+        );
     }
 
     #[test]
@@ -674,8 +699,16 @@ mod tests {
         assert!(page.hit_test(Point::new(5.9, 5.0)).is_some());
         // 点在页面空白处（第二行下方很远处）必须返回 None：
         // 否则"拖拽选字"会在任何地方都生效，无法平移画面
-        assert_eq!(page.hit_test(Point::new(3.0, 200.0)), None, "远离文字的空白点不应命中");
-        assert_eq!(page.hit_test(Point::new(-50.0, 5.0)), None, "页外点不应命中");
+        assert_eq!(
+            page.hit_test(Point::new(3.0, 200.0)),
+            None,
+            "远离文字的空白点不应命中"
+        );
+        assert_eq!(
+            page.hit_test(Point::new(-50.0, 5.0)),
+            None,
+            "页外点不应命中"
+        );
         // 框选前两个字符
         assert_eq!(
             page.range_for_rect(Rect::new(0.0, 0.0, 11.0, 10.0)),
@@ -744,6 +777,9 @@ mod tests {
         assert_eq!(TextRange::new(2, 5).len(), 3);
         assert!(TextRange::new(2, 5).contains(4));
         assert!(!TextRange::new(2, 5).contains(5));
-        assert_eq!(TextRange::new(0, 2).union(TextRange::new(5, 9)), TextRange::new(0, 9));
+        assert_eq!(
+            TextRange::new(0, 2).union(TextRange::new(5, 9)),
+            TextRange::new(0, 9)
+        );
     }
 }

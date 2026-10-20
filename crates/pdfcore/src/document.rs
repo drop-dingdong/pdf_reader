@@ -43,7 +43,12 @@ pub struct Permissions {
 impl Permissions {
     /// 全部允许（未加密文档的默认值）。
     pub const fn all_allowed() -> Self {
-        Self { print: true, copy_text: true, modify: true, annotate: true }
+        Self {
+            print: true,
+            copy_text: true,
+            modify: true,
+            annotate: true,
+        }
     }
 }
 
@@ -156,7 +161,10 @@ impl NavigationIndex {
 
     /// 某页的链接热区；越界返回空切片（UI 不必自己判边界）。
     pub fn links_on(&self, page: PageIndex) -> &[Link] {
-        self.links_by_page.get(page.get() as usize).map(Vec::as_slice).unwrap_or(&[])
+        self.links_by_page
+            .get(page.get() as usize)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// 是否没有任何导航数据。
@@ -273,7 +281,10 @@ pub trait Document: Send + Sync {
         geometries
             .get(page.get() as usize)
             .map(|geometry| geometry.size)
-            .ok_or(CoreError::PageOutOfRange { page, page_count: geometries.len() as u32 })
+            .ok_or(CoreError::PageOutOfRange {
+                page,
+                page_count: geometries.len() as u32,
+            })
     }
 
     /// 某页自带的 `/Rotate`；默认实现查批量表。越界同样返回 [`CoreError::PageOutOfRange`]。
@@ -282,7 +293,10 @@ pub trait Document: Send + Sync {
         geometries
             .get(page.get() as usize)
             .map(|geometry| geometry.rotation)
-            .ok_or(CoreError::PageOutOfRange { page, page_count: geometries.len() as u32 })
+            .ok_or(CoreError::PageOutOfRange {
+                page,
+                page_count: geometries.len() as u32,
+            })
     }
 
     /// 导航索引：大纲 + 逐页链接 + 命名目标，**打开时一次性解析并合并存储**。O(1) 返回。
@@ -321,7 +335,12 @@ impl OpenedDocument {
         text: Option<Arc<dyn TextLayer>>,
         capabilities: Capabilities,
     ) -> Self {
-        Self { document, raster, text, capabilities }
+        Self {
+            document,
+            raster,
+            text,
+            capabilities,
+        }
     }
 
     /// 页数。

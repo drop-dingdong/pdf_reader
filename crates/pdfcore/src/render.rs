@@ -208,12 +208,22 @@ pub struct RenderKey {
 impl RenderKey {
     /// 整页渲染的键。
     pub fn new(page: PageIndex, scale: Scale, rotation: Rotation) -> Self {
-        Self { page, scale_milli: milli(scale), rotation, tile: None }
+        Self {
+            page,
+            scale_milli: milli(scale),
+            rotation,
+            tile: None,
+        }
     }
 
     /// 单个瓦片的键。
     pub fn tiled(page: PageIndex, scale: Scale, rotation: Rotation, tile: TileSpec) -> Self {
-        Self { page, scale_milli: milli(scale), rotation, tile: Some(tile) }
+        Self {
+            page,
+            scale_milli: milli(scale),
+            rotation,
+            tile: Some(tile),
+        }
     }
 
     /// 还原比例（= 渲染比例）。
@@ -298,7 +308,11 @@ impl RenderRequest {
         tile: TileSpec,
         region: RenderRegion,
     ) -> Self {
-        Self { tile: Some(tile), region: Some(region), ..Self::new(page, scale, rotation) }
+        Self {
+            tile: Some(tile),
+            region: Some(region),
+            ..Self::new(page, scale, rotation)
+        }
     }
 
     /// 设置优先级。

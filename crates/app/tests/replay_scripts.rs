@@ -102,7 +102,10 @@ fn preview_size_does_not_depend_on_the_current_zoom() {
     };
     let low = size_of(&at_100).expect("100% 下应已生成预览纹理");
     let high = size_of(&at_800).expect("800% 下应已生成预览纹理");
-    assert_eq!(low, high, "预览尺寸必须只由「区域 × 记录分辨率」决定，与当前缩放无关");
+    assert_eq!(
+        low, high,
+        "预览尺寸必须只由「区域 × 记录分辨率」决定，与当前缩放无关"
+    );
     // 150×80pt × 10.486（800% 波段上界）两端取整
     let expected = app::view::region_pixel_size(
         pdfcore::prelude::Rect::new(72.0, 640.0, 150.0, 80.0),
@@ -132,7 +135,10 @@ fn timing_mode_settles_and_actually_renders() {
         assert!(action.settled, "timing 模式下动作 {} 没稳定", action.id);
     }
     let submitted: u64 = report.actions.iter().map(|action| action.submitted).sum();
-    assert!(submitted > 0, "整段脚本一次渲染都没发生，测出来的基数是假的");
+    assert!(
+        submitted > 0,
+        "整段脚本一次渲染都没发生，测出来的基数是假的"
+    );
 }
 
 /// D-111 的"软上限"路径：预算小到连当前视口都放不下时，
@@ -146,15 +152,16 @@ fn a_tiny_texture_budget_still_keeps_the_view_correct() {
     let path = stage("page_walk.json", Sample::A4);
     let script = replay::load_script(&path).expect("读脚本");
     let clock = app::clock::Clock::manual();
-    let mut reader = app::PdfReaderApp::new_headless(
-        clock.clone(),
-        app::diag::Diagnostics::capturing(),
-        None,
-    );
+    let mut reader =
+        app::PdfReaderApp::new_headless(clock.clone(), app::diag::Diagnostics::capturing(), None);
     // 4 MB：远小于"3 页 × 13 MB 的整页图"，必然触发软上限
     reader.set_texture_budget(4 * 1024 * 1024);
     let report = replay::run(&mut reader, &script, &clock, &replay::RunOptions::default());
-    assert!(report.ok(), "软上限路径不应产生违规：{:#?}", report.violations);
+    assert!(
+        report.ok(),
+        "软上限路径不应产生违规：{:#?}",
+        report.violations
+    );
     for action in &report.actions {
         assert!(action.settled, "动作 {} 没稳定", action.id);
     }

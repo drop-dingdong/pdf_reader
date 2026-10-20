@@ -70,7 +70,11 @@ pub fn two_page_pdf() -> Vec<u8> {
 
 /// 把内容包成流对象（`/Length` 必须等于流数据的字节数）。
 fn stream_object(content: &str) -> String {
-    format!("<< /Length {} >>\nstream\n{}endstream", content.len(), content)
+    format!(
+        "<< /Length {} >>\nstream\n{}endstream",
+        content.len(),
+        content
+    )
 }
 
 /// 把测试 PDF 写到临时文件，返回路径（供 `Source::Path` 路径测试使用）。
@@ -87,7 +91,9 @@ pub fn two_page_pdf_file(name: &str) -> std::path::PathBuf {
 /// 每页都画满横线与边框，保证页面上到处都有"墨"，便于断言渲染结果不是空白。
 pub fn many_page_pdf(page_count: usize, width: f32, height: f32) -> Vec<u8> {
     let font_object = 3 + page_count * 2; // 字体对象排在所有页之后
-    let kids: Vec<String> = (0..page_count).map(|index| format!("{} 0 R", 3 + index * 2)).collect();
+    let kids: Vec<String> = (0..page_count)
+        .map(|index| format!("{} 0 R", 3 + index * 2))
+        .collect();
 
     let mut objects: Vec<String> = Vec::with_capacity(page_count * 2 + 3);
     objects.push("<< /Type /Catalog /Pages 2 0 R >>".to_string());
@@ -98,7 +104,11 @@ pub fn many_page_pdf(page_count: usize, width: f32, height: f32) -> Vec<u8> {
 
     for index in 0..page_count {
         let content_object = 4 + index * 2;
-        let mut content = format!("0 0 0 RG 4 w 20 20 {} {} re S\n", width - 40.0, height - 40.0);
+        let mut content = format!(
+            "0 0 0 RG 4 w 20 20 {} {} re S\n",
+            width - 40.0,
+            height - 40.0
+        );
         let mut y = height - 80.0;
         while y > 60.0 {
             content.push_str(&format!("20 {y} m {} {y} l S\n", width - 20.0));

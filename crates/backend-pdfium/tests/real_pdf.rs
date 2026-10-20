@@ -16,14 +16,19 @@ fn backend() -> Option<PdfiumBackend> {
     match backend_pdfium::pdfium() {
         Ok(_) => Some(PdfiumBackend::new()),
         Err(_) => {
-            eprintln!("跳过：未找到 PDFium 动态库。请先运行 scripts/fetch-pdfium.sh 或设置 PDFIUM_PATH。");
+            eprintln!(
+                "跳过：未找到 PDFium 动态库。请先运行 scripts/fetch-pdfium.sh 或设置 PDFIUM_PATH。"
+            );
             None
         }
     }
 }
 
 fn assert_close(actual: f32, expected: f32) {
-    assert!((actual - expected).abs() < 0.5, "期望 {expected}，实际 {actual}");
+    assert!(
+        (actual - expected).abs() < 0.5,
+        "期望 {expected}，实际 {actual}"
+    );
 }
 
 /// 按网格构造一个块请求（D-95 的形状：块的**页面空间矩形** + **期望像素尺寸**）。
@@ -50,7 +55,9 @@ fn tile_request(
 fn opens_from_path_and_reports_unrotated_geometry() {
     let Some(backend) = backend() else { return };
     let path = common::two_page_pdf_file("geometry");
-    let opened = backend.open(Source::Path(&path), None).expect("打开临时 PDF");
+    let opened = backend
+        .open(Source::Path(&path), None)
+        .expect("打开临时 PDF");
 
     // D-01：一次拿到批量页几何（不再逐页跨 FFI）
     let geometries = opened.document.page_geometries().expect("批量页几何");
@@ -69,7 +76,10 @@ fn opens_from_path_and_reports_unrotated_geometry() {
 
     // 单页查询走 trait 默认实现（查表），越界必须报错
     assert_eq!(
-        opened.document.page_rotation(PageIndex::new(1)).expect("第 2 页旋转"),
+        opened
+            .document
+            .page_rotation(PageIndex::new(1))
+            .expect("第 2 页旋转"),
         Rotation::Clockwise90
     );
     assert!(matches!(
@@ -77,7 +87,10 @@ fn opens_from_path_and_reports_unrotated_geometry() {
         Err(CoreError::PageOutOfRange { .. })
     ));
 
-    assert_eq!(opened.capabilities.max_concurrency, 1, "PDFium 必须声明并发上限 1");
+    assert_eq!(
+        opened.capabilities.max_concurrency, 1,
+        "PDFium 必须声明并发上限 1"
+    );
     assert!(opened.capabilities.text_layer, "PDFium 提供文本层");
     assert!(opened.has_text_layer());
 
@@ -97,28 +110,49 @@ fn opens_from_bytes_and_pre_resolves_navigation() {
     assert_eq!(navigation.outline[0].title, "Chapter One");
     assert_eq!(
         navigation.outline[0].destination,
-        Some(Destination::Page { page: PageIndex::FIRST, offset: None })
+        Some(Destination::Page {
+            page: PageIndex::FIRST,
+            offset: None
+        })
     );
 
     let links = navigation.links_on(PageIndex::FIRST);
     assert_eq!(links.len(), 1, "第 1 页有一个跳转到第 2 页的链接");
-    assert_eq!(links[0].destination, Destination::Page { page: PageIndex::new(1), offset: None });
+    assert_eq!(
+        links[0].destination,
+        Destination::Page {
+            page: PageIndex::new(1),
+            offset: None
+        }
+    );
     // 链接热区在 PDF 页面空间且落在页面内
     assert!(links[0].rect.x >= 0.0 && links[0].rect.right() <= 612.5);
     assert!(links[0].rect.y >= 0.0 && links[0].rect.bottom() <= 792.5);
 
-    assert!(navigation.links_on(PageIndex::new(1)).is_empty(), "第 2 页没有链接");
-    assert!(navigation.links_on(PageIndex::new(99)).is_empty(), "越界返回空切片");
+    assert!(
+        navigation.links_on(PageIndex::new(1)).is_empty(),
+        "第 2 页没有链接"
+    );
+    assert!(
+        navigation.links_on(PageIndex::new(99)).is_empty(),
+        "越界返回空切片"
+    );
 }
 
 #[test]
 fn renders_whole_page_and_detects_ink() {
     let Some(backend) = backend() else { return };
-    let opened = backend.open(Source::Bytes(&common::two_page_pdf()), None).expect("打开");
+    let opened = backend
+        .open(Source::Bytes(&common::two_page_pdf()), None)
+        .expect("打开");
 
     let image = opened
         .raster
-        .render(&RenderRequest::new(PageIndex::FIRST, Scale::IDENTITY, Rotation::None))
+        .render(&RenderRequest::new(
+            PageIndex::FIRST,
+            Scale::IDENTITY,
+            Rotation::None,
+        ))
         .expect("整页渲染");
 
     assert_eq!((image.width, image.height), (612, 792));
@@ -131,7 +165,9 @@ fn renders_whole_page_and_detects_ink() {
 #[test]
 fn rotated_page_is_rendered_in_displayed_orientation() {
     let Some(backend) = backend() else { return };
-    let opened = backend.open(Source::Bytes(&common::two_page_pdf()), None).expect("打开");
+    let opened = backend
+        .open(Source::Bytes(&common::two_page_pdf()), None)
+        .expect("打开");
 
     // MediaBox 200×400 + /Rotate 90 → 显示 400×200
     let image = opened
@@ -142,13 +178,19 @@ fn rotated_page_is_rendered_in_displayed_orientation() {
             Rotation::Clockwise90,
         ))
         .expect("旋转页渲染");
-    assert_eq!((image.width, image.height), (400, 200), "位图必须已是显示朝向");
+    assert_eq!(
+        (image.width, image.height),
+        (400, 200),
+        "位图必须已是显示朝向"
+    );
 }
 
 #[test]
 fn tiles_render_only_the_requested_region() {
     let Some(backend) = backend() else { return };
-    let opened = backend.open(Source::Bytes(&common::two_page_pdf()), None).expect("打开");
+    let opened = backend
+        .open(Source::Bytes(&common::two_page_pdf()), None)
+        .expect("打开");
 
     // 612×792 @2x → 1224×1584 → 2×2 网格，每块 612×792（D-94：网格由 TileGrid 给出）
     let scale = Scale::from_zoom(2.0);
@@ -211,11 +253,17 @@ fn tiles_render_only_the_requested_region() {
 #[test]
 fn extracts_text_with_boxes_and_searches() {
     let Some(backend) = backend() else { return };
-    let opened = backend.open(Source::Bytes(&common::two_page_pdf()), None).expect("打开");
+    let opened = backend
+        .open(Source::Bytes(&common::two_page_pdf()), None)
+        .expect("打开");
     let text_layer = opened.text.as_ref().expect("PDFium 提供文本层");
 
     let page = text_layer.page_text(PageIndex::FIRST).expect("第 1 页文本");
-    assert!(page.text.contains("Hello World"), "实际提取：{:?}", page.text);
+    assert!(
+        page.text.contains("Hello World"),
+        "实际提取：{:?}",
+        page.text
+    );
     // pdfcore 的不变量：字符一一对应
     assert_eq!(page.text.chars().count(), page.chars.len());
 
@@ -231,7 +279,11 @@ fn extracts_text_with_boxes_and_searches() {
         "首字符包围盒应位于页面上半部（PDF 空间），实际 {:?}",
         first.bbox
     );
-    assert!(first.bbox.height > 0.0, "字符包围盒不应退化：{:?}", first.bbox);
+    assert!(
+        first.bbox.height > 0.0,
+        "字符包围盒不应退化：{:?}",
+        first.bbox
+    );
 
     // 搜索（不区分大小写）
     let hits = text_layer.search(&SearchQuery::new("world")).expect("搜索");
@@ -240,8 +292,14 @@ fn extracts_text_with_boxes_and_searches() {
     assert!(!hits[0].rects.is_empty(), "命中应有高亮矩形");
 
     // 第 2 页也可提取
-    let second = text_layer.page_text(PageIndex::new(1)).expect("第 2 页文本");
-    assert!(second.text.contains("Second"), "实际提取：{:?}", second.text);
+    let second = text_layer
+        .page_text(PageIndex::new(1))
+        .expect("第 2 页文本");
+    assert!(
+        second.text.contains("Second"),
+        "实际提取：{:?}",
+        second.text
+    );
 
     // 越界页
     assert!(matches!(
@@ -254,7 +312,9 @@ fn extracts_text_with_boxes_and_searches() {
 #[test]
 fn assembles_a_session_with_the_real_backend() {
     let Some(backend) = backend() else { return };
-    let opened = backend.open(Source::Bytes(&common::two_page_pdf()), None).expect("打开");
+    let opened = backend
+        .open(Source::Bytes(&common::two_page_pdf()), None)
+        .expect("打开");
     let raster = opened.raster.clone();
 
     let mut session = DocumentSession::new(
@@ -267,19 +327,29 @@ fn assembles_a_session_with_the_real_backend() {
     .expect("装配会话");
 
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(800.0, 1000.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(800.0, 1000.0)),
+        &mut events,
+    );
     session.handle(ViewerCommand::RequestVisible, &mut events);
     session.pump(&mut events);
 
     // 位图经"调度 → 缓存"就绪。尺寸按**波段渲染比例**给（D-94：超采样，比显示尺寸大）
     let render = session.render_scale(PageIndex::FIRST);
-    let image = session.image_for(PageIndex::FIRST).expect("首页应渲染并写入缓存");
+    let image = session
+        .image_for(PageIndex::FIRST)
+        .expect("首页应渲染并写入缓存");
     assert_eq!(
         (image.width, image.height),
-        ((612.0 * render.0).round() as u32, (792.0 * render.0).round() as u32)
+        (
+            (612.0 * render.0).round() as u32,
+            (792.0 * render.0).round() as u32
+        )
     );
     assert!(render.0 >= 1.0, "渲染比例不得小于显示比例");
-    assert!(events.iter().any(|event| matches!(event, SessionEvent::PageRendered(_))));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SessionEvent::PageRendered(_))));
 
     // 文本层驱动选择与高亮（真实字符包围盒）
     session.handle(ViewerCommand::SelectAll, &mut events);
@@ -287,7 +357,9 @@ fn assembles_a_session_with_the_real_backend() {
     assert!(selected.contains("Hello World"), "实际选中：{selected:?}");
     let highlights = session.highlight_selection();
     assert!(!highlights.is_empty(), "应有高亮矩形");
-    assert!(highlights.iter().all(|highlight| !highlight.rects.is_empty()));
+    assert!(highlights
+        .iter()
+        .all(|highlight| !highlight.rects.is_empty()));
 
     // 大纲来自真实后端
     let navigation = session.navigation().expect("导航索引");
@@ -310,7 +382,9 @@ fn assembles_a_session_with_the_real_backend() {
 fn every_tile_contains_ink_for_a_full_page_document() {
     let Some(backend) = backend() else { return };
     let path = common::many_page_pdf_file("tile-ink", 2, 612.0, 792.0);
-    let opened = backend.open(Source::Path(&path), None).expect("打开多页 PDF");
+    let opened = backend
+        .open(Source::Path(&path), None)
+        .expect("打开多页 PDF");
 
     // 612×792 @2x → 1224×1584 → 2×2 网格
     let zoom = 2.0;
@@ -379,9 +453,8 @@ fn tiles_match_the_crop_of_the_whole_page_render() {
             for y in 0..tile.height as usize {
                 for x in 0..tile.width as usize {
                     let tile_offset = (y * tile.width as usize + x) * 4;
-                    let whole_offset = ((tile_y as usize + y) * whole.width as usize
-                        + (tile_x as usize + x))
-                        * 4;
+                    let whole_offset =
+                        ((tile_y as usize + y) * whole.width as usize + (tile_x as usize + x)) * 4;
                     for channel in 0..4 {
                         let diff = tile.data()[tile_offset + channel]
                             .abs_diff(whole.data()[whole_offset + channel]);
@@ -400,7 +473,13 @@ fn tiles_match_the_crop_of_the_whole_page_render() {
     check("tile-crop-even", 612.0, 792.0, 2.0, Rotation::None);
     check("tile-crop-odd", 610.0, 790.0, 3.0, Rotation::None);
     // 旋转 90°：块矩形在页面空间里是"横"的，映射到设备后要交换宽高 —— 最容易算错的一种
-    check("tile-crop-rotated", 610.0, 790.0, 3.0, Rotation::Clockwise90);
+    check(
+        "tile-crop-rotated",
+        610.0,
+        790.0,
+        3.0,
+        Rotation::Clockwise90,
+    );
 }
 
 /// 800% 现场诊断：高倍缩放下瓦片是否仍然有内容。
@@ -447,7 +526,9 @@ fn tiles_at_800_percent_still_contain_ink() {
 #[test]
 fn wrong_expected_tile_size_is_rejected_not_stretched() {
     let Some(backend) = backend() else { return };
-    let opened = backend.open(Source::Bytes(&common::two_page_pdf()), None).expect("打开");
+    let opened = backend
+        .open(Source::Bytes(&common::two_page_pdf()), None)
+        .expect("打开");
     let page_size = Size::new(612.0, 792.0);
 
     let mut wrong_size = tile_request(
@@ -462,9 +543,15 @@ fn wrong_expected_tile_size_is_rejected_not_stretched() {
     }
     match opened.raster.render(&wrong_size) {
         Err(CoreError::Internal(message)) => {
-            assert!(message.contains("尺寸"), "错误信息应指出尺寸不符，实际：{message}")
+            assert!(
+                message.contains("尺寸"),
+                "错误信息应指出尺寸不符，实际：{message}"
+            )
         }
-        Ok(image) => panic!("尺寸不符必须报错，实际渲染出 {}×{}", image.width, image.height),
+        Ok(image) => panic!(
+            "尺寸不符必须报错，实际渲染出 {}×{}",
+            image.width, image.height
+        ),
         Err(other) => panic!("应返回 Internal，实际 {other:?}"),
     }
 
@@ -481,7 +568,10 @@ fn wrong_expected_tile_size_is_rejected_not_stretched() {
         region.page_rect.x += 0.25;
     }
     assert!(
-        matches!(opened.raster.render(&half_pixel), Err(CoreError::Internal(_))),
+        matches!(
+            opened.raster.render(&half_pixel),
+            Err(CoreError::Internal(_))
+        ),
         "半像素的块矩形必须被拒绝"
     );
 
@@ -507,7 +597,9 @@ fn wrong_expected_tile_size_is_rejected_not_stretched() {
 #[test]
 fn zooming_inside_a_band_does_not_render_again_with_the_real_backend() {
     let Some(backend) = backend() else { return };
-    let opened = backend.open(Source::Bytes(&common::two_page_pdf()), None).expect("打开");
+    let opened = backend
+        .open(Source::Bytes(&common::two_page_pdf()), None)
+        .expect("打开");
     let raster = opened.raster.clone();
 
     let mut session = DocumentSession::new(
@@ -520,7 +612,10 @@ fn zooming_inside_a_band_does_not_render_again_with_the_real_backend() {
     .expect("装配会话");
 
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(600.0, 700.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(600.0, 700.0)),
+        &mut events,
+    );
     // 100% 与 150% 都落在波段 0（[1, 1.6)），渲染比例恒为 1.6
     session.handle(ViewerCommand::RequestVisible, &mut events);
     session.pump(&mut events);
@@ -528,7 +623,10 @@ fn zooming_inside_a_band_does_not_render_again_with_the_real_backend() {
     let image_at_100 = session.image_for(PageIndex::FIRST).expect("100% 应已渲染");
     assert_eq!(
         (image_at_100.width, image_at_100.height),
-        ((612.0 * render.0).round() as u32, (792.0 * render.0).round() as u32)
+        (
+            (612.0 * render.0).round() as u32,
+            (792.0 * render.0).round() as u32
+        )
     );
 
     events.clear();
@@ -536,9 +634,15 @@ fn zooming_inside_a_band_does_not_render_again_with_the_real_backend() {
     session.handle(ViewerCommand::RequestVisible, &mut events);
     session.pump(&mut events);
 
-    assert_eq!(session.render_scale(PageIndex::FIRST), render, "波段内渲染比例不变");
+    assert_eq!(
+        session.render_scale(PageIndex::FIRST),
+        render,
+        "波段内渲染比例不变"
+    );
     assert!(
-        events.iter().all(|event| !matches!(event, SessionEvent::PageRendered(_))),
+        events
+            .iter()
+            .all(|event| !matches!(event, SessionEvent::PageRendered(_))),
         "同一波段内不应重新渲染：{events:?}"
     );
     assert!(
@@ -599,14 +703,21 @@ fn geometry_text_and_links_are_normalized_to_the_rendered_box() {
     // 这正是用户反馈"选取区域/搜索高亮与实际文字不符"的直接判据。
     let image = opened
         .raster
-        .render(&RenderRequest::new(PageIndex::FIRST, Scale::IDENTITY, Rotation::None))
+        .render(&RenderRequest::new(
+            PageIndex::FIRST,
+            Scale::IDENTITY,
+            Rotation::None,
+        ))
         .expect("整页渲染");
     assert_eq!((image.width, image.height), (612, 792));
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0u32, 0u32);
     for y in 0..image.height {
         for x in 0..image.width {
             let offset = ((y * image.width + x) * 4) as usize;
-            if image.data()[offset..offset + 3].iter().all(|byte| *byte < 128) {
+            if image.data()[offset..offset + 3]
+                .iter()
+                .all(|byte| *byte < 128)
+            {
                 min_x = min_x.min(x);
                 min_y = min_y.min(y);
                 max_x = max_x.max(x);

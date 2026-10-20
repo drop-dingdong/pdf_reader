@@ -27,8 +27,8 @@ use crate::render::{
     CacheStats, PageRaster, RenderCache, RenderEvent, RenderKey, RenderRequest, RenderScheduler,
 };
 use crate::store::KeyValueStore;
-use crate::tiling::TileGrid;
 use crate::text::{PageText, SearchHit, SearchQuery, TextChar, TextLayer, TextRange, TextSpan};
+use crate::tiling::TileGrid;
 
 // ------------------------------------------------------------------ 存储替身
 
@@ -51,7 +51,10 @@ impl KeyValueStore for MemoryStore {
     }
 
     fn set(&self, key: &str, value: &str) -> Result<()> {
-        self.entries.lock().unwrap().insert(key.to_string(), value.to_string());
+        self.entries
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.to_string());
         Ok(())
     }
 
@@ -103,7 +106,10 @@ impl RenderCache for MemoryCache {
     }
 
     fn remove_page(&self, page: PageIndex) {
-        self.entries.lock().unwrap().retain(|key, _| key.page != page);
+        self.entries
+            .lock()
+            .unwrap()
+            .retain(|key, _| key.page != page);
     }
 
     fn clear(&self) {
@@ -137,7 +143,11 @@ pub struct ImmediateScheduler {
 impl ImmediateScheduler {
     /// 用给定的光栅器构造。
     pub fn new(raster: Arc<dyn PageRaster>) -> Self {
-        Self { raster, events: Mutex::new(VecDeque::new()), next_job: AtomicU64::new(1) }
+        Self {
+            raster,
+            events: Mutex::new(VecDeque::new()),
+            next_job: AtomicU64::new(1),
+        }
     }
 }
 
@@ -158,7 +168,10 @@ impl RenderScheduler for ImmediateScheduler {
             let key = request.key();
             match self.raster.render(&request) {
                 Ok(image) => RenderEvent::Rendered { key, image },
-                Err(error) => RenderEvent::Failed { page: request.page, error },
+                Err(error) => RenderEvent::Failed {
+                    page: request.page,
+                    error,
+                },
             }
         };
         self.events.lock().unwrap().push_back(event);
@@ -221,7 +234,11 @@ pub struct MemoryPage {
 impl MemoryPage {
     /// 构造。
     pub fn new(size: Size, rotation: Rotation, lines: Vec<String>) -> Self {
-        Self { size, rotation, lines }
+        Self {
+            size,
+            rotation,
+            lines,
+        }
     }
 }
 
@@ -259,7 +276,11 @@ impl MemoryDocument {
             .iter()
             .enumerate()
             .map(|(index, page)| OutlineNode {
-                title: page.lines.first().cloned().unwrap_or_else(|| format!("Page {}", index + 1)),
+                title: page
+                    .lines
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| format!("Page {}", index + 1)),
                 destination: Some(Destination::Page {
                     page: PageIndex::new(index as u32),
                     offset: None,
@@ -294,7 +315,10 @@ impl MemoryDocument {
             if (page as usize) < pages.len() {
                 named_destinations.insert(
                     name.to_string(),
-                    Destination::Page { page: PageIndex::new(page), offset: None },
+                    Destination::Page {
+                        page: PageIndex::new(page),
+                        offset: None,
+                    },
                 );
             } else {
                 unresolved.push(name.to_string());
@@ -308,7 +332,11 @@ impl MemoryDocument {
             unresolved,
         });
 
-        Self { info, geometries, navigation }
+        Self {
+            info,
+            geometries,
+            navigation,
+        }
     }
 }
 
@@ -359,19 +387,24 @@ impl PageRaster for MemoryRaster {
         if request.cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
-        let page = self.pages.get(request.page.get() as usize).ok_or(
-            CoreError::PageOutOfRange {
-                page: request.page,
-                page_count: self.pages.len() as u32,
-            },
-        )?;
+        let page =
+            self.pages
+                .get(request.page.get() as usize)
+                .ok_or(CoreError::PageOutOfRange {
+                    page: request.page,
+                    page_count: self.pages.len() as u32,
+                })?;
         // 与真实后端用**同一套**几何：网格与整页位图尺寸都由「旋转后页尺寸 × 渲染比例」推出，
         // 因此这里也能验证"请求里给出的块坐标确实落在该网格内"。
         let grid = TileGrid::new(page.size.rotated(request.rotation), request.scale.0);
         let (page_width, page_height) = grid.render_px();
 
         let (width, height, color) = match request.tile {
-            None => (page_width.max(1), page_height.max(1), Self::color_for(request.page)),
+            None => (
+                page_width.max(1),
+                page_height.max(1),
+                Self::color_for(request.page),
+            ),
             Some(tile) => {
                 let region = request.region.ok_or_else(|| {
                     CoreError::Internal("瓦片请求缺少区域（块矩形 + 期望像素尺寸）".to_string())
@@ -408,12 +441,18 @@ impl PageRaster for MemoryRaster {
                 (
                     tile_width,
                     tile_height,
-                    [tile.col as u8, tile.row as u8, (request.page.get() % 251) as u8, 255],
+                    [
+                        tile.col as u8,
+                        tile.row as u8,
+                        (request.page.get() % 251) as u8,
+                        255,
+                    ],
                 )
             }
         };
 
-        let mut data = Vec::with_capacity(RasterImage::expected_len(width, height, PixelFormat::Rgba8));
+        let mut data =
+            Vec::with_capacity(RasterImage::expected_len(width, height, PixelFormat::Rgba8));
         for _ in 0..(width as usize * height as usize) {
             data.extend_from_slice(&color);
         }
@@ -442,7 +481,10 @@ impl TextLayer for MemoryTextLayer {
         let target = self
             .pages
             .get(page.get() as usize)
-            .ok_or(CoreError::PageOutOfRange { page, page_count: self.pages.len() as u32 })?;
+            .ok_or(CoreError::PageOutOfRange {
+                page,
+                page_count: self.pages.len() as u32,
+            })?;
         Ok(Arc::new(build_page_text(page, target.size, &target.lines)))
     }
 
@@ -481,7 +523,11 @@ impl TextLayer for MemoryTextLayer {
                     }
                 }
                 let range = TextRange::new(start as u32, (start + needle.len()) as u32);
-                hits.push(SearchHit { page, range, rects: text.rects_for_range(range) });
+                hits.push(SearchHit {
+                    page,
+                    range,
+                    rects: text.rects_for_range(range),
+                });
                 if let Some(limit) = query.limit {
                     if hits.len() >= limit {
                         return Ok(hits);
@@ -506,7 +552,12 @@ pub fn build_page_text(page: PageIndex, page_size: Size, lines: &[String]) -> Pa
     for (line_index, line) in lines.iter().enumerate() {
         if line_index > 0 {
             text.push('\n');
-            chars.push(TextChar { ch: '\n', bbox: Rect::ZERO, origin: Point::ORIGIN, span: 0 });
+            chars.push(TextChar {
+                ch: '\n',
+                bbox: Rect::ZERO,
+                origin: Point::ORIGIN,
+                span: 0,
+            });
         }
         // PDF 页面空间原点在左下角，因此第一行最靠上（y 最大）。
         let baseline = page_size.height - (line_index as f32 + 1.0) * LINE_HEIGHT;
@@ -522,7 +573,15 @@ pub fn build_page_text(page: PageIndex, page_size: Size, lines: &[String]) -> Pa
         }
     }
     let len = chars.len() as u32;
-    PageText { page, text, chars, spans: vec![TextSpan { range: TextRange::new(0, len), font_size: 12.0 }] }
+    PageText {
+        page,
+        text,
+        chars,
+        spans: vec![TextSpan {
+            range: TextRange::new(0, len),
+            font_size: 12.0,
+        }],
+    }
 }
 
 // ------------------------------------------------------------------ 假后端
@@ -537,7 +596,10 @@ pub struct MemoryBackend {
 impl MemoryBackend {
     /// 用给定页面构造。
     pub fn new(pages: Vec<MemoryPage>) -> Self {
-        Self { pages: Arc::new(pages), password: None }
+        Self {
+            pages: Arc::new(pages),
+            password: None,
+        }
     }
 
     /// 三页演示文档：前两页正常、第三页带 `/Rotate 90`，每页都有文本。
@@ -554,7 +616,11 @@ impl MemoryBackend {
                 Rotation::None,
                 vec!["Page two".to_string(), "has text too".to_string()],
             ),
-            MemoryPage::new(size, Rotation::Clockwise90, vec!["Rotated page".to_string()]),
+            MemoryPage::new(
+                size,
+                Rotation::Clockwise90,
+                vec!["Rotated page".to_string()],
+            ),
         ])
     }
 
@@ -588,9 +654,7 @@ impl PdfBackend for MemoryBackend {
 
     fn open(&self, source: Source<'_>, password: Option<&str>) -> Result<OpenedDocument> {
         match source {
-            Source::Bytes([]) => {
-                return Err(CoreError::CorruptDocument("空的字节流".to_string()))
-            }
+            Source::Bytes([]) => return Err(CoreError::CorruptDocument("空的字节流".to_string())),
             Source::Path(path) if path.as_os_str().is_empty() => {
                 return Err(CoreError::Io("空路径".to_string()))
             }
@@ -680,7 +744,9 @@ mod tests {
             backend.open(Source::Bytes(b"%PDF-fake"), Some("nope")),
             Err(CoreError::IncorrectPassword)
         ));
-        assert!(backend.open(Source::Bytes(b"%PDF-fake"), Some("secret")).is_ok());
+        assert!(backend
+            .open(Source::Bytes(b"%PDF-fake"), Some("secret"))
+            .is_ok());
     }
 
     /// D-01：批量页几何必须是唯一数据源，且单页查询（默认方法）能取到逐页旋转。
@@ -692,12 +758,25 @@ mod tests {
         let geometries = opened.document.page_geometries().unwrap();
         assert_eq!(geometries.len(), 3);
         assert_eq!(geometries[0].size, Size::new(612.0, 792.0));
-        assert_eq!(geometries[2].rotation, Rotation::Clockwise90, "逐页 /Rotate 必须保留");
+        assert_eq!(
+            geometries[2].rotation,
+            Rotation::Clockwise90,
+            "逐页 /Rotate 必须保留"
+        );
 
         // 默认方法从批量表取数
-        assert_eq!(opened.document.page_size(PageIndex::new(0)).unwrap(), Size::new(612.0, 792.0));
-        assert_eq!(opened.document.page_rotation(PageIndex::new(2)).unwrap(), Rotation::Clockwise90);
-        assert_eq!(opened.document.page_rotation(PageIndex::new(0)).unwrap(), Rotation::None);
+        assert_eq!(
+            opened.document.page_size(PageIndex::new(0)).unwrap(),
+            Size::new(612.0, 792.0)
+        );
+        assert_eq!(
+            opened.document.page_rotation(PageIndex::new(2)).unwrap(),
+            Rotation::Clockwise90
+        );
+        assert_eq!(
+            opened.document.page_rotation(PageIndex::new(0)).unwrap(),
+            Rotation::None
+        );
 
         // 越界：两个默认方法都必须报错（不能静默返回默认值）
         assert!(matches!(
@@ -725,8 +804,12 @@ mod tests {
         assert_eq!(hits[0].page, PageIndex::new(1));
         assert!(!hits[0].rects.is_empty());
 
-        let limited =
-            text.search(&SearchQuery { limit: Some(1), ..SearchQuery::new("page") }).unwrap();
+        let limited = text
+            .search(&SearchQuery {
+                limit: Some(1),
+                ..SearchQuery::new("page")
+            })
+            .unwrap();
         assert_eq!(limited.len(), 1, "limit 必须生效");
     }
 
@@ -767,12 +850,19 @@ mod tests {
         if let Some(region) = wrong_size.region.as_mut() {
             region.pixel_size = (region.pixel_size.0 + 1, region.pixel_size.1);
         }
-        assert!(opened.raster.render(&wrong_size).is_err(), "尺寸不符必须报错");
+        assert!(
+            opened.raster.render(&wrong_size).is_err(),
+            "尺寸不符必须报错"
+        );
 
         // 整页路径仍然可用（用低倍率，避免测试里分配上百 MB）
         let whole = opened
             .raster
-            .render(&RenderRequest::new(PageIndex::new(0), Scale::IDENTITY, Rotation::None))
+            .render(&RenderRequest::new(
+                PageIndex::new(0),
+                Scale::IDENTITY,
+                Rotation::None,
+            ))
             .unwrap();
         assert_eq!((whole.width, whole.height), (612, 792));
     }
@@ -784,7 +874,11 @@ mod tests {
         let opened = backend.open(Source::Bytes(b"%PDF-fake"), None).unwrap();
         let navigation = opened.document.navigation().unwrap();
 
-        assert_eq!(navigation.links_by_page.len(), 3, "每页一个槽位（下标 = 页号）");
+        assert_eq!(
+            navigation.links_by_page.len(),
+            3,
+            "每页一个槽位（下标 = 页号）"
+        );
         assert_eq!(navigation.outline.len(), 3);
         assert!(navigation.named_destinations.contains_key("chapter-1"));
         assert_eq!(navigation.unresolved, vec!["chapter-broken".to_string()]);

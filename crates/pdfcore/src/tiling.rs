@@ -56,7 +56,11 @@ impl TileGrid {
         let mut level = Self::level_for(longest);
         // 单边硬上限：继续细分到"块边长 ≤ 上限"，但仍受 32×32 的层级上限约束
         // 0 = 不限制（与 `DocumentSession::max_texture_side` 的约定一致）
-        let limit = if max_side_px == 0 { f32::INFINITY } else { max_side_px as f32 };
+        let limit = if max_side_px == 0 {
+            f32::INFINITY
+        } else {
+            max_side_px as f32
+        };
         while level < 5 && longest / ((1u32 << level) as f32) > limit {
             level += 1;
         }
@@ -158,18 +162,16 @@ impl TileGrid {
     ///
     /// 换算路径：渲染像素 → 渲染比例下的显示坐标（÷`render_scale`）→ 页面空间
     /// （[`Rotation::unmap_point`]）→ 四角外接矩形（90°/270° 会交换宽高）。
-    pub fn tile_page_rect(
-        &self,
-        col: u32,
-        row: u32,
-        page_size: Size,
-        rotation: Rotation,
-    ) -> Rect {
+    pub fn tile_page_rect(&self, col: u32, row: u32, page_size: Size, rotation: Rotation) -> Rect {
         let (x, y, width, height) = self.tile_px(col, row);
         if width == 0 || height == 0 {
             return Rect::ZERO;
         }
-        let scale = if self.render_scale > 0.0 { self.render_scale } else { 1.0 };
+        let scale = if self.render_scale > 0.0 {
+            self.render_scale
+        } else {
+            1.0
+        };
         let pixels = Rect::new(
             x as f32 / scale,
             y as f32 / scale,
@@ -182,7 +184,9 @@ impl TileGrid {
             Point::new(pixels.x, pixels.bottom()),
             Point::new(pixels.right(), pixels.bottom()),
         ];
-        let mut iter = corners.iter().map(|point| rotation.unmap_point(*point, page_size));
+        let mut iter = corners
+            .iter()
+            .map(|point| rotation.unmap_point(*point, page_size));
         let first = iter.next().unwrap_or(Point::ORIGIN);
         iter.fold(Rect::from_min_max(first, first), |acc, point| {
             acc.union(Rect::from_min_max(point, point))
@@ -203,7 +207,11 @@ impl TileGrid {
         if !(rect.width > 0.0) || !(rect.height > 0.0) {
             return None;
         }
-        let scale = if self.render_scale > 0.0 { self.render_scale } else { 1.0 };
+        let scale = if self.render_scale > 0.0 {
+            self.render_scale
+        } else {
+            1.0
+        };
         let corners = [
             Point::new(rect.x, rect.y),
             Point::new(rect.right(), rect.y),
@@ -311,7 +319,11 @@ fn index_at(edges: &[u32], value: f32, is_high: bool) -> u32 {
     let mut result = 0u32;
     for (index, edge) in edges.iter().enumerate().take(edges.len().saturating_sub(1)) {
         let start = *edge as f32;
-        let inside = if is_high { start < value } else { start <= value };
+        let inside = if is_high {
+            start < value
+        } else {
+            start <= value
+        };
         if inside {
             result = index as u32;
         } else {
@@ -353,7 +365,11 @@ mod tests {
                 }
                 // 末元素 = round(渲染像素)
                 let expected = (size.width * render).round().max(1.0) as u32;
-                assert_eq!(*grid.x_edges().last().unwrap(), expected, "宽边界应覆盖整页");
+                assert_eq!(
+                    *grid.x_edges().last().unwrap(),
+                    expected,
+                    "宽边界应覆盖整页"
+                );
             }
         }
     }
@@ -382,7 +398,11 @@ mod tests {
             for row in 1..grid.side {
                 let top = grid.display_rect(page, col, row - 1, display, render);
                 let bottom = grid.display_rect(page, col, row, display, render);
-                assert_eq!(top.y + top.height, bottom.y, "第 {row} 行与上邻必须严格相接");
+                assert_eq!(
+                    top.y + top.height,
+                    bottom.y,
+                    "第 {row} 行与上邻必须严格相接"
+                );
             }
         }
     }
@@ -463,7 +483,10 @@ mod tests {
                 // 相对页原点的偏移比例应一致：a.x / 页宽 == b.x / 页宽
                 let ratio_a = a.x / page_a.width;
                 let ratio_b = b.x / page_b.width;
-                assert!((ratio_a - ratio_b).abs() < 1e-6, "相对位置必须与显示比例无关");
+                assert!(
+                    (ratio_a - ratio_b).abs() < 1e-6,
+                    "相对位置必须与显示比例无关"
+                );
             }
         }
     }
@@ -528,7 +551,11 @@ mod tests {
     #[test]
     fn page_rect_probe_matches_a_full_scan() {
         let page = Size::new(595.28, 841.89);
-        for rotation in [Rotation::None, Rotation::Clockwise90, Rotation::Clockwise270] {
+        for rotation in [
+            Rotation::None,
+            Rotation::Clockwise90,
+            Rotation::Clockwise270,
+        ] {
             for render in [1.6f32, 4.096, 10.48576] {
                 let grid = TileGrid::new(page.rotated(rotation), render);
                 // 若干页面空间矩形：整页、四角、跨块、以及一个极小区域
@@ -540,8 +567,7 @@ mod tests {
                     Rect::new(page.width * 0.5, page.height * 0.5, 5.0, 5.0),
                 ];
                 for rect in rects {
-                    let Some((c0, r0, c1, r1)) =
-                        grid.tiles_for_page_rect(rect, page, rotation)
+                    let Some((c0, r0, c1, r1)) = grid.tiles_for_page_rect(rect, page, rotation)
                     else {
                         panic!("页面内矩形必须覆盖到块：{rect:?}");
                     };
@@ -576,11 +602,7 @@ mod tests {
                 }
                 // 页外 → None
                 assert!(grid
-                    .tiles_for_page_rect(
-                        Rect::new(-50.0, -50.0, 10.0, 10.0),
-                        page,
-                        rotation
-                    )
+                    .tiles_for_page_rect(Rect::new(-50.0, -50.0, 10.0, 10.0), page, rotation)
                     .is_none());
             }
         }
@@ -627,7 +649,9 @@ mod tests {
         let size = Size::new(500.0, 700.0);
         let grid = TileGrid::new(size, 4.0);
         let page = Rect::new(0.0, 0.0, size.width, size.height);
-        assert!(grid.tiles_in_view(page, Rect::new(5000.0, 5000.0, 10.0, 10.0), 1.0, 4.0).is_none());
+        assert!(grid
+            .tiles_in_view(page, Rect::new(5000.0, 5000.0, 10.0, 10.0), 1.0, 4.0)
+            .is_none());
         for (col, row) in grid.all_tiles() {
             let (_, _, w, h) = grid.tile_px(col, row);
             assert!(w > 0 && h > 0);
@@ -643,7 +667,10 @@ mod tests {
                 let grid = TileGrid::new(size, render);
                 assert_eq!(
                     grid.render_px(),
-                    (*grid.x_edges().last().unwrap(), *grid.y_edges().last().unwrap())
+                    (
+                        *grid.x_edges().last().unwrap(),
+                        *grid.y_edges().last().unwrap()
+                    )
                 );
             }
         }
@@ -674,14 +701,22 @@ pub const DEFAULT_OVERSCAN: f32 = 1.6;
 /// 波段 `b` 覆盖 `[overscan^b, overscan^(b+1))`；渲染时取波段**上界**，
 /// 因此波段内始终满足 `u = 显示/渲染 ≤ 1`（只下采样，不会放大变糊）。
 pub fn band_for(scale: f32, overscan: f32) -> i32 {
-    let ratio = if overscan > 1.0 { overscan } else { DEFAULT_OVERSCAN };
+    let ratio = if overscan > 1.0 {
+        overscan
+    } else {
+        DEFAULT_OVERSCAN
+    };
     let value = if scale > 0.0 { scale } else { 1.0 };
     (value.ln() / ratio.ln()).floor() as i32
 }
 
 /// 波段号 → 该波段应采用的**渲染比例**（取波段上界）。
 pub fn render_scale_for_band(band: i32, overscan: f32) -> f32 {
-    let ratio = if overscan > 1.0 { overscan } else { DEFAULT_OVERSCAN };
+    let ratio = if overscan > 1.0 {
+        overscan
+    } else {
+        DEFAULT_OVERSCAN
+    };
     ratio.powi(band + 1)
 }
 
@@ -755,7 +790,11 @@ mod band_tests {
 /// 这只用于测试与"新旧行为对比"（代价是失去波段复用 —— 显示比例是连续值，
 /// 每变一点就是一个新键）；正常运行请用 [`DEFAULT_OVERSCAN`]。
 pub fn render_scale_for(display_scale: f32, overscan: f32) -> f32 {
-    let display = if display_scale > 0.0 { display_scale } else { 1.0 };
+    let display = if display_scale > 0.0 {
+        display_scale
+    } else {
+        1.0
+    };
     if !(overscan > 1.0) {
         return display;
     }
@@ -807,7 +846,11 @@ mod render_scale_tests {
     fn overscan_of_one_disables_supersampling() {
         for display in [0.2f32, 0.5, 1.0, 1.7, 4.0] {
             assert_eq!(render_scale_for(display, 1.0), display);
-            assert_eq!(render_scale_for(display, 0.5), display, "小于 1 同样视为关闭");
+            assert_eq!(
+                render_scale_for(display, 0.5),
+                display,
+                "小于 1 同样视为关闭"
+            );
         }
         assert_eq!(render_scale_for(0.0, 1.0), 1.0, "非法显示比例退回 1.0");
     }

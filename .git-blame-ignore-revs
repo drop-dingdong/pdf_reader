@@ -1,0 +1,2 @@
+# 只含格式化的提交（让 git blame 跳过它们）
+# https://git-scm.com/docs/git-blame#Documentation/git-blame.txt---ignore-revs-file

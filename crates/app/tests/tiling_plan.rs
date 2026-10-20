@@ -30,7 +30,10 @@ fn session_at_800() -> (DocumentSession, PageIndex, Arc<MemoryCache>) {
     )
     .unwrap();
     let mut events = Vec::new();
-    session.handle(ViewerCommand::ResizeViewport(Size::new(1200.0, 900.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(1200.0, 900.0)),
+        &mut events,
+    );
     session.handle(ViewerCommand::SetZoom(8.0), &mut events);
     (session, PageIndex::FIRST, cache)
 }
@@ -98,7 +101,11 @@ fn settle(session: &mut DocumentSession, store: &mut KeyedStore<&'static str>, p
 /// 到达某个缩放的**第一帧**：上传已缓存的 → 按新波段裁剪 → 返回可用的旧内容。
 ///
 /// 顺序与 app 的 `ensure_textures`（先上传再裁剪）+ 绘制决策一致。
-fn arrive(session: &mut DocumentSession, store: &mut KeyedStore<&'static str>, zoom: f32) -> Preview {
+fn arrive(
+    session: &mut DocumentSession,
+    store: &mut KeyedStore<&'static str>,
+    zoom: f32,
+) -> Preview {
     let mut events = Vec::new();
     session.handle(ViewerCommand::SetZoom(zoom), &mut events);
     let page = session.state().current_page;
@@ -126,7 +133,12 @@ fn ready_count_uses_the_same_keys_and_range_as_the_session() {
     assert_eq!(ready, 0);
 
     // 只放一块：必须仍判定"未就绪"，且计划不翻页（这是白块修复的核心）
-    let first = RenderKey::tiled(page, render, Rotation::None, TileSpec::new(range.0, range.1));
+    let first = RenderKey::tiled(
+        page,
+        render,
+        Rotation::None,
+        TileSpec::new(range.0, range.1),
+    );
     store.insert(first, "one");
     let (ready, total_after) =
         store.ready_tiles_in_view(page, Rotation::None, render, &grid, range);
@@ -193,7 +205,11 @@ fn band_and_grid_are_stable_inside_a_band() {
     let range = session.visible_tiles(page).expect("范围");
 
     session.handle(ViewerCommand::SetZoom(7.0), &mut events);
-    assert_eq!(session.render_scale(page), render, "7.0 与 8.0 仍在同一波段");
+    assert_eq!(
+        session.render_scale(page),
+        render,
+        "7.0 与 8.0 仍在同一波段"
+    );
     assert_eq!(
         session.tile_grid(page).expect("分块").render_px(),
         grid.render_px(),
@@ -227,7 +243,10 @@ fn region_render_feeds_the_preview_at_the_recorded_scale() {
     .unwrap();
     let mut events = Vec::new();
     // 视口只显示页面顶部一小块：页面下半部分在缓存里没有像素
-    session.handle(ViewerCommand::ResizeViewport(Size::new(600.0, 400.0)), &mut events);
+    session.handle(
+        ViewerCommand::ResizeViewport(Size::new(600.0, 400.0)),
+        &mut events,
+    );
     session.handle(ViewerCommand::SetZoom(8.0), &mut events);
     session.handle(ViewerCommand::SetScroll(Vec2::new(0.0, 0.0)), &mut events);
     session.handle(ViewerCommand::RequestVisible, &mut events);
@@ -238,18 +257,25 @@ fn region_render_feeds_the_preview_at_the_recorded_scale() {
     let target = Rect::new(100.0, 100.0, 120.0, 60.0);
     // 记录分辨率 200% → 吸到波段 2.56
     let render = Scale::from_zoom(render_scale_for(2.0, DEFAULT_OVERSCAN));
-    assert!(session.region_tiles(page, target, render).is_none(), "还没请求，必然缺块");
+    assert!(
+        session.region_tiles(page, target, render).is_none(),
+        "还没请求，必然缺块"
+    );
 
     let count = session.request_region(page, target, render);
     assert!(count > 0, "应提交覆盖该区域的块");
     session.pump(&mut events);
 
-    let tiles = session.region_tiles(page, target, render).expect("渲染完应全部就绪");
+    let tiles = session
+        .region_tiles(page, target, render)
+        .expect("渲染完应全部就绪");
     assert!(!tiles.is_empty());
     // 该区域的像素尺寸 = 区域 × 渲染比例（与当前 800% 的缩放无关）
     let grid = TileGrid::new(Size::new(595.28, 841.89), render.0);
-    let borrowed: Vec<(TileSpec, &RasterImage)> =
-        tiles.iter().map(|(tile, image)| (*tile, image.as_ref())).collect();
+    let borrowed: Vec<(TileSpec, &RasterImage)> = tiles
+        .iter()
+        .map(|(tile, image)| (*tile, image.as_ref()))
+        .collect();
     let image = app::view::compose_region_snapshot(
         target,
         Size::new(595.28, 841.89),

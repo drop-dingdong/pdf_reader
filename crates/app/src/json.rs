@@ -25,7 +25,10 @@ pub(crate) enum Json {
 
 impl Json {
     pub(crate) fn parse(text: &str) -> Parsed<Json> {
-        let mut parser = Parser { bytes: text.as_bytes(), position: 0 };
+        let mut parser = Parser {
+            bytes: text.as_bytes(),
+            position: 0,
+        };
         let value = parser.value()?;
         parser.skip_whitespace();
         if parser.position != parser.bytes.len() {
@@ -51,7 +54,10 @@ impl Json {
 
 impl Json {
     fn get_from<'b>(items: &'b [(String, Json)], key: &str) -> Option<&'b Json> {
-        items.iter().find(|(name, _)| name == key).map(|(_, value)| value)
+        items
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
     }
 }
 
@@ -217,7 +223,11 @@ impl Parser<'_> {
     }
 
     fn literal(&mut self) -> Parsed<Json> {
-        for (text, value) in [("true", Json::Bool(true)), ("false", Json::Bool(false)), ("null", Json::Null)] {
+        for (text, value) in [
+            ("true", Json::Bool(true)),
+            ("false", Json::Bool(false)),
+            ("null", Json::Null),
+        ] {
             if self.bytes[self.position..].starts_with(text.as_bytes()) {
                 self.position += text.len();
                 return Ok(value);
@@ -232,14 +242,22 @@ impl Parser<'_> {
             self.position += 1;
         }
         while let Some(byte) = self.peek() {
-            if byte.is_ascii_digit() || byte == b'.' || byte == b'e' || byte == b'E' || byte == b'+' || byte == b'-' {
+            if byte.is_ascii_digit()
+                || byte == b'.'
+                || byte == b'e'
+                || byte == b'E'
+                || byte == b'+'
+                || byte == b'-'
+            {
                 self.position += 1;
             } else {
                 break;
             }
         }
-        let text = std::str::from_utf8(&self.bytes[start..self.position]).map_err(|e| e.to_string())?;
-        text.parse::<f32>().map(Json::Number).map_err(|e| e.to_string())
+        let text =
+            std::str::from_utf8(&self.bytes[start..self.position]).map_err(|e| e.to_string())?;
+        text.parse::<f32>()
+            .map(Json::Number)
+            .map_err(|e| e.to_string())
     }
 }
-

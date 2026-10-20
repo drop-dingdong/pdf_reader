@@ -264,7 +264,10 @@ pub struct Loaded {
 pub fn load(text: &str) -> std::result::Result<Loaded, LoadError> {
     let mut data = SavedData::from_json(text).map_err(LoadError::Parse)?;
     if data.version > CURRENT_VERSION {
-        return Err(LoadError::NewerVersion { found: data.version, supported: CURRENT_VERSION });
+        return Err(LoadError::NewerVersion {
+            found: data.version,
+            supported: CURRENT_VERSION,
+        });
     }
     let migration = migrate(&mut data);
     Ok(Loaded { data, migration })
@@ -299,7 +302,12 @@ pub fn migrate(data: &mut SavedData) -> Migration {
         data.version = 2;
     }
 
-    Migration { from, to: data.version, changed: from != data.version, notes }
+    Migration {
+        from,
+        to: data.version,
+        changed: from != data.version,
+        notes,
+    }
 }
 
 /// 与 PDF 同目录同名、追加 `.json` 的存档路径。
@@ -405,8 +413,15 @@ fn json_string(value: &str) -> String {
 fn parse_link(value: &Json) -> Parsed<Link> {
     let object = value.as_object().ok_or("link 不是对象")?;
     let rect = parse_rect(object.field("rect").ok_or("link 缺 rect")?)?;
-    let dest = object.field("dest").ok_or("link 缺 dest")?.as_object().ok_or("dest 不是对象")?;
-    let kind = dest.field("kind").and_then(|v| v.as_str()).ok_or("dest 缺 kind")?;
+    let dest = object
+        .field("dest")
+        .ok_or("link 缺 dest")?
+        .as_object()
+        .ok_or("dest 不是对象")?;
+    let kind = dest
+        .field("kind")
+        .and_then(|v| v.as_str())
+        .ok_or("dest 缺 kind")?;
     let destination = match kind {
         "page" => {
             let page = dest
@@ -414,10 +429,16 @@ fn parse_link(value: &Json) -> Parsed<Link> {
                 .and_then(|v| v.as_number())
                 .ok_or("dest 缺 page")? as u32;
             let offset = dest.field("offset").map(parse_point).transpose()?;
-            Destination::Page { page: PageIndex::new(page), offset }
+            Destination::Page {
+                page: PageIndex::new(page),
+                offset,
+            }
         }
         "uri" => {
-            let uri = dest.field("uri").and_then(|v| v.as_str()).ok_or("dest 缺 uri")?;
+            let uri = dest
+                .field("uri")
+                .and_then(|v| v.as_str())
+                .ok_or("dest 缺 uri")?;
             Destination::Uri(uri.to_string())
         }
         other => return Err(format!("未知的 dest kind: {other}")),
@@ -446,7 +467,10 @@ fn parse_scale(object: &[(String, Json)]) -> f32 {
 
 fn parse_custom(value: &Json) -> Parsed<SavedCustom> {
     let object = value.as_object().ok_or("custom 不是对象")?;
-    let page = object.field("page").and_then(|v| v.as_number()).ok_or("custom 缺 page")? as u32;
+    let page = object
+        .field("page")
+        .and_then(|v| v.as_number())
+        .ok_or("custom 缺 page")? as u32;
     Ok(SavedCustom {
         page: PageIndex::new(page),
         point: parse_point(object.field("point").ok_or("custom 缺 point")?)?,
@@ -457,7 +481,10 @@ fn parse_custom(value: &Json) -> Parsed<SavedCustom> {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string(),
-        text: object.field("text").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        text: object
+            .field("text")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         scale: parse_scale(object),
     })
 }
@@ -630,7 +657,11 @@ mod tests {
             }
             other => panic!("应当拒绝读取，实际：{other:?}"),
         }
-        let message = LoadError::NewerVersion { found: 99, supported: CURRENT_VERSION }.to_string();
+        let message = LoadError::NewerVersion {
+            found: 99,
+            supported: CURRENT_VERSION,
+        }
+        .to_string();
         assert!(message.contains("拒绝"), "{message}");
     }
 
