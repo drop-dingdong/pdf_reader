@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# 打一个"自带 PDFium"的发布目录。用法：
-#   ./scripts/package.sh                 # 本机平台
-#   ./scripts/package.sh linux-x64       # 显式指定（见 backend-pdfium::library::platform_tag）
+# 打一个"自带 PDFium"的发布目录。**只能打包当前平台**。
+#   ./scripts/package.sh                 # 自动识别当前平台
+#   ./scripts/package.sh linux-x64       # 显式写出来（必须与当前平台一致，只是个自检）
+#
+# 为什么不接受"打包别的平台"：这个脚本调用的是宿主的 `cargo build`，产出的是**宿主格式**
+# 的可执行文件。在 Linux 上 `./scripts/package.sh win-x64` 会得到一个 ELF 却命名为 Windows 包 ——
+# 那不是在打包，是在造一个假的产物。交叉编译需要额外的 target + 链接器，本脚本不尝试；
+# Windows/macOS 的产物请在那两个平台（或 CI 的对应 runner）上跑本脚本。
 #
 # 产物：
 #   dist/pdf_reader_<平台>/
@@ -14,15 +19,25 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-target="${1:-}"
-if [ -z "$target" ]; then
-  case "$(uname -s)-$(uname -m)" in
-    Linux-x86_64) target=linux-x64 ;;
-    Linux-aarch64) target=linux-arm64 ;;
-    Darwin-arm64) target=mac-arm64 ;;
-    Darwin-x86_64) target=mac-x64 ;;
-    *) echo "无法识别当前平台，请显式传参（linux-x64 / linux-arm64 / mac-arm64 / mac-x64 / win-x64）" >&2; exit 2 ;;
-  esac
+host="$(uname -s 2>/dev/null || echo unknown)-$(uname -m 2>/dev/null || echo unknown)"
+case "$host" in
+  Linux-x86_64)   host_tag=linux-x64 ;;
+  Linux-aarch64)  host_tag=linux-arm64 ;;
+  Darwin-arm64)   host_tag=mac-arm64 ;;
+  Darwin-x86_64)  host_tag=mac-x64 ;;
+  MINGW*|MSYS*|CYGWIN*) host_tag=win-x64 ;;
+  *) echo "无法识别当前平台：$host（本脚本只能打包当前平台）" >&2; exit 2 ;;
+esac
+
+target="${1:-$host_tag}"
+if [ "$target" != "$host_tag" ]; then
+  echo "拒绝打包：本脚本只能产出**当前平台**的可执行文件。" >&2
+  echo "  当前平台：$host_tag（$host）" >&2
+  echo "  请求平台：$target" >&2
+  echo "  在 $host_tag 上构建出的二进制是 $host_tag 的格式，改名成 $target 只会得到跑不起来的假产物。" >&2
+  echo "  正确做法：在 $target 的机器上（或 CI 的 $target runner 上）运行本脚本。" >&2
+  echo "  交叉编译需要额外安装 target 与链接器，本脚本不提供。" >&2
+  exit 2
 fi
 
 case "$target" in

@@ -469,6 +469,10 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **验证**：`./scripts/package.sh linux-x64` 产出 16 MB 目录，在临时目录里（无 `PDFIUM_PATH`、
   非仓库目录）`./app --selftest` 输出"自检通过：platform=linux-x64 pdfium=已加载"。
 - **遗留**：macOS 分发仍需签名/公证；Windows 未在真机验证；三平台自动产出留给 CI。
+- **修正（只打包宿主平台）**：脚本调用的是宿主 `cargo build`，产出宿主格式的二进制
+  —— 在 Linux 上 `package.sh win-x64` 只会得到一个 ELF 却命名为 Windows 包。
+  因此脚本现在**拒绝**与当前平台不一致的请求（直接退出码 2 并说明正确做法）；
+  Windows/macOS 产物在对应平台（或 CI 对应 runner）上构建，不做交叉编译。
 - **修正（Windows 命名）**：上游 `pdfium-win-*` 包里，**运行库** `pdfium.dll` 在 `bin/` 下，
   而 `lib/pdfium.dll.lib` 是**导入库**（链接期用）。因此：
   `scripts/fetch-pdfium.sh` 装完把运行库归位到 `lib/` 并删除 `*.dll.lib`/`*.a`/`*.pdb`；

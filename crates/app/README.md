@@ -22,6 +22,10 @@ cargo test -p app
 ./scripts/package.sh linux-x64          # → dist/pdf_reader_linux_x64/
 ```
 
+**只能在目标平台上打包**：脚本调用宿主 `cargo build`，产出的是宿主格式的可执行文件，
+所以 `package.sh win-x64` 在 Linux 上会被**拒绝**（那只会造出一个 ELF 却叫 Windows 包的假产物）。
+要 Windows/macOS 产物，就在那两个平台上跑（或让 CI 用对应 runner 的 matrix）。
+
 产物结构：
 
 ```
