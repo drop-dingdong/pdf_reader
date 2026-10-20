@@ -444,6 +444,33 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   `PDF_READER_REQUIRE_PDFIUM=1` 把它变成失败（`check.sh` 里已标 TODO）。
 - **状态**：有效。
 
+### D-114 验收辅助入口改为环境开关（默认不显示）
+
+- **决定**：「截图」「测试浮窗」两个按钮默认**不在界面上**；设 `PDF_READER_DEV_ENTRY=1` 才出现。
+  代码保留、可调用，既不加 `#[allow(dead_code)]`，也不从代码里删掉。
+- **理由**：用户要求"界面上不显示，但保留代码"。用开关是最小代价：正式界面干净，
+  手工验收（浮窗拖动/层级、截图流程）随时能用；而"删代码 + 靠 git 历史找回"会让这两个
+  入口每次验收都要重新贴回来。
+- **影响**：`app::dev_entries_enabled()` + 顶栏第二行的一层 `if`；`--selftest` 不变。
+- **验证**：258 passed、clippy -D warnings 0、fmt 干净（默认路径下这两个 `ui.button` 不执行，
+  也不产生 dead_code 警告，因为它们有调用者）。
+
+### D-115 发布包自带 PDFium：`app` + `lib/libpdfium.so`
+
+- **决定**：打包产物固定为
+  `pdf_reader_<平台>/app` + `pdf_reader_<平台>/lib/libpdfium.so`（macOS `.dylib`、Windows `.dll`），
+  外加一份 `BUILD-INFO.txt`（平台 / 二进制与库的 sha256 / 构建时间）。
+  `scripts/package.sh <平台>` 负责构建、组装，并在临时目录里 `./app --selftest` 自检。
+- **理由**：`backend-pdfium::library` 的查找顺序里本来就有"**可执行文件所在目录**及其 `lib/`"，
+  且按绝对路径 `bind_to_library` —— 所以这个布局**不需要 rpath / LD_LIBRARY_PATH / 工作目录假设**。
+  之所以值得显式约定：用户机器上往往装着别的 pdfium，`--selftest` + `BUILD-INFO.txt` 能把
+  "到底加载了哪个库"变成一眼可见的事实。
+- **影响**：新增 `--selftest`（加载 PDFium 并打印 `platform=…`，失败退出码 1）；`.gitignore` 加 `dist/`。
+- **验证**：`./scripts/package.sh linux-x64` 产出 16 MB 目录，在临时目录里（无 `PDFIUM_PATH`、
+  非仓库目录）`./app --selftest` 输出"自检通过：platform=linux-x64 pdfium=已加载"。
+- **遗留**：macOS 分发仍需签名/公证；Windows 未在真机验证；三平台自动产出留给 CI。
+- **状态**：有效。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

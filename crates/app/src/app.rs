@@ -74,6 +74,14 @@ fn texture_key_bytes(page_size: Size, rotation: Rotation, max_side: u32, key: &R
     width.saturating_mul(height).saturating_mul(4)
 }
 
+/// 是否显示"验收辅助入口"（截图 / 测试浮窗）。
+///
+/// 默认关闭：它们只服务于手工验收，不该占正式界面；设 `PDF_READER_DEV_ENTRY=1` 打开。
+/// 用开关而不是删代码/加 `allow(dead_code)`：代码保持可编译、可调用，随时能用（D-114）。
+fn dev_entries_enabled() -> bool {
+    std::env::var_os("PDF_READER_DEV_ENTRY").is_some()
+}
+
 /// 从环境变量 `PDF_READER_TEXTURE_BUDGET_MB` 读预算（缺省用 [`TEXTURE_BUDGET_BYTES`]）。
 fn texture_budget_bytes() -> u64 {
     std::env::var("PDF_READER_TEXTURE_BUDGET_MB")
@@ -1508,28 +1516,30 @@ impl PdfReaderApp {
                     }
                 }
 
-                ui.separator();
-
-                // 验收辅助入口（D-38 截图 / D-36 测试浮窗）：
-                // 截图从空白选区开始，框选后 Enter 保存成快照浮窗；测试浮窗凭空造一个纯文字浮窗。
-                if ui
-                    .button("截图")
-                    .on_hover_text("框选区域 → Enter 保存为浮窗，Esc 取消")
-                    .clicked()
-                {
-                    self.capture = Some(CaptureState {
-                        rect: None,
-                        anchor: None,
-                        target: CaptureTarget::Plain,
-                    });
-                    self.message = "截图模式：拖出选区，Enter 保存，Esc 取消".to_string();
-                }
-                if ui
-                    .button("测试浮窗")
-                    .on_hover_text("添加一个纯文字浮窗（验收浮窗拖动/改大小/层级）")
-                    .clicked()
-                {
-                    self.add_test_float();
+                // 验收辅助入口（D-38 截图 / D-36 测试浮窗）：默认**不显示**，
+                // 设 `PDF_READER_DEV_ENTRY=1` 才出现在顶栏。代码保留（见 D-114）：
+                // 它们是手工验证"截图流程 / 浮窗拖动改大小层级"最快的入口。
+                if dev_entries_enabled() {
+                    ui.separator();
+                    if ui
+                        .button("截图")
+                        .on_hover_text("框选区域 → Enter 保存为浮窗，Esc 取消")
+                        .clicked()
+                    {
+                        self.capture = Some(CaptureState {
+                            rect: None,
+                            anchor: None,
+                            target: CaptureTarget::Plain,
+                        });
+                        self.message = "截图模式：拖出选区，Enter 保存，Esc 取消".to_string();
+                    }
+                    if ui
+                        .button("测试浮窗")
+                        .on_hover_text("添加一个纯文字浮窗（验收浮窗拖动/改大小/层级）")
+                        .clicked()
+                    {
+                        self.add_test_float();
+                    }
                 }
 
                 // 引用显示样式（链接框 + 引用点 合并为一个菜单）

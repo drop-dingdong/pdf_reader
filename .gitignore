@@ -10,3 +10,6 @@ scripts/replay/*.pdf.json
 perf/*
 !perf/baseline/
 !perf/baseline/*.json
+
+# 打包产物
+dist/

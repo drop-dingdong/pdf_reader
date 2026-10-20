@@ -136,6 +136,21 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // 自检：能不能加载 PDFium（打包后用它在目标机器上验证，见 scripts/package.sh）
+    if args.first().map(String::as_str) == Some("--selftest") {
+        let platform = backend_pdfium::library::platform_tag();
+        match backend_pdfium::library::pdfium() {
+            Ok(_) => {
+                println!("自检通过：platform={platform} pdfium=已加载");
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!("自检失败：platform={platform}\n{error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // 一次性把所有回放样本写进某目录（CI 用：脚本里的 pdf 是相对路径）
     if args.first().map(String::as_str) == Some("--samples") {
         let Some(dir) = args.get(1).map(PathBuf::from) else {
