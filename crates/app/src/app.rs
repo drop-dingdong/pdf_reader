@@ -1508,6 +1508,30 @@ impl PdfReaderApp {
                     }
                 }
 
+                ui.separator();
+
+                // 验收辅助入口（D-38 截图 / D-36 测试浮窗）：
+                // 截图从空白选区开始，框选后 Enter 保存成快照浮窗；测试浮窗凭空造一个纯文字浮窗。
+                if ui
+                    .button("截图")
+                    .on_hover_text("框选区域 → Enter 保存为浮窗，Esc 取消")
+                    .clicked()
+                {
+                    self.capture = Some(CaptureState {
+                        rect: None,
+                        anchor: None,
+                        target: CaptureTarget::Plain,
+                    });
+                    self.message = "截图模式：拖出选区，Enter 保存，Esc 取消".to_string();
+                }
+                if ui
+                    .button("测试浮窗")
+                    .on_hover_text("添加一个纯文字浮窗（验收浮窗拖动/改大小/层级）")
+                    .clicked()
+                {
+                    self.add_test_float();
+                }
+
                 // 引用显示样式（链接框 + 引用点 合并为一个菜单）
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     egui::ComboBox::from_id_salt("display-style")
@@ -2922,6 +2946,32 @@ impl PdfReaderApp {
                 self.draw_capture(ui, canvas, session, scroll);
             }
         });
+    }
+
+    /// 添加一个"测试浮窗"（带任意文字），位置按已有浮窗数量级联偏移。
+    ///
+    /// 入口在顶栏第二行（「测试浮窗」按钮）；用于不依赖文档内容地验证浮窗的
+    /// 拖动/改大小/关闭/层级。
+    fn add_test_float(&mut self) {
+        let id = self.next_float_id;
+        self.next_float_id += 1;
+        let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(24.0 + cascade, 24.0 + cascade),
+            EVec2::new(280.0, 150.0),
+        );
+        self.floats.push(Float {
+            id,
+            title: format!("测试浮窗 #{id}"),
+            content: FloatContent::Text(format!(
+                "这是第 {id} 个测试浮窗。\n目前只显示文字。\n\n可以拖动标题栏移动、\n拖右下角改变大小、\n点右上角 ✕ 关闭。"
+            )),
+            origin: None,
+            custom: None,
+            body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
+            rect,
+        });
+        self.message = format!("已添加测试浮窗 #{id}");
     }
 
     /// 悬停预览浮窗：检测鼠标下的页内链接 → 找到对应被引用点 → 必要时**渲染一次**截图 →
