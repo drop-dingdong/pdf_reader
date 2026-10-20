@@ -469,6 +469,13 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **验证**：`./scripts/package.sh linux-x64` 产出 16 MB 目录，在临时目录里（无 `PDFIUM_PATH`、
   非仓库目录）`./app --selftest` 输出"自检通过：platform=linux-x64 pdfium=已加载"。
 - **遗留**：macOS 分发仍需签名/公证；Windows 未在真机验证；三平台自动产出留给 CI。
+- **修正（Windows 实测加载失败）**：三条原因都补上 ——
+  ① `fetch-pdfium.sh` 在 Git Bash 下 `uname -s` 是 `MINGW64_NT-…`，原来直接报错退出
+  （于是根本没有 `vendor/pdfium-win-*/lib/`）；现在按 `uname -m` 自动映射到 win-x64/win-x86/win-arm64；
+  ② 新增 **PowerShell 版** `scripts/fetch-pdfium.ps1` / `scripts/package.ps1`（不依赖 bash，
+  负责下载、把 `bin\pdfium.dll` 归位到 `lib\`、构建、打包、`--selftest`）；
+  ③ `library.rs` 的加载失败信息现在标注**每个候选路径"文件存在/不存在"**
+  —— 区分"没下载"与"位数不对/缺 VC 运行库"。
 - **修正（只打包宿主平台）**：脚本调用的是宿主 `cargo build`，产出宿主格式的二进制
   —— 在 Linux 上 `package.sh win-x64` 只会得到一个 ELF 却命名为 Windows 包。
   因此脚本现在**拒绝**与当前平台不一致的请求（直接退出码 2 并说明正确做法）；

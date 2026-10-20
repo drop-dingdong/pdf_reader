@@ -26,6 +26,18 @@ cargo test -p app
 所以 `package.sh win-x64` 在 Linux 上会被**拒绝**（那只会造出一个 ELF 却叫 Windows 包的假产物）。
 要 Windows/macOS 产物，就在那两个平台上跑（或让 CI 用对应 runner 的 matrix）。
 
+### Windows
+
+```powershell
+# 1) 下载 pdfium.dll 到 vendor\pdfium-win-x64\lib\（自动识别架构，无需 bash）
+powershell -ExecutionPolicy Bypass -File scripts\fetch-pdfium.ps1
+# 2) 构建 + 打包 + 自检 → dist\pdf_reader_win_x64powershell -ExecutionPolicy Bypass -File scripts\package.ps1
+```
+
+上游 Windows 包的坑：`bin\pdfium.dll` 是运行库，`lib\pdfium.dll.lib` 是导入库（链接期用），
+两个脚本都会把运行库归位到 `lib\`。加载失败时先跑 `app.exe --selftest` ——
+它会列出**每个**候选路径，并标注"文件存在/不存在"。
+
 产物结构：
 
 ```

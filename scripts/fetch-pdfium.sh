@@ -22,7 +22,14 @@ if [ -z "$PLATFORM" ]; then
     Linux/aarch64)  PLATFORM="linux-arm64" ;;
     Darwin/arm64)   PLATFORM="mac-arm64" ;;
     Darwin/x86_64)  PLATFORM="mac-x64" ;;
-    MINGW*|MSYS*|CYGWIN*) echo "Windows 请在 Git Bash/PowerShell 里显式传入 win-x64 / win-x86 / win-arm64" >&2; exit 1 ;;
+    # Git Bash / MSYS2 / Cygwin 下 uname 给的是 MINGW64_NT-10.0-19045 之类
+    MINGW*|MSYS*|CYGWIN*)
+      case "$ARCH" in
+        x86_64|amd64) PLATFORM="win-x64" ;;
+        i686|i386|x86) PLATFORM="win-x86" ;;
+        aarch64|arm64) PLATFORM="win-arm64" ;;
+        *) echo "无法识别的 Windows 架构：$ARCH，请显式传入 win-x64 / win-x86 / win-arm64" >&2; exit 1 ;;
+      esac ;;
     *) echo "无法识别的平台：$OS/$ARCH，请显式传入平台标识" >&2; exit 1 ;;
   esac
 fi

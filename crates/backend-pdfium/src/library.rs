@@ -49,7 +49,16 @@ fn bind() -> std::result::Result<Pdfium, String> {
         let path = Pdfium::pdfium_platform_library_name_at_path(&directory);
         match Pdfium::bind_to_library(&path) {
             Ok(bindings) => return Ok(Pdfium::new(bindings)),
-            Err(error) => attempts.push(format!("{}：{error}", path.display())),
+            Err(error) => {
+                // 区分"没下载/放错位置"与"文件在但加载失败（位数不对、缺 VC 运行库…）——
+                // Windows 上这两种情况的排查方向完全不同
+                let state = if path.exists() {
+                    "文件存在"
+                } else {
+                    "文件不存在"
+                };
+                attempts.push(format!("{}（{state}）：{error}", path.display()));
+            }
         }
     }
 

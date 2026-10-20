@@ -26,7 +26,14 @@ scripts/fetch-pdfium.sh linux-x64  # 或显式指定
 > **Windows 的坑**：bblanchon 的 tar 包里，运行库 `pdfium.dll` 在 **`bin/`** 下，
 > 而 `lib/pdfium.dll.lib` 是**导入库**（链接期用，运行时不加载）。
 > `scripts/fetch-pdfium.sh` 会把运行库归位到 `lib/` 并删掉导入库/静态库；
-> 读取顺序里也包含 `bin/`，所以两种布局都能用。查找顺序见
+> 读取顺序里也包含 `bin/`，所以两种布局都能用。
+>
+> **Windows 上推荐用 PowerShell 脚本**（不依赖 bash）：
+> `scripts\fetch-pdfium.ps1`（下载并归位）、`scripts\package.ps1`（构建+打包+`--selftest`）。
+>
+> 加载失败时的排查顺序：`app.exe --selftest` 的输出里每个候选路径都标了
+> "文件存在/不存在" —— 不存在 = 没下载或位置不对；存在但失败 = 位数不对（x64 vs x86）
+> 或缺少 VC++ 运行库。查找顺序见
 [`library::pdfium`](src/library.rs)：`PDFIUM_PATH` 环境变量 → 仓库内 `vendor/`（从当前目录向上 3 层）
 → 可执行文件同级及 `lib/` → 系统库。
 
