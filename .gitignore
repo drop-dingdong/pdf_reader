@@ -7,4 +7,6 @@ scripts/replay/*.pdf
 scripts/replay/*.pdf.json
 
 # 性能基线（每台机器自己记录，不入库）
-perf/
+perf/*
+!perf/baseline/
+!perf/baseline/*.json

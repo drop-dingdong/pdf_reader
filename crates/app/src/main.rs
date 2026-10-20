@@ -26,6 +26,7 @@ fn main() -> eframe::Result<()> {
         };
         let out = arg_value("--out");
         let record = arg_value("--record");
+        let record_structural = arg_value("--record-structural");
         let compare = arg_value("--compare");
         let timing = args.iter().any(|arg| arg == "--timing");
         match app::replay::run_script_file_with(&script, out.as_deref(), timing) {
@@ -64,6 +65,14 @@ fn main() -> eframe::Result<()> {
                 let machine = Machine::detect();
                 println!("机器：{}", machine.summary());
                 let mut gate_failed = false;
+                if let Some(path) = &record_structural {
+                    let data = Baseline::record_structural(&report);
+                    if let Err(error) = data.write(path) {
+                        eprintln!("写结构基线 {} 失败：{error}", path.display());
+                        std::process::exit(2);
+                    }
+                    println!("已记录结构基线 {}", path.display());
+                }
                 if let Some(path) = &record {
                     let data = Baseline::record(&report, machine.clone());
                     if let Err(error) = data.write(path) {
@@ -122,6 +131,24 @@ fn main() -> eframe::Result<()> {
             Err(error) => {
                 eprintln!("写入 {} 失败：{error}", out.display());
                 std::process::exit(2);
+            }
+        }
+        return Ok(());
+    }
+
+    // 一次性把所有回放样本写进某目录（CI 用：脚本里的 pdf 是相对路径）
+    if args.first().map(String::as_str) == Some("--samples") {
+        let Some(dir) = args.get(1).map(PathBuf::from) else {
+            eprintln!("用法：app --samples <目录>");
+            std::process::exit(2);
+        };
+        for sample in app::replay::samples::Sample::all() {
+            match sample.write(&dir) {
+                Ok(path) => println!("已生成 {}", path.display()),
+                Err(error) => {
+                    eprintln!("写入 {} 失败：{error}", dir.display());
+                    std::process::exit(2);
+                }
             }
         }
         return Ok(());

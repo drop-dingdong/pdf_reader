@@ -20,7 +20,12 @@ use std::path::Path;
 use super::{escape, Report};
 
 /// 基线格式版本。
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
+
+/// 只记结构指标的基线（硬件无关，可以入库、可以在 CI 里跨机比较）。
+pub const PROFILE_STRUCTURAL: &str = "structural";
+/// 含时序的基线（只能在同一台机器、同一构建配置下比较）。
+pub const PROFILE_TIMING: &str = "timing";
 
 /// 跑这份基线时的机器与构建条件。
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +108,8 @@ pub struct ActionBaseline {
 pub struct Baseline {
     /// 格式版本。
     pub version: u32,
+    /// 基线类型：`timing`（含时序，仅本机可比）或 `structural`（只记结构指标，可入库/跨机比较）。
+    pub profile: String,
     /// 脚本名。
     pub script: String,
     /// 机器条件。
@@ -150,6 +157,7 @@ impl Baseline {
         let cpu_ms = report.busy_frame_percentiles();
         Self {
             version: VERSION,
+            profile: PROFILE_TIMING.to_string(),
             script: report.script.clone(),
             machine,
             actions,
@@ -161,11 +169,37 @@ impl Baseline {
         }
     }
 
+    /// 记录一份**只含结构指标**的基线：时序/内存字段清零，`compare` 会跳过机器与时序检查。
+    ///
+    /// 这份文件与硬件无关，可以提交进仓库，让 CI 守住"同一波段多渲一次""上传字节暴涨"
+    /// 这类退化（D-113）。
+    pub fn record_structural(report: &Report) -> Self {
+        let mut baseline = Self::record(report, Machine::detect());
+        baseline.profile = PROFILE_STRUCTURAL.to_string();
+        baseline.cpu_ms = (0.0, 0.0, 0.0, 0.0);
+        baseline.cpu_ms_total = 0.0;
+        baseline.wall_ms_total = 0.0;
+        baseline.rss_peak_kb = 0;
+        baseline.busy_frames = 0;
+        for action in &mut baseline.actions {
+            action.busy_frames = 0;
+            action.cpu_ms_total = 0.0;
+            action.wall_ms = 0.0;
+        }
+        baseline
+    }
+
+    /// 是否是"只含结构指标"的基线。
+    pub fn is_structural(&self) -> bool {
+        self.profile == PROFILE_STRUCTURAL
+    }
+
     /// 序列化成 JSON。
     pub fn to_json(&self) -> String {
         let mut out = String::new();
         let _ = writeln!(out, "{{");
         let _ = writeln!(out, "  \"version\": {},", self.version);
+        let _ = writeln!(out, "  \"profile\": \"{}\",", escape(&self.profile));
         let _ = writeln!(out, "  \"script\": \"{}\",", escape(&self.script));
         let _ = writeln!(out, "  \"machine\": {{");
         let _ = writeln!(out, "    \"cpu\": \"{}\",", escape(&self.machine.cpu));
@@ -311,6 +345,11 @@ impl Baseline {
         };
         Ok(Self {
             version: number("version")? as u32,
+            profile: root
+                .field("profile")
+                .and_then(|value| value.as_str())
+                .unwrap_or(PROFILE_TIMING)
+                .to_string(),
             script: root
                 .field("script")
                 .and_then(|value| value.as_str())
@@ -401,7 +440,8 @@ pub fn compare(baseline: &Baseline, report: &Report, machine: &Machine) -> Vec<F
             baseline.version
         )));
     }
-    if !baseline.machine.same_condition(machine) {
+    let structural = baseline.is_structural();
+    if !structural && !baseline.machine.same_condition(machine) {
         findings.push(Finding::warn(format!(
             "机器条件不同（基线：{}；当前：{}），时序指标只作参考",
             baseline.machine.summary(),
@@ -489,6 +529,10 @@ pub fn compare(baseline: &Baseline, report: &Report, machine: &Machine) -> Vec<F
                 expected.id, actual_preview, expected.preview
             )));
         }
+    }
+    // 只含结构指标的基线不比较时序/内存
+    if structural {
+        return findings;
     }
     // 时序指标：只报告
     let (p50, p95, p99, _) = report.busy_frame_percentiles();
