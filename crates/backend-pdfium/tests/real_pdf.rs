@@ -24,6 +24,44 @@ fn backend() -> Option<PdfiumBackend> {
     }
 }
 
+/// 颜色通道顺序：整页黄色必须渲染成 `Bgra8` 的 (B=0, G=255, R=255)。
+///
+/// 这条测试专治"红蓝对调"：`PdfRenderConfig` 默认会给 PDFium 打开
+/// `FPDF_REVERSE_BYTE_ORDER`（输出 RGBA），而我们按 Bgra8 再交换一次，黄底就会变成青色、
+/// 蓝字变成红色 —— 灰度样本完全发现不了。
+#[test]
+fn yellow_page_stays_yellow_in_bgra_bytes() {
+    let Some(backend) = backend() else { return };
+    let bytes = common::colored_page_pdf();
+    let opened = backend
+        .open(Source::Bytes(&bytes), None)
+        .expect("打开彩色 PDF");
+
+    let image = opened
+        .raster
+        .render(&RenderRequest::new(
+            PageIndex::FIRST,
+            Scale::IDENTITY,
+            Rotation::None,
+        ))
+        .expect("整页渲染");
+
+    // 200×200 pt 的页面，整页铺黄底 + 下方蓝字；取左上角 (5,5)（远离文字）
+    assert_eq!((image.width, image.height), (200, 200));
+    let index = (5 * image.width as usize + 5) * 4;
+    let (b, g, r, a) = (
+        image.data()[index],
+        image.data()[index + 1],
+        image.data()[index + 2],
+        image.data()[index + 3],
+    );
+    assert_eq!(
+        (r, g, b, a),
+        (255, 255, 0, 255),
+        "黄底按 Bgra8 读出来是 (B={b},G={g},R={r},A={a})；红蓝对调时 R/B 会互换"
+    );
+}
+
 fn assert_close(actual: f32, expected: f32) {
     assert!(
         (actual - expected).abs() < 0.5,

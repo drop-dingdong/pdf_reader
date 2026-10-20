@@ -488,6 +488,30 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   单测 `candidate_directories_cover_exe_dir_lib_and_bin` 守住三种布局。
 - **状态**：有效。
 
+### D-116 链接框按"目的地类型"用两种颜色
+
+- **决定**：内链的 `/Dest` **带页内位置**（`Destination::Page { offset: Some(_) }`）时，链接框画成
+  **绿色** `(40,170,90)`；只给页码（`offset: None`）或外部 URI 时仍是**红色** `(220,40,40)`。
+  判定集中在 `view::link_box_color`，单测覆盖三种目标。
+- **理由**：两类目的地在 PDF 语义上不同（只页码 = 跳到页首；页码 + 位置 = 跳到页内某处），
+  但界面原本同色，无法分辨（用户要求区分）。
+- **影响**：`draw_canvas` 的链接框绘制改用该函数；`LINK_OVERLAY_COLOR` 仍用于引用点记号。
+- **验证**：`link_box_color_distinguishes_page_only_and_page_with_position`。
+- **状态**：有效。
+
+### D-117 修复红蓝对调（`FPDF_REVERSE_BYTE_ORDER` 默认开启）
+
+- **决定**：渲染配置显式 `.set_reverse_byte_order(false)`，让 `PdfBitmapFormat::BGRA` 真的输出
+  B,G,R,A，与 `PixelFormat::Bgra8` / `view::color_image` 的交换保持一致。
+- **理由**：`PdfRenderConfig::new()` 默认 `do_set_flag_reverse_byte_order = true`，PDFium 于是
+  往 BGRA 位图写 **RGBA** 字节；我们再交换一次 → 红蓝对调。用户实测：黄色页显示成蓝色、
+  蓝色字显示成红色（与"色相不动、只换 R/B"的症状完全一致）。
+- **影响**：`backend-pdfium::raster` 一行配置 + 注释；`docs/current/rendering.md` 增加 §7.1.1。
+- **验证**：新增样本 `fixtures::colored_page_pdf`（200×200 整页黄底 + 蓝字）与
+  `real_pdf::yellow_page_stays_yellow_in_bgra_bytes`。去掉那一行时该测试失败并打印
+  `(B=255,G=255,R=0)`（= 青色），加上后通过 —— 有牙。
+- **状态**：有效。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

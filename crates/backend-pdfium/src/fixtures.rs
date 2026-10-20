@@ -77,6 +77,41 @@ fn stream_object(content: &str) -> String {
     )
 }
 
+/// 一页"整页黄色 + 蓝色文字"的 PDF（200×200 pt）。
+///
+/// 存在的唯一目的：**钉住颜色通道顺序**。红蓝对调时，黄底会变成青色、蓝字变成红色，
+/// 而灰度样本完全看不出来。
+pub fn colored_page_pdf() -> Vec<u8> {
+    let content = "1 1 0 rg 0 0 200 200 re f\n0 0 1 rg BT /F1 20 Tf 20 100 Td (Blue) Tj ET\n";
+    let objects: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
+         /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+            .to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        stream_object(content),
+    ];
+
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{}\nendobj\n", index + 1, body));
+    }
+    let xref_offset = out.len();
+    let size = objects.len() + 1;
+    out.push_str(&format!("xref\n0 {size}\n"));
+    out.push_str("0000000000 65535 f \n");
+    for offset in &offsets {
+        out.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
+    ));
+    out.into_bytes()
+}
+
 /// 把测试 PDF 写到临时文件，返回路径（供 `Source::Path` 路径测试使用）。
 pub fn two_page_pdf_file(name: &str) -> std::path::PathBuf {
     let mut path = std::env::temp_dir();

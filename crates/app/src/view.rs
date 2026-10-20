@@ -396,6 +396,20 @@ impl PageDraw {
 ///
 /// 两个用途：`[画法]` 的**边沿触发**输出（只在变化时打一行），以及回放器读取
 /// "一次波段切换里画法翻了哪几次"（断言"只翻一次"）。
+/// 链接框颜色：**带页内位置**的内部链接用绿色，其余（只有页码的内链 / 外部 URI）用红色。
+///
+/// 依据：PDF 的 `/Dest` 可以只给页码，也可以给页码 + 位置/缩放。两者原本同色、无法区分
+/// （用户要求用颜色区分，D-116）。
+pub fn link_box_color(destination: &Destination) -> egui::Color32 {
+    match destination {
+        Destination::Page {
+            offset: Some(_), ..
+        } => egui::Color32::from_rgb(40, 170, 90),
+        _ => egui::Color32::from_rgb(220, 40, 40),
+    }
+}
+
+/// 某一帧某页的"画法快照"（用于 `[画法]` 边沿输出与回放断言）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanStamp {
     /// 这一帧采用的画法。
@@ -2288,6 +2302,32 @@ mod tests {
         assert_eq!(desired.must_bytes, 200);
         assert!(desired.over_budget);
         assert_eq!(desired.bed_bytes + desired.old_bytes, 0);
+    }
+
+    /// D-116：带页内位置的内链是绿色，只有页码的内链与外部 URI 是红色。
+    #[test]
+    fn link_box_color_distinguishes_page_only_and_page_with_position() {
+        let page = PageIndex::new(3);
+        let with_position = Destination::Page {
+            page,
+            offset: Some(Point::new(10.0, 700.0)),
+        };
+        let page_only = Destination::Page { page, offset: None };
+        assert_eq!(
+            link_box_color(&with_position),
+            egui::Color32::from_rgb(40, 170, 90),
+            "带位置的链接应当是绿色"
+        );
+        assert_eq!(
+            link_box_color(&page_only),
+            egui::Color32::from_rgb(220, 40, 40),
+            "只有页码的链接应当仍是红色"
+        );
+        assert_eq!(
+            link_box_color(&Destination::Uri("https://example.com".to_string())),
+            egui::Color32::from_rgb(220, 40, 40),
+            "外部链接保持红色"
+        );
     }
 
     #[test]

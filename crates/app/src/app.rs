@@ -33,15 +33,16 @@ use crate::view::{
     compose_region_snapshot, compose_snapshot, default_dest_rect, desired_textures,
     destination_points, drag_float_rect, find_dest_index, find_float_for_custom,
     find_float_for_target, fit_height_zoom, fit_inside, flatten_outline, float_rect_at_row,
-    float_size_for_body, hover_preview_allowed, link_overlay_visible, link_rect_in_page_bounds,
-    move_to_last, needs_underlay, outline_node_count, overflow_layout, page_index_from_text,
-    page_rect_to_screen, pages_intersecting, parse_zoom_percent, pin_exits_on_mode_change,
-    plan_page, pointer_over_any, save_button_label, screen_rect_to_content, texture_pages,
-    tile_view_rect, tile_view_rect_scaled, tip_rect_for, veil_bands, view_rect_for,
-    view_rect_to_page_rect, view_to_content, wheel_targets_canvas, zero_rect_at, zoom_percent_text,
-    Desired, DrawInput, KeyedStore, PageDraw, PageFacts, PageShape, PlanStamp, Preview,
-    SnapshotLayer, SnapshotPage, CUSTOM_SYMBOL_DELETE, CUSTOM_SYMBOL_EDIT, CUSTOM_SYMBOL_IMAGE,
-    CUSTOM_SYMBOL_TEXT, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
+    float_size_for_body, hover_preview_allowed, link_box_color, link_overlay_visible,
+    link_rect_in_page_bounds, move_to_last, needs_underlay, outline_node_count, overflow_layout,
+    page_index_from_text, page_rect_to_screen, pages_intersecting, parse_zoom_percent,
+    pin_exits_on_mode_change, plan_page, pointer_over_any, save_button_label,
+    screen_rect_to_content, texture_pages, tile_view_rect, tile_view_rect_scaled, tip_rect_for,
+    veil_bands, view_rect_for, view_rect_to_page_rect, view_to_content, wheel_targets_canvas,
+    zero_rect_at, zoom_percent_text, Desired, DrawInput, KeyedStore, PageDraw, PageFacts,
+    PageShape, PlanStamp, Preview, SnapshotLayer, SnapshotPage, CUSTOM_SYMBOL_DELETE,
+    CUSTOM_SYMBOL_EDIT, CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE,
+    FLOAT_TITLE_HEIGHT,
 };
 
 /// 纹理层的**字节**预算（软上限，D-111）。
@@ -117,6 +118,8 @@ const HOVER_SCROLL_QUIET: std::time::Duration = std::time::Duration::from_millis
 const OUTLINE_ROW_HEIGHT: f32 = 18.0;
 /// 链接热区框的颜色（空心红线，用户指定）。
 const LINK_OVERLAY_COLOR: Color32 = Color32::from_rgb(220, 40, 40);
+
+// 链接框颜色（红/绿）由 `view::link_box_color` 决定，见 D-116。
 
 /// 每帧最多上传几张纹理。
 ///
@@ -2714,7 +2717,7 @@ impl PdfReaderApp {
                             painter.rect_stroke(
                                 screen,
                                 CornerRadius::ZERO,
-                                Stroke::new(1.5, LINK_OVERLAY_COLOR),
+                                Stroke::new(1.5, link_box_color(&link.destination)),
                                 StrokeKind::Outside,
                             );
                         }

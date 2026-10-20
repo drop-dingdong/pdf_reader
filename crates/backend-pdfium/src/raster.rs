@@ -91,7 +91,13 @@ impl PageRaster for PdfiumRaster {
 
         // 旋转由本适配层全权负责（`automatic_orientation = false`）：
         // 位图方向因此严格等于 `request.rotation`，与 `PagePlacement` 的约定一一对应。
+        // **必须显式关闭**：`PdfRenderConfig::new()` 默认打开
+        // `FPDF_REVERSE_BYTE_ORDER`（do_set_flag_reverse_byte_order = true），
+        // 于是 PDFium 往 BGRA 位图里写的是 **RGBA** 字节 —— 我们再按 Bgra8 交换一次，
+        // 红蓝就对调了（实测现象：黄色页显示成青色、蓝色字显示成红色）。
+        // 关掉它，`PdfBitmapFormat::BGRA` 才真的是 B,G,R,A，与 `PixelFormat::Bgra8` 一致。
         let config = PdfRenderConfig::new()
+            .set_reverse_byte_order(false)
             .set_fixed_size(page_px.0, page_px.1)
             .set_origin(origin.0, origin.1)
             .rotate(to_pdfium_rotation(request.rotation), false);

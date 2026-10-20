@@ -128,6 +128,17 @@ let screen  = canvas.min + view;
   **不按波段裁剪**——没超限就一直留着（缩回旧波段可秒回）。
 * 单张超限时保留最后一张（避免"存进去立刻被丢"的抖动）。
 
+### 7.1.1 颜色通道顺序（易错点）
+
+PDFium 写入 `PdfBitmapFormat::BGRA` 位图的字节序，取决于 `PdfRenderConfig` 的
+`reverse_byte_order` 标志：**pdfium-render 默认把它打开**（`FPDF_REVERSE_BYTE_ORDER`），
+此时写出来的是 **RGBA**。我们按 `PixelFormat::Bgra8` 声明并在 `view::color_image` 里交换
+R/B，所以适配层必须**显式** `set_reverse_byte_order(false)`。
+
+踩过的坑：漏了这一行 → 红蓝对调（黄色页显示成青色、蓝色字显示成红色），而灰度样本完全看不出来。
+现在由 `real_pdf::yellow_page_stays_yellow_in_bgra_bytes` 钉住：整页黄色的样本，
+在 Bgra8 字节里必须是 `(B=0,G=255,R=255,A=255)`。
+
 ### 7.2 GPU 纹理层（`app::view::KeyedStore`）
 
 **一个纯函数决定"该有哪些"，另一段代码只负责对账**（D-112）：
