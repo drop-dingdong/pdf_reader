@@ -469,6 +469,12 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **验证**：`./scripts/package.sh linux-x64` 产出 16 MB 目录，在临时目录里（无 `PDFIUM_PATH`、
   非仓库目录）`./app --selftest` 输出"自检通过：platform=linux-x64 pdfium=已加载"。
 - **遗留**：macOS 分发仍需签名/公证；Windows 未在真机验证；三平台自动产出留给 CI。
+- **修正（Windows 命名）**：上游 `pdfium-win-*` 包里，**运行库** `pdfium.dll` 在 `bin/` 下，
+  而 `lib/pdfium.dll.lib` 是**导入库**（链接期用）。因此：
+  `scripts/fetch-pdfium.sh` 装完把运行库归位到 `lib/` 并删除 `*.dll.lib`/`*.a`/`*.pdb`；
+  `scripts/package.sh` 的 vendor 查找 `lib/` 优先、回退 `bin/`；
+  `library.rs` 的 exe 候选目录增加 `bin/`；平台表补 `win-x86`（`ARCH=x86`）。
+  单测 `candidate_directories_cover_exe_dir_lib_and_bin` 守住三种布局。
 - **状态**：有效。
 
 ## 五、开放项（尚未决策，等实测/评审）

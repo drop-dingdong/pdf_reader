@@ -21,7 +21,12 @@ scripts/fetch-pdfium.sh            # 自动识别平台
 scripts/fetch-pdfium.sh linux-x64  # 或显式指定
 ```
 
-产物放在 `vendor/pdfium-<平台>/lib/`（已被 `.gitignore` 忽略）。查找顺序见
+产物放在 `vendor/pdfium-<平台>/lib/`（已被 `.gitignore` 忽略）。
+
+> **Windows 的坑**：bblanchon 的 tar 包里，运行库 `pdfium.dll` 在 **`bin/`** 下，
+> 而 `lib/pdfium.dll.lib` 是**导入库**（链接期用，运行时不加载）。
+> `scripts/fetch-pdfium.sh` 会把运行库归位到 `lib/` 并删掉导入库/静态库；
+> 读取顺序里也包含 `bin/`，所以两种布局都能用。查找顺序见
 [`library::pdfium`](src/library.rs)：`PDFIUM_PATH` 环境变量 → 仓库内 `vendor/`（从当前目录向上 3 层）
 → 可执行文件同级及 `lib/` → 系统库。
 

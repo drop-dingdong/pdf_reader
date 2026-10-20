@@ -36,6 +36,7 @@ pub fn platform_tag() -> &'static str {
         ("macos", "aarch64") => "mac-arm64",
         ("macos", "x86_64") => "mac-x64",
         ("windows", "x86_64") => "win-x64",
+        ("windows", "x86") => "win-x86",
         ("windows", "aarch64") => "win-arm64",
         _ => "unknown",
     }
@@ -99,6 +100,8 @@ fn candidate_directories() -> Vec<String> {
         if let Some(parent) = exe.parent() {
             candidates.push(with_separator(parent.to_path_buf()));
             candidates.push(with_separator(parent.join("lib")));
+            // 有的 PDFium 分发包把 Windows 运行库放在 bin/ 下（lib/ 里是导入库 .dll.lib）
+            candidates.push(with_separator(parent.join("bin")));
         }
     }
 
@@ -125,6 +128,25 @@ mod tests {
             "unknown",
             "未识别的平台会导致找不到 vendor 目录"
         );
+    }
+
+    /// 打包布局：库与程序同目录、在 `lib/` 下、或在 `bin/` 下（Windows 上游包）。
+    #[test]
+    fn candidate_directories_cover_exe_dir_lib_and_bin() {
+        let exe = std::env::current_exe().expect("测试二进制路径");
+        let parent = exe.parent().expect("父目录");
+        let candidates = candidate_directories();
+        let wanted = [
+            with_separator(parent.to_path_buf()),
+            with_separator(parent.join("lib")),
+            with_separator(parent.join("bin")),
+        ];
+        for path in wanted {
+            assert!(
+                candidates.iter().any(|item| item == &path),
+                "候选目录缺少 {path}（打包后的查找依赖它）；实际：{candidates:?}"
+            );
+        }
     }
 
     #[test]

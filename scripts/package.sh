@@ -33,8 +33,14 @@ case "$target" in
 esac
 
 vendor="vendor/pdfium-$target/lib/$libname"
+# Windows 的上游包把运行库放在 bin/ 下（lib/ 里是导入库 pdfium.dll.lib）；两种布局都接受
+if [ ! -f "$vendor" ] && [ -f "vendor/pdfium-$target/bin/$libname" ]; then
+  vendor="vendor/pdfium-$target/bin/$libname"
+fi
 if [ ! -f "$vendor" ]; then
-  echo "找不到 $vendor —— 先运行 ./scripts/fetch-pdfium.sh $target" >&2
+  echo "找不到 vendor/pdfium-$target/{lib,bin}/$libname" >&2
+  echo "  注意：Windows 上 lib/pdfium.dll.lib 是**导入库**（链接期用），运行库是 bin/pdfium.dll。" >&2
+  echo "  先运行 ./scripts/fetch-pdfium.sh $target（它会把运行库归位到 lib/）" >&2
   exit 2
 fi
 

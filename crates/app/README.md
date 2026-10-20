@@ -28,6 +28,7 @@ cargo test -p app
 pdf_reader_linux_x64/
   app                 # Windows: app.exe
   lib/libpdfium.so    # macOS: libpdfium.dylib；Windows: pdfium.dll
+                      #（Windows 上游包的 pdfium.dll 在 bin/ 下，fetch 脚本会归位到 lib/）
   BUILD-INFO.txt      # 平台 + 二进制/库的 sha256 + 构建时间
 ```
 
