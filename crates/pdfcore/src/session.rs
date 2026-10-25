@@ -564,7 +564,14 @@ impl DocumentSession {
         (self.cache.get(&key).is_some() || self.jobs.contains_key(&key)).then_some(key)
     }
 
-    /// "开场底料"的位图（已渲染完才返回）。
+    /// "开场底料"的位图（**已渲染完**才返回）。
+    ///
+    /// 注意与 [`Self::thumbnail_key`] 的区别：那个函数把"任务还在飞"也算作已请求
+    /// （调用方用它避免重复提交），所以**它返回 `Some` 时这里仍可能是 `None`** ——
+    /// 这不是缺陷，而是在回答两个不同的问题："请求过了吗" vs "图到了吗"。
+    ///
+    /// **当前只被测试使用**：运行时上传统一走 [`Self::image_for_key`]（D-112 之后
+    /// `desired_textures` 决定"该传哪些键"，不再按页特判底料）。
     pub fn thumbnail_image(&self, page: PageIndex) -> Option<Arc<RasterImage>> {
         let key = self.thumbnail_key(page)?;
         self.cache.get(&key)

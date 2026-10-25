@@ -65,15 +65,16 @@ impl PageGeometry {
 
 /// 页面排布模式。
 ///
-/// MVP 中两种模式共用同一套纵向布局（[`VerticalLayout`]），差别只在滚动行为：
-/// `Continuous` 自由滚动，`SinglePage` 通过翻页命令按页对齐。
-/// "只渲染当前页"的裁剪属于优化项，留待 M4。
+/// **`SinglePage` 目前是预留项**：它会被持久化、也会被塞进 [`LayoutParams::mode`]，但
+/// **没有任何布局实现读它**（[`VerticalLayout`] / [`HorizontalLayout`] 都不看 `mode`），
+/// 界面也没有发送 `ViewerCommand::SetLayoutMode` 的入口 —— 选它不会改变任何行为。
+/// 保留的理由是"单页 / 连续"属于阅读器的基本模式，将来实现时不必再改接口与存档格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PageLayoutMode {
     /// 连续纵向滚动（MVP 默认，最接近浏览器的阅读体验）。
     #[default]
     Continuous,
-    /// 一次一页（翻页式）。
+    /// 一次一页（翻页式）。**预留，未实现**（见枚举级说明）。
     SinglePage,
 }
 

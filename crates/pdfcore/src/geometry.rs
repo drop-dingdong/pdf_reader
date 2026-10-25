@@ -275,14 +275,33 @@ impl Rect {
     }
 
     /// 内缩（页边距、视口留白）。
+    ///
+    /// **当前只被单测使用**（生产代码里没有调用点）。保留是因为"给矩形留边"是排布与命中
+    /// 都会用到的基本操作。
+    ///
+    /// 超限语义：当某条轴上的 `before + after` 超过边长时，**按比例**收缩到零尺寸，
+    /// 落点仍在原矩形内部（`left:right = 1:2` → 零尺寸矩形落在 1/3 处），
+    /// 而不是"原点照旧平移、宽度夹到 0"（那样零尺寸矩形可能跑到原矩形外面）。
     pub fn inset(self, insets: Insets) -> Self {
-        Self::new(
-            self.x + insets.left,
-            self.y + insets.top,
-            (self.width - insets.left - insets.right).max(0.0),
-            (self.height - insets.top - insets.bottom).max(0.0),
-        )
+        let (x, width) = inset_axis(self.x, self.width, insets.left, insets.right);
+        let (y, height) = inset_axis(self.y, self.height, insets.top, insets.bottom);
+        Self::new(x, y, width, height)
     }
+}
+
+/// 一条轴上的内缩：放得下就正常内缩；放不下就按 `before:after` 的比例收缩到零尺寸。
+fn inset_axis(start: f32, length: f32, before: f32, after: f32) -> (f32, f32) {
+    let span = before + after;
+    // 正常内缩（含负内缩 = 扩张）
+    if span <= length {
+        return (start + before, (length - span).max(0.0));
+    }
+    if span <= 0.0 {
+        return (start + before, length);
+    }
+    // 超限：按比例收缩，落点 = 原起点 + before 的占比
+    let factor = length.max(0.0) / span;
+    (start + before * factor, 0.0)
 }
 
 /// 四边留白。
@@ -567,6 +586,37 @@ mod tests {
         assert!(a.contains(Point::new(0.0, 0.0)));
         assert!(!a.contains(Point::new(10.0, 10.0)), "右/下边界为开区间");
         assert_eq!(a.inset(Insets::all(1.0)), Rect::new(1.0, 1.0, 8.0, 8.0));
+        // 超限时按比例收缩：left:right = 1:2 → 零尺寸矩形落在横向 1/3 处
+        let squashed = a.inset(Insets {
+            left: 10.0,
+            right: 20.0,
+            top: 0.0,
+            bottom: 0.0,
+        });
+        assert_eq!(squashed.size(), Size::new(0.0, 10.0));
+        assert!(
+            (squashed.x - 10.0 / 3.0).abs() < 1e-4,
+            "落点应在 1/3 处，实际 {}",
+            squashed.x
+        );
+        // 两条轴同时超限：各自按自己的比例落点，且都不跑出原矩形
+        let both = a.inset(Insets {
+            left: 6.0,
+            right: 4.0,
+            top: 0.0,
+            bottom: 30.0,
+        });
+        assert_eq!(both.size(), Size::ZERO);
+        assert!(
+            (both.x - 6.0).abs() < 1e-4,
+            "x 应在 6/10 处，实际 {}",
+            both.x
+        );
+        assert!(
+            (both.y - 0.0).abs() < 1e-4,
+            "y 应与原起点重合，实际 {}",
+            both.y
+        );
         assert_eq!(a.inset(Insets::all(20.0)).size(), Size::ZERO);
     }
 }
