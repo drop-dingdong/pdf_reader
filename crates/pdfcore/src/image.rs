@@ -54,7 +54,11 @@ impl RasterImage {
     /// （宁可在这里拒绝，也不要让 UI 拿到会越界读的数据）。
     pub fn new(width: u32, height: u32, format: PixelFormat, data: Arc<[u8]>) -> Option<Self> {
         let expected = Self::expected_len(width, height, format);
-        if data.len() < expected {
+        // 必须**精确**匹配：多出来的字节意味着调用方给的宽高/格式与缓冲区不符
+        // （例如后端返回带行填充的 stride）。`RasterImage` 不带 stride 字段，
+        // 所有读取方都按 `width * bpp` 逐行索引 —— 静默接受会让整幅图斜切，
+        // 所以这里宁可拒绝（在构造点就失败，而不是画错了才被发现）。
+        if data.len() != expected {
             return None;
         }
         Some(Self {

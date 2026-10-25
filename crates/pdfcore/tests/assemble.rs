@@ -683,9 +683,12 @@ fn zoom_keeps_the_view_center_anchored() {
 ///
 /// 原实现退化为"当前页顶部对齐 + 水平居中"。在**横向布局**下这会造成明显跳变：
 /// 向右滚动时视口中心很容易落进页间距，于是每次重排都被拽回"当前页顶部正中"
-/// （用户实测：纵向大缩放时向右移动会跳到该页顶部）。因此改为保持位置。
+/// 中心落在**页间距**时，锚点必须回退到最近的页，而不是丢弃锚点。
+///
+/// 丢弃锚点的后果（用户实测）：`set_zoom` 会保留原始 content 偏移，而 content 坐标随缩放
+/// 变化 —— 800% 下第 8 页附近的偏移，切回 100% 后落到了第 64 页。
 #[test]
-fn anchor_fallback_keeps_scroll_when_center_is_between_pages() {
+fn anchor_falls_back_to_the_nearest_page_when_center_is_between_pages() {
     let mut session = assemble();
     let mut events = Vec::new();
     session.handle(
@@ -695,31 +698,39 @@ fn anchor_fallback_keeps_scroll_when_center_is_between_pages() {
 
     // zoom=1 时页 0 矩形 y 12..804、页 1 起点 y=816；让中心落在 810（页间距内）
     session.handle(ViewerCommand::SetScroll(Vec2::new(0.0, 410.0)), &mut events);
+    let anchor = session
+        .capture_anchor()
+        .expect("中心在页间距里也必须能捕获锚点（回退到最近的页）");
     assert!(
-        session.capture_anchor().is_none(),
-        "中心落在页间距，应捕获失败"
+        anchor.page == PageIndex::new(0) || anchor.page == PageIndex::new(1),
+        "应当回退到相邻的页，实际 {:?}",
+        anchor.page
     );
 
-    let before = session.viewport().scroll;
-    session.handle(ViewerCommand::SetZoom(1.5), &mut events); // 不得 panic
+    // 大缩放：锚点必须把视野留在**同一页附近**（旧实现会跳到很远的页）
+    let before_page = session.state().current_page;
+    session.handle(ViewerCommand::SetZoom(8.0), &mut events);
+    let after_page = session.state().current_page;
+    assert!(
+        after_page.get().abs_diff(before_page.get()) <= 1,
+        "缩放后不应跳到别的页：before={before_page:?} after={after_page:?}"
+    );
 
-    // 保持原有位置（只可能被夹取到合法范围），不会跳到某页顶部
-    let after = session.viewport().scroll;
+    // 滚动位置必须在合法范围内（不会被夹到内容之外）
     let max_y = content_max_scroll_y(&session);
     assert!(
-        after.y <= max_y + 0.5,
-        "位置必须在合法范围内，实际 {after:?}，上限 {max_y}"
+        session.viewport().scroll.y <= max_y + 0.5,
+        "滚动应在合法范围内：{:?} > {max_y}",
+        session.viewport().scroll
     );
-    let page_top = session
-        .layout()
-        .placement(session.state().current_page)
-        .map(|placement| placement.rect.y);
-    if let Some(page_top) = page_top {
-        assert!(
-            (after.y - before.y).abs() < 0.5 || (after.y - page_top).abs() > 5.0,
-            "不应被拉回页顶：before={before:?} after={after:?} page_top={page_top}"
-        );
-    }
+
+    // 再缩回 1×：仍然不能跳页
+    session.handle(ViewerCommand::SetZoom(1.0), &mut events);
+    let back = session.state().current_page;
+    assert!(
+        back.get().abs_diff(before_page.get()) <= 1,
+        "缩回后不应跳到别的页：before={before_page:?} after={back:?}"
+    );
 }
 
 /// 第三轮验收：缩放之后，**旧比例**的在飞任务必须被取消。

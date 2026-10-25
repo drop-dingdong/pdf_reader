@@ -29,6 +29,49 @@ fn backend() -> Option<PdfiumBackend> {
 /// 这条测试专治"红蓝对调"：`PdfRenderConfig` 默认会给 PDFium 打开
 /// `FPDF_REVERSE_BYTE_ORDER`（输出 RGBA），而我们按 Bgra8 再交换一次，黄底就会变成青色、
 /// 蓝字变成红色 —— 灰度样本完全发现不了。
+/// 大纲必须是**树**，每个节点恰好出现一次（深处节点不得被祖先重复收集）。
+#[test]
+fn nested_outline_is_a_tree_without_duplicates() {
+    let Some(backend) = backend() else { return };
+    let bytes = common::nested_outline_pdf();
+    let opened = backend
+        .open(Source::Bytes(&bytes), None)
+        .expect("打开嵌套大纲 PDF");
+    let navigation = opened.document.navigation().expect("导航索引");
+
+    let titles: Vec<&str> = navigation
+        .outline
+        .iter()
+        .map(|node| node.title.as_str())
+        .collect();
+    assert_eq!(titles, vec!["A", "B"], "顶层只能有 A 与 B");
+    assert_eq!(navigation.outline[0].children.len(), 1, "A 只有一个子项");
+    assert_eq!(navigation.outline[0].children[0].title, "A1");
+    assert_eq!(
+        navigation.outline[0].children[0].children.len(),
+        1,
+        "A1 只有一个子项"
+    );
+    assert_eq!(navigation.outline[0].children[0].children[0].title, "A1a");
+    assert!(
+        navigation.outline[0].children[0].children[0]
+            .children
+            .is_empty(),
+        "A1a 是叶子"
+    );
+    // 带位置的 /XYZ 目标：A1 应当有页内偏移
+    assert!(
+        matches!(
+            navigation.outline[0].children[0].destination,
+            Some(Destination::Page {
+                offset: Some(_),
+                ..
+            })
+        ),
+        "A1 的 /XYZ 目标应当解析出页内位置"
+    );
+}
+
 #[test]
 fn yellow_page_stays_yellow_in_bgra_bytes() {
     let Some(backend) = backend() else { return };

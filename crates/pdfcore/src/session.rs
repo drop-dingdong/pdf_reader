@@ -747,11 +747,22 @@ impl DocumentSession {
     /// 调用方应退化为"当前页居中"（见 [`DocumentSession::restore_anchor`] 的调用方）。
     pub fn capture_anchor(&self) -> Option<ScrollAnchor> {
         let center = self.viewport.center_content_point();
-        let page = self.layout_engine.page_at(&self.layout, center)?;
+        // 中心可能落在页间距 / 页边留白里：`page_at` 会返回 None，此时**必须**回退到
+        // 最近的页，否则缩放只能保留原始 content 偏移 —— 而 content 坐标随缩放变化，
+        // 偏移量会被放大到别的页（实测：800% 第 8 页切回 100% 跳到第 64 页）。
+        let page = self
+            .layout_engine
+            .page_at(&self.layout, center)
+            .or_else(|| self.layout_engine.nearest_page(&self.layout, center))?;
         let placement = self.layout.placement(page)?;
+        // 在页外时把点夹进页面矩形，保证页内坐标有意义（在页内时是空操作）
+        let clamped = Point::new(
+            center.x.clamp(placement.rect.x, placement.rect.right()),
+            center.y.clamp(placement.rect.y, placement.rect.bottom()),
+        );
         Some(ScrollAnchor {
             page,
-            page_point: placement.content_to_page(center),
+            page_point: placement.content_to_page(clamped),
         })
     }
 

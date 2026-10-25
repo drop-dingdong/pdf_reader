@@ -77,6 +77,56 @@ fn stream_object(content: &str) -> String {
     )
 }
 
+/// 两层嵌套 + 一个平级项的大纲：A > A1 > A1a，以及平级的 B。
+///
+/// 存在的唯一目的：**钉住大纲的树形遍历**。pdfium-render 的 `bookmarks().iter()`
+/// 是整棵树的先序遍历（深处节点会被祖先的递归再收集一次），
+/// 只有 `root()` + `next_sibling()` + `iter_direct_children()` 才是"每个节点恰好一次"。
+pub fn nested_outline_pdf() -> Vec<u8> {
+    let page = |content: u32| {
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
+             /Resources << /Font << /F1 7 0 R >> >> /Contents {content} 0 R >>"
+        )
+    };
+    let objects: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /Outlines 8 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".to_string(),
+        page(4),
+        stream_object("BT /F1 12 Tf 20 100 Td (Page one) Tj ET\n"),
+        page(6),
+        stream_object("BT /F1 12 Tf 20 100 Td (Page two) Tj ET\n"),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Outlines /First 9 0 R /Last 12 0 R /Count 4 >>".to_string(),
+        "<< /Title (A) /Parent 8 0 R /Next 12 0 R /First 10 0 R /Last 10 0 R /Count 2 \
+         /Dest [3 0 R /Fit] >>"
+            .to_string(),
+        "<< /Title (A1) /Parent 9 0 R /First 11 0 R /Last 11 0 R /Count 1 \
+         /Dest [3 0 R /XYZ 0 500 null] >>"
+            .to_string(),
+        "<< /Title (A1a) /Parent 10 0 R /Dest [5 0 R /Fit] >>".to_string(),
+        "<< /Title (B) /Parent 8 0 R /Prev 9 0 R /Dest [5 0 R /Fit] >>".to_string(),
+    ];
+
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{}\nendobj\n", index + 1, body));
+    }
+    let xref_offset = out.len();
+    let size = objects.len() + 1;
+    out.push_str(&format!("xref\n0 {size}\n"));
+    out.push_str("0000000000 65535 f \n");
+    for offset in &offsets {
+        out.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
+    ));
+    out.into_bytes()
+}
+
 /// 一页"整页黄色 + 蓝色文字"的 PDF（200×200 pt）。
 ///
 /// 存在的唯一目的：**钉住颜色通道顺序**。红蓝对调时，黄底会变成青色、蓝字变成红色，

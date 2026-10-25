@@ -294,6 +294,19 @@ impl DocumentLayout {
     }
 }
 
+/// 点到矩形的最短距离的平方（点在矩形内时为 0）。
+fn distance_sq_to_rect(rect: Rect, point: Point) -> f32 {
+    let dx = (rect.x - point.x)
+        .max(0.0)
+        .max(point.x - rect.right())
+        .max(0.0);
+    let dy = (rect.y - point.y)
+        .max(0.0)
+        .max(point.y - rect.bottom())
+        .max(0.0);
+    dx * dx + dy * dy
+}
+
 /// **布局引擎**：页几何 → 内容空间排布。
 ///
 /// ## 这个 trait 存在的目的
@@ -337,6 +350,22 @@ pub trait PageLayout: Send + Sync {
             .placements
             .iter()
             .find(|placement| placement.rect.contains(content_point))
+            .map(|placement| placement.page)
+    }
+
+    /// 离 `content_point` 最近的页（点落在页间距或页边留白里时用它）。
+    ///
+    /// [`PageLayout::page_at`] 只认"被页面矩形包含"的点；缩放锚点却必须**总有**一个页，
+    /// 否则缩放时只能保留原始滚动偏移 —— 而内容坐标随缩放变化，偏移量会被放大到别的页
+    /// （实测：800% 第 8 页切回 100% 跳到第 64 页）。
+    fn nearest_page(&self, layout: &DocumentLayout, content_point: Point) -> Option<PageIndex> {
+        layout
+            .placements
+            .iter()
+            .min_by(|a, b| {
+                distance_sq_to_rect(a.rect, content_point)
+                    .total_cmp(&distance_sq_to_rect(b.rect, content_point))
+            })
             .map(|placement| placement.page)
     }
 

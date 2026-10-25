@@ -1917,11 +1917,12 @@ impl PdfReaderApp {
             1.0
         };
         // 记录的比例可能让预览图超出纹理单边上限（大区域 + 高倍）：按超采样步长降档（D-108）
+        let requested_scale = render_scale_for(display_scale, session.overscan());
         let render_value = crate::view::preview_render_scale(
             page_rect,
             placement.page_size,
             placement.rotation,
-            render_scale_for(display_scale, session.overscan()),
+            requested_scale,
             session.max_texture_side(),
         );
         let render = Scale::from_zoom(render_value);
@@ -1952,6 +1953,31 @@ impl PdfReaderApp {
                     range,
                     count
                 ));
+                // 显式说明"降档"：上面的数字里能推导出来（记录分辨率 vs 渲染比例），
+                // 但这里把原因也写清楚（区域像素超过纹理单边上限）。每次请求只打一行。
+                if render_value < requested_scale {
+                    let (region_w, region_h) = crate::view::region_pixel_size(
+                        page_rect,
+                        placement.page_size,
+                        placement.rotation,
+                        requested_scale,
+                    )
+                    .unwrap_or((0, 0));
+                    let steps = (requested_scale / render_value.max(f32::MIN_POSITIVE))
+                        .log(crate::view::DEFAULT_PREVIEW_STEP)
+                        .round();
+                    self.diag.line(format!(
+                        "[预览] 降档：{tag} 页={} 记录分辨率={:.0}% 原渲染比例={:.3} → 实际={:.3}（降 {:.0} 档：区域 {}x{} 超过 max_texture_side={}）",
+                        page.display_number(),
+                        display_scale * 100.0,
+                        requested_scale,
+                        render_value,
+                        steps,
+                        region_w,
+                        region_h,
+                        session.max_texture_side()
+                    ));
+                }
             }
             return None;
         };

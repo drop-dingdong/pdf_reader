@@ -35,11 +35,17 @@ fn backend_available() -> bool {
     backend_pdfium::pdfium().is_ok()
 }
 
-/// 每个测试用独立的临时目录（脚本与样本放在一起：脚本里的 `pdf` 是相对路径）。
+/// 每个"一次调用"用独立的临时目录（脚本与样本放在一起：脚本里的 `pdf` 是相对路径）。
+///
+/// 目录名必须带上**递增序号**：两个测试都会遍历同一批脚本，若只用"进程号 + 脚本名"，
+/// 它们会落到同一个目录里，一边写样本一边读 —— 会把 PDF 读成半截（曾偶发失败）。
 fn stage(script: &str, sample: Sample) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let sequence = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "pdf-replay-{}-{}",
+        "pdf-replay-{}-{}-{}",
         std::process::id(),
+        sequence,
         script.trim_end_matches(".json")
     ));
     std::fs::create_dir_all(&dir).expect("建临时目录");

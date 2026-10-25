@@ -191,11 +191,14 @@ fn collect_navigation(
         }
     }
 
-    let outline = document
-        .bookmarks()
-        .iter()
-        .map(|bookmark| bookmark_to_node(&bookmark))
-        .collect();
+    // 只从**顶层**开始：`bookmarks().iter()` 是整棵树的先序遍历，深处节点会被
+    // 祖先的 `iter_direct_children()` 再收集一次（深度 d 的节点出现 d 次）。
+    let mut outline = Vec::new();
+    let mut current = document.bookmarks().root();
+    while let Some(bookmark) = current {
+        outline.push(bookmark_to_node(&bookmark));
+        current = bookmark.next_sibling();
+    }
 
     let mut links_by_page = Vec::with_capacity(page_count as usize);
     for index in 0..page_count {
