@@ -44,6 +44,8 @@ fn annotation_and_body_survive_a_save_and_reopen() {
     { "id": "top", "op": "set_scroll", "x": 0, "y": 0 },
     { "id": "settle", "op": "wait", "frames": 8 },
     { "id": "annotate", "op": "highlight", "page": 0, "x": 50, "y": 690, "width": 450, "height": 50 },
+    { "id": "ink", "op": "ink", "page": 0, "width": 3.0,
+      "points": [[50, 700], [120, 720], [200, 690], [280, 730]] },
     { "id": "save", "op": "save" },
     { "id": "after", "op": "wait", "frames": 3 }"#,
     );
@@ -68,10 +70,29 @@ fn annotation_and_body_survive_a_save_and_reopen() {
         "主存档（正文所在）必须落盘：{}",
         sidecar_path.display()
     );
+    let ink = report
+        .actions
+        .iter()
+        .find(|action| action.id == "ink")
+        .expect("墨迹动作");
+    assert_eq!(ink.annotations, 2, "高亮之后再加一笔墨迹");
+
     let overlay = std::fs::read_to_string(&overlay_path).expect("读图层");
     assert!(
         overlay.contains("highlight"),
         "图层里应当有 highlight：{overlay}"
+    );
+    assert!(
+        overlay.contains("\"kind\":\"ink\"") && overlay.contains("\"points\""),
+        "图层里应当有墨迹的 points：{overlay}"
+    );
+    assert!(
+        overlay.contains("\"width\":3.00"),
+        "墨迹的线宽必须落盘（页面空间）：{overlay}"
+    );
+    assert!(
+        overlay.contains("\"version\": 2"),
+        "墨迹需要 v2 图层（v1 读取端会静默丢掉它）：{overlay}"
     );
 
     // 第 2 次：重新打开同一份 PDF → 标注应当被加载回来
@@ -88,9 +109,22 @@ fn annotation_and_body_survive_a_save_and_reopen() {
         .find(|action| action.id == "settle")
         .expect("等待动作");
     assert_eq!(
-        settle.annotations, 1,
-        "重新打开后应当加载回那条标注（用户实测：这里为 0 = 图层没落盘/没读回）"
+        settle.annotations, 2,
+        "重新打开后应当加载回两条标注（用户实测：这里为 0 = 图层没落盘/没读回）"
     );
+    // `annotation_bounds` 取最后一条（加载顺序保留：高亮在前、墨迹在后）
+    let (x, y, width, height) = settle.annotation_bounds.expect("墨迹包围盒");
+    for (label, actual, expected) in [
+        ("x", x, 48.5),
+        ("y", y, 688.5),
+        ("width", width, 233.0),
+        ("height", height, 43.0),
+    ] {
+        assert!(
+            (actual - expected).abs() < 0.01,
+            "重开后墨迹的 {label} 应为 {expected}，实际 {actual}（几何必须原样回来）"
+        );
+    }
 
     std::fs::remove_dir_all(&dir).ok();
 }

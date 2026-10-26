@@ -1,0 +1,13 @@
+{
+  "name": "ink",
+  "pdf": "rotated_2p.pdf",
+  "actions": [
+    { "id": "resize", "op": "resize", "width": 700, "height": 800 },
+    { "id": "top", "op": "set_scroll", "x": 0, "y": 0 },
+    { "id": "settle", "op": "wait", "frames": 8 },
+    { "id": "stroke", "op": "ink", "page": 0, "width": 3.0,
+      "points": [[50, 700], [120, 720], [200, 690], [280, 730]] },
+    { "id": "undo1", "op": "undo" },
+    { "id": "redo1", "op": "redo" }
+  ]
+}

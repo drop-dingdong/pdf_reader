@@ -27,8 +27,8 @@ impl AnnotationId {
 
 /// 标注种类。
 ///
-/// 三类的几何都是"若干四边形"（文本类标注天然按行分成多个矩形）；
-/// 墨迹与选框在 S4/S5 再加，模型不预先为它们留空壳。
+/// 文本类（高亮 / 下划线 / 删除线）的几何是"若干四边形"——天然按行分成多个矩形；
+/// 墨迹的几何是**页面空间折线**（S4）；选框在 S5 之后再加，模型不预先为它留空壳。
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnnotationKind {
     /// 高亮：半透明填充。
@@ -46,17 +46,72 @@ pub enum AnnotationKind {
         /// 每行的矩形（页面空间）。
         quads: Vec<Rect>,
     },
+    /// 墨迹：一笔绘制出的折线。
+    ///
+    /// 顶点与线宽**都是页面空间单位**：缩放时按布局的 `scale` 换算，粗细才与缩放无关
+    /// （存屏幕像素会让"画完再放大"变成一条细线）。
+    Ink {
+        /// 折线顶点（页面空间，顺序即笔顺；至少两个点）。
+        points: Vec<Point>,
+        /// 线宽（页面空间）。
+        width: f32,
+    },
 }
 
 impl AnnotationKind {
-    /// 该种类的行矩形。
+    /// 该种类的行矩形（墨迹没有矩形，返回空切片）。
+    ///
+    /// 文本类标注的绘制、命中与"按页取行"都走它；墨迹为空是**刻意**的：
+    /// 调用方如果只处理 `quads`，自然会跳过墨迹，而不是把它当零面积矩形误判。
     pub fn quads(&self) -> &[Rect] {
         match self {
             Self::Highlight { quads } | Self::Underline { quads } | Self::StrikeOut { quads } => {
                 quads
             }
+            Self::Ink { .. } => &[],
         }
     }
+
+    /// 墨迹的折线与线宽；其它种类为 `None`。
+    pub fn ink(&self) -> Option<(&[Point], f32)> {
+        match self {
+            Self::Ink { points, width } => Some((points, *width)),
+            _ => None,
+        }
+    }
+
+    /// 几何是否满足该类的不变量（`Annotation::new` 的唯一判据）。
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Self::Highlight { quads } | Self::Underline { quads } | Self::StrikeOut { quads } => {
+                !quads.is_empty()
+                    && quads
+                        .iter()
+                        .all(|quad| quad.width > 0.0 && quad.height > 0.0)
+            }
+            Self::Ink { points, width } => {
+                points.len() >= 2
+                    && width.is_finite()
+                    && *width > 0.0
+                    && points
+                        .iter()
+                        .all(|point| point.x.is_finite() && point.y.is_finite())
+            }
+        }
+    }
+}
+
+/// 点到线段 `a─b` 的最短距离（墨迹命中用；退化成点时距离到该点）。
+fn distance_to_segment(point: Point, a: Point, b: Point) -> f32 {
+    let ab = b - a;
+    let length_squared = ab.x * ab.x + ab.y * ab.y;
+    if length_squared <= f32::EPSILON {
+        return point.distance(a);
+    }
+    let ap = point - a;
+    let t = ((ap.x * ab.x + ap.y * ab.y) / length_squared).clamp(0.0, 1.0);
+    let closest = Point::new(a.x + ab.x * t, a.y + ab.y * t);
+    point.distance(closest)
 }
 
 /// 一个标注。
@@ -79,12 +134,7 @@ pub struct Annotation {
 impl Annotation {
     /// 构造一个标注并做不变量检查（几何为空或退化时返回 `None`）。
     pub fn new(page: PageIndex, kind: AnnotationKind) -> Option<Self> {
-        let quads = kind.quads();
-        if quads.is_empty()
-            || !quads
-                .iter()
-                .all(|quad| quad.width > 0.0 && quad.height > 0.0)
-        {
+        if !kind.is_valid() {
             return None;
         }
         Some(Self {
@@ -97,16 +147,47 @@ impl Annotation {
         })
     }
 
-    /// 覆盖全部行矩形的包围盒（页面空间）。
+    /// 覆盖全部几何的包围盒（页面空间）。
+    ///
+    /// 墨迹的包围盒按折线点集外扩**半个线宽**——否则一条横线的高度为 0，
+    /// 依赖包围盒的浮窗位置、截图与命中预备检查都会退化成一条线。
     pub fn bounds(&self) -> Option<Rect> {
+        if let Some((points, width)) = self.kind.ink() {
+            let first = *points.first()?;
+            let mut min = first;
+            let mut max = first;
+            for point in points {
+                min.x = min.x.min(point.x);
+                min.y = min.y.min(point.y);
+                max.x = max.x.max(point.x);
+                max.y = max.y.max(point.y);
+            }
+            let half = width * 0.5;
+            return Some(Rect::new(
+                min.x - half,
+                min.y - half,
+                (max.x - min.x) + width,
+                (max.y - min.y) + width,
+            ));
+        }
         let mut quads = self.kind.quads().iter().copied();
         let first = quads.next()?;
         Some(quads.fold(first, |union, quad| union.union(quad)))
     }
 
     /// 点是否落在标注内（`tolerance` 是页面空间单位，由调用方按缩放换算）。
+    ///
+    /// 文本类看"是否落在某行矩形里"；墨迹看"到折线的距离是否小于半线宽（或容差）"，
+    /// **不能**用包围盒——一笔 L 形墨迹的包围盒里有大片空白，用包围盒会出现
+    /// "点在空白处却选中了墨迹"。
     pub fn contains(&self, point: Point, tolerance: f32) -> bool {
         let tolerance = tolerance.max(0.0);
+        if let Some((points, width)) = self.kind.ink() {
+            let radius = (width * 0.5).max(tolerance);
+            return points
+                .windows(2)
+                .any(|pair| distance_to_segment(point, pair[0], pair[1]) <= radius);
+        }
         self.kind.quads().iter().any(|quad| {
             let expanded = Rect::new(
                 quad.x - tolerance,
@@ -259,6 +340,153 @@ mod tests {
         assert!(
             annotation.contains(Point::new(15.0, 39.0), 2.0),
             "容差应当把边缘外的点算进来"
+        );
+    }
+
+    #[test]
+    fn ink_needs_two_finite_points_and_a_positive_width() {
+        let page = PageIndex::FIRST;
+        let two = || vec![Point::new(10.0, 20.0), Point::new(60.0, 28.0)];
+        assert!(
+            Annotation::new(
+                page,
+                AnnotationKind::Ink {
+                    points: two(),
+                    width: 4.0
+                }
+            )
+            .is_some(),
+            "两个点 + 正线宽是合法墨迹"
+        );
+        assert!(
+            Annotation::new(
+                page,
+                AnnotationKind::Ink {
+                    points: vec![Point::new(10.0, 20.0)],
+                    width: 4.0
+                }
+            )
+            .is_none(),
+            "单点画不出折线"
+        );
+        assert!(
+            Annotation::new(
+                page,
+                AnnotationKind::Ink {
+                    points: two(),
+                    width: 0.0
+                }
+            )
+            .is_none(),
+            "零线宽看不见，也不该入库"
+        );
+        assert!(
+            Annotation::new(
+                page,
+                AnnotationKind::Ink {
+                    points: two(),
+                    width: f32::NAN
+                }
+            )
+            .is_none(),
+            "NaN 线宽会污染包围盒"
+        );
+        assert!(
+            Annotation::new(
+                page,
+                AnnotationKind::Ink {
+                    points: vec![Point::new(f32::NAN, 0.0), Point::new(1.0, 1.0)],
+                    width: 2.0
+                }
+            )
+            .is_none(),
+            "NaN 顶点会污染包围盒与命中"
+        );
+    }
+
+    #[test]
+    fn ink_has_no_quads_but_has_an_ink_accessor() {
+        let annotation = Annotation::new(
+            PageIndex::FIRST,
+            AnnotationKind::Ink {
+                points: vec![Point::new(0.0, 0.0), Point::new(10.0, 10.0)],
+                width: 2.0,
+            },
+        )
+        .expect("有效墨迹");
+        assert!(
+            annotation.kind.quads().is_empty(),
+            "墨迹没有行矩形；只处理 quads 的旧代码应当自然跳过它"
+        );
+        let (points, width) = annotation.kind.ink().expect("墨迹访问器");
+        assert_eq!(points.len(), 2);
+        assert_eq!(width, 2.0);
+    }
+
+    #[test]
+    fn ink_bounds_include_half_the_stroke_width() {
+        let annotation = Annotation::new(
+            PageIndex::FIRST,
+            AnnotationKind::Ink {
+                points: vec![
+                    Point::new(10.0, 20.0),
+                    Point::new(60.0, 28.0),
+                    Point::new(40.0, 50.0),
+                ],
+                width: 4.0,
+            },
+        )
+        .expect("有效墨迹");
+        let bounds = annotation.bounds().expect("包围盒");
+        // 点集 x:10..60 y:20..50，外扩半个线宽（2）
+        assert_eq!(
+            (bounds.x, bounds.y, bounds.width, bounds.height),
+            (8.0, 18.0, 54.0, 34.0)
+        );
+    }
+
+    #[test]
+    fn ink_hit_tests_the_polyline_not_the_bounding_box() {
+        // L 形：横向 (0,0)→(100,0)，再纵向 (100,0)→(100,80)
+        let annotation = Annotation::new(
+            PageIndex::FIRST,
+            AnnotationKind::Ink {
+                points: vec![
+                    Point::new(0.0, 0.0),
+                    Point::new(100.0, 0.0),
+                    Point::new(100.0, 80.0),
+                ],
+                width: 4.0,
+            },
+        )
+        .expect("有效墨迹");
+
+        assert!(
+            !annotation.contains(Point::new(50.0, 8.0), 0.0),
+            "半线宽是 2，离折线 8 的点不该命中"
+        );
+        assert!(
+            annotation.contains(Point::new(50.0, 1.5), 0.0),
+            "贴线应当命中"
+        );
+        assert!(
+            annotation.contains(Point::new(50.0, 8.0), 9.0),
+            "容差大于半线宽时按容差判定（命中逻辑是距离比较）"
+        );
+
+        // 包围盒内部、但离两条边都很远：绝不能命中（这是"包围盒当几何"的经典 bug）
+        assert!(
+            !annotation.contains(Point::new(50.0, 40.0), 0.0),
+            "包围盒内的空白不算命中"
+        );
+        // 线段端点之外的外延区域
+        assert!(
+            !annotation.contains(Point::new(-10.0, 0.0), 0.0),
+            "折线端点之外不命中"
+        );
+        assert!(
+            annotation.contains(Point::new(-1.0, 0.0), 0.0),
+            "端点处的半线宽内仍应命中"
         );
     }
 

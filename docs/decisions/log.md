@@ -574,6 +574,37 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 4. **截图不含注释**（`compose_region_snapshot` 只合成位图；需在 S2 后明确写入文档）；
 5. **回放拖拽跨帧**（S0 先做，否则 S1 之后全靠人眼）。
 
+### D-119 墨迹（S4a）：模型 + 回放动作 + 标注图层 v2
+
+- **决定**（D-118 S4 的第一批，按"先回放、后模型、再工具"的顺序落地）：
+  1. `AnnotationKind::Ink { points: Vec<Point>, width: f32 }`，**顶点与线宽都是页面空间**
+     （存屏幕像素会让"画完再放大"变成一条细线）。`quads()` 对墨迹返回**空切片**：
+     只处理行矩形的旧代码会自然跳过它，而不是把它当零面积矩形误判。
+  2. `bounds()` 按点集外扩**半个线宽**（一条横线否则高度为 0，浮窗定位/截图会退化）；
+     `contains()` 用"点到折线的最短距离 ≤ max(width/2, tolerance)"，
+     **不能用包围盒**——L 形墨迹的包围盒里有大片空白。
+  3. `<pdf>.annot.json` 版本 **1 → 2**（新增 `points` + `width`）。必须升版本：
+     v1 的读取端会把 `"kind":"ink"` 当未知种类静默丢掉，用户再保存一次就真丢了；
+     升版本让旧程序按既有规则**拒读且不覆盖**（D-107 / D-118 第 7 条）。v1 文件仍可读，
+     不需要迁移（读得懂就不改数据）。
+  4. 回放动作 `ink { page, points, width? }` 走"直接建标注"，与 `highlight` 共用新的
+     `app.add_annotation` 唯一入口，因此自动获得 `apply_edit` 的撤销/重做与配对正文条目。
+     **真实拖拽**（一笔一命令、Esc / 移出窗口 / 切工具丢弃、0.5px 抽稀）留给 S4 的工具层，
+     那一层接上后改由手势驱动同一个 `annotate_ink`。
+- **影响**：`pdfcore::annotation`（`Ink` / `is_valid` / `bounds` / `contains` / `ink()`）、
+  `persist`（`ANNOT_VERSION = 2`、`SavedAnnotation::{points,width}`、
+  `annotation_kind_from_saved`）、`app`（`add_annotation` / `annotate_ink`、墨迹绘制）、
+  `replay`（`ink` 动作 + `DEFAULT_INK_WIDTH`）、`scripts/replay/ink.json` + 结构基线。
+- **验证**：`annotation::tests::ink_*`（不变量 / 空 quads / 半线宽包围盒 / 折线命中而非包围盒）、
+  `persist::annot_tests::ink_round_trips_through_json_with_points_and_width`、
+  `a_version_1_overlay_still_loads`、`ink_with_too_few_points_is_skipped_at_the_model_layer`、
+  回放 `ink_stroke_is_one_annotation_that_undo_and_redo_can_move`（一笔 = 1 条、撤销/重做、
+  包围盒 48.5 / 688.5 / 233 / 43）、`annot_roundtrip` 增加墨迹（重开后几何与线宽原样回来，
+  文件里 `"version": 2`），结构基线 `perf/baseline/ink.json` 与现有 8 条并列通过。
+- **未做**：墨迹工具（手势状态机）、抽稀上限、Esc 丢弃、1000 条以内的忙帧 p99 验收；
+  这些是 S4 的下一批。
+- **状态**：S4a 生效；S4 未完成。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

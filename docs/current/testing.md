@@ -93,9 +93,15 @@ cargo test -p app --test replay_scripts
 | `start_high.json` | a4 | **开局就在 800%**、拖动、再缩回 100%：验证"开场底料"让页面全程不露白（断言⑤）。
   脚本里的 `"start_zoom"` 字段用于模拟"一打开就是高倍" |
 | `strip_page.json` | strip | 条幅页（单边超纹理上限）→ 强制分块（D-108） |
+| `click_link.json` | rotated | `click` 动作真的驱动 UI：点链接跳页（不是"跑完没报错"） |
+| `drag_pan.json` | a4 | `drag` 在平移工具下按**页面空间**位移滚动 |
+| `annotate_zoom.json` | rotated | 同一区域在 1× 与 8× 下标注几何逐值相同（"只存页面空间"的守卫） |
+| `undo_redo.json` | rotated | 3 画 2 撤 1 重做；配对正文条目跟着一起走 |
+| `ink.json` | rotated | 一笔墨迹 = 一条标注；包围盒按半线宽外扩；撤销/重做整笔进出 |
 
 脚本格式（JSON，每个动作（`resize` / `zoom` / `scroll_by` / `set_scroll` / `go_to_page` / `hover_link` / `unhover` /
-`click` / `drag` / `highlight` / `save` / `open_preview` / `wait`：`click` 与 `drag` 用**页面空间**坐标，
+`click` / `drag` / `highlight` / `ink` / `save` / `undo` / `redo` / `open_preview` / `wait`：`click`、`drag`
+与 `ink` 用**页面空间**坐标，
 因此与缩放、窗口尺寸、页边距无关）一个 `id`）：
 
 ```json
@@ -109,7 +115,10 @@ cargo test -p app --test replay_scripts
 
 可用动作：`resize`（宽/高）、`zoom`（`value`）、`scroll_by`（`dx/dy`）、`set_scroll`（`x/y`）、
 `go_to_page`（`page`，0 起）、`hover_link`（`page/link`）、`unhover`、`wait`（`frames`）、
-`open_preview`（`index`：唤出第 index 条自定义图片 preview 的浮窗，走 app 自己的懒生成路径）。
+`open_preview`（`index`：唤出第 index 条自定义图片 preview 的浮窗，走 app 自己的懒生成路径）、
+`highlight`（`page/x/y/width/height`：页面空间矩形 → 文本行高亮）、
+`ink`（`page` + `points:[[x,y],…]` + 可选 `width`：一笔墨迹，顶点与线宽都是页面空间）、
+`save`（等价于点"保存"/Ctrl+S）、`undo` / `redo`（等价于 Ctrl+Z / Ctrl+Shift+Z）。
 
 ### 4.5.1 确定性从哪来
 

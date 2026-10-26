@@ -31,6 +31,8 @@ const CASES: &[(&str, Sample)] = &[
     ("annotate_zoom.json", Sample::Rotated),
     // S3：撤销/重做（单栈、时间序）
     ("undo_redo.json", Sample::Rotated),
+    // S4：墨迹（一笔一标注、包围盒按半线宽外扩）
+    ("ink.json", Sample::Rotated),
 ];
 
 /// 脚本目录（测试的工作目录是 crate 目录，不是工作区根）。
@@ -164,6 +166,54 @@ fn undo_and_redo_walk_the_annotation_stack() {
         action("redo1").previews_total,
         2,
         "重做后正文条目必须一起回来"
+    );
+}
+
+/// S4：一笔墨迹 = 一条标注；撤销一次整笔消失，重做回来（含配对正文条目）。
+///
+/// 包围盒按"点集外扩半个线宽"计算，所以这里不只是"能跑通"，还钉住了墨迹的几何契约：
+/// 若哪天有人把墨迹存成屏幕坐标，或忘了外扩线宽，这四个数会立刻对不上。
+#[test]
+fn ink_stroke_is_one_annotation_that_undo_and_redo_can_move() {
+    if !backend_available() {
+        return;
+    }
+    let report = run("ink.json", Sample::Rotated);
+    let action = |id: &str| {
+        report
+            .actions
+            .iter()
+            .find(|action| action.id == id)
+            .unwrap_or_else(|| panic!("缺动作 {id}"))
+    };
+
+    let stroke = action("stroke");
+    assert_eq!(stroke.annotations, 1, "一笔墨迹应当只产生一条标注");
+    assert_eq!(stroke.previews_total, 1, "墨迹也要有配对的正文条目");
+    let (x, y, width, height) = stroke.annotation_bounds.expect("墨迹包围盒");
+    for (label, actual, expected) in [
+        ("x", x, 48.5),
+        ("y", y, 688.5),
+        ("width", width, 233.0),
+        ("height", height, 43.0),
+    ] {
+        assert!(
+            (actual - expected).abs() < 0.01,
+            "墨迹包围盒 {label} 应为 {expected}（点集外扩半个线宽），实际 {actual}"
+        );
+    }
+
+    assert_eq!(action("undo1").annotations, 0, "撤销一次整笔消失");
+    assert_eq!(
+        action("undo1").previews_total,
+        0,
+        "撤销必须同时收走配对正文条目"
+    );
+    assert_eq!(action("redo1").annotations, 1, "重做后墨迹回来");
+    assert_eq!(
+        action("redo1").previews_total,
+        1,
+        "重做必须同时放回配对正文条目"
     );
 }
 

@@ -123,6 +123,9 @@ const LINK_OVERLAY_COLOR: Color32 = Color32::from_rgb(220, 40, 40);
 /// 标注命中的容差（**屏幕像素**；命中时按缩放换算成页面单位，否则高倍下会变成"无边框的靶子"）。
 const ANNOTATION_HIT_TOLERANCE_PX: f32 = 4.0;
 
+/// 墨迹的默认线宽（**页面空间**单位；回放动作与 S4 的墨迹工具共用）。
+const DEFAULT_INK_WIDTH: f32 = 2.0;
+
 // 链接框颜色（红/绿）由 `view::link_box_color` 决定，见 D-116。
 
 /// 每帧最多上传几张纹理。
@@ -2469,12 +2472,32 @@ impl PdfReaderApp {
         usize::from(self.add_highlight(page, quads, bounds))
     }
 
-    /// 建一条标注 + 配对正文条目，并**记入历史**（撤销/重做共用同一个入口）。
+    /// 把页面上的一笔墨迹变成标注（页面空间折线 + 页面空间线宽，D-118 S4）。
+    ///
+    /// 回放动作 `ink` 与（S4c 的）墨迹工具都调用它：**抬笔时调用一次**，
+    /// 因此"一笔 = 一条标注 = 一次撤销"只有这一处实现。
+    fn annotate_ink(&mut self, page: PageIndex, points: &[Point], width: f32) -> bool {
+        if self.add_annotation(
+            page,
+            AnnotationKind::Ink {
+                points: points.to_vec(),
+                width,
+            },
+        ) {
+            self.message = "已添加墨迹（Ctrl+Z 可撤销）".to_string();
+            true
+        } else {
+            false
+        }
+    }
+
     fn add_highlight(&mut self, page: PageIndex, quads: Vec<Rect>, _bounds: Rect) -> bool {
-        let Some(id) = self
-            .annotations
-            .add(page, AnnotationKind::Highlight { quads })
-        else {
+        self.add_annotation(page, AnnotationKind::Highlight { quads })
+    }
+
+    /// 建一条标注 + 配对正文条目，并**记入历史**（所有"新建标注"的唯一入口）。
+    fn add_annotation(&mut self, page: PageIndex, kind: AnnotationKind) -> bool {
+        let Some(id) = self.annotations.add(page, kind) else {
             return false;
         };
         let title = persist::annotation_body_title(id);
@@ -3287,6 +3310,53 @@ impl PdfReaderApp {
                         let alpha = (annotation.clamped_opacity() * 255.0).round() as u8;
                         let [r, g, b] = annotation.color;
                         let color = Color32::from_rgba_unmultiplied(r, g, b, alpha);
+                        // 墨迹：折线的每个顶点都要换算（含旋转），所以不能走下面的"按矩形"循环。
+                        // 线宽乘布局比例，高倍下才跟着变粗；悬停命中走与点击相同的折线距离判定。
+                        if let Some((ink_points, ink_width)) = annotation.kind.ink() {
+                            let screen_points: Vec<egui::Pos2> = ink_points
+                                .iter()
+                                .map(|point| {
+                                    let content = placement.page_to_content(*point);
+                                    egui::pos2(
+                                        canvas.min.x + content.x - scroll.x,
+                                        canvas.min.y + content.y - scroll.y,
+                                    )
+                                })
+                                .collect();
+                            let stroke_width = (ink_width * placement.scale.0).max(1.0);
+                            painter.add(egui::Shape::line(
+                                screen_points,
+                                Stroke::new(stroke_width, color),
+                            ));
+                            if annotation.body_title.is_some() {
+                                if let Some(pointer) = pointer {
+                                    let content_point = Point::new(
+                                        pointer.x - canvas.min.x + scroll.x,
+                                        pointer.y - canvas.min.y + scroll.y,
+                                    );
+                                    let tolerance =
+                                        ANNOTATION_HIT_TOLERANCE_PX / placement.scale.0.max(0.01);
+                                    if placement.rect.contains(content_point)
+                                        && annotation.contains(
+                                            placement.content_to_page(content_point),
+                                            tolerance,
+                                        )
+                                    {
+                                        self.hovered_annotation = Some(annotation.id);
+                                        if let Some(title) = &annotation.body_title {
+                                            if let Some(window) = self
+                                                .floats
+                                                .iter()
+                                                .find(|window| &window.title == title)
+                                            {
+                                                self.highlight_float = Some(window.id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                         for quad in annotation.kind.quads() {
                             let content = placement.rect_to_content(*quad);
                             let screen = egui::Rect::from_min_size(
@@ -3325,6 +3395,8 @@ impl PdfReaderApp {
                                         Stroke::new(2.0, color),
                                     );
                                 }
+                                // 墨迹在上面按折线画完了，且没有 quads，不会进入本循环。
+                                AnnotationKind::Ink { .. } => {}
                             }
                         }
                     }

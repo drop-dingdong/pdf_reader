@@ -716,17 +716,26 @@ mod tests {
 // 也不会牵动主存档的版本迁移。
 
 /// 标注图层的格式版本（与 `SavedData` 独立）。
-pub const ANNOT_VERSION: u32 = 1;
+///
+/// * **v1**：只有文本类标注（高亮 / 下划线 / 删除线），几何是 `quads`。
+/// * **v2**（S4）：增加墨迹（`points` + `width`）。v1 文件仍可读；v1 的读取端
+///   会把墨迹条目当成"未知种类"静默丢掉，再保存就真丢了 —— 所以必须升版本，
+///   让旧程序按既有规则**拒读且不覆盖**。
+pub const ANNOT_VERSION: u32 = 2;
 
 /// `<pdf>.annot.json` 里的一条标注。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SavedAnnotation {
     /// 标注 id（与正文的哨兵标题 `#annot:<id>` 对应）。
     pub id: u64,
-    /// 种类：`highlight` / `underline` / `strike_out`。
+    /// 种类：`highlight` / `underline` / `strike_out` / `ink`。
     pub kind: String,
-    /// 每行的矩形（**未旋转页面空间**）。
+    /// 每行的矩形（**未旋转页面空间**）；墨迹为空。
     pub quads: Vec<pdfcore::prelude::Rect>,
+    /// 墨迹的折线顶点（**未旋转页面空间**）；文本类标注为空。
+    pub points: Vec<pdfcore::prelude::Point>,
+    /// 墨迹的线宽（页面空间）；文本类标注为 `None`。
+    pub width: Option<f32>,
     /// RGB。
     pub color: [u8; 3],
     /// 不透明度。
@@ -775,7 +784,7 @@ impl SavedOverlay {
                     out.push_str(",\n     ");
                 }
                 out.push_str(&format!(
-                    "{{\"id\":{}, \"kind\":\"{}\", \"color\":[{},{},{}], \"opacity\":{:.2}, \"quads\":[",
+                    "{{\"id\":{}, \"kind\":\"{}\", \"color\":[{},{},{}], \"opacity\":{:.2}, ",
                     annotation.id,
                     json_string(&annotation.kind).trim_matches('"'),
                     annotation.color[0],
@@ -783,16 +792,32 @@ impl SavedOverlay {
                     annotation.color[2],
                     annotation.opacity
                 ));
-                for (quad_index, quad) in annotation.quads.iter().enumerate() {
-                    if quad_index > 0 {
-                        out.push_str(", ");
+                if annotation.points.is_empty() {
+                    out.push_str("\"quads\":[");
+                    for (quad_index, quad) in annotation.quads.iter().enumerate() {
+                        if quad_index > 0 {
+                            out.push_str(", ");
+                        }
+                        out.push_str(&format!(
+                            "[{:.2},{:.2},{:.2},{:.2}]",
+                            quad.x, quad.y, quad.width, quad.height
+                        ));
                     }
+                    out.push(']');
+                } else {
+                    out.push_str("\"points\":[");
+                    for (point_index, point) in annotation.points.iter().enumerate() {
+                        if point_index > 0 {
+                            out.push_str(", ");
+                        }
+                        out.push_str(&format!("[{:.2},{:.2}]", point.x, point.y));
+                    }
+                    out.push(']');
                     out.push_str(&format!(
-                        "[{:.2},{:.2},{:.2},{:.2}]",
-                        quad.x, quad.y, quad.width, quad.height
+                        ", \"width\":{:.2}",
+                        annotation.width.unwrap_or(2.0)
                     ));
                 }
-                out.push(']');
                 if let Some(title) = &annotation.body_title {
                     out.push_str(&format!(", \"body\": {}", json_string(title)));
                 }
@@ -914,7 +939,26 @@ fn parse_overlay(text: &str) -> std::result::Result<SavedOverlay, LoadError> {
                     ));
                 }
             }
-            if quads.is_empty() {
+            let mut points = Vec::new();
+            for point in annotation
+                .field("points")
+                .and_then(|value| value.as_array())
+                .unwrap_or(&[])
+            {
+                let numbers: Vec<f32> = point
+                    .as_array()
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|value| value.as_number())
+                    .collect();
+                if numbers.len() == 2 {
+                    points.push(pdfcore::prelude::Point::new(numbers[0], numbers[1]));
+                }
+            }
+            let width = annotation
+                .field("width")
+                .and_then(|value| value.as_number());
+            if quads.is_empty() && points.is_empty() {
                 continue; // 几何缺失的条目直接跳过（不因为一条坏数据整份加载失败）
             }
             let body_title = annotation
@@ -925,6 +969,8 @@ fn parse_overlay(text: &str) -> std::result::Result<SavedOverlay, LoadError> {
                 id,
                 kind,
                 quads,
+                points,
+                width,
                 color,
                 opacity,
                 body_title,
@@ -943,19 +989,32 @@ pub fn annotation_kind_name(kind: &pdfcore::annotation::AnnotationKind) -> &'sta
         AnnotationKind::Highlight { .. } => "highlight",
         AnnotationKind::Underline { .. } => "underline",
         AnnotationKind::StrikeOut { .. } => "strike_out",
+        AnnotationKind::Ink { .. } => "ink",
     }
 }
 
-/// 存档里的字符串 → 标注种类（未知种类按高亮处理，避免一条坏数据毁掉整份图层）。
-pub fn annotation_kind_from_name(
-    name: &str,
-    quads: Vec<pdfcore::prelude::Rect>,
-) -> pdfcore::annotation::AnnotationKind {
+/// 存档里的一条 → 标注种类（未知种类按高亮处理，避免一条坏数据毁掉整份图层）。
+///
+/// **几何是否有效不在这里判断**：交给 `Annotation::new` 的不变量检查，
+/// 这样"缺几何 / 单点墨迹 / 零宽矩形"的跳过规则只有一处。
+pub fn annotation_kind_from_saved(saved: &SavedAnnotation) -> pdfcore::annotation::AnnotationKind {
     use pdfcore::annotation::AnnotationKind;
-    match name {
-        "underline" => AnnotationKind::Underline { quads },
-        "strike_out" => AnnotationKind::StrikeOut { quads },
-        _ => AnnotationKind::Highlight { quads },
+    if saved.kind == "ink" {
+        return AnnotationKind::Ink {
+            points: saved.points.clone(),
+            width: saved.width.unwrap_or(2.0),
+        };
+    }
+    match saved.kind.as_str() {
+        "underline" => AnnotationKind::Underline {
+            quads: saved.quads.clone(),
+        },
+        "strike_out" => AnnotationKind::StrikeOut {
+            quads: saved.quads.clone(),
+        },
+        _ => AnnotationKind::Highlight {
+            quads: saved.quads.clone(),
+        },
     }
 }
 
@@ -967,10 +1026,18 @@ pub fn overlay_from_store(store: &pdfcore::annotation::AnnotationStore) -> Saved
         if pages.len() <= page {
             pages.resize_with(page + 1, Vec::new);
         }
+        let (quads, points, width) = match &annotation.kind {
+            pdfcore::annotation::AnnotationKind::Ink { points, width } => {
+                (Vec::new(), points.clone(), Some(*width))
+            }
+            _ => (annotation.kind.quads().to_vec(), Vec::new(), None),
+        };
         pages[page].push(SavedAnnotation {
             id: annotation.id.get(),
             kind: annotation_kind_name(&annotation.kind).to_string(),
-            quads: annotation.kind.quads().to_vec(),
+            quads,
+            points,
+            width,
             color: annotation.color,
             opacity: annotation.opacity,
             body_title: annotation.body_title.clone(),
@@ -987,7 +1054,7 @@ pub fn store_from_overlay(overlay: &SavedOverlay) -> pdfcore::annotation::Annota
     let mut store = pdfcore::annotation::AnnotationStore::new();
     for (page, annotations) in overlay.pages.iter().enumerate() {
         for saved in annotations {
-            let kind = annotation_kind_from_name(&saved.kind, saved.quads.clone());
+            let kind = annotation_kind_from_saved(saved);
             let mut annotation = match pdfcore::annotation::Annotation::new(
                 pdfcore::prelude::PageIndex::new(page as u32),
                 kind,
@@ -1009,7 +1076,7 @@ pub fn store_from_overlay(overlay: &SavedOverlay) -> pdfcore::annotation::Annota
 mod annot_tests {
     use super::*;
     use pdfcore::annotation::{AnnotationKind, AnnotationStore};
-    use pdfcore::prelude::{PageIndex, Rect};
+    use pdfcore::prelude::{PageIndex, Point, Rect};
 
     fn store_with_one() -> AnnotationStore {
         let mut store = AnnotationStore::new();
@@ -1062,6 +1129,77 @@ mod annot_tests {
         let overlay = SavedOverlay::from_json(text).expect("坏条目不应让整份失败");
         assert_eq!(overlay.len(), 1, "缺几何的条目应被跳过");
         assert_eq!(overlay.pages[0][0].id, 2);
+    }
+
+    #[test]
+    fn ink_round_trips_through_json_with_points_and_width() {
+        let mut store = AnnotationStore::new();
+        store
+            .add(
+                PageIndex::FIRST,
+                AnnotationKind::Ink {
+                    points: vec![Point::new(10.0, 20.0), Point::new(60.0, 28.0)],
+                    width: 3.5,
+                },
+            )
+            .expect("有效墨迹");
+
+        let overlay = overlay_from_store(&store);
+        assert_eq!(overlay.version, ANNOT_VERSION, "新写的图层用当前版本");
+        let text = overlay.to_json();
+        assert!(text.contains("\"points\""), "墨迹必须写成 points：{text}");
+        assert!(text.contains("\"width\":3.50"), "线宽要落盘：{text}");
+        assert!(
+            !text.contains("\"quads\""),
+            "墨迹条目不该再写一个空的 quads：{text}"
+        );
+
+        let parsed = SavedOverlay::from_json(&text).expect("应当能解析");
+        assert_eq!(parsed, overlay, "解析结果必须与写出的结构一致");
+
+        let restored = store_from_overlay(&parsed);
+        let item = restored.iter().next().expect("恢复一条");
+        match &item.kind {
+            AnnotationKind::Ink { points, width } => {
+                assert_eq!(points.len(), 2, "顶点数必须保留");
+                assert!((points[0].x - 10.0).abs() < 0.01);
+                assert!((points[1].y - 28.0).abs() < 0.01);
+                assert!((width - 3.5).abs() < 0.001, "线宽必须保留");
+            }
+            other => panic!("应当恢复成墨迹，实际 {other:?}"),
+        }
+        assert_eq!(
+            item.bounds().map(|rect| rect.width),
+            Some(53.5),
+            "恢复后的包围盒仍按半线宽外扩"
+        );
+    }
+
+    #[test]
+    fn a_version_1_overlay_still_loads() {
+        let text = r#"{"version":1,"pages":[[
+            {"id":1,"kind":"highlight","quads":[[1,2,3,4]],"color":[1,2,3],"opacity":1.0}
+        ]]}"#;
+        let overlay = SavedOverlay::from_json(text).expect("v1 必须能读");
+        assert_eq!(overlay.version, 1, "旧版本号原样保留");
+        assert_eq!(
+            store_from_overlay(&overlay).len(),
+            1,
+            "v1 的高亮必须无损升级成内存模型"
+        );
+    }
+
+    #[test]
+    fn ink_with_too_few_points_is_skipped_at_the_model_layer() {
+        let text = r#"{"version":2,"pages":[[
+            {"id":1,"kind":"ink","points":[[1,2]],"width":3}
+        ]]}"#;
+        let overlay = SavedOverlay::from_json(text).expect("坏条目不应让整份失败");
+        assert_eq!(overlay.len(), 1, "解析层保留原始条目");
+        assert!(
+            store_from_overlay(&overlay).is_empty(),
+            "单点墨迹在模型层被拒（不变量只有一处）"
+        );
     }
 
     #[test]

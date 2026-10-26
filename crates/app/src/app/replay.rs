@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use pdfcore::prelude::*;
 
-use super::{CustomKind, PdfReaderApp};
+use super::{CustomKind, PdfReaderApp, DEFAULT_INK_WIDTH};
 use crate::clock::Clock;
 use crate::diag::Diagnostics;
 use crate::json::{Json, JsonLookup};
@@ -119,6 +119,18 @@ pub enum Action {
         /// 中间移动帧数（默认 6；越大越接近真实拖拽）。
         steps: u32,
     },
+    /// 画一笔墨迹（**页面空间**折线；S4 用它在回放里造墨迹）。
+    ///
+    /// 与 `highlight` 一样走"直接建标注"的路径（不模拟指针拖拽）：它验证的是
+    /// 模型与持久化，而"拖拽 → 一笔一命令 → Esc 丢弃"由墨迹工具那一层负责。
+    Ink {
+        /// 页号（0 起）。
+        page: u32,
+        /// 折线顶点（页面空间，左下原点；至少两个点）。
+        points: Vec<Point>,
+        /// 线宽（页面空间单位）。
+        width: f32,
+    },
     /// 把页面上的一块矩形变成高亮标注（**页面空间**；S1 用它在回放里造标注）。
     Highlight {
         /// 页号（0 起）。
@@ -159,6 +171,7 @@ impl Action {
             Self::HoverLink { .. } => "hover_link",
             Self::OpenPreview { .. } => "open_preview",
             Self::Click { .. } => "click",
+            Self::Ink { .. } => "ink",
             Self::Highlight { .. } => "highlight",
             Self::Save => "save",
             Self::Undo => "undo",
@@ -188,6 +201,13 @@ impl Action {
                 ..
             } => {
                 format!("drag p{page} ({from_x},{from_y})→({to_x},{to_y})")
+            }
+            Self::Ink {
+                page,
+                points,
+                width,
+            } => {
+                format!("ink p{page} {} 点，线宽 {width}", points.len())
             }
             Self::Highlight {
                 page,
@@ -596,6 +616,31 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
                 to_y: number("to_y")?,
                 steps: number("steps").unwrap_or(6.0) as u32,
             },
+            "ink" => {
+                let list = object
+                    .field("points")
+                    .ok_or_else(|| format!("{id}: 缺 points"))?
+                    .as_array()
+                    .ok_or_else(|| format!("{id}: points 不是数组"))?;
+                let mut points = Vec::with_capacity(list.len());
+                for (point_index, point) in list.iter().enumerate() {
+                    let numbers: Vec<f32> = point
+                        .as_array()
+                        .unwrap_or(&[])
+                        .iter()
+                        .filter_map(|value| value.as_number())
+                        .collect();
+                    if numbers.len() != 2 {
+                        return Err(format!("{id}: points[{point_index}] 必须是 [x,y]"));
+                    }
+                    points.push(Point::new(numbers[0], numbers[1]));
+                }
+                Action::Ink {
+                    page: number("page")? as u32,
+                    points,
+                    width: number("width").unwrap_or(DEFAULT_INK_WIDTH),
+                }
+            }
             "highlight" => Action::Highlight {
                 page: number("page")? as u32,
                 x: number("x")?,
@@ -1163,6 +1208,15 @@ impl Harness {
             app.annotate_page_rect(PageIndex::new(*page), Rect::new(*x, *y, *width, *height));
             return;
         }
+        if let Action::Ink {
+            page,
+            points,
+            width,
+        } = action
+        {
+            app.annotate_ink(PageIndex::new(*page), points, *width);
+            return;
+        }
         if let Action::Save = action {
             app.save_all();
             return;
@@ -1215,6 +1269,7 @@ impl Harness {
             Action::Click { .. }
             | Action::Drag { .. }
             | Action::Highlight { .. }
+            | Action::Ink { .. }
             | Action::Save => {}
             Action::HoverLink { .. } | Action::Unhover => {
                 // 指针位置必须走 egui 的输入事件：在 `run_frame` 里按帧重放
