@@ -708,3 +708,373 @@ mod tests {
         assert!(SavedData::from_json("{}").is_ok(), "空对象是合法的最小存档");
     }
 }
+
+// ====================================================================== 标注图层（D-118）
+//
+// 与 `<pdf>.json` **分开**存放：标注几何是"应用层装饰"，注释正文仍在 `<pdf>.json` 的
+// `custom_texts` 里（哨兵标题 `#annot:<id>` 引用）。这样删掉本文件就等于清空所有标注，
+// 也不会牵动主存档的版本迁移。
+
+/// 标注图层的格式版本（与 `SavedData` 独立）。
+pub const ANNOT_VERSION: u32 = 1;
+
+/// `<pdf>.annot.json` 里的一条标注。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedAnnotation {
+    /// 标注 id（与正文的哨兵标题 `#annot:<id>` 对应）。
+    pub id: u64,
+    /// 种类：`highlight` / `underline` / `strike_out`。
+    pub kind: String,
+    /// 每行的矩形（**未旋转页面空间**）。
+    pub quads: Vec<pdfcore::prelude::Rect>,
+    /// RGB。
+    pub color: [u8; 3],
+    /// 不透明度。
+    pub opacity: f32,
+    /// 正文引用（哨兵标题）；没有正文时为 `None`。
+    pub body_title: Option<String>,
+}
+
+/// 整份标注图层。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SavedOverlay {
+    /// 格式版本。
+    pub version: u32,
+    /// 逐页的标注（下标 = 页号）。
+    pub pages: Vec<Vec<SavedAnnotation>>,
+}
+
+impl SavedOverlay {
+    /// 空图层（当前版本）。
+    pub fn new() -> Self {
+        Self {
+            version: ANNOT_VERSION,
+            pages: Vec::new(),
+        }
+    }
+
+    /// 标注总数。
+    pub fn len(&self) -> usize {
+        self.pages.iter().map(Vec::len).sum()
+    }
+
+    /// 是否没有任何标注。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// 序列化成 JSON（逐页数组，便于人工检查与 diff）。
+    pub fn to_json(&self) -> String {
+        let mut out = String::from("{\n");
+        out.push_str(&format!("  \"version\": {},\n", self.version));
+        out.push_str("  \"pages\": [\n");
+        for (page, annotations) in self.pages.iter().enumerate() {
+            out.push_str("    [");
+            for (index, annotation) in annotations.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(",\n     ");
+                }
+                out.push_str(&format!(
+                    "{{\"id\":{}, \"kind\":\"{}\", \"color\":[{},{},{}], \"opacity\":{:.2}, \"quads\":[",
+                    annotation.id,
+                    json_string(&annotation.kind).trim_matches('"'),
+                    annotation.color[0],
+                    annotation.color[1],
+                    annotation.color[2],
+                    annotation.opacity
+                ));
+                for (quad_index, quad) in annotation.quads.iter().enumerate() {
+                    if quad_index > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&format!(
+                        "[{:.2},{:.2},{:.2},{:.2}]",
+                        quad.x, quad.y, quad.width, quad.height
+                    ));
+                }
+                out.push(']');
+                if let Some(title) = &annotation.body_title {
+                    out.push_str(&format!(", \"body\": {}", json_string(title)));
+                }
+                out.push('}');
+            }
+            out.push(']');
+            if page + 1 < self.pages.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ]\n}\n");
+        out
+    }
+
+    /// 解析（版本高于 [`ANNOT_VERSION`] 时返回 [`LoadError::NewerVersion`]）。
+    pub fn from_json(text: &str) -> std::result::Result<Self, LoadError> {
+        let parsed = parse_overlay(text)?;
+        if parsed.version > ANNOT_VERSION {
+            return Err(LoadError::NewerVersion {
+                found: parsed.version,
+                supported: ANNOT_VERSION,
+            });
+        }
+        Ok(parsed)
+    }
+}
+
+/// `<pdf>.annot.json` 的路径。
+pub fn annot_path(pdf: &std::path::Path) -> std::path::PathBuf {
+    let mut name = pdf.as_os_str().to_owned();
+    name.push(".annot.json");
+    std::path::PathBuf::from(name)
+}
+
+/// 原子写：先写同目录的临时文件，再 `rename` 覆盖。
+///
+/// 存档变成"每次 Ctrl+S 都写"的高频操作之后，`fs::write` 中途崩溃会留下截断的 JSON
+/// （下一次打开就解析失败）。`rename` 在同一文件系统上是原子的，因此要么是旧内容、
+/// 要么是完整的新内容。
+pub fn write_atomic(target: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    let mut temporary = target.as_os_str().to_owned();
+    temporary.push(".tmp");
+    let temporary = std::path::PathBuf::from(temporary);
+    std::fs::write(&temporary, contents)?;
+    std::fs::rename(&temporary, target)
+}
+
+/// 极简解析：只认本文件自己的格式（字段名固定、顺序不限、忽略未知字段）。
+fn parse_overlay(text: &str) -> std::result::Result<SavedOverlay, LoadError> {
+    use crate::json::Json;
+    let root = Json::parse(text).map_err(|error| LoadError::Parse(format!("解析失败：{error}")))?;
+    let Json::Object(root) = root else {
+        return Err(LoadError::Parse("标注文件顶层不是对象".to_string()));
+    };
+    let root = root.as_slice();
+    let version = root
+        .field("version")
+        .and_then(|value| value.as_number())
+        .map(|value| value.round().max(1.0) as u32)
+        .unwrap_or(1);
+    let mut pages = Vec::new();
+    let page_items = root
+        .field("pages")
+        .and_then(|value| value.as_array())
+        .unwrap_or(&[]);
+    for (page, item) in page_items.iter().enumerate() {
+        let mut annotations = Vec::new();
+        for annotation in item.as_array().unwrap_or(&[]) {
+            let Json::Object(annotation) = annotation else {
+                continue;
+            };
+            let annotation = annotation.as_slice();
+            let id = annotation
+                .field("id")
+                .and_then(|value| value.as_number())
+                .unwrap_or(0.0) as u64;
+            let kind = annotation
+                .field("kind")
+                .and_then(|value| value.as_str())
+                .unwrap_or("highlight")
+                .to_string();
+            let mut color = [255u8, 214, 0];
+            if let Some(channels) = annotation.field("color").and_then(|value| value.as_array()) {
+                for (index, channel) in channels.iter().take(3).enumerate() {
+                    if let Some(number) = channel.as_number() {
+                        color[index] = number.clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+            let opacity = annotation
+                .field("opacity")
+                .and_then(|value| value.as_number())
+                .unwrap_or(0.35)
+                .clamp(0.0, 1.0);
+            let mut quads = Vec::new();
+            for quad in annotation
+                .field("quads")
+                .and_then(|value| value.as_array())
+                .unwrap_or(&[])
+            {
+                let numbers: Vec<f32> = quad
+                    .as_array()
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|value| value.as_number())
+                    .collect();
+                if numbers.len() == 4 {
+                    quads.push(pdfcore::prelude::Rect::new(
+                        numbers[0], numbers[1], numbers[2], numbers[3],
+                    ));
+                }
+            }
+            if quads.is_empty() {
+                continue; // 几何缺失的条目直接跳过（不因为一条坏数据整份加载失败）
+            }
+            let body_title = annotation
+                .field("body")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            annotations.push(SavedAnnotation {
+                id,
+                kind,
+                quads,
+                color,
+                opacity,
+                body_title,
+            });
+        }
+        pages.push(annotations);
+        let _ = page;
+    }
+    Ok(SavedOverlay { version, pages })
+}
+
+/// 标注种类 → 存档里的字符串。
+pub fn annotation_kind_name(kind: &pdfcore::annotation::AnnotationKind) -> &'static str {
+    use pdfcore::annotation::AnnotationKind;
+    match kind {
+        AnnotationKind::Highlight { .. } => "highlight",
+        AnnotationKind::Underline { .. } => "underline",
+        AnnotationKind::StrikeOut { .. } => "strike_out",
+    }
+}
+
+/// 存档里的字符串 → 标注种类（未知种类按高亮处理，避免一条坏数据毁掉整份图层）。
+pub fn annotation_kind_from_name(
+    name: &str,
+    quads: Vec<pdfcore::prelude::Rect>,
+) -> pdfcore::annotation::AnnotationKind {
+    use pdfcore::annotation::AnnotationKind;
+    match name {
+        "underline" => AnnotationKind::Underline { quads },
+        "strike_out" => AnnotationKind::StrikeOut { quads },
+        _ => AnnotationKind::Highlight { quads },
+    }
+}
+
+/// 把内存里的标注写成图层文件结构。
+pub fn overlay_from_store(store: &pdfcore::annotation::AnnotationStore) -> SavedOverlay {
+    let mut pages: Vec<Vec<SavedAnnotation>> = Vec::new();
+    for annotation in store.iter() {
+        let page = annotation.page.get() as usize;
+        if pages.len() <= page {
+            pages.resize_with(page + 1, Vec::new);
+        }
+        pages[page].push(SavedAnnotation {
+            id: annotation.id.get(),
+            kind: annotation_kind_name(&annotation.kind).to_string(),
+            quads: annotation.kind.quads().to_vec(),
+            color: annotation.color,
+            opacity: annotation.opacity,
+            body_title: annotation.body_title.clone(),
+        });
+    }
+    SavedOverlay {
+        version: ANNOT_VERSION,
+        pages,
+    }
+}
+
+/// 从图层文件结构恢复标注（保留 id，撤销栈因此仍能对上）。
+pub fn store_from_overlay(overlay: &SavedOverlay) -> pdfcore::annotation::AnnotationStore {
+    let mut store = pdfcore::annotation::AnnotationStore::new();
+    for (page, annotations) in overlay.pages.iter().enumerate() {
+        for saved in annotations {
+            let kind = annotation_kind_from_name(&saved.kind, saved.quads.clone());
+            let mut annotation = match pdfcore::annotation::Annotation::new(
+                pdfcore::prelude::PageIndex::new(page as u32),
+                kind,
+            ) {
+                Some(annotation) => annotation,
+                None => continue,
+            };
+            annotation.id = pdfcore::annotation::AnnotationId(saved.id);
+            annotation.color = saved.color;
+            annotation.opacity = saved.opacity;
+            annotation.body_title = saved.body_title.clone();
+            store.insert(annotation);
+        }
+    }
+    store
+}
+
+#[cfg(test)]
+mod annot_tests {
+    use super::*;
+    use pdfcore::annotation::{AnnotationKind, AnnotationStore};
+    use pdfcore::prelude::{PageIndex, Rect};
+
+    fn store_with_one() -> AnnotationStore {
+        let mut store = AnnotationStore::new();
+        store
+            .add(
+                PageIndex::FIRST,
+                AnnotationKind::Highlight {
+                    quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+                },
+            )
+            .expect("有效几何");
+        store
+    }
+
+    #[test]
+    fn overlay_round_trips_through_json() {
+        let mut store = store_with_one();
+        let id = store.iter().next().expect("一条").id;
+        store.set_body(id, Some("#annot:1".to_string()));
+
+        let overlay = overlay_from_store(&store);
+        let text = overlay.to_json();
+        let parsed = SavedOverlay::from_json(&text).expect("应当能解析");
+        assert_eq!(parsed, overlay, "解析结果必须与写出的结构一致");
+
+        let restored = store_from_overlay(&parsed);
+        let item = restored.iter().next().expect("恢复一条");
+        assert_eq!(item.id, id, "id 必须保留（撤销栈要对得上）");
+        assert_eq!(item.kind.quads()[0], Rect::new(10.0, 20.0, 30.0, 8.0));
+        assert_eq!(item.body_title.as_deref(), Some("#annot:1"));
+    }
+
+    #[test]
+    fn newer_overlay_version_is_refused() {
+        let text = "{\"version\": 99, \"pages\": []}";
+        match SavedOverlay::from_json(text) {
+            Err(LoadError::NewerVersion { found, supported }) => {
+                assert_eq!((found, supported), (99, ANNOT_VERSION));
+            }
+            other => panic!("应当拒绝更新的版本，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entries_without_geometry_are_skipped_instead_of_failing() {
+        let text = r#"{"version":1,"pages":[[
+            {"id":1,"kind":"highlight","quads":[]},
+            {"id":2,"kind":"underline","quads":[[1,2,3,4]],"color":[1,2,3],"opacity":1.0}
+        ]]}"#;
+        let overlay = SavedOverlay::from_json(text).expect("坏条目不应让整份失败");
+        assert_eq!(overlay.len(), 1, "缺几何的条目应被跳过");
+        assert_eq!(overlay.pages[0][0].id, 2);
+    }
+
+    #[test]
+    fn atomic_write_replaces_content_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("pdf-annot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let target = dir.join("a.annot.json");
+        write_atomic(&target, "{\"version\":1,\"pages\":[]}").expect("第一次写");
+        write_atomic(&target, "{\"version\":1,\"pages\":[[]]}").expect("覆盖写");
+        let text = std::fs::read_to_string(&target).expect("读回");
+        assert!(text.contains("[[]]"), "应当是新内容，实际 {text}");
+        assert!(
+            !dir.join("a.annot.json.tmp").exists(),
+            "临时文件必须被 rename 掉"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn annot_path_sits_next_to_the_pdf() {
+        let path = annot_path(std::path::Path::new("/tmp/book.pdf"));
+        assert_eq!(path, std::path::PathBuf::from("/tmp/book.pdf.annot.json"));
+    }
+}
