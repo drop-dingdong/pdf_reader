@@ -398,6 +398,17 @@ enum AppEdit {
         /// 那一条。
         preview: std::sync::Arc<CustomPreview>,
     },
+    /// 重选引用点（撤销 = 换回旧的矩形/截图/文字）。
+    EditDestMark {
+        /// 页号。
+        page: PageIndex,
+        /// 该页第几个被引用点。
+        index: usize,
+        /// 旧值。
+        before: std::sync::Arc<DestMark>,
+        /// 新值。
+        after: std::sync::Arc<DestMark>,
+    },
 }
 
 impl AppEdit {
@@ -416,6 +427,9 @@ impl AppEdit {
             }
             Self::DeletePreview { index, .. } => format!("删除自定义preview #{index}"),
             Self::AddPreview { index, .. } => format!("恢复自定义preview #{index}"),
+            Self::EditDestMark { page, .. } => {
+                format!("重选引用点（第 {} 页）", page.display_number())
+            }
         }
     }
 
@@ -423,6 +437,7 @@ impl AppEdit {
     fn weight(&self) -> usize {
         match self {
             Self::DeletePreview { .. } | Self::AddPreview { .. } => 512,
+            Self::EditDestMark { .. } => 1024 * 1024,
             _ => 768,
         }
     }
@@ -840,6 +855,17 @@ impl PdfReaderApp {
                 let at = (*index).min(self.custom_previews.len());
                 self.custom_previews.insert(at, (**preview).clone());
             }
+            AppEdit::EditDestMark {
+                page, index, after, ..
+            } => {
+                if let Some(slot) = self
+                    .dest_marks
+                    .get_mut(page.get() as usize)
+                    .and_then(|marks| marks.get_mut(*index))
+                {
+                    *slot = (**after).clone();
+                }
+            }
         }
         self.overlay_dirty = true;
         self.data_dirty = true;
@@ -861,6 +887,17 @@ impl PdfReaderApp {
             // 这两个的"逆"由 `apply_edit` 自身根据当前状态判别（见各自的注释）
             AppEdit::DeletePreview { index, preview } => AppEdit::AddPreview { index, preview },
             AppEdit::AddPreview { index, preview } => AppEdit::DeletePreview { index, preview },
+            AppEdit::EditDestMark {
+                page,
+                index,
+                before,
+                after,
+            } => AppEdit::EditDestMark {
+                page,
+                index,
+                before: after,
+                after: before,
+            },
         };
         self.apply_edit(inverse, false);
         self.message = format!("已撤销：{}", entry.description);
@@ -4413,18 +4450,28 @@ impl PdfReaderApp {
         );
 
         // 回写：矩形 + 截图 + **正文尺寸**（= 该选区在**当时缩放比例**下的显示尺寸，用户要求）
-        let mut rect_saved = false;
-        if let Some(mark) = self
+        let old = self
             .dest_marks
-            .get_mut(page.get() as usize)
-            .and_then(|marks| marks.get_mut(index))
-        {
-            mark.rect = page_rect;
-            mark.snapshot = Some(texture.clone());
-            mark.body_size = egui::vec2(overlap.width, overlap.height);
+            .get(page.get() as usize)
+            .and_then(|marks| marks.get(index))
+            .cloned();
+        let mut rect_saved = false;
+        if let Some(old) = old {
+            let mut after = old.clone();
+            after.rect = page_rect;
+            after.snapshot = Some(texture.clone());
+            after.body_size = egui::vec2(overlap.width, overlap.height);
             // ▲v2：记录这张图的分辨率（截图时的显示比例）
-            mark.scale = session.state().zoom;
-            self.data_dirty = true;
+            after.scale = session.state().zoom;
+            self.apply_edit(
+                AppEdit::EditDestMark {
+                    page,
+                    index,
+                    before: std::sync::Arc::new(old),
+                    after: std::sync::Arc::new(after),
+                },
+                true,
+            );
             rect_saved = true;
         }
         if !rect_saved {
