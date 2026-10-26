@@ -802,7 +802,7 @@ impl PdfReaderApp {
             custom_texts,
         };
         let target = persist::sidecar_path(&path);
-        match std::fs::write(&target, data.to_json()) {
+        match persist::write_atomic(&target, &data.to_json()) {
             Ok(()) => {
                 self.data_dirty = false;
                 self.message = format!("已保存自定义数据：{}", target.display());
@@ -1393,7 +1393,7 @@ impl PdfReaderApp {
                 );
                 response.on_hover_text(&path_text);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = save_button_label(self.data_dirty);
+                    let label = save_button_label(self.data_dirty || self.overlay_dirty);
                     match self.sidecar_locked {
                         // 存档属于更新版本：不读也不写（D-107），按钮直接禁用并说明原因
                         Some((found, supported)) => {
@@ -1404,8 +1404,14 @@ impl PdfReaderApp {
                                 ));
                         }
                         None => {
-                            if ui.button(label).clicked() {
-                                self.save_custom_data();
+                            if ui
+                                .button(label)
+                                .on_hover_text("保存所有有改动的文件（Ctrl+S）")
+                                .clicked()
+                            {
+                                // 按钮与 Ctrl+S 必须**走同一条路径**：上一版按钮只存主存档，
+                                // 于是"点了保存、标注却没落盘"（用户实测踩到）
+                                self.save_all();
                             }
                         }
                     }

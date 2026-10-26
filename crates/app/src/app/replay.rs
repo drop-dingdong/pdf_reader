@@ -132,6 +132,8 @@ pub enum Action {
         /// 区域高。
         height: f32,
     },
+    /// 保存所有有改动的文件（等价于点"保存"或 Ctrl+S）。
+    Save,
     /// 指针移出画布。
     Unhover,
     /// 什么都不做，只跑若干帧（用来观察"稳定后"的状态）。
@@ -154,6 +156,7 @@ impl Action {
             Self::OpenPreview { .. } => "open_preview",
             Self::Click { .. } => "click",
             Self::Highlight { .. } => "highlight",
+            Self::Save => "save",
             Self::Drag { .. } => "drag",
             Self::Unhover => "unhover",
             Self::Wait { .. } => "wait",
@@ -189,6 +192,7 @@ impl Action {
             } => {
                 format!("highlight p{page} ({x},{y},{width},{height})")
             }
+            Self::Save => "save".to_string(),
             Self::Unhover => "unhover".to_string(),
             Self::Wait { frames } => format!("wait {frames}"),
         }
@@ -587,6 +591,7 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
                 width: number("width")?,
                 height: number("height")?,
             },
+            "save" => Action::Save,
             "unhover" => Action::Unhover,
             "wait" => Action::Wait {
                 frames: number("frames").unwrap_or(3.0) as u64,
@@ -1140,6 +1145,10 @@ impl Harness {
             app.annotate_page_rect(PageIndex::new(*page), Rect::new(*x, *y, *width, *height));
             return;
         }
+        if let Action::Save = action {
+            app.save_all();
+            return;
+        }
         if matches!(action, Action::Click { .. } | Action::Drag { .. }) {
             self.pending_pointer = None;
             self.gesture = self.gesture_for(app, action);
@@ -1177,7 +1186,10 @@ impl Harness {
                 app.spawn_custom_float(*index, rect);
             }
             // 已在函数开头处理（不借用 session）
-            Action::Click { .. } | Action::Drag { .. } | Action::Highlight { .. } => {}
+            Action::Click { .. }
+            | Action::Drag { .. }
+            | Action::Highlight { .. }
+            | Action::Save => {}
             Action::HoverLink { .. } | Action::Unhover => {
                 // 指针位置必须走 egui 的输入事件：在 `run_frame` 里按帧重放
                 self.pending_pointer = self.pointer_for_action(app, action);

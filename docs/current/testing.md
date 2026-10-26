@@ -95,7 +95,7 @@ cargo test -p app --test replay_scripts
 | `strip_page.json` | strip | 条幅页（单边超纹理上限）→ 强制分块（D-108） |
 
 脚本格式（JSON，每个动作（`resize` / `zoom` / `scroll_by` / `set_scroll` / `go_to_page` / `hover_link` / `unhover` /
-`click` / `drag` / `open_preview` / `wait`：`click` 与 `drag` 用**页面空间**坐标，
+`click` / `drag` / `highlight` / `save` / `open_preview` / `wait`：`click` 与 `drag` 用**页面空间**坐标，
 因此与缩放、窗口尺寸、页边距无关）一个 `id`）：
 
 ```json
