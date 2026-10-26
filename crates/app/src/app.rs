@@ -2312,17 +2312,28 @@ impl PdfReaderApp {
             .position(|preview| preview.title == title)
         {
             let rect = egui::Rect::from_min_size(at, EVec2::new(280.0, 150.0));
-            self.spawn_custom_float(index, rect);
+            // 走"已存在就高亮置顶、否则新建"的同一条路径 —— 直接 spawn 会导致
+            // 同一个标注每点一次就多一个浮窗（用户实测）。
+            self.activate_custom_preview(index, rect);
             return;
         }
         // 引用失效：保留几何、正文显示占位（绝不因为找不到正文而崩溃/丢弃标注）
         let body = "（正文已丢失）".to_string();
         let rect = egui::Rect::from_min_size(at, EVec2::new(280.0, 150.0));
+        let title = format!("标注 #{}", id.get());
+        // 同一条标注的占位浮窗也只应有一个：已存在就高亮置顶
+        if let Some(position) = self.floats.iter().position(|window| window.title == title) {
+            let window = self.floats.remove(position);
+            let float_id = window.id;
+            self.floats.push(window);
+            self.highlight_float = Some(float_id);
+            return;
+        }
         let float_id = self.next_float_id;
         self.next_float_id += 1;
         self.floats.push(Float {
             id: float_id,
-            title: format!("标注 #{}", id.get()),
+            title,
             content: FloatContent::Text(body),
             rect,
             custom: None,

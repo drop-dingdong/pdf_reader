@@ -324,6 +324,8 @@ pub struct ActionReport {
     pub annotations: usize,
     /// 最后一条标注的页面空间包围盒（`x,y,w,h`）—— 用于断言"几何与缩放无关"。
     pub annotation_bounds: Option<(f32, f32, f32, f32)>,
+    /// 动作结束时的浮窗数量（断言"重复点击不重复开窗"）。
+    pub floats: usize,
 }
 
 /// 整次回放的报告。
@@ -960,6 +962,7 @@ pub fn run(
             scroll_after: (0.0, 0.0),
             annotations: 0,
             annotation_bounds: None,
+            floats: 0,
         };
         harness.apply_action(app, action);
         // 每个动作开始时清空诊断缓冲：这一行只属于这个动作
@@ -1062,6 +1065,7 @@ pub fn run(
             action_report.scroll_after = (session.viewport().scroll.x, session.viewport().scroll.y);
         }
         action_report.annotations = app.annotations.len();
+        action_report.floats = app.floats.len();
         action_report.annotation_bounds = app
             .annotations
             .iter()
@@ -1768,6 +1772,7 @@ mod tests {
             scroll_after: (10.0, 20.0),
             annotations: 0,
             annotation_bounds: None,
+            floats: 0,
         };
         action.frames_data.push(FrameStat {
             frame: 1,

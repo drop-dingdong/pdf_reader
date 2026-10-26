@@ -662,6 +662,7 @@ mod tests {
             scroll_after: (0.0, 0.0),
             annotations: 0,
             annotation_bounds: None,
+            floats: 0,
         }
     }
 
