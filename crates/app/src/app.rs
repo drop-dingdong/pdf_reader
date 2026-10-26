@@ -367,19 +367,18 @@ struct CaptureState {
 /// 命令里**持有旧值**（`Arc` 共享，不做深拷贝）：撤销时把它移回应用即可。
 #[derive(Clone)]
 enum AppEdit {
-    /// 新增一条标注（含配对的正文条目）。
+    /// 新增一条标注。
+    ///
+    /// **不带正文内容**：正文由 `orphan_bodies` 在"删除那一刻"保管。
+    /// 带创建时的快照会把之后的正文修改丢掉（用户实测：改正文 → 撤销 → 重做，正文没了）。
     AddAnnotation {
         /// 标注本体（含 id，撤销后重做必须用同一个 id）。
         annotation: pdfcore::annotation::Annotation,
-        /// 配对的正文条目（`custom_texts` 里那条哨兵标题的 preview）。
-        body: Option<std::sync::Arc<CustomPreview>>,
     },
-    /// 删除一条标注（撤销 = 放回去，所以同样要带旧值）。
+    /// 删除一条标注（撤销 = 放回 `orphan_bodies` 里那份正文）。
     DeleteAnnotation {
         /// 被删掉的标注。
         annotation: pdfcore::annotation::Annotation,
-        /// 被删掉的正文条目。
-        body: Option<std::sync::Arc<CustomPreview>>,
     },
 }
 
@@ -402,14 +401,9 @@ impl AppEdit {
         }
     }
 
-    /// 估算权重（注释类很小；正文条目按 512 字节算）。
+    /// 估算权重（注释命令很小；正文条目另算 512 字节上限）。
     fn weight(&self) -> usize {
-        let body = match self {
-            Self::AddAnnotation { body, .. } | Self::DeleteAnnotation { body, .. } => {
-                body.is_some()
-            }
-        };
-        256 + if body { 512 } else { 0 }
+        768
     }
 }
 
@@ -480,6 +474,8 @@ pub struct PdfReaderApp {
     overlay_dirty: bool,
     /// 编辑历史（注释 + 重选截图/引用点，单栈时间序）。
     history: crate::history::History<AppEdit>,
+    /// 被撤销的标注正文（等重做时取回；保留"删除那一刻"的内容）。
+    orphan_bodies: std::collections::HashMap<AnnotationId, CustomPreview>,
     /// 是否显示"编辑历史"可视列表（首次撤销时自动打开）。
     show_history: bool,
     /// 本帧指针悬停在哪个标注上（`Delete` 用它决定删谁）。
@@ -680,6 +676,7 @@ impl PdfReaderApp {
             pending_annotate: false,
             overlay_dirty: false,
             history: crate::history::History::new(),
+            orphan_bodies: std::collections::HashMap::new(),
             show_history: false,
             hovered_annotation: None,
             outline_rows: Vec::new(),
@@ -773,21 +770,41 @@ impl PdfReaderApp {
     fn apply_edit(&mut self, edit: AppEdit, record: bool) {
         let description = edit.describe();
         match &edit {
-            AppEdit::AddAnnotation { annotation, body } => {
+            AppEdit::AddAnnotation { annotation } => {
                 self.annotations.insert(annotation.clone());
+                // 正文：优先取回"上次删除时"保管的那份（含期间的所有修改）；
+                // 首次创建则现造一条空正文（标题就是哨兵标题）。
+                let body = self.orphan_bodies.remove(&annotation.id).or_else(|| {
+                    let title = annotation.body_title.clone()?;
+                    let bounds = annotation.bounds()?;
+                    Some(CustomPreview {
+                        page: annotation.page,
+                        point: bounds.center(),
+                        rect: bounds,
+                        kind: CustomKind::Text,
+                        title,
+                        text: Some(String::new()),
+                        snapshot: None,
+                        body_size: egui::vec2(280.0, 150.0),
+                        scale: 1.0,
+                    })
+                });
                 if let Some(body) = body {
-                    self.custom_previews.push((**body).clone());
+                    self.custom_previews.push(body);
                 }
             }
-            AppEdit::DeleteAnnotation { annotation, body } => {
+            AppEdit::DeleteAnnotation { annotation } => {
                 self.annotations.remove(annotation.id);
-                if let Some(body) = body {
+                // 把配对的正文条目**移进 orphan_bodies**（不是丢弃）：重做时要原样放回，
+                // 且必须带上"删除那一刻"的内容（创建时的快照会丢掉之后的修改）。
+                if let Some(title) = annotation.body_title.clone() {
                     if let Some(index) = self
                         .custom_previews
                         .iter()
-                        .position(|preview| preview.title == body.title)
+                        .position(|preview| preview.title == title)
                     {
-                        self.custom_previews.remove(index);
+                        let body = self.custom_previews.remove(index);
+                        self.orphan_bodies.insert(annotation.id, body);
                         // 浮窗的下标引用要跟着左移（否则删一个会串到别人身上）
                         for window in &mut self.floats {
                             if let Some(custom) = window.custom {
@@ -816,12 +833,8 @@ impl PdfReaderApp {
             return;
         };
         let inverse = match entry.command {
-            AppEdit::AddAnnotation { annotation, body } => {
-                AppEdit::DeleteAnnotation { annotation, body }
-            }
-            AppEdit::DeleteAnnotation { annotation, body } => {
-                AppEdit::AddAnnotation { annotation, body }
-            }
+            AppEdit::AddAnnotation { annotation } => AppEdit::DeleteAnnotation { annotation },
+            AppEdit::DeleteAnnotation { annotation } => AppEdit::AddAnnotation { annotation },
         };
         self.apply_edit(inverse, false);
         self.message = format!("已撤销：{}", entry.description);
@@ -2341,26 +2354,6 @@ impl PdfReaderApp {
     }
 
     /// 按某个自定义 preview 的数据生成它的**正式浮窗**（正文尺寸取 `body_size`）。
-    /// 为一条标注新建正文条目（`custom_texts` 里的哨兵标题），返回下标。
-    ///
-    /// S2 的约定：标注**正文就是**一条文字 preview，不另立存储；删除标注时按同一标题删条目。
-    fn create_annotation_body(&mut self, id: AnnotationId, page: PageIndex, at: Point, rect: Rect) {
-        let title = persist::annotation_body_title(id);
-        let body_size = egui::vec2(280.0, 150.0);
-        self.custom_previews.push(CustomPreview {
-            page,
-            point: at,
-            rect,
-            kind: CustomKind::Text,
-            title,
-            text: Some(String::new()),
-            snapshot: None,
-            body_size,
-            scale: 1.0,
-        });
-        self.data_dirty = true;
-    }
-
     /// 把当前选区变成高亮标注，返回新增数量（D-118 S1）。
     ///
     /// 几何来自文本层的 `rects_for_range`（已按行合并），因此与选字高亮用的是同一套算法；
@@ -2414,7 +2407,7 @@ impl PdfReaderApp {
     }
 
     /// 建一条标注 + 配对正文条目，并**记入历史**（撤销/重做共用同一个入口）。
-    fn add_highlight(&mut self, page: PageIndex, quads: Vec<Rect>, bounds: Rect) -> bool {
+    fn add_highlight(&mut self, page: PageIndex, quads: Vec<Rect>, _bounds: Rect) -> bool {
         let Some(id) = self
             .annotations
             .add(page, AnnotationKind::Highlight { quads })
@@ -2423,23 +2416,13 @@ impl PdfReaderApp {
         };
         let title = persist::annotation_body_title(id);
         self.annotations.set_body(id, Some(title));
-        self.create_annotation_body(id, page, bounds.center(), bounds);
         let Some(annotation) = self.annotations.get(id).cloned() else {
             return false;
         };
-        let body = self
-            .custom_previews
-            .iter()
-            .find(|preview| preview.title == persist::annotation_body_title(id))
-            .cloned()
-            .map(std::sync::Arc::new);
         // 先把"就地插入"撤掉，再走统一的 `apply_edit` 重新应用 —— 这样"新建"与"撤销后重做"
         // 走的是同一条代码路径，不会一边删了正文、另一边忘了删。
         self.annotations.remove(id);
-        if body.is_some() {
-            self.custom_previews.pop();
-        }
-        self.apply_edit(AppEdit::AddAnnotation { annotation, body }, true);
+        self.apply_edit(AppEdit::AddAnnotation { annotation }, true);
         true
     }
 
@@ -2451,17 +2434,7 @@ impl PdfReaderApp {
         let Some(annotation) = self.annotations.get(id).cloned() else {
             return false;
         };
-        let body = annotation
-            .body_title
-            .as_ref()
-            .and_then(|title| {
-                self.custom_previews
-                    .iter()
-                    .find(|preview| &preview.title == title)
-            })
-            .cloned()
-            .map(std::sync::Arc::new);
-        self.apply_edit(AppEdit::DeleteAnnotation { annotation, body }, true);
+        self.apply_edit(AppEdit::DeleteAnnotation { annotation }, true);
         self.message = "已删除标注（Ctrl+Z 可撤销）".to_string();
         true
     }
