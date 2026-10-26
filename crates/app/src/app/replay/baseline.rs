@@ -448,11 +448,16 @@ pub fn compare(baseline: &Baseline, report: &Report, machine: &Machine) -> Vec<F
             machine.summary()
         )));
     }
-    if baseline.total_submitted() == 0 {
-        // 一份"一次渲染都没发生"的基线几乎一定是录制时跑错了（例如帧太便宜、
-        // 整段都停在缩放预览窗口里）。拿它当门禁会一路放行，所以直接判失败。
+    // "录制时跑错了"的判据：**既没有提交渲染，也从未上传过纹理** —— 说明整段回放
+    // 根本没渲染出任何东西（例如脚本找不到 PDF）。只看 `submitted` 会误伤纯交互脚本：
+    // 点击链接/拖拽平移时页面若已被预取渲染过，本来就不该有新的渲染请求。
+    let any_texture = baseline
+        .actions
+        .iter()
+        .any(|action| action.texture_bytes_peak > 0);
+    if baseline.total_submitted() == 0 && !any_texture {
         findings.push(Finding::gate(
-            "基线里没有任何渲染请求（很可能录制时跑错了），请重新录制",
+            "基线里既没有任何渲染请求、也没有任何纹理（很可能录制时跑错了），请重新录制",
         ));
     }
     if baseline.script != report.script {
@@ -653,6 +658,8 @@ mod tests {
             busy_frames: 1,
             busy_cpu_ms: (1.0, 1.0, 1.0, 1.0),
             busy_cpu_ms_total: 1.0,
+            page_after: 0,
+            scroll_after: (0.0, 0.0),
         }
     }
 
@@ -758,13 +765,17 @@ mod tests {
     fn a_baseline_without_any_render_requests_is_rejected() {
         // 真机第一次录制就踩到：帧太便宜，整段都停在缩放预览窗口里，一次渲染都没发生。
         // 这样的基线必须判失败，否则它会"一路放行"。
-        let empty = Baseline::record(&report(vec![action("a", 0, 0)]), machine());
-        let findings = compare(&empty, &report(vec![action("a", 0, 0)]), &machine());
+        // 真正"什么都没发生"：没有提交渲染，也没有任何纹理字节
+        let mut idle = action("a", 0, 0);
+        idle.textures_peak = 0;
+        idle.texture_bytes_peak = 0;
+        let empty = Baseline::record(&report(vec![idle.clone()]), machine());
+        let findings = compare(&empty, &report(vec![idle]), &machine());
         assert!(
             findings
                 .iter()
                 .any(|finding| finding.severity == Severity::Gate
-                    && finding.message.contains("没有任何渲染请求")),
+                    && finding.message.contains("也没有任何纹理")),
             "{findings:?}"
         );
     }

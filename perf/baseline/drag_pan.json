@@ -1,0 +1,25 @@
+{
+  "version": 4,
+  "profile": "structural",
+  "script": "drag_pan",
+  "machine": {
+    "cpu": "AMD Ryzen 7 7730U with Radeon Graphics",
+    "cores": 16,
+    "ram_mb": 15329,
+    "os": "linux",
+    "arch": "x86_64",
+    "build": "debug"
+  },
+  "actions": [
+    {"id": "resize", "submitted": 0, "upload_bytes": 12356156, "textures_peak": 2, "texture_bytes_peak": 10258752, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "top", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 10258752, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "settle", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 10258752, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "drag", "submitted": 0, "upload_bytes": 5129376, "textures_peak": 3, "texture_bytes_peak": 15388128, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "after", "submitted": 0, "upload_bytes": 0, "textures_peak": 3, "texture_bytes_peak": 15388128, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null}
+  ],
+  "cpu_ms": {"p50": 0.000, "p95": 0.000, "p99": 0.000, "max": 0.000},
+  "cpu_ms_total": 0.000,
+  "wall_ms_total": 0.0,
+  "busy_frames": 0,
+  "rss_peak_kb": 0
+}

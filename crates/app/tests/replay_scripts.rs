@@ -24,6 +24,9 @@ const CASES: &[(&str, Sample)] = &[
     // 两个"整页波段"之后再进分块波段：守住"上传集合必须是保留集合的子集"，
     // 否则开场底料/整页图会被每帧重传（实测过一次 8.4MB → 136MB）
     ("whole_pages.json", Sample::A4),
+    // S0：交互动作（点击跳链接 / 拖拽平移）—— 注释功能的自动化基础
+    ("click_link.json", Sample::Rotated),
+    ("drag_pan.json", Sample::A4),
 ];
 
 /// 脚本目录（测试的工作目录是 crate 目录，不是工作区根）。
@@ -61,6 +64,39 @@ fn stage(script: &str, sample: Sample) -> PathBuf {
 fn run(script: &str, sample: Sample) -> Report {
     let path = stage(script, sample);
     replay::run_script_file(&path, None).expect("回放应能跑完")
+}
+
+/// S0：`click` / `drag` 动作必须真的驱动 UI，而不是"跑完没报错"。
+#[test]
+fn click_navigates_and_drag_pans() {
+    if !backend_available() {
+        return;
+    }
+    let clicked = run("click_link.json", Sample::Rotated);
+    let action = clicked
+        .actions
+        .iter()
+        .find(|action| action.id == "click_link")
+        .expect("click 动作");
+    assert!(action.settled, "click 动作应当稳定");
+    assert_eq!(
+        action.page_after, 1,
+        "点击第 1 页的链接应当跳到第 2 页（0 起），实际 {}",
+        action.page_after
+    );
+
+    let dragged = run("drag_pan.json", Sample::A4);
+    let action = dragged
+        .actions
+        .iter()
+        .find(|action| action.id == "drag")
+        .expect("drag 动作");
+    assert!(action.settled, "drag 动作应当稳定");
+    assert!(
+        action.scroll_after.1.abs() > 100.0,
+        "拖拽应当平移画面，实际 scroll={:?}",
+        action.scroll_after
+    );
 }
 
 #[test]

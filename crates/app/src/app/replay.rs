@@ -92,6 +92,33 @@ pub enum Action {
         /// 自定义 preview 的下标（来自 sidecar 的加载顺序）。
         index: usize,
     },
+    /// 在页面上点击一次（**页面空间**坐标，左下原点）。
+    ///
+    /// 用页面空间而不是屏幕坐标：脚本因此与缩放、窗口尺寸、页边距无关
+    /// （S0 的目的：让注释等"点/拖"交互可以被自动化复现）。
+    Click {
+        /// 页号（0 起）。
+        page: u32,
+        /// 页内 x（PDF 页面单位）。
+        x: f32,
+        /// 页内 y（PDF 页面单位，左下原点）。
+        y: f32,
+    },
+    /// 在页面上拖拽（**页面空间**坐标）；按下 → `steps` 次插值移动 → 抬起。
+    Drag {
+        /// 页号（0 起）。
+        page: u32,
+        /// 起点 x（页面空间）。
+        from_x: f32,
+        /// 起点 y（页面空间）。
+        from_y: f32,
+        /// 终点 x（页面空间）。
+        to_x: f32,
+        /// 终点 y（页面空间）。
+        to_y: f32,
+        /// 中间移动帧数（默认 6；越大越接近真实拖拽）。
+        steps: u32,
+    },
     /// 指针移出画布。
     Unhover,
     /// 什么都不做，只跑若干帧（用来观察"稳定后"的状态）。
@@ -112,6 +139,8 @@ impl Action {
             Self::GoToPage { .. } => "go_to_page",
             Self::HoverLink { .. } => "hover_link",
             Self::OpenPreview { .. } => "open_preview",
+            Self::Click { .. } => "click",
+            Self::Drag { .. } => "drag",
             Self::Unhover => "unhover",
             Self::Wait { .. } => "wait",
         }
@@ -126,6 +155,17 @@ impl Action {
             Self::GoToPage { page } => format!("go_to_page {page}"),
             Self::HoverLink { page, link } => format!("hover_link p{page} #{link}"),
             Self::OpenPreview { index } => format!("open_preview #{index}"),
+            Self::Click { page, x, y } => format!("click p{page} ({x},{y})"),
+            Self::Drag {
+                page,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                ..
+            } => {
+                format!("drag p{page} ({from_x},{from_y})→({to_x},{to_y})")
+            }
             Self::Unhover => "unhover".to_string(),
             Self::Wait { frames } => format!("wait {frames}"),
         }
@@ -249,6 +289,10 @@ pub struct ActionReport {
     pub busy_cpu_ms: (f64, f64, f64, f64),
     /// 忙帧的 CPU 时间合计（毫秒）—— 这个动作一共烧了多少 CPU。
     pub busy_cpu_ms_total: f64,
+    /// 动作结束时当前页（0 起）。用于断言"点击链接跳页"这类由交互触发的导航。
+    pub page_after: u32,
+    /// 动作结束时的滚动偏移（内容空间像素）。用于断言拖拽平移。
+    pub scroll_after: (f32, f32),
 }
 
 /// 整次回放的报告。
@@ -495,6 +539,19 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
             },
             "open_preview" => Action::OpenPreview {
                 index: number("index").unwrap_or(0.0) as usize,
+            },
+            "click" => Action::Click {
+                page: number("page")? as u32,
+                x: number("x")?,
+                y: number("y")?,
+            },
+            "drag" => Action::Drag {
+                page: number("page")? as u32,
+                from_x: number("from_x")?,
+                from_y: number("from_y")?,
+                to_x: number("to_x")?,
+                to_y: number("to_y")?,
+                steps: number("steps").unwrap_or(6.0) as u32,
             },
             "unhover" => Action::Unhover,
             "wait" => Action::Wait {
@@ -817,6 +874,7 @@ pub fn run(
         pending: Vec::new(),
         screen: options.screen,
         pending_pointer: None,
+        gesture: None,
     };
 
     // 打开文档：直接走 app 自己的入口（与命令行/拖放同一条路径）
@@ -859,6 +917,8 @@ pub fn run(
             busy_frames: 0,
             busy_cpu_ms: (0.0, 0.0, 0.0, 0.0),
             busy_cpu_ms_total: 0.0,
+            page_after: 0,
+            scroll_after: (0.0, 0.0),
         };
         harness.apply_action(app, action);
         // 每个动作开始时清空诊断缓冲：这一行只属于这个动作
@@ -895,7 +955,11 @@ pub fn run(
             // 少了"预览窗口"这一条，动作会在窗口还没结束时就判定稳定 —— 此时渲染请求
             // 还没提交，后面自然看不到新瓦片（第一版回放就踩了这个坑）。
             let previewing = app.previewing();
-            let quiet_now = !previewing && stat.pending == 0 && state == last_state;
+            // 手势（点击/拖拽）还在逐帧投喂时**不算稳定**：否则 3 个静止帧就会让动作提前结束，
+            // 按下/抬起根本来不及发出（实测：点击动作只跑了 3 帧，一次 click 都没发生）。
+            let gesture_busy = harness.gesture.is_some();
+            let quiet_now =
+                !previewing && !gesture_busy && stat.pending == 0 && state == last_state;
             action_report.frames_data.push(stat);
             if quiet_now {
                 quiet += 1;
@@ -952,6 +1016,10 @@ pub fn run(
         action_report.busy_frames = busy.len() as u64;
         action_report.busy_cpu_ms_total = busy.iter().sum();
         action_report.busy_cpu_ms = percentiles(&busy);
+        if let Some(session) = app.session.as_ref() {
+            action_report.page_after = session.state().current_page.get();
+            action_report.scroll_after = (session.viewport().scroll.x, session.viewport().scroll.y);
+        }
         action_report.previews = app
             .custom_previews
             .iter()
@@ -982,6 +1050,17 @@ pub fn run(
     report
 }
 
+/// 一次指针手势：每帧消费一条，用真实事件流驱动 egui。
+///
+/// 为什么不是"一帧内按下+抬起"：egui 的点击判定依赖 `any_pressed()` / `any_released()`
+/// 两个**按帧**的布尔量，同一帧里先后发生会被合并掉，点击可能根本不会被识别。
+struct Gesture {
+    /// `(位置, 按键)`：`Some(true)` = 按下，`Some(false)` = 抬起，`None` = 只移动。
+    frames: std::collections::VecDeque<(egui::Pos2, Option<bool>)>,
+    /// 手势结束后指针停在哪里（保持悬停状态，避免下一帧状态抖动）。
+    rest: Option<egui::Pos2>,
+}
+
 struct Harness {
     ctx: egui::Context,
     frame: eframe::Frame,
@@ -999,10 +1078,19 @@ struct Harness {
     screen: (f32, f32),
     /// 当前动作要求的指针位置（悬停链接时持续保持；`None` = 移出画布）。
     pending_pointer: Option<egui::Pos2>,
+    /// 正在进行的"点击/拖拽"手势（逐帧消费事件）。
+    gesture: Option<Gesture>,
 }
 
 impl Harness {
     fn apply_action(&mut self, app: &mut crate::PdfReaderApp, action: &Action) {
+        // 点击/拖拽：先把页面空间坐标换算成屏幕坐标、建好手势，再让 `run_frame` 逐帧喂事件。
+        // 这里必须**先**于 `app.session.as_mut()` 借用，否则拿不到 `canvas_rect`。
+        if matches!(action, Action::Click { .. } | Action::Drag { .. }) {
+            self.pending_pointer = None;
+            self.gesture = self.gesture_for(app, action);
+            return;
+        }
         let Some(session) = app.session.as_mut() else {
             return;
         };
@@ -1034,6 +1122,8 @@ impl Harness {
                 );
                 app.spawn_custom_float(*index, rect);
             }
+            // 已在函数开头处理（不借用 session）
+            Action::Click { .. } | Action::Drag { .. } => {}
             Action::HoverLink { .. } | Action::Unhover => {
                 // 指针位置必须走 egui 的输入事件：在 `run_frame` 里按帧重放
                 self.pending_pointer = self.pointer_for_action(app, action);
@@ -1041,6 +1131,64 @@ impl Harness {
             Action::Wait { .. } => {}
         }
         app.events.extend(events);
+    }
+
+    /// 把"点击/拖拽"动作变成一串逐帧的指针事件（页面空间 → 内容空间 → 屏幕空间）。
+    fn gesture_for(&self, app: &crate::PdfReaderApp, action: &Action) -> Option<Gesture> {
+        let session = app.session.as_ref()?;
+        let canvas = app.canvas_rect;
+        let scroll = session.viewport().scroll;
+        let to_screen = |page: u32, point: Point| -> Option<egui::Pos2> {
+            let placement = session.placement(PageIndex::new(page))?;
+            let content = placement.page_to_content(point);
+            Some(egui::pos2(
+                canvas.min.x + content.x - scroll.x,
+                canvas.min.y + content.y - scroll.y,
+            ))
+        };
+        match action {
+            Action::Click { page, x, y } => {
+                let position = to_screen(*page, Point::new(*x, *y))?;
+                let mut frames = std::collections::VecDeque::new();
+                // **两帧**移动：egui 的 `hovered` 需要指针到达后的稳定一帧，按下发生在
+                // 到达帧会判定"没有悬停在控件上"而丢掉这次点击（实测 3 帧版本点击数为 0）
+                frames.push_back((position, None));
+                frames.push_back((position, None));
+                frames.push_back((position, Some(true)));
+                frames.push_back((position, Some(false)));
+                Some(Gesture {
+                    frames,
+                    rest: Some(position),
+                })
+            }
+            Action::Drag {
+                page,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                steps,
+            } => {
+                let start = to_screen(*page, Point::new(*from_x, *from_y))?;
+                let end = to_screen(*page, Point::new(*to_x, *to_y))?;
+                let steps = (*steps).clamp(1, 64);
+                let mut frames = std::collections::VecDeque::new();
+                // 同 Click：两帧移动，确保按下时控件已经 hovered（否则拖拽起点无效）
+                frames.push_back((start, None));
+                frames.push_back((start, None));
+                frames.push_back((start, Some(true)));
+                for step in 1..=steps {
+                    let t = step as f32 / steps as f32;
+                    frames.push_back((start + (end - start) * t, None));
+                }
+                frames.push_back((end, Some(false)));
+                Some(Gesture {
+                    frames,
+                    rest: Some(end),
+                })
+            }
+            _ => None,
+        }
     }
 
     /// 指针位置（悬停链接/移出画布）—— 由动作换算成屏幕坐标，回放时每帧沿用。
@@ -1074,8 +1222,24 @@ impl Harness {
             max_texture_side: Some(16_384),
             ..Default::default()
         };
-        // 指针：上一帧动作可能要求悬停某链接；这里用"当前动作"的位置（持续保持）
-        if let Some(position) = self.pending_pointer {
+        // 指针：手势（点击/拖拽）优先，逐帧消费；否则沿用"悬停位置"
+        if let Some(gesture) = &mut self.gesture {
+            if let Some((position, button)) = gesture.frames.pop_front() {
+                input.events.push(egui::Event::PointerMoved(position));
+                if let Some(pressed) = button {
+                    input.events.push(egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    });
+                }
+                if gesture.frames.is_empty() {
+                    self.pending_pointer = gesture.rest;
+                    self.gesture = None;
+                }
+            }
+        } else if let Some(position) = self.pending_pointer {
             input.events.push(egui::Event::PointerMoved(position));
             input.events.push(egui::Event::PointerButton {
                 pos: position,
@@ -1435,6 +1599,14 @@ fn action_json(report: &Report, action: &ActionReport) -> String {
                 action.busy_cpu_ms_total
             ),
         ),
+        ("page_after", action.page_after.to_string()),
+        (
+            "scroll_after",
+            format!(
+                "{{\"x\":{:.1},\"y\":{:.1}}}",
+                action.scroll_after.0, action.scroll_after.1
+            ),
+        ),
         ("submitted", action.submitted.to_string()),
         ("upload_bytes", action.upload_bytes.to_string()),
         ("texture_bytes_peak", action.texture_bytes_peak.to_string()),
@@ -1526,6 +1698,8 @@ mod tests {
             busy_frames: 3,
             busy_cpu_ms: (5.0, 18.5, 22.7, 22.7),
             busy_cpu_ms_total: 41.6,
+            page_after: 2,
+            scroll_after: (10.0, 20.0),
         };
         action.frames_data.push(FrameStat {
             frame: 1,
