@@ -169,10 +169,12 @@ fn undo_and_redo_walk_the_annotation_stack() {
     );
 }
 
-/// S4：一笔墨迹 = 一条标注；撤销一次整笔消失，重做回来（含配对正文条目）。
+/// S4b：`ink` 走**真实拖拽**（按下 → 移动 → 抬起），一笔 = 一条标注 = 一次撤销。
 ///
-/// 包围盒按"点集外扩半个线宽"计算，所以这里不只是"能跑通"，还钉住了墨迹的几何契约：
-/// 若哪天有人把墨迹存成屏幕坐标，或忘了外扩线宽，这四个数会立刻对不上。
+/// 三个断言一起钉住 S4 的验收点：
+/// 1. 一次拖拽只产生 1 条标注（拖动过程不进集合，抬笔才入库）；
+/// 2. Esc 取消 → 整笔丢弃（数量不变、不留正文条目）；
+/// 3. 1× 与 2× 下画同一组**页面空间**点 → 包围盒逐值相同（笔画中心不随缩放漂移）。
 #[test]
 fn ink_stroke_is_one_annotation_that_undo_and_redo_can_move() {
     if !backend_available() {
@@ -188,18 +190,18 @@ fn ink_stroke_is_one_annotation_that_undo_and_redo_can_move() {
     };
 
     let stroke = action("stroke");
-    assert_eq!(stroke.annotations, 1, "一笔墨迹应当只产生一条标注");
+    assert_eq!(stroke.annotations, 1, "一次拖拽应当只产生一条标注");
     assert_eq!(stroke.previews_total, 1, "墨迹也要有配对的正文条目");
-    let (x, y, width, height) = stroke.annotation_bounds.expect("墨迹包围盒");
+    let saved = stroke.annotation_bounds.expect("墨迹包围盒");
     for (label, actual, expected) in [
-        ("x", x, 48.5),
-        ("y", y, 688.5),
-        ("width", width, 233.0),
-        ("height", height, 43.0),
+        ("x", saved.0, 279.0),
+        ("y", saved.1, 389.0),
+        ("width", saved.2, 82.0),
+        ("height", saved.3, 22.0),
     ] {
         assert!(
             (actual - expected).abs() < 0.01,
-            "墨迹包围盒 {label} 应为 {expected}（点集外扩半个线宽），实际 {actual}"
+            "墨迹包围盒 {label} 应为 {expected}（点集外扩半线宽 1.0），实际 {actual}"
         );
     }
 
@@ -215,6 +217,33 @@ fn ink_stroke_is_one_annotation_that_undo_and_redo_can_move() {
         1,
         "重做必须同时放回配对正文条目"
     );
+
+    assert_eq!(
+        action("cancel").annotations,
+        1,
+        "拖到一半按 Esc：整笔丢弃，既不多一条也不该弄丢已有的那条"
+    );
+    assert_eq!(
+        action("cancel").previews_total,
+        1,
+        "取消的一笔不该留下正文条目"
+    );
+
+    // 2× 下再画同一组页面空间点：几何必须逐值相同（缩放不参与几何）
+    let at_200 = action("stroke_200");
+    assert_eq!(at_200.annotations, 2, "2× 下再画一笔");
+    let zoomed = at_200.annotation_bounds.expect("2× 的包围盒");
+    for (left, right) in [
+        (saved.0, zoomed.0),
+        (saved.1, zoomed.1),
+        (saved.2, zoomed.2),
+        (saved.3, zoomed.3),
+    ] {
+        assert!(
+            (left - right).abs() < 0.01,
+            "同一组页面空间点在不同缩放下的墨迹几何必须相同：{saved:?} vs {zoomed:?}"
+        );
+    }
 }
 
 #[test]

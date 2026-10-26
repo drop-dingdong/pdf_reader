@@ -44,7 +44,8 @@ fn annotation_and_body_survive_a_save_and_reopen() {
     { "id": "top", "op": "set_scroll", "x": 0, "y": 0 },
     { "id": "settle", "op": "wait", "frames": 8 },
     { "id": "annotate", "op": "highlight", "page": 0, "x": 50, "y": 690, "width": 450, "height": 50 },
-    { "id": "ink", "op": "ink", "page": 0, "width": 3.0,
+    { "id": "tool", "op": "set_tool", "tool": "ink" },
+    { "id": "ink", "op": "ink", "page": 0,
       "points": [[50, 700], [120, 720], [200, 690], [280, 730]] },
     { "id": "save", "op": "save" },
     { "id": "after", "op": "wait", "frames": 3 }"#,
@@ -87,7 +88,7 @@ fn annotation_and_body_survive_a_save_and_reopen() {
         "图层里应当有墨迹的 points：{overlay}"
     );
     assert!(
-        overlay.contains("\"width\":3.00"),
+        overlay.contains("\"width\":2.00"),
         "墨迹的线宽必须落盘（页面空间）：{overlay}"
     );
     assert!(
@@ -115,10 +116,10 @@ fn annotation_and_body_survive_a_save_and_reopen() {
     // `annotation_bounds` 取最后一条（加载顺序保留：高亮在前、墨迹在后）
     let (x, y, width, height) = settle.annotation_bounds.expect("墨迹包围盒");
     for (label, actual, expected) in [
-        ("x", x, 48.5),
-        ("y", y, 688.5),
-        ("width", width, 233.0),
-        ("height", height, 43.0),
+        ("x", x, 49.0),
+        ("y", y, 689.0),
+        ("width", width, 232.0),
+        ("height", height, 42.0),
     ] {
         assert!(
             (actual - expected).abs() < 0.01,

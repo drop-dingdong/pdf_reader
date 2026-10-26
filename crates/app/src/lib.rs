@@ -19,6 +19,7 @@ pub mod app;
 pub mod clock;
 pub mod diag;
 pub mod history;
+pub(crate) mod ink;
 pub(crate) mod json;
 pub mod persist;
 pub mod view;

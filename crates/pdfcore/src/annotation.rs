@@ -12,6 +12,21 @@
 use crate::geometry::{Point, Rect};
 use crate::ids::PageIndex;
 
+/// 文本类标注的默认颜色（半透明黄，像荧光笔）。
+pub const TEXT_MARK_COLOR: [u8; 3] = [255, 214, 0];
+
+/// 文本类标注的默认不透明度。
+pub const TEXT_MARK_OPACITY: f32 = 0.35;
+
+/// 墨迹的默认颜色（不透明深色，像笔）。
+///
+/// 墨迹不能沿用高亮的半透明黄：35% 的黄在页面上几乎看不见，
+/// 用户会以为"画了但没有反应"。默认样式只在**新建**时使用，存档里的值优先。
+pub const INK_COLOR: [u8; 3] = [25, 25, 25];
+
+/// 墨迹的默认不透明度。
+pub const INK_OPACITY: f32 = 1.0;
+
 /// 标注 id。
 ///
 /// **删除后不复用**：撤销栈（S3）会把旧 id 放回，复用会与新标注撞号。
@@ -137,12 +152,16 @@ impl Annotation {
         if !kind.is_valid() {
             return None;
         }
+        let (color, opacity) = match &kind {
+            AnnotationKind::Ink { .. } => (INK_COLOR, INK_OPACITY),
+            _ => (TEXT_MARK_COLOR, TEXT_MARK_OPACITY),
+        };
         Some(Self {
             id: AnnotationId(0),
             page,
             kind,
-            color: [255, 214, 0],
-            opacity: 0.35,
+            color,
+            opacity,
             body_title: None,
         })
     }
@@ -487,6 +506,37 @@ mod tests {
         assert!(
             annotation.contains(Point::new(-1.0, 0.0), 0.0),
             "端点处的半线宽内仍应命中"
+        );
+    }
+
+    #[test]
+    fn ink_defaults_are_an_opaque_pen_not_a_highlighter() {
+        let page = PageIndex::FIRST;
+        let ink = Annotation::new(
+            page,
+            AnnotationKind::Ink {
+                points: vec![Point::new(0.0, 0.0), Point::new(10.0, 10.0)],
+                width: 2.0,
+            },
+        )
+        .expect("有效墨迹");
+        assert_eq!((ink.color, ink.opacity), (INK_COLOR, INK_OPACITY));
+        assert!(
+            ink.clamped_opacity() >= 0.99,
+            "墨迹必须不透明（半透明的黄看着像没画上）"
+        );
+
+        let highlight = Annotation::new(
+            page,
+            AnnotationKind::Highlight {
+                quads: vec![quad(0.0, 0.0, 5.0, 5.0)],
+            },
+        )
+        .expect("有效高亮");
+        assert_eq!(
+            (highlight.color, highlight.opacity),
+            (TEXT_MARK_COLOR, TEXT_MARK_OPACITY),
+            "文本类仍是半透明黄"
         );
     }
 

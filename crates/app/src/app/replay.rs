@@ -23,8 +23,9 @@
 //!   帧耗时/上传字节/内存，作为本机基线（见 `docs/current/testing.md`）。
 //!
 //! ## 边界
-//! * 只驱动"主视图渲染"相关动作（打开/缩放/滚动/跳页/调整视口/悬停链接）；
-//!   浮窗、侧栏、编辑等交互不在范围内。
+//! * 驱动"主视图 + 标注"相关动作（打开/缩放/滚动/跳页/调整视口/悬停链接/点击/拖拽/
+//!   墨迹/保存/撤销/重做）；无窗口下可复现的编辑都在范围内。
+//! * **不在**范围内：浮窗内部的拖动/改大小、侧栏行点击、正文编辑器（需要真实窗口，交人工验收）。
 //! * 没有 GPU：测不到纹理上传的真实开销；`textures_delta` 只反映"打算上传多少字节"。
 
 pub mod baseline;
@@ -37,7 +38,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use pdfcore::prelude::*;
 
-use super::{CustomKind, PdfReaderApp, DEFAULT_INK_WIDTH};
+use super::{CustomKind, PdfReaderApp, Tool};
 use crate::clock::Clock;
 use crate::diag::Diagnostics;
 use crate::json::{Json, JsonLookup};
@@ -119,17 +120,22 @@ pub enum Action {
         /// 中间移动帧数（默认 6；越大越接近真实拖拽）。
         steps: u32,
     },
-    /// 画一笔墨迹（**页面空间**折线；S4 用它在回放里造墨迹）。
+    /// 画一笔墨迹（**页面空间**折线；S4b 起走**真实拖拽**）。
     ///
-    /// 与 `highlight` 一样走"直接建标注"的路径（不模拟指针拖拽）：它验证的是
-    /// 模型与持久化，而"拖拽 → 一笔一命令 → Esc 丢弃"由墨迹工具那一层负责。
+    /// 脚本必须先 `set_tool ink`：按下 → 逐点移动 → 抬起，**抬手时**才产生标注
+    /// （一笔 = 一条标注 = 一次撤销）。
     Ink {
         /// 页号（0 起）。
         page: u32,
         /// 折线顶点（页面空间，左下原点；至少两个点）。
         points: Vec<Point>,
-        /// 线宽（页面空间单位）。
-        width: f32,
+        /// 拖到最后一帧时按 Esc（验证"整笔丢弃、不留半条"）。
+        cancel: bool,
+    },
+    /// 切换工具（`pan` / `select` / `ink`）。
+    SetTool {
+        /// 工具名。
+        tool: String,
     },
     /// 把页面上的一块矩形变成高亮标注（**页面空间**；S1 用它在回放里造标注）。
     Highlight {
@@ -172,6 +178,7 @@ impl Action {
             Self::OpenPreview { .. } => "open_preview",
             Self::Click { .. } => "click",
             Self::Ink { .. } => "ink",
+            Self::SetTool { .. } => "set_tool",
             Self::Highlight { .. } => "highlight",
             Self::Save => "save",
             Self::Undo => "undo",
@@ -205,10 +212,12 @@ impl Action {
             Self::Ink {
                 page,
                 points,
-                width,
+                cancel,
             } => {
-                format!("ink p{page} {} 点，线宽 {width}", points.len())
+                let suffix = if *cancel { "（Esc 取消）" } else { "" };
+                format!("ink p{page} {} 点{suffix}", points.len())
             }
+            Self::SetTool { tool } => format!("set_tool {tool}"),
             Self::Highlight {
                 page,
                 x,
@@ -638,9 +647,19 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
                 Action::Ink {
                     page: number("page")? as u32,
                     points,
-                    width: number("width").unwrap_or(DEFAULT_INK_WIDTH),
+                    cancel: object
+                        .field("cancel")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false),
                 }
             }
+            "set_tool" => Action::SetTool {
+                tool: object
+                    .field("tool")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| format!("{id}: 缺 tool"))?
+                    .to_string(),
+            },
             "highlight" => Action::Highlight {
                 page: number("page")? as u32,
                 x: number("x")?,
@@ -1166,10 +1185,58 @@ pub fn run(
 /// 为什么不是"一帧内按下+抬起"：egui 的点击判定依赖 `any_pressed()` / `any_released()`
 /// 两个**按帧**的布尔量，同一帧里先后发生会被合并掉，点击可能根本不会被识别。
 struct Gesture {
-    /// `(位置, 按键)`：`Some(true)` = 按下，`Some(false)` = 抬起，`None` = 只移动。
-    frames: std::collections::VecDeque<(egui::Pos2, Option<bool>)>,
+    /// 逐帧的指针（+ 可选的同帧键盘事件）。
+    frames: std::collections::VecDeque<GestureFrame>,
     /// 手势结束后指针停在哪里（保持悬停状态，避免下一帧状态抖动）。
     rest: Option<egui::Pos2>,
+}
+
+/// 手势里的一帧。
+struct GestureFrame {
+    /// 指针位置。
+    position: egui::Pos2,
+    /// `Some(true)` = 按下，`Some(false)` = 抬起，`None` = 只移动。
+    button: Option<bool>,
+    /// 该帧要同时注入的键盘事件（墨迹的 Esc 丢弃用它）。
+    keys: Vec<egui::Event>,
+}
+
+impl GestureFrame {
+    fn moved(position: egui::Pos2) -> Self {
+        Self {
+            position,
+            button: None,
+            keys: Vec::new(),
+        }
+    }
+
+    fn pressed(position: egui::Pos2) -> Self {
+        Self {
+            position,
+            button: Some(true),
+            keys: Vec::new(),
+        }
+    }
+
+    fn released(position: egui::Pos2) -> Self {
+        Self {
+            position,
+            button: Some(false),
+            keys: Vec::new(),
+        }
+    }
+
+    /// 在这一帧之前再按一个键（例如拖拽中途 Esc）。
+    fn with_key(mut self, key: egui::Key) -> Self {
+        self.keys.push(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        self
+    }
 }
 
 struct Harness {
@@ -1208,13 +1275,10 @@ impl Harness {
             app.annotate_page_rect(PageIndex::new(*page), Rect::new(*x, *y, *width, *height));
             return;
         }
-        if let Action::Ink {
-            page,
-            points,
-            width,
-        } = action
-        {
-            app.annotate_ink(PageIndex::new(*page), points, *width);
+        if let Action::SetTool { tool } = action {
+            if let Some(tool) = Tool::from_key(tool) {
+                app.switch_tool(tool);
+            }
             return;
         }
         if let Action::Save = action {
@@ -1229,7 +1293,10 @@ impl Harness {
             app.redo_edit();
             return;
         }
-        if matches!(action, Action::Click { .. } | Action::Drag { .. }) {
+        if matches!(
+            action,
+            Action::Click { .. } | Action::Drag { .. } | Action::Ink { .. }
+        ) {
             self.pending_pointer = None;
             self.gesture = self.gesture_for(app, action);
             return;
@@ -1270,6 +1337,7 @@ impl Harness {
             | Action::Drag { .. }
             | Action::Highlight { .. }
             | Action::Ink { .. }
+            | Action::SetTool { .. }
             | Action::Save => {}
             Action::HoverLink { .. } | Action::Unhover => {
                 // 指针位置必须走 egui 的输入事件：在 `run_frame` 里按帧重放
@@ -1299,10 +1367,10 @@ impl Harness {
                 let mut frames = std::collections::VecDeque::new();
                 // **两帧**移动：egui 的 `hovered` 需要指针到达后的稳定一帧，按下发生在
                 // 到达帧会判定"没有悬停在控件上"而丢掉这次点击（实测 3 帧版本点击数为 0）
-                frames.push_back((position, None));
-                frames.push_back((position, None));
-                frames.push_back((position, Some(true)));
-                frames.push_back((position, Some(false)));
+                frames.push_back(GestureFrame::moved(position));
+                frames.push_back(GestureFrame::moved(position));
+                frames.push_back(GestureFrame::pressed(position));
+                frames.push_back(GestureFrame::released(position));
                 Some(Gesture {
                     frames,
                     rest: Some(position),
@@ -1321,14 +1389,43 @@ impl Harness {
                 let steps = (*steps).clamp(1, 64);
                 let mut frames = std::collections::VecDeque::new();
                 // 同 Click：两帧移动，确保按下时控件已经 hovered（否则拖拽起点无效）
-                frames.push_back((start, None));
-                frames.push_back((start, None));
-                frames.push_back((start, Some(true)));
+                frames.push_back(GestureFrame::moved(start));
+                frames.push_back(GestureFrame::moved(start));
+                frames.push_back(GestureFrame::pressed(start));
                 for step in 1..=steps {
                     let t = step as f32 / steps as f32;
-                    frames.push_back((start + (end - start) * t, None));
+                    frames.push_back(GestureFrame::moved(start + (end - start) * t));
                 }
-                frames.push_back((end, Some(false)));
+                frames.push_back(GestureFrame::released(end));
+                Some(Gesture {
+                    frames,
+                    rest: Some(end),
+                })
+            }
+            // 墨迹：走**真实的按下 → 移动 → 抬起**（S4b）。脚本里必须先 `set_tool ink`，
+            // 否则按下的还是平移工具（拖拽会滚页而不是画线）。
+            Action::Ink {
+                page,
+                points,
+                cancel,
+            } => {
+                let start = to_screen(*page, *points.first()?)?;
+                let mut frames = std::collections::VecDeque::new();
+                frames.push_back(GestureFrame::moved(start));
+                frames.push_back(GestureFrame::moved(start));
+                frames.push_back(GestureFrame::pressed(start));
+                for (index, point) in points.iter().enumerate().skip(1) {
+                    let position = to_screen(*page, *point)?;
+                    let frame = GestureFrame::moved(position);
+                    // 最后一帧移动时按 Esc：验证"拖到一半取消 → 整笔丢弃、不留半条"
+                    frames.push_back(if *cancel && index + 1 == points.len() {
+                        frame.with_key(egui::Key::Escape)
+                    } else {
+                        frame
+                    });
+                }
+                let end = to_screen(*page, *points.last()?)?;
+                frames.push_back(GestureFrame::released(end));
                 Some(Gesture {
                     frames,
                     rest: Some(end),
@@ -1371,11 +1468,14 @@ impl Harness {
         };
         // 指针：手势（点击/拖拽）优先，逐帧消费；否则沿用"悬停位置"
         if let Some(gesture) = &mut self.gesture {
-            if let Some((position, button)) = gesture.frames.pop_front() {
-                input.events.push(egui::Event::PointerMoved(position));
-                if let Some(pressed) = button {
+            if let Some(frame) = gesture.frames.pop_front() {
+                // 键盘事件先于指针事件：Esc 必须在"这一帧的指针移动"之前被处理，
+                // 否则拖拽会先采样一个点再取消（结果一样，但诊断顺序会误导）。
+                input.events.extend(frame.keys);
+                input.events.push(egui::Event::PointerMoved(frame.position));
+                if let Some(pressed) = frame.button {
                     input.events.push(egui::Event::PointerButton {
-                        pos: position,
+                        pos: frame.position,
                         button: egui::PointerButton::Primary,
                         pressed,
                         modifiers: Default::default(),
@@ -1765,6 +1865,18 @@ fn action_json(report: &Report, action: &ActionReport) -> String {
                 .map_or(0, |frame| frame.textures)
                 .to_string(),
         ),
+        ("annotations", action.annotations.to_string()),
+        (
+            "annotation_bounds",
+            match action.annotation_bounds {
+                Some((x, y, width, height)) => {
+                    format!("{{\"x\":{x:.2},\"y\":{y:.2},\"width\":{width:.2},\"height\":{height:.2}}}")
+                }
+                None => "null".to_string(),
+            },
+        ),
+        ("floats", action.floats.to_string()),
+        ("previews_total", action.previews_total.to_string()),
         ("violations", serde_free_array(&action.violations)),
         ("notes", serde_free_array(&action.notes)),
         ("previews", format!("[{}]", previews.join(","))),

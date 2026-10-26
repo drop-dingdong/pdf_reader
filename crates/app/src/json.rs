@@ -91,6 +91,13 @@ impl Json {
             _ => None,
         }
     }
+
+    pub(crate) fn as_bool(&self) -> Option<bool> {
+        match self {
+            Json::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
 }
 
 struct Parser<'a> {

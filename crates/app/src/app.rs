@@ -21,9 +21,10 @@ use egui::{
     Align2, Color32, CornerRadius, Id, Key, Modifiers, RichText, Sense, Stroke, StrokeKind,
     Vec2 as EVec2,
 };
-use pdfcore::annotation::{AnnotationId, AnnotationKind, AnnotationStore};
+use pdfcore::annotation::{AnnotationId, AnnotationKind, AnnotationStore, INK_COLOR, INK_OPACITY};
 use pdfcore::prelude::*;
 
+use crate::ink::InkStroke;
 use crate::persist;
 
 /// 无窗口回放器（脚本驱动真实 `App::ui`，用于回归断言与性能基线，见 D-103）。
@@ -151,6 +152,8 @@ enum DragMode {
     Pan,
     /// 拖选文字（起点命中了字符）。
     Select,
+    /// 正在画墨迹（S4b）：采样点累积在 `ink` 里，抬笔才变成标注。
+    Ink,
 }
 
 /// 鼠标拖拽的语义（第二轮验收：去掉不可靠的"自动"模式，只留两种明确行为）。
@@ -161,6 +164,8 @@ enum Tool {
     Pan,
     /// 总是选字（拖到空白处不产生选区）。
     Select,
+    /// 画墨迹（S4b）：拖拽画一笔，**抬起才入库**；不滚页也不选字。
+    Ink,
 }
 
 impl Tool {
@@ -168,6 +173,17 @@ impl Tool {
         match self {
             Self::Pan => "平移",
             Self::Select => "选字",
+            Self::Ink => "墨迹",
+        }
+    }
+
+    /// 脚本里的名字（回放动作 `set_tool`）。
+    fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "pan" => Some(Self::Pan),
+            "select" => Some(Self::Select),
+            "ink" => Some(Self::Ink),
+            _ => None,
         }
     }
 }
@@ -507,6 +523,8 @@ pub struct PdfReaderApp {
     show_annotations: bool,
     /// 页面标注（会话内；S2 才落盘）。
     annotations: AnnotationStore,
+    /// 正在画的一笔墨迹（S4b）；**抬笔之前它不是标注**，取消只要丢掉它。
+    ink: Option<InkStroke>,
     /// "下一步把当前选区变成标注"（由快捷键/按钮置位，在画布绘制时执行）。
     pending_annotate: bool,
     /// 标注图层是否有未保存的改动（Ctrl+S 用它决定要不要写）。
@@ -712,6 +730,7 @@ impl PdfReaderApp {
             show_links: false,
             show_annotations: true,
             annotations: AnnotationStore::new(),
+            ink: None,
             pending_annotate: false,
             overlay_dirty: false,
             history: crate::history::History::new(),
@@ -1328,6 +1347,13 @@ impl PdfReaderApp {
                 self.pending_annotate = true;
                 continue;
             }
+            if key == Key::Escape && self.ink.is_some() {
+                // 整笔丢弃：不进标注集合、不产生命令，所以撤销栈里不会留下半条
+                self.ink = None;
+                self.drag = None;
+                self.message = "已取消这一笔".to_string();
+                continue;
+            }
             if let Some(command) = command_for_key(key, modifiers, page_count) {
                 self.commands.push(command);
             }
@@ -1829,16 +1855,13 @@ impl PdfReaderApp {
 
                 ui.separator();
 
-                // 预览模式：平移 / 选字
-                for tool in [Tool::Pan, Tool::Select] {
+                // 工具：平移 / 选字 / 墨迹（D-118 S4b）
+                for tool in [Tool::Pan, Tool::Select, Tool::Ink] {
                     if ui
                         .selectable_label(self.tool == tool, tool.label())
                         .clicked()
                     {
-                        self.tool = tool;
-                        if pin_exits_on_mode_change(tool == Tool::Select, false) {
-                            self.custom_pin = None;
-                        }
+                        self.switch_tool(tool);
                     }
                 }
 
@@ -2472,6 +2495,111 @@ impl PdfReaderApp {
         usize::from(self.add_highlight(page, quads, bounds))
     }
 
+    /// 切换工具（工具栏与回放共用）：**切走墨迹时丢弃正在画的一笔**。
+    fn switch_tool(&mut self, tool: Tool) {
+        if self.tool == Tool::Ink && tool != Tool::Ink {
+            if self.ink.take().is_some() {
+                self.message = "已切换工具，未完成的一笔已丢弃".to_string();
+            }
+            self.drag = None;
+        }
+        self.tool = tool;
+        if pin_exits_on_mode_change(tool == Tool::Select, false) {
+            self.custom_pin = None;
+        }
+    }
+
+    /// 内容空间点 →（所在页，页面空间点）。
+    ///
+    /// 墨迹用它决定"这一笔画在哪一页"：可见页按顺序取第一个包含该点的。
+    fn page_at_content(
+        &self,
+        session: &DocumentSession,
+        content: Point,
+    ) -> Option<(PageIndex, Point)> {
+        for page in self.visible.clone() {
+            let Some(placement) = session.placement(page) else {
+                continue;
+            };
+            if placement.rect.contains(content) {
+                return Some((page, placement.content_to_page(content)));
+            }
+        }
+        None
+    }
+
+    /// 墨迹工具的手势：按下起笔、拖动累积、**抬笔才入库**（D-118 S4b）。
+    ///
+    /// 拖拽中只更新 [`InkStroke`]（实时跟手），不进 `AnnotationStore`、不产生命令；
+    /// 因此 Esc / 切工具丢弃时"不会留下半条"。
+    fn handle_ink_pointer(
+        &mut self,
+        ui: &egui::Ui,
+        canvas: egui::Rect,
+        response: &egui::Response,
+        session: &DocumentSession,
+        scroll: Vec2,
+    ) {
+        if self.capture.is_some() {
+            return;
+        }
+        if response.drag_started() {
+            // 起点必须用 `press_origin`：egui 的 `drag_started` 要等指针移过阈值才触发，
+            // 用当时的指针位置会让整笔平移几个像素。
+            let Some(origin) = ui.input(|input| input.pointer.press_origin()) else {
+                return;
+            };
+            let content = canvas_to_content(canvas, origin, scroll);
+            let Some((page, page_point)) = self.page_at_content(session, content) else {
+                self.message = "请在页面上开始画墨迹".to_string();
+                return;
+            };
+            let mut stroke = InkStroke::start(page, DEFAULT_INK_WIDTH, page_point);
+            // 触发 `drag_started` 需要先移过阈值，所以"按下点"与"当前位置"之间已经有一段了；
+            // 把当前位置也采进来，否则一笔的开头会凭空少一段（快速起笔时尤其明显）。
+            if let Some(position) = response.interact_pointer_pos() {
+                let current = canvas_to_content(canvas, position, scroll);
+                if let Some(placement) = session.placement(page) {
+                    stroke.push(placement.content_to_page(current));
+                }
+            }
+            self.ink = Some(stroke);
+            self.drag = Some(DragMode::Ink);
+            self.message = "正在画墨迹（Esc 取消）".to_string();
+            return;
+        }
+        if response.dragged() {
+            let Some(position) = response.interact_pointer_pos() else {
+                return;
+            };
+            let Some(stroke) = self.ink.as_mut() else {
+                return;
+            };
+            let Some(placement) = session.placement(stroke.page()) else {
+                return;
+            };
+            let content = canvas_to_content(canvas, position, scroll);
+            if stroke.push(placement.content_to_page(content)) {
+                ui.ctx().request_repaint();
+            }
+            return;
+        }
+        if response.drag_stopped() {
+            self.drag = None;
+            let Some(stroke) = self.ink.take() else {
+                return;
+            };
+            match stroke.finish() {
+                Some((page, points, width)) => {
+                    self.annotate_ink(page, &points, width);
+                }
+                None => {
+                    self.message = "这一笔太短：至少需要两个点".to_string();
+                }
+            }
+        }
+    }
+
     /// 把页面上的一笔墨迹变成标注（页面空间折线 + 页面空间线宽，D-118 S4）。
     ///
     /// 回放动作 `ink` 与（S4c 的）墨迹工具都调用它：**抬笔时调用一次**，
@@ -2861,8 +2989,12 @@ impl PdfReaderApp {
             let select_now = match self.tool {
                 Tool::Select => !inverted_now,
                 Tool::Pan => inverted_now,
+                Tool::Ink => false,
             };
-            if self.capture.is_none() && response.drag_started() {
+            // 墨迹工具独占指针：拖拽既不滚页也不选字（S4b）
+            if self.tool == Tool::Ink {
+                self.handle_ink_pointer(ui, canvas, &response, session, session.viewport().scroll);
+            } else if self.capture.is_none() && response.drag_started() {
                 self.drag_started_at = Some(self.clock.now());
                 self.last_pan_at = None;
                 if self.diag.enabled() {
@@ -2953,6 +3085,8 @@ impl PdfReaderApp {
                             }
                         }
                     }
+                    // 墨迹已在上面由 `handle_ink_pointer` 逐帧累积采样点
+                    Some(DragMode::Ink) => {}
                     None => {}
                 }
             }
@@ -3401,6 +3535,42 @@ impl PdfReaderApp {
                         }
                     }
                 }
+
+                // 正在画的一笔：还没进标注集合，但必须**跟手显示**（否则用户以为没反应）
+                if let Some(stroke) = &self.ink {
+                    if let Some(placement) = session.placement(stroke.page()).copied() {
+                        let alpha = (INK_OPACITY * 255.0).round() as u8;
+                        let color = Color32::from_rgba_unmultiplied(
+                            INK_COLOR[0],
+                            INK_COLOR[1],
+                            INK_COLOR[2],
+                            alpha,
+                        );
+                        let width = (stroke.width() * placement.scale.0).max(1.0);
+                        let screen_points: Vec<egui::Pos2> = stroke
+                            .points()
+                            .iter()
+                            .map(|point| {
+                                let content = placement.page_to_content(*point);
+                                egui::pos2(
+                                    canvas.min.x + content.x - scroll.x,
+                                    canvas.min.y + content.y - scroll.y,
+                                )
+                            })
+                            .collect();
+                        if let Some(first) = screen_points.first() {
+                            if screen_points.len() == 1 {
+                                // 刚起笔还没拖动：画一个点，让"按下有反应"可见
+                                painter.circle_filled(*first, width * 0.5, color);
+                            } else {
+                                painter.add(egui::Shape::line(
+                                    screen_points,
+                                    Stroke::new(width, color),
+                                ));
+                            }
+                        }
+                    }
+                }
             }
 
             // 2c) 被引用的点（链接跳转目的地）：按位置去重后画记号；
@@ -3489,6 +3659,7 @@ impl PdfReaderApp {
             let select_tool = match self.tool {
                 Tool::Select => !inverted,
                 Tool::Pan => inverted,
+                Tool::Ink => false,
             };
 
             // drag_started / dragged 已在绘制之前处理（当帧生效），此处不重复
@@ -3506,7 +3677,7 @@ impl PdfReaderApp {
                             }
                         }
                     }
-                    Some(DragMode::Pan) => {
+                    Some(DragMode::Pan) | Some(DragMode::Ink) => {
                         // 已在绘制之前当帧处理（见"拖动当帧生效"），这里不再重复提交
                     }
                     None => {}
