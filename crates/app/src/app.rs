@@ -282,6 +282,7 @@ struct CustomDialog {
 /// 按用户要求记录：Pin 结束时的**页号 + 页内坐标**、以该坐标为中心的**零尺寸矩形**
 /// （与链接对应）、以及题目/内容或截图。位置类字段暂时只被"保存"而未被读取 ——
 /// 它们是给"自定义 preview 与链接/被引用点挂接"的下一版准备的。
+#[derive(Clone)]
 struct CustomPreview {
     page: PageIndex,
     /// 记录时的页内坐标。**只写不读**：当前只用于写回存档（D-49 的"位置类字段"），
@@ -361,6 +362,57 @@ struct CaptureState {
     target: CaptureTarget,
 }
 
+/// 一条可撤销的编辑（S3）。
+///
+/// 命令里**持有旧值**（`Arc` 共享，不做深拷贝）：撤销时把它移回应用即可。
+#[derive(Clone)]
+enum AppEdit {
+    /// 新增一条标注（含配对的正文条目）。
+    AddAnnotation {
+        /// 标注本体（含 id，撤销后重做必须用同一个 id）。
+        annotation: pdfcore::annotation::Annotation,
+        /// 配对的正文条目（`custom_texts` 里那条哨兵标题的 preview）。
+        body: Option<std::sync::Arc<CustomPreview>>,
+    },
+    /// 删除一条标注（撤销 = 放回去，所以同样要带旧值）。
+    DeleteAnnotation {
+        /// 被删掉的标注。
+        annotation: pdfcore::annotation::Annotation,
+        /// 被删掉的正文条目。
+        body: Option<std::sync::Arc<CustomPreview>>,
+    },
+}
+
+impl AppEdit {
+    /// 给人看的一句话（可视列表直接用它）。
+    fn describe(&self) -> String {
+        let (page, kind) = match self {
+            Self::AddAnnotation { annotation, .. } | Self::DeleteAnnotation { annotation, .. } => (
+                annotation.page.display_number(),
+                annotation.kind.quads().len(),
+            ),
+        };
+        let verb = match self {
+            Self::AddAnnotation { .. } => "高亮",
+            Self::DeleteAnnotation { .. } => "删除标注",
+        };
+        match kind {
+            1 => format!("{verb}（第 {page} 页）"),
+            rows => format!("{verb}（第 {page} 页，{rows} 行）"),
+        }
+    }
+
+    /// 估算权重（注释类很小；正文条目按 512 字节算）。
+    fn weight(&self) -> usize {
+        let body = match self {
+            Self::AddAnnotation { body, .. } | Self::DeleteAnnotation { body, .. } => {
+                body.is_some()
+            }
+        };
+        256 + if body { 512 } else { 0 }
+    }
+}
+
 /// 浮窗内容：纯文字，或一张**自包含的截图**。
 enum FloatContent {
     /// 纯文字。
@@ -426,6 +478,12 @@ pub struct PdfReaderApp {
     pending_annotate: bool,
     /// 标注图层是否有未保存的改动（Ctrl+S 用它决定要不要写）。
     overlay_dirty: bool,
+    /// 编辑历史（注释 + 重选截图/引用点，单栈时间序）。
+    history: crate::history::History<AppEdit>,
+    /// 是否显示"编辑历史"可视列表（首次撤销时自动打开）。
+    show_history: bool,
+    /// 本帧指针悬停在哪个标注上（`Delete` 用它决定删谁）。
+    hovered_annotation: Option<AnnotationId>,
     /// 大纲的**扁平行**（打开文档时摊平一次；侧栏用虚拟化行渲染，避免每帧布局上千行）。
     outline_rows: Vec<crate::view::OutlineRow>,
     /// 视图区域内的浮窗；**后加入的排在后面 → 绘制与交互都在更上层**（用户要求"后出现的浮窗更高"）。
@@ -621,6 +679,9 @@ impl PdfReaderApp {
             annotations: AnnotationStore::new(),
             pending_annotate: false,
             overlay_dirty: false,
+            history: crate::history::History::new(),
+            show_history: false,
+            hovered_annotation: None,
             outline_rows: Vec::new(),
             floats: Vec::new(),
             next_float_id: 1,
@@ -705,6 +766,79 @@ impl PdfReaderApp {
     }
 
     /// 打开文档（装配会话：LRU 缓存 + 后台调度器 + 纵向布局 + 选区模型）。
+    /// 应用一条编辑（`record = true` 时同时记入历史）。
+    ///
+    /// 只有这一处修改"标注 + 配对正文"，撤销/重做因此共用同一条代码路径 ——
+    /// 否则"删除标注忘了删正文"这类不对称会从两个方向各犯一次。
+    fn apply_edit(&mut self, edit: AppEdit, record: bool) {
+        let description = edit.describe();
+        match &edit {
+            AppEdit::AddAnnotation { annotation, body } => {
+                self.annotations.insert(annotation.clone());
+                if let Some(body) = body {
+                    self.custom_previews.push((**body).clone());
+                }
+            }
+            AppEdit::DeleteAnnotation { annotation, body } => {
+                self.annotations.remove(annotation.id);
+                if let Some(body) = body {
+                    if let Some(index) = self
+                        .custom_previews
+                        .iter()
+                        .position(|preview| preview.title == body.title)
+                    {
+                        self.custom_previews.remove(index);
+                        // 浮窗的下标引用要跟着左移（否则删一个会串到别人身上）
+                        for window in &mut self.floats {
+                            if let Some(custom) = window.custom {
+                                if custom > index {
+                                    window.custom = Some(custom - 1);
+                                }
+                            }
+                        }
+                        self.floats.retain(|window| window.custom != Some(index));
+                    }
+                }
+            }
+        }
+        self.overlay_dirty = true;
+        self.data_dirty = true;
+        if record {
+            let weight = edit.weight();
+            self.history.push(description, edit, weight);
+        }
+    }
+
+    /// 撤销一步（反向应用栈顶命令）。
+    fn undo_edit(&mut self) {
+        let Some(entry) = self.history.undo() else {
+            self.message = "没有可撤销的编辑".to_string();
+            return;
+        };
+        let inverse = match entry.command {
+            AppEdit::AddAnnotation { annotation, body } => {
+                AppEdit::DeleteAnnotation { annotation, body }
+            }
+            AppEdit::DeleteAnnotation { annotation, body } => {
+                AppEdit::AddAnnotation { annotation, body }
+            }
+        };
+        self.apply_edit(inverse, false);
+        self.message = format!("已撤销：{}", entry.description);
+        self.show_history = true;
+    }
+
+    /// 重做一步。
+    fn redo_edit(&mut self) {
+        let Some(entry) = self.history.redo() else {
+            self.message = "没有可重做的编辑".to_string();
+            return;
+        };
+        self.apply_edit(entry.command, false);
+        self.message = format!("已重做：{}", entry.description);
+        self.show_history = true;
+    }
+
     /// `Ctrl+S`：保存**所有**有脏标记的文件（主存档 + 标注图层）。
     ///
     /// 顺序固定：先主存档（正文在里面）、再图层；两份各自原子写，互不依赖，
@@ -1090,8 +1224,25 @@ impl PdfReaderApp {
             if copy_event && key == Key::C {
                 continue;
             }
-            if key == Key::S && (modifiers.ctrl || modifiers.command) {
+            let command_modifier = modifiers.ctrl || modifiers.command;
+            // 文本框有焦点时把按键让给文本框（它自己的撤销/删除更贴合当前输入）
+            let text_focused = ctx.memory(|memory| memory.focused().is_some());
+            if key == Key::S && command_modifier {
                 self.save_all();
+                continue;
+            }
+            if key == Key::Z && command_modifier && !text_focused {
+                if modifiers.shift {
+                    self.redo_edit();
+                } else {
+                    self.undo_edit();
+                }
+                continue;
+            }
+            if (key == Key::Delete || key == Key::Backspace)
+                && !text_focused
+                && self.delete_hovered_annotation()
+            {
                 continue;
             }
             if key == Key::H && !modifiers.any() {
@@ -2224,15 +2375,7 @@ impl PdfReaderApp {
                 .copied()
                 .reduce(|a, b| a.union(b))
                 .unwrap_or(highlight.rects[0]);
-            if let Some(id) = self.annotations.add(
-                highlight.page,
-                AnnotationKind::Highlight {
-                    quads: highlight.rects.clone(),
-                },
-            ) {
-                let title = persist::annotation_body_title(id);
-                self.annotations.set_body(id, Some(title));
-                self.create_annotation_body(id, highlight.page, bounds.center(), bounds);
+            if self.add_highlight(highlight.page, highlight.rects.clone(), bounds) {
                 added += 1;
             }
         }
@@ -2267,17 +2410,60 @@ impl PdfReaderApp {
             .copied()
             .reduce(|a, b| a.union(b))
             .unwrap_or(rect);
+        usize::from(self.add_highlight(page, quads, bounds))
+    }
+
+    /// 建一条标注 + 配对正文条目，并**记入历史**（撤销/重做共用同一个入口）。
+    fn add_highlight(&mut self, page: PageIndex, quads: Vec<Rect>, bounds: Rect) -> bool {
         let Some(id) = self
             .annotations
             .add(page, AnnotationKind::Highlight { quads })
         else {
-            return 0;
+            return false;
         };
         let title = persist::annotation_body_title(id);
         self.annotations.set_body(id, Some(title));
         self.create_annotation_body(id, page, bounds.center(), bounds);
-        self.overlay_dirty = true;
-        1
+        let Some(annotation) = self.annotations.get(id).cloned() else {
+            return false;
+        };
+        let body = self
+            .custom_previews
+            .iter()
+            .find(|preview| preview.title == persist::annotation_body_title(id))
+            .cloned()
+            .map(std::sync::Arc::new);
+        // 先把"就地插入"撤掉，再走统一的 `apply_edit` 重新应用 —— 这样"新建"与"撤销后重做"
+        // 走的是同一条代码路径，不会一边删了正文、另一边忘了删。
+        self.annotations.remove(id);
+        if body.is_some() {
+            self.custom_previews.pop();
+        }
+        self.apply_edit(AppEdit::AddAnnotation { annotation, body }, true);
+        true
+    }
+
+    /// 删除指针下的标注（`Delete` 键；Ctrl+Z 可撤销）。
+    fn delete_hovered_annotation(&mut self) -> bool {
+        let Some(id) = self.hovered_annotation else {
+            return false;
+        };
+        let Some(annotation) = self.annotations.get(id).cloned() else {
+            return false;
+        };
+        let body = annotation
+            .body_title
+            .as_ref()
+            .and_then(|title| {
+                self.custom_previews
+                    .iter()
+                    .find(|preview| &preview.title == title)
+            })
+            .cloned()
+            .map(std::sync::Arc::new);
+        self.apply_edit(AppEdit::DeleteAnnotation { annotation, body }, true);
+        self.message = "已删除标注（Ctrl+Z 可撤销）".to_string();
+        true
     }
 
     /// 命中标注（`content` 是内容空间点，容差按**屏幕像素**换算到页面单位）。
@@ -2446,6 +2632,44 @@ impl PdfReaderApp {
         self.spawn_custom_float(index, rect);
         self.click_highlight = Some((id, self.clock.now() + CLICK_HIGHLIGHT));
         self.message = "已生成该自定义preview浮窗".to_string();
+    }
+
+    /// "编辑历史"可视列表：只是撤销栈的**视图**（点击不做状态跳转）。
+    fn draw_history_window(&mut self, ctx: &egui::Context) {
+        if !self.show_history || (!self.history.can_undo() && !self.history.can_redo()) {
+            return;
+        }
+        let mut open = self.show_history;
+        egui::Window::new("编辑历史")
+            .open(&mut open)
+            .resizable(false)
+            .default_width(240.0)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "可撤销 {} 步 · 可重做 {} 步",
+                    self.history.descriptions().count(),
+                    if self.history.can_redo() { 1 } else { 0 }
+                ));
+                ui.separator();
+                for (index, description) in self.history.descriptions().enumerate() {
+                    ui.label(format!("{}. {description}", index + 1));
+                }
+                if self.history.dropped() > 0 {
+                    ui.separator();
+                    ui.weak(format!(
+                        "更早的 {} 条记录已因内存上限被丢弃",
+                        self.history.dropped()
+                    ));
+                }
+                ui.separator();
+                if ui.button("撤销一步").clicked() {
+                    self.undo_edit();
+                }
+                if ui.button("重做一步").clicked() {
+                    self.redo_edit();
+                }
+            });
+        self.show_history = open;
     }
 
     /// 底部状态栏：页码与缩放已移到顶栏（用户要求），这里只留消息、选中字数与诊断。
@@ -3039,6 +3263,7 @@ impl PdfReaderApp {
                             // 悬停：把对应浮窗高亮一帧（离开即熄灭；点击另有时长高亮）
                             if let (Some(pointer), Some(title)) = (pointer, &annotation.body_title) {
                                 if screen.contains(pointer) {
+                                    self.hovered_annotation = Some(annotation.id);
                                     if let Some(window) =
                                         self.floats.iter().find(|window| &window.title == title)
                                     {
@@ -4651,6 +4876,7 @@ impl eframe::App for PdfReaderApp {
 
         // 拖放打开：**空状态下也必须处理**（v1 只在已有会话时读取，导致启动后拖入无反应）
         self.handle_dropped_files(&ctx);
+        self.draw_history_window(&ctx);
 
         // 把会话临时取出，避免与 `self` 的其它字段发生借用冲突
         let Some(mut session) = self.session.take() else {
@@ -4662,6 +4888,7 @@ impl eframe::App for PdfReaderApp {
         let frame_start = std::time::Instant::now();
         // 高亮只维持一帧：由本帧的悬停判定重新设置
         self.highlight_float = None;
+        self.hovered_annotation = None;
         // 点击产生的一次性高亮（D-118）：在计时内**每帧**生效，并请求"到期时重绘"。
         // 少了这次请求，空闲时 egui 不会再画一帧 —— 高亮会一直停在屏幕上，
         // 直到下一次鼠标移动之类的事件（用户实测"移开指针后高亮不定长地持续"）。

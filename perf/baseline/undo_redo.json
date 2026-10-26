@@ -1,0 +1,29 @@
+{
+  "version": 4,
+  "profile": "structural",
+  "script": "undo_redo",
+  "machine": {
+    "cpu": "AMD Ryzen 7 7730U with Radeon Graphics",
+    "cores": 16,
+    "ram_mb": 15329,
+    "os": "linux",
+    "arch": "x86_64",
+    "build": "debug"
+  },
+  "actions": [
+    {"id": "resize", "submitted": 0, "upload_bytes": 7877924, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "top", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "settle", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "a1", "submitted": 0, "upload_bytes": 120, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "a2", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "a3", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "undo1", "submitted": 0, "upload_bytes": 2688, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "undo2", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "redo1", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null}
+  ],
+  "cpu_ms": {"p50": 0.000, "p95": 0.000, "p99": 0.000, "max": 0.000},
+  "cpu_ms_total": 0.000,
+  "wall_ms_total": 0.0,
+  "busy_frames": 0,
+  "rss_peak_kb": 0
+}

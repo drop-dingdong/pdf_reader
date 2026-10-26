@@ -134,6 +134,10 @@ pub enum Action {
     },
     /// 保存所有有改动的文件（等价于点"保存"或 Ctrl+S）。
     Save,
+    /// 撤销一步（等价于 Ctrl+Z）。
+    Undo,
+    /// 重做一步（等价于 Ctrl+Shift+Z）。
+    Redo,
     /// 指针移出画布。
     Unhover,
     /// 什么都不做，只跑若干帧（用来观察"稳定后"的状态）。
@@ -157,6 +161,8 @@ impl Action {
             Self::Click { .. } => "click",
             Self::Highlight { .. } => "highlight",
             Self::Save => "save",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
             Self::Drag { .. } => "drag",
             Self::Unhover => "unhover",
             Self::Wait { .. } => "wait",
@@ -193,6 +199,8 @@ impl Action {
                 format!("highlight p{page} ({x},{y},{width},{height})")
             }
             Self::Save => "save".to_string(),
+            Self::Undo => "undo".to_string(),
+            Self::Redo => "redo".to_string(),
             Self::Unhover => "unhover".to_string(),
             Self::Wait { frames } => format!("wait {frames}"),
         }
@@ -594,6 +602,8 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
                 height: number("height")?,
             },
             "save" => Action::Save,
+            "undo" => Action::Undo,
+            "redo" => Action::Redo,
             "unhover" => Action::Unhover,
             "wait" => Action::Wait {
                 frames: number("frames").unwrap_or(3.0) as u64,
@@ -1153,6 +1163,14 @@ impl Harness {
             app.save_all();
             return;
         }
+        if let Action::Undo = action {
+            app.undo_edit();
+            return;
+        }
+        if let Action::Redo = action {
+            app.redo_edit();
+            return;
+        }
         if matches!(action, Action::Click { .. } | Action::Drag { .. }) {
             self.pending_pointer = None;
             self.gesture = self.gesture_for(app, action);
@@ -1198,7 +1216,7 @@ impl Harness {
                 // 指针位置必须走 egui 的输入事件：在 `run_frame` 里按帧重放
                 self.pending_pointer = self.pointer_for_action(app, action);
             }
-            Action::Wait { .. } => {}
+            Action::Wait { .. } | Action::Undo | Action::Redo => {}
         }
         app.events.extend(events);
     }

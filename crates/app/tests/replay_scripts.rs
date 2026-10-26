@@ -29,6 +29,8 @@ const CASES: &[(&str, Sample)] = &[
     ("drag_pan.json", Sample::A4),
     // S1：标注的几何必须只与文本层有关、与缩放无关
     ("annotate_zoom.json", Sample::Rotated),
+    // S3：撤销/重做（单栈、时间序）
+    ("undo_redo.json", Sample::Rotated),
 ];
 
 /// 脚本目录（测试的工作目录是 crate 目录，不是工作区根）。
@@ -132,6 +134,26 @@ fn annotation_geometry_does_not_depend_on_zoom() {
             "同一区域在不同缩放下的标注几何必须相同：{a:?} vs {b:?}"
         );
     }
+}
+
+/// S3 验收：3 条标注 → 撤销 2 次剩 1 → 重做 1 次回到 2。
+#[test]
+fn undo_and_redo_walk_the_annotation_stack() {
+    if !backend_available() {
+        return;
+    }
+    let report = run("undo_redo.json", Sample::Rotated);
+    let action = |id: &str| {
+        report
+            .actions
+            .iter()
+            .find(|action| action.id == id)
+            .unwrap_or_else(|| panic!("缺动作 {id}"))
+    };
+    assert_eq!(action("a3").annotations, 3, "三条标注都建好了");
+    assert_eq!(action("undo1").annotations, 2, "撤销一次剩两条");
+    assert_eq!(action("undo2").annotations, 1, "再撤销一次剩一条");
+    assert_eq!(action("redo1").annotations, 2, "重做一次回到两条");
 }
 
 #[test]
