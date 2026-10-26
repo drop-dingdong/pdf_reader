@@ -2327,6 +2327,7 @@ impl PdfReaderApp {
             let float_id = window.id;
             self.floats.push(window);
             self.highlight_float = Some(float_id);
+            self.click_highlight = Some((float_id, self.clock.now() + CLICK_HIGHLIGHT));
             return;
         }
         let float_id = self.next_float_id;
@@ -3021,6 +3022,7 @@ impl PdfReaderApp {
 
             // 2b') 标注叠加层（D-118）：几何在页面空间，这里换算到屏幕
             if self.show_annotations && self.capture.is_none() {
+                let pointer = ui.ctx().pointer_hover_pos();
                 for page in self.visible.clone() {
                     let Some(placement) = session.placement(page).copied() else { continue };
                     for annotation in self.annotations.on_page(page) {
@@ -3034,6 +3036,16 @@ impl PdfReaderApp {
                                     + EVec2::new(content.x - scroll.x, content.y - scroll.y),
                                 EVec2::new(content.width, content.height),
                             );
+                            // 悬停：把对应浮窗高亮一帧（离开即熄灭；点击另有时长高亮）
+                            if let (Some(pointer), Some(title)) = (pointer, &annotation.body_title) {
+                                if screen.contains(pointer) {
+                                    if let Some(window) =
+                                        self.floats.iter().find(|window| &window.title == title)
+                                    {
+                                        self.highlight_float = Some(window.id);
+                                    }
+                                }
+                            }
                             match annotation.kind {
                                 AnnotationKind::Highlight { .. } => {
                                     painter.rect_filled(screen, CornerRadius::ZERO, color);
@@ -4650,6 +4662,18 @@ impl eframe::App for PdfReaderApp {
         let frame_start = std::time::Instant::now();
         // 高亮只维持一帧：由本帧的悬停判定重新设置
         self.highlight_float = None;
+        // 点击产生的一次性高亮（D-118）：在计时内**每帧**生效，并请求"到期时重绘"。
+        // 少了这次请求，空闲时 egui 不会再画一帧 —— 高亮会一直停在屏幕上，
+        // 直到下一次鼠标移动之类的事件（用户实测"移开指针后高亮不定长地持续"）。
+        if let Some((id, until)) = self.click_highlight {
+            let now = self.clock.now();
+            if now < until {
+                self.highlight_float = Some(id);
+                ctx.request_repaint_after(until - now);
+            } else {
+                self.click_highlight = None;
+            }
+        }
         self.collect_commands(&ctx, &session);
         if self.capture.is_some() {
             // 丢弃工具栏等来源的命令：截图期间不改动主视图内容；
