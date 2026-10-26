@@ -29,11 +29,6 @@ impl PageIndex {
         self.0 + 1
     }
 
-    /// 下一页；已是最后一页时返回 `None`（调用方需结合页数判断）。
-    pub const fn next(self) -> Self {
-        Self(self.0 + 1)
-    }
-
     /// 上一页；已经是第一页时返回 `None`。
     pub const fn prev(self) -> Option<Self> {
         if self.0 == 0 {
