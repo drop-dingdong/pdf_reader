@@ -422,10 +422,10 @@ pub struct PdfReaderApp {
     show_annotations: bool,
     /// 页面标注（会话内；S2 才落盘）。
     annotations: AnnotationStore,
-    /// 标注正文（会话内；S2 改为复用 `custom_texts`）。
-    annotation_bodies: std::collections::HashMap<AnnotationId, String>,
     /// "下一步把当前选区变成标注"（由快捷键/按钮置位，在画布绘制时执行）。
     pending_annotate: bool,
+    /// 标注图层是否有未保存的改动（Ctrl+S 用它决定要不要写）。
+    overlay_dirty: bool,
     /// 大纲的**扁平行**（打开文档时摊平一次；侧栏用虚拟化行渲染，避免每帧布局上千行）。
     outline_rows: Vec<crate::view::OutlineRow>,
     /// 视图区域内的浮窗；**后加入的排在后面 → 绘制与交互都在更上层**（用户要求"后出现的浮窗更高"）。
@@ -619,8 +619,8 @@ impl PdfReaderApp {
             show_links: false,
             show_annotations: true,
             annotations: AnnotationStore::new(),
-            annotation_bodies: std::collections::HashMap::new(),
             pending_annotate: false,
+            overlay_dirty: false,
             outline_rows: Vec::new(),
             floats: Vec::new(),
             next_float_id: 1,
@@ -705,6 +705,45 @@ impl PdfReaderApp {
     }
 
     /// 打开文档（装配会话：LRU 缓存 + 后台调度器 + 纵向布局 + 选区模型）。
+    /// `Ctrl+S`：保存**所有**有脏标记的文件（主存档 + 标注图层）。
+    ///
+    /// 顺序固定：先主存档（正文在里面）、再图层；两份各自原子写，互不依赖，
+    /// 所以即使图层写失败，正文也已经落盘（加载时缺图层只是"没有标注"，不会崩）。
+    fn save_all(&mut self) {
+        if let Some((found, supported)) = self.sidecar_locked {
+            self.message = format!(
+                "存档由更新版本写入（v{found} > v{supported}），拒绝覆盖；请升级程序后再保存"
+            );
+            return;
+        }
+        if !self.data_dirty && !self.overlay_dirty {
+            self.message = "无改动".to_string();
+            return;
+        }
+        if self.data_dirty {
+            self.save_custom_data();
+        }
+        if self.overlay_dirty {
+            self.save_overlay();
+        }
+    }
+
+    /// 写 `<pdf>.annot.json`（原子写；失败只提示，不清脏标记）。
+    fn save_overlay(&mut self) {
+        let Some(path) = self.document_path.clone() else {
+            return;
+        };
+        let overlay = persist::overlay_from_store(&self.annotations);
+        let target = persist::annot_path(&path);
+        match persist::write_atomic(&target, &overlay.to_json()) {
+            Ok(()) => {
+                self.overlay_dirty = false;
+                self.message = format!("已保存标注：{}", target.display());
+            }
+            Err(error) => self.message = format!("保存标注失败：{error}"),
+        }
+    }
+
     /// 保存自定义数据到 `<pdf>.json`（不含任何图片像素）。
     fn save_custom_data(&mut self) {
         if let Some((found, supported)) = self.sidecar_locked {
@@ -772,6 +811,23 @@ impl PdfReaderApp {
         }
     }
 
+    /// 载入标注图层；文件不存在 → 空集合，坏文件 → 提示并返回空集合。
+    fn load_overlay_file(
+        path: &std::path::Path,
+    ) -> std::result::Result<pdfcore::annotation::AnnotationStore, String> {
+        let target = persist::annot_path(path);
+        let text = match std::fs::read_to_string(&target) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(pdfcore::annotation::AnnotationStore::new())
+            }
+            Err(error) => return Err(format!("读取标注图层失败：{error}")),
+        };
+        persist::SavedOverlay::from_json(&text)
+            .map(|overlay| persist::store_from_overlay(&overlay))
+            .map_err(|error| format!("标注图层无法加载（{error}），已按空处理"))
+    }
+
     fn open(&mut self, path: &std::path::Path, password: Option<&str>) {
         let backend = PdfiumBackend::new();
         match backend.open(Source::Path(path), password) {
@@ -804,6 +860,13 @@ impl PdfReaderApp {
                         self.sidecar_migrated = false;
                         self.sidecar_locked = None;
                         self.document_path = Some(path.to_path_buf());
+                        // 标注图层（<pdf>.annot.json）：缺文件 = 空；坏文件只提示，不影响打开文档
+                        self.annotations.clear();
+                        self.overlay_dirty = false;
+                        match Self::load_overlay_file(path) {
+                            Ok(store) => self.annotations = store,
+                            Err(message) => self.message = message,
+                        }
                         // 同目录若有存档（<pdf>.json），载入并**替换**链接与被引用点/自定义数据。
                         // 旧版本就地升级并置脏（下次保存写回当前版本）；**更新版本一律拒绝**（D-107）。
                         let saved = match load_sidecar(path) {
@@ -1025,6 +1088,10 @@ impl PdfReaderApp {
         for (key, modifiers) in pressed {
             // 已经由 Event::Copy 处理过时不重复处理（避免复制两次）
             if copy_event && key == Key::C {
+                continue;
+            }
+            if key == Key::S && (modifiers.ctrl || modifiers.command) {
+                self.save_all();
                 continue;
             }
             if key == Key::H && !modifiers.any() {
@@ -2117,6 +2184,26 @@ impl PdfReaderApp {
     }
 
     /// 按某个自定义 preview 的数据生成它的**正式浮窗**（正文尺寸取 `body_size`）。
+    /// 为一条标注新建正文条目（`custom_texts` 里的哨兵标题），返回下标。
+    ///
+    /// S2 的约定：标注**正文就是**一条文字 preview，不另立存储；删除标注时按同一标题删条目。
+    fn create_annotation_body(&mut self, id: AnnotationId, page: PageIndex, at: Point, rect: Rect) {
+        let title = persist::annotation_body_title(id);
+        let body_size = egui::vec2(280.0, 150.0);
+        self.custom_previews.push(CustomPreview {
+            page,
+            point: at,
+            rect,
+            kind: CustomKind::Text,
+            title,
+            text: Some(String::new()),
+            snapshot: None,
+            body_size,
+            scale: 1.0,
+        });
+        self.data_dirty = true;
+    }
+
     /// 把当前选区变成高亮标注，返回新增数量（D-118 S1）。
     ///
     /// 几何来自文本层的 `rects_for_range`（已按行合并），因此与选字高亮用的是同一套算法；
@@ -2125,18 +2212,26 @@ impl PdfReaderApp {
         let highlights = session.highlight_selection();
         let mut added = 0;
         for highlight in highlights {
-            if self
-                .annotations
-                .add(
-                    highlight.page,
-                    AnnotationKind::Highlight {
-                        quads: highlight.rects,
-                    },
-                )
-                .is_some()
-            {
+            let bounds = highlight
+                .rects
+                .iter()
+                .copied()
+                .reduce(|a, b| a.union(b))
+                .unwrap_or(highlight.rects[0]);
+            if let Some(id) = self.annotations.add(
+                highlight.page,
+                AnnotationKind::Highlight {
+                    quads: highlight.rects.clone(),
+                },
+            ) {
+                let title = persist::annotation_body_title(id);
+                self.annotations.set_body(id, Some(title));
+                self.create_annotation_body(id, highlight.page, bounds.center(), bounds);
                 added += 1;
             }
+        }
+        if added > 0 {
+            self.overlay_dirty = true;
         }
         if added == 0 && session.highlight_selection().is_empty() {
             self.message = "先选中文字，再高亮".to_string();
@@ -2161,10 +2256,22 @@ impl PdfReaderApp {
         let Some(quads) = self.quads_for_page_rect(page, rect) else {
             return 0;
         };
-        self.annotations
+        let bounds = quads
+            .iter()
+            .copied()
+            .reduce(|a, b| a.union(b))
+            .unwrap_or(rect);
+        let Some(id) = self
+            .annotations
             .add(page, AnnotationKind::Highlight { quads })
-            .map(|_| 1)
-            .unwrap_or(0)
+        else {
+            return 0;
+        };
+        let title = persist::annotation_body_title(id);
+        self.annotations.set_body(id, Some(title));
+        self.create_annotation_body(id, page, bounds.center(), bounds);
+        self.overlay_dirty = true;
+        1
     }
 
     /// 命中标注（`content` 是内容空间点，容差按**屏幕像素**换算到页面单位）。
@@ -2190,9 +2297,20 @@ impl PdfReaderApp {
         None
     }
 
-    /// 点击标注：打开它的正文浮窗（正文暂存内存，S2 改为 `custom_texts`）。
+    /// 点击标注：按哨兵标题找到正文条目并打开浮窗；找不到时显示"正文已丢失"。
     fn open_annotation_note(&mut self, id: AnnotationId, at: egui::Pos2) {
-        let body = self.annotation_bodies.get(&id).cloned().unwrap_or_default();
+        let title = persist::annotation_body_title(id);
+        if let Some(index) = self
+            .custom_previews
+            .iter()
+            .position(|preview| preview.title == title)
+        {
+            let rect = egui::Rect::from_min_size(at, EVec2::new(280.0, 150.0));
+            self.spawn_custom_float(index, rect);
+            return;
+        }
+        // 引用失效：保留几何、正文显示占位（绝不因为找不到正文而崩溃/丢弃标注）
+        let body = "（正文已丢失）".to_string();
         let rect = egui::Rect::from_min_size(at, EVec2::new(280.0, 150.0));
         let float_id = self.next_float_id;
         self.next_float_id += 1;

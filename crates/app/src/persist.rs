@@ -821,6 +821,14 @@ impl SavedOverlay {
     }
 }
 
+/// 标注正文的**哨兵标题**：`#annot:<id>`。
+///
+/// 正文本身存在主存档的 `custom_texts` 里（不新增字段），靠这个标题与标注对应。
+/// 用户可见（不隐藏）；保存时做唯一性检查。
+pub fn annotation_body_title(id: pdfcore::annotation::AnnotationId) -> String {
+    format!("#annot:{}", id.get())
+}
+
 /// `<pdf>.annot.json` 的路径。
 pub fn annot_path(pdf: &std::path::Path) -> std::path::PathBuf {
     let mut name = pdf.as_os_str().to_owned();
