@@ -1,0 +1,13 @@
+{
+  "name": "annotate_zoom",
+  "pdf": "rotated_2p.pdf",
+  "actions": [
+    { "id": "resize", "op": "resize", "width": 700, "height": 800 },
+    { "id": "top", "op": "set_scroll", "x": 0, "y": 0 },
+    { "id": "settle", "op": "wait", "frames": 8 },
+    { "id": "annotate_100", "op": "highlight", "page": 0, "x": 50, "y": 690, "width": 450, "height": 50 },
+    { "id": "zoom_800", "op": "zoom", "value": 8.0 },
+    { "id": "settle_800", "op": "wait", "frames": 8 },
+    { "id": "annotate_800", "op": "highlight", "page": 0, "x": 50, "y": 690, "width": 450, "height": 50 }
+  ]
+}

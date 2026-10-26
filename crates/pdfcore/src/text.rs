@@ -217,6 +217,26 @@ impl PageText {
         self.chars_in(range).iter().map(|c| c.ch).collect()
     }
 
+    /// 与给定页面矩形相交的字符范围（取最小..最大下标）。
+    ///
+    /// 用途：在页面上框选一块区域 → 转成文本范围 → 复用 [`Self::rects_for_range`] 的
+    /// 按行合并。标注与选字因此共用同一套几何算法，不会在旋转页上分叉。
+    pub fn range_for_page_rect(&self, rect: Rect) -> Option<TextRange> {
+        let mut start = None;
+        let mut end = None;
+        for (index, char) in self.chars.iter().enumerate() {
+            if !char.bbox.intersects(rect) {
+                continue;
+            }
+            start.get_or_insert(index);
+            end = Some(index);
+        }
+        match (start, end) {
+            (Some(start), Some(end)) => Some(TextRange::new(start as u32, end as u32 + 1)),
+            _ => None,
+        }
+    }
+
     /// 取区间的高亮矩形：**按行合并**，避免一个字符一个矩形导致 UI 抖动与绘制开销。
     pub fn rects_for_range(&self, range: TextRange) -> Vec<Rect> {
         let mut out: Vec<Rect> = Vec::new();
@@ -781,5 +801,55 @@ mod tests {
             TextRange::new(0, 2).union(TextRange::new(5, 9)),
             TextRange::new(0, 9)
         );
+    }
+}
+
+#[cfg(test)]
+mod annotation_range_tests {
+    use super::*;
+    use crate::geometry::Rect;
+
+    fn page_with(chars: &[Rect]) -> PageText {
+        PageText {
+            page: PageIndex::FIRST,
+            text: "abc".to_string(),
+            chars: chars
+                .iter()
+                .map(|bbox| TextChar {
+                    ch: 'a',
+                    bbox: *bbox,
+                    origin: Point::new(bbox.x, bbox.y),
+                    span: 0,
+                })
+                .collect(),
+            spans: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn rect_selects_intersecting_characters_and_merges_per_line() {
+        let page = page_with(&[
+            Rect::new(0.0, 80.0, 5.0, 10.0),
+            Rect::new(6.0, 80.0, 5.0, 10.0),
+            Rect::new(0.0, 60.0, 5.0, 10.0),
+        ]);
+        // 只框住第一行两个字符
+        let range = page
+            .range_for_page_rect(Rect::new(-1.0, 78.0, 20.0, 14.0))
+            .expect("应当命中第一行");
+        assert_eq!((range.start, range.end), (0, 2));
+        assert_eq!(page.rects_for_range(range).len(), 1);
+
+        // 框住两行 → 两个矩形
+        let range = page
+            .range_for_page_rect(Rect::new(-1.0, 58.0, 20.0, 40.0))
+            .expect("应当命中两行");
+        assert_eq!((range.start, range.end), (0, 3));
+        assert_eq!(page.rects_for_range(range).len(), 2);
+
+        // 空区域
+        assert!(page
+            .range_for_page_rect(Rect::new(200.0, 200.0, 10.0, 10.0))
+            .is_none());
     }
 }

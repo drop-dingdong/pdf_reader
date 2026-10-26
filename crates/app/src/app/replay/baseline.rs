@@ -660,6 +660,8 @@ mod tests {
             busy_cpu_ms_total: 1.0,
             page_after: 0,
             scroll_after: (0.0, 0.0),
+            annotations: 0,
+            annotation_bounds: None,
         }
     }
 

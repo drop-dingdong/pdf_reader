@@ -27,6 +27,8 @@ const CASES: &[(&str, Sample)] = &[
     // S0：交互动作（点击跳链接 / 拖拽平移）—— 注释功能的自动化基础
     ("click_link.json", Sample::Rotated),
     ("drag_pan.json", Sample::A4),
+    // S1：标注的几何必须只与文本层有关、与缩放无关
+    ("annotate_zoom.json", Sample::Rotated),
 ];
 
 /// 脚本目录（测试的工作目录是 crate 目录，不是工作区根）。
@@ -97,6 +99,39 @@ fn click_navigates_and_drag_pans() {
         "拖拽应当平移画面，实际 scroll={:?}",
         action.scroll_after
     );
+}
+
+/// S1 验收：同一块页面区域，在 1× 与 8× 下产生的标注几何必须**逐值相同**。
+///
+/// 这是"几何只存页面空间"的直接证据：如果哪天有人改成存屏幕坐标（或按当前缩放算几何），
+/// 两条 bounds 就会分叉。
+#[test]
+fn annotation_geometry_does_not_depend_on_zoom() {
+    if !backend_available() {
+        return;
+    }
+    let report = run("annotate_zoom.json", Sample::Rotated);
+    let action = |id: &str| {
+        report
+            .actions
+            .iter()
+            .find(|action| action.id == id)
+            .unwrap_or_else(|| panic!("缺动作 {id}"))
+    };
+    let at_100 = action("annotate_100");
+    let at_800 = action("annotate_800");
+    assert_eq!(at_100.annotations, 1, "1× 下应当产生一条标注");
+    assert_eq!(at_800.annotations, 2, "8× 下再产生一条");
+    let (a, b) = (
+        at_100.annotation_bounds.expect("1× 的包围盒"),
+        at_800.annotation_bounds.expect("8× 的包围盒"),
+    );
+    for (left, right) in [(a.0, b.0), (a.1, b.1), (a.2, b.2), (a.3, b.3)] {
+        assert!(
+            (left - right).abs() < 0.01,
+            "同一区域在不同缩放下的标注几何必须相同：{a:?} vs {b:?}"
+        );
+    }
 }
 
 #[test]

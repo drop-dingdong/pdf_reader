@@ -119,6 +119,19 @@ pub enum Action {
         /// 中间移动帧数（默认 6；越大越接近真实拖拽）。
         steps: u32,
     },
+    /// 把页面上的一块矩形变成高亮标注（**页面空间**；S1 用它在回放里造标注）。
+    Highlight {
+        /// 页号（0 起）。
+        page: u32,
+        /// 区域左上角 x（页面空间）。
+        x: f32,
+        /// 区域左上角 y（页面空间，注意 PDF 左下原点）。
+        y: f32,
+        /// 区域宽。
+        width: f32,
+        /// 区域高。
+        height: f32,
+    },
     /// 指针移出画布。
     Unhover,
     /// 什么都不做，只跑若干帧（用来观察"稳定后"的状态）。
@@ -140,6 +153,7 @@ impl Action {
             Self::HoverLink { .. } => "hover_link",
             Self::OpenPreview { .. } => "open_preview",
             Self::Click { .. } => "click",
+            Self::Highlight { .. } => "highlight",
             Self::Drag { .. } => "drag",
             Self::Unhover => "unhover",
             Self::Wait { .. } => "wait",
@@ -165,6 +179,15 @@ impl Action {
                 ..
             } => {
                 format!("drag p{page} ({from_x},{from_y})→({to_x},{to_y})")
+            }
+            Self::Highlight {
+                page,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                format!("highlight p{page} ({x},{y},{width},{height})")
             }
             Self::Unhover => "unhover".to_string(),
             Self::Wait { frames } => format!("wait {frames}"),
@@ -293,6 +316,10 @@ pub struct ActionReport {
     pub page_after: u32,
     /// 动作结束时的滚动偏移（内容空间像素）。用于断言拖拽平移。
     pub scroll_after: (f32, f32),
+    /// 动作结束时的标注数量。
+    pub annotations: usize,
+    /// 最后一条标注的页面空间包围盒（`x,y,w,h`）—— 用于断言"几何与缩放无关"。
+    pub annotation_bounds: Option<(f32, f32, f32, f32)>,
 }
 
 /// 整次回放的报告。
@@ -552,6 +579,13 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
                 to_x: number("to_x")?,
                 to_y: number("to_y")?,
                 steps: number("steps").unwrap_or(6.0) as u32,
+            },
+            "highlight" => Action::Highlight {
+                page: number("page")? as u32,
+                x: number("x")?,
+                y: number("y")?,
+                width: number("width")?,
+                height: number("height")?,
             },
             "unhover" => Action::Unhover,
             "wait" => Action::Wait {
@@ -919,6 +953,8 @@ pub fn run(
             busy_cpu_ms_total: 0.0,
             page_after: 0,
             scroll_after: (0.0, 0.0),
+            annotations: 0,
+            annotation_bounds: None,
         };
         harness.apply_action(app, action);
         // 每个动作开始时清空诊断缓冲：这一行只属于这个动作
@@ -1020,6 +1056,13 @@ pub fn run(
             action_report.page_after = session.state().current_page.get();
             action_report.scroll_after = (session.viewport().scroll.x, session.viewport().scroll.y);
         }
+        action_report.annotations = app.annotations.len();
+        action_report.annotation_bounds = app
+            .annotations
+            .iter()
+            .last()
+            .and_then(|annotation| annotation.bounds())
+            .map(|rect| (rect.x, rect.y, rect.width, rect.height));
         action_report.previews = app
             .custom_previews
             .iter()
@@ -1086,6 +1129,17 @@ impl Harness {
     fn apply_action(&mut self, app: &mut crate::PdfReaderApp, action: &Action) {
         // 点击/拖拽：先把页面空间坐标换算成屏幕坐标、建好手势，再让 `run_frame` 逐帧喂事件。
         // 这里必须**先**于 `app.session.as_mut()` 借用，否则拿不到 `canvas_rect`。
+        if let Action::Highlight {
+            page,
+            x,
+            y,
+            width,
+            height,
+        } = action
+        {
+            app.annotate_page_rect(PageIndex::new(*page), Rect::new(*x, *y, *width, *height));
+            return;
+        }
         if matches!(action, Action::Click { .. } | Action::Drag { .. }) {
             self.pending_pointer = None;
             self.gesture = self.gesture_for(app, action);
@@ -1123,7 +1177,7 @@ impl Harness {
                 app.spawn_custom_float(*index, rect);
             }
             // 已在函数开头处理（不借用 session）
-            Action::Click { .. } | Action::Drag { .. } => {}
+            Action::Click { .. } | Action::Drag { .. } | Action::Highlight { .. } => {}
             Action::HoverLink { .. } | Action::Unhover => {
                 // 指针位置必须走 egui 的输入事件：在 `run_frame` 里按帧重放
                 self.pending_pointer = self.pointer_for_action(app, action);
@@ -1700,6 +1754,8 @@ mod tests {
             busy_cpu_ms_total: 41.6,
             page_after: 2,
             scroll_after: (10.0, 20.0),
+            annotations: 0,
+            annotation_bounds: None,
         };
         action.frames_data.push(FrameStat {
             frame: 1,

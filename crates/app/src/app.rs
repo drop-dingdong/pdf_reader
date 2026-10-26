@@ -21,6 +21,7 @@ use egui::{
     Align2, Color32, CornerRadius, Id, Key, Modifiers, RichText, Sense, Stroke, StrokeKind,
     Vec2 as EVec2,
 };
+use pdfcore::annotation::{AnnotationId, AnnotationKind, AnnotationStore};
 use pdfcore::prelude::*;
 
 use crate::persist;
@@ -118,6 +119,9 @@ const HOVER_SCROLL_QUIET: std::time::Duration = std::time::Duration::from_millis
 const OUTLINE_ROW_HEIGHT: f32 = 18.0;
 /// 链接热区框的颜色（空心红线，用户指定）。
 const LINK_OVERLAY_COLOR: Color32 = Color32::from_rgb(220, 40, 40);
+
+/// 标注命中的容差（**屏幕像素**；命中时按缩放换算成页面单位，否则高倍下会变成"无边框的靶子"）。
+const ANNOTATION_HIT_TOLERANCE_PX: f32 = 4.0;
 
 // 链接框颜色（红/绿）由 `view::link_box_color` 决定，见 D-116。
 
@@ -414,6 +418,14 @@ pub struct PdfReaderApp {
     tool: Tool,
     /// 是否画出链接热区框（工具栏 checkbox，默认关闭）。
     show_links: bool,
+    /// 是否绘制标注（D-118；默认开启）。
+    show_annotations: bool,
+    /// 页面标注（会话内；S2 才落盘）。
+    annotations: AnnotationStore,
+    /// 标注正文（会话内；S2 改为复用 `custom_texts`）。
+    annotation_bodies: std::collections::HashMap<AnnotationId, String>,
+    /// "下一步把当前选区变成标注"（由快捷键/按钮置位，在画布绘制时执行）。
+    pending_annotate: bool,
     /// 大纲的**扁平行**（打开文档时摊平一次；侧栏用虚拟化行渲染，避免每帧布局上千行）。
     outline_rows: Vec<crate::view::OutlineRow>,
     /// 视图区域内的浮窗；**后加入的排在后面 → 绘制与交互都在更上层**（用户要求"后出现的浮窗更高"）。
@@ -605,6 +617,10 @@ impl PdfReaderApp {
             drag: None,
             tool: Tool::default(),
             show_links: false,
+            show_annotations: true,
+            annotations: AnnotationStore::new(),
+            annotation_bodies: std::collections::HashMap::new(),
+            pending_annotate: false,
             outline_rows: Vec::new(),
             floats: Vec::new(),
             next_float_id: 1,
@@ -1009,6 +1025,10 @@ impl PdfReaderApp {
         for (key, modifiers) in pressed {
             // 已经由 Event::Copy 处理过时不重复处理（避免复制两次）
             if copy_event && key == Key::C {
+                continue;
+            }
+            if key == Key::H && !modifiers.any() {
+                self.pending_annotate = true;
                 continue;
             }
             if let Some(command) = command_for_key(key, modifiers, page_count) {
@@ -1545,6 +1565,15 @@ impl PdfReaderApp {
                     }
                 }
 
+                ui.separator();
+                if ui
+                    .button("高亮")
+                    .on_hover_text("把当前选中文字变成高亮标注（H）；点击标注可打开正文")
+                    .clicked()
+                {
+                    self.pending_annotate = true;
+                }
+
                 // 引用显示样式（链接框 + 引用点 合并为一个菜单）
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     egui::ComboBox::from_id_salt("display-style")
@@ -1567,6 +1596,15 @@ impl PdfReaderApp {
                                 .clicked()
                             {
                                 self.show_dest_points = !self.show_dest_points;
+                            }
+                            if ui
+                                .selectable_label(
+                                    self.show_annotations,
+                                    checkbox_row("标注", self.show_annotations),
+                                )
+                                .clicked()
+                            {
+                                self.show_annotations = !self.show_annotations;
                             }
                         });
                 });
@@ -2079,6 +2117,97 @@ impl PdfReaderApp {
     }
 
     /// 按某个自定义 preview 的数据生成它的**正式浮窗**（正文尺寸取 `body_size`）。
+    /// 把当前选区变成高亮标注，返回新增数量（D-118 S1）。
+    ///
+    /// 几何来自文本层的 `rects_for_range`（已按行合并），因此与选字高亮用的是同一套算法；
+    /// 标注**只存页面空间**，缩放/旋转时由布局换算，不会漂移。
+    fn annotate_selection(&mut self, session: &mut DocumentSession) -> usize {
+        let highlights = session.highlight_selection();
+        let mut added = 0;
+        for highlight in highlights {
+            if self
+                .annotations
+                .add(
+                    highlight.page,
+                    AnnotationKind::Highlight {
+                        quads: highlight.rects,
+                    },
+                )
+                .is_some()
+            {
+                added += 1;
+            }
+        }
+        if added == 0 && session.highlight_selection().is_empty() {
+            self.message = "先选中文字，再高亮".to_string();
+        } else if added > 0 {
+            self.message = format!("已高亮 {added} 处");
+        }
+        added
+    }
+
+    /// 页面矩形 → 该区域覆盖的文本行矩形（页面空间）。
+    ///
+    /// 会**按需加载**该页文本：标注必须先有文本层才能取几何（扫描件没有字符框，
+    /// 这种页应当走"选框"类标注，而不是文本高亮）。
+    fn quads_for_page_rect(&mut self, page: PageIndex, rect: Rect) -> Option<Vec<Rect>> {
+        let text = self.session.as_mut()?.page_text(page)?;
+        let range = text.range_for_page_rect(rect)?;
+        Some(text.rects_for_range(range))
+    }
+
+    /// 把页面上的一块矩形区域变成高亮（按文本字符范围取几何）。
+    fn annotate_page_rect(&mut self, page: PageIndex, rect: Rect) -> usize {
+        let Some(quads) = self.quads_for_page_rect(page, rect) else {
+            return 0;
+        };
+        self.annotations
+            .add(page, AnnotationKind::Highlight { quads })
+            .map(|_| 1)
+            .unwrap_or(0)
+    }
+
+    /// 命中标注（`content` 是内容空间点，容差按**屏幕像素**换算到页面单位）。
+    fn annotation_at(&self, session: &DocumentSession, content: Point) -> Option<AnnotationId> {
+        let zoom = session.state().zoom.max(0.01);
+        let tolerance = ANNOTATION_HIT_TOLERANCE_PX / zoom;
+        for page in self.visible.clone() {
+            let Some(placement) = session.placement(page) else {
+                continue;
+            };
+            if !placement.rect.contains(content) {
+                continue;
+            }
+            let page_point = placement.content_to_page(content);
+            if let Some(hit) = self
+                .annotations
+                .on_page(page)
+                .find(|annotation| annotation.contains(page_point, tolerance))
+            {
+                return Some(hit.id);
+            }
+        }
+        None
+    }
+
+    /// 点击标注：打开它的正文浮窗（正文暂存内存，S2 改为 `custom_texts`）。
+    fn open_annotation_note(&mut self, id: AnnotationId, at: egui::Pos2) {
+        let body = self.annotation_bodies.get(&id).cloned().unwrap_or_default();
+        let rect = egui::Rect::from_min_size(at, EVec2::new(280.0, 150.0));
+        let float_id = self.next_float_id;
+        self.next_float_id += 1;
+        self.floats.push(Float {
+            id: float_id,
+            title: format!("标注 #{}", id.get()),
+            content: FloatContent::Text(body),
+            rect,
+            custom: None,
+            body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
+            origin: None,
+        });
+        self.highlight_float = Some(float_id);
+    }
+
     fn spawn_custom_float(&mut self, index: usize, rect: egui::Rect) {
         let Some(preview) = self.custom_previews.get(index) else {
             return;
@@ -2214,6 +2343,10 @@ impl PdfReaderApp {
 
     /// 画布：页面（纹理或白底页框）+ 高亮 + 鼠标交互。
     fn draw_canvas(&mut self, ui: &mut egui::Ui, session: &mut DocumentSession) {
+        if self.pending_annotate {
+            self.pending_annotate = false;
+            self.annotate_selection(session);
+        }
         // 搜索栏放在**中央区域**的底部：只占画布宽度（不会跑到侧栏下方），
         // 且位于状态栏之上（用户建议）。
         self.draw_search_bar_in_center(ui, session);
@@ -2751,6 +2884,47 @@ impl PdfReaderApp {
                 }
             }
 
+            // 2b') 标注叠加层（D-118）：几何在页面空间，这里换算到屏幕
+            if self.show_annotations && self.capture.is_none() {
+                for page in self.visible.clone() {
+                    let Some(placement) = session.placement(page).copied() else { continue };
+                    for annotation in self.annotations.on_page(page) {
+                        let alpha = (annotation.clamped_opacity() * 255.0).round() as u8;
+                        let [r, g, b] = annotation.color;
+                        let color = Color32::from_rgba_unmultiplied(r, g, b, alpha);
+                        for quad in annotation.kind.quads() {
+                            let content = placement.rect_to_content(*quad);
+                            let screen = egui::Rect::from_min_size(
+                                canvas.min
+                                    + EVec2::new(content.x - scroll.x, content.y - scroll.y),
+                                EVec2::new(content.width, content.height),
+                            );
+                            match annotation.kind {
+                                AnnotationKind::Highlight { .. } => {
+                                    painter.rect_filled(screen, CornerRadius::ZERO, color);
+                                }
+                                AnnotationKind::Underline { .. } => {
+                                    painter.line_segment(
+                                        [screen.left_bottom(), screen.right_bottom()],
+                                        Stroke::new(2.0, color),
+                                    );
+                                }
+                                AnnotationKind::StrikeOut { .. } => {
+                                    let y = screen.center().y;
+                                    painter.line_segment(
+                                        [
+                                            egui::pos2(screen.left(), y),
+                                            egui::pos2(screen.right(), y),
+                                        ],
+                                        Stroke::new(2.0, color),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // 2c) 被引用的点（链接跳转目的地）：按位置去重后画记号；
             //     与链接框同样在缩放过小时不显示（用户要求）。
             if self.capture.is_none()
@@ -2915,8 +3089,10 @@ impl PdfReaderApp {
             } else if self.capture.is_none() && response.clicked() {
                 if let Some(position) = response.interact_pointer_pos() {
                     let content = canvas_to_content(canvas, position, scroll);
-                    // 链接优先：命中热区就跳转（不论当前工具）—— 目的地有坐标时居中（用户要求）
-                    if !self.follow_link(session, content) && select_tool {
+                    // 标注最先（它画在链接框之上，用户点到的就是它）；其次是链接热区
+                    if let Some(id) = self.annotation_at(session, content) {
+                        self.open_annotation_note(id, position);
+                    } else if !self.follow_link(session, content) && select_tool {
                         // 选字工具下：点空白处清空选择，点到文字则重新落点。
                         // v1 无条件清空，于是"选完随手点一下"就会把选区清掉、复制扑空。
                         match session.text_position_at(content) {
