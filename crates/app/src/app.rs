@@ -333,6 +333,7 @@ struct HoverTip {
 /// * `rect`：页面空间的一块矩形，初始化时是点周围的一小块；用户可在截图模式里改；
 /// * `snapshot`：**初始为 `None`** —— 没有额外动作前不渲染任何截图（用户要求）；
 ///   只有"点击标识 → 截图模式 → Enter"之后才会变成 `Some`。
+#[derive(Clone)]
 struct DestMark {
     /// 页面空间的位置。
     point: Point,
@@ -380,30 +381,50 @@ enum AppEdit {
         /// 被删掉的标注。
         annotation: pdfcore::annotation::Annotation,
     },
+    /// 删除一条自定义 preview（撤销 = 按原下标放回）。
+    ///
+    /// 备注：自定义 preview 的"重新截图"入口**目前不存在**（截图入口只用于新建），
+    /// 所以这一类编辑现在只有"删除"。
+    DeletePreview {
+        /// 原来在下标里的位置。
+        index: usize,
+        /// 被删掉的那一条（`Arc` 共享，不深拷贝）。
+        preview: std::sync::Arc<CustomPreview>,
+    },
+    /// 放回一条自定义 preview（撤销"删除"时用；`index` 是原来的位置）。
+    AddPreview {
+        /// 原位置。
+        index: usize,
+        /// 那一条。
+        preview: std::sync::Arc<CustomPreview>,
+    },
 }
 
 impl AppEdit {
     /// 给人看的一句话（可视列表直接用它）。
     fn describe(&self) -> String {
-        let (page, kind) = match self {
-            Self::AddAnnotation { annotation, .. } | Self::DeleteAnnotation { annotation, .. } => (
-                annotation.page.display_number(),
-                annotation.kind.quads().len(),
-            ),
-        };
-        let verb = match self {
-            Self::AddAnnotation { .. } => "高亮",
-            Self::DeleteAnnotation { .. } => "删除标注",
-        };
-        match kind {
-            1 => format!("{verb}（第 {page} 页）"),
-            rows => format!("{verb}（第 {page} 页，{rows} 行）"),
+        match self {
+            Self::AddAnnotation { annotation } => {
+                let page = annotation.page.display_number();
+                match annotation.kind.quads().len() {
+                    1 => format!("高亮（第 {page} 页）"),
+                    rows => format!("高亮（第 {page} 页，{rows} 行）"),
+                }
+            }
+            Self::DeleteAnnotation { annotation } => {
+                format!("删除标注（第 {} 页）", annotation.page.display_number())
+            }
+            Self::DeletePreview { index, .. } => format!("删除自定义preview #{index}"),
+            Self::AddPreview { index, .. } => format!("恢复自定义preview #{index}"),
         }
     }
 
-    /// 估算权重（注释命令很小；正文条目另算 512 字节上限）。
+    /// 估算权重：截图类命令持有位图（在 `Arc` 后面共享），按 1 MiB 估。
     fn weight(&self) -> usize {
-        768
+        match self {
+            Self::DeletePreview { .. } | Self::AddPreview { .. } => 512,
+            _ => 768,
+        }
     }
 }
 
@@ -805,17 +826,19 @@ impl PdfReaderApp {
                     {
                         let body = self.custom_previews.remove(index);
                         self.orphan_bodies.insert(annotation.id, body);
-                        // 浮窗的下标引用要跟着左移（否则删一个会串到别人身上）
-                        for window in &mut self.floats {
-                            if let Some(custom) = window.custom {
-                                if custom > index {
-                                    window.custom = Some(custom - 1);
-                                }
-                            }
-                        }
-                        self.floats.retain(|window| window.custom != Some(index));
+                        self.shift_float_custom_indices(index);
                     }
                 }
+            }
+            AppEdit::DeletePreview { index, .. } => {
+                if *index < self.custom_previews.len() {
+                    self.custom_previews.remove(*index);
+                    self.shift_float_custom_indices(*index);
+                }
+            }
+            AppEdit::AddPreview { index, preview } => {
+                let at = (*index).min(self.custom_previews.len());
+                self.custom_previews.insert(at, (**preview).clone());
             }
         }
         self.overlay_dirty = true;
@@ -835,6 +858,9 @@ impl PdfReaderApp {
         let inverse = match entry.command {
             AppEdit::AddAnnotation { annotation } => AppEdit::DeleteAnnotation { annotation },
             AppEdit::DeleteAnnotation { annotation } => AppEdit::AddAnnotation { annotation },
+            // 这两个的"逆"由 `apply_edit` 自身根据当前状态判别（见各自的注释）
+            AppEdit::DeletePreview { index, preview } => AppEdit::AddPreview { index, preview },
+            AppEdit::AddPreview { index, preview } => AppEdit::DeletePreview { index, preview },
         };
         self.apply_edit(inverse, false);
         self.message = format!("已撤销：{}", entry.description);
@@ -2426,6 +2452,18 @@ impl PdfReaderApp {
         true
     }
 
+    /// 删除 `custom_previews[index]` 之后，把浮窗里的下标引用左移并移除指向它的浮窗。
+    fn shift_float_custom_indices(&mut self, index: usize) {
+        for window in &mut self.floats {
+            if let Some(custom) = window.custom {
+                if custom > index {
+                    window.custom = Some(custom - 1);
+                }
+            }
+        }
+        self.floats.retain(|window| window.custom != Some(index));
+    }
+
     /// 删除指针下的标注（`Delete` 键；Ctrl+Z 可撤销）。
     fn delete_hovered_annotation(&mut self) -> bool {
         let Some(id) = self.hovered_annotation else {
@@ -2537,37 +2575,9 @@ impl PdfReaderApp {
         if index >= self.custom_previews.len() {
             return;
         }
-        self.custom_previews.remove(index);
-        self.floats.retain(|window| window.custom != Some(index));
-        for window in &mut self.floats {
-            if let Some(custom) = window.custom {
-                if custom > index {
-                    window.custom = Some(custom - 1);
-                }
-            }
-        }
-        if self
-            .custom_hover
-            .is_some_and(|(hovered, _)| hovered == index)
-        {
-            self.custom_hover = None;
-        }
-        if self
-            .editing_title
-            .as_ref()
-            .is_some_and(|(editing, _)| *editing == index)
-        {
-            self.editing_title = None;
-        }
-        if self
-            .editing_body
-            .as_ref()
-            .is_some_and(|(editing, _)| *editing == index)
-        {
-            self.editing_body = None;
-        }
-        self.data_dirty = true;
-        self.message = "已删除该自定义preview".to_string();
+        let preview = std::sync::Arc::new(self.custom_previews[index].clone());
+        self.apply_edit(AppEdit::DeletePreview { index, preview }, true);
+        self.message = "已删除该自定义preview（Ctrl+Z 可撤销）".to_string();
     }
 
     /// 若某个自定义 preview 已有**正式浮窗**，把它高亮并置顶（侧栏悬浮/点击共用）。
