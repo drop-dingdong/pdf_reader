@@ -3244,9 +3244,23 @@ impl PdfReaderApp {
                 }
             }
 
+            // 2a'') 右键菜单：指针在标注上时提供"删除标注"（可撤销）——比
+            // "悬停 + Delete" 更好发现，也让删除不再依赖键盘焦点。
+            if self.capture.is_none() && self.hovered_annotation.is_some() {
+                let hovered = self.hovered_annotation;
+                response.context_menu(|ui| {
+                    if ui.button("删除标注（可撤销）").clicked() {
+                        self.hovered_annotation = hovered;
+                        self.delete_hovered_annotation();
+                        ui.close();
+                    }
+                });
+            }
+
             // 2b') 标注叠加层（D-118）：几何在页面空间，这里换算到屏幕
             if self.show_annotations && self.capture.is_none() {
                 let pointer = ui.ctx().pointer_hover_pos();
+                self.hovered_annotation = None; // 每帧重算（指针离开后立即失效）
                 for page in self.visible.clone() {
                     let Some(placement) = session.placement(page).copied() else { continue };
                     for annotation in self.annotations.on_page(page) {
@@ -4888,7 +4902,9 @@ impl eframe::App for PdfReaderApp {
         let frame_start = std::time::Instant::now();
         // 高亮只维持一帧：由本帧的悬停判定重新设置
         self.highlight_float = None;
-        self.hovered_annotation = None;
+        // `hovered_annotation` **不在这里清空**：按键处理（`collect_commands`）在本帧更早的位置
+        // 读取它，清空会让"悬停 + Delete"永远看不到目标。它由标注绘制那段每帧重算，
+        // 指针离开标注时自然变成 `None`。
         // 点击产生的一次性高亮（D-118）：在计时内**每帧**生效，并请求"到期时重绘"。
         // 少了这次请求，空闲时 egui 不会再画一帧 —— 高亮会一直停在屏幕上，
         // 直到下一次鼠标移动之类的事件（用户实测"移开指针后高亮不定长地持续"）。

@@ -334,6 +334,8 @@ pub struct ActionReport {
     pub annotation_bounds: Option<(f32, f32, f32, f32)>,
     /// 动作结束时的浮窗数量（断言"重复点击不重复开窗"）。
     pub floats: usize,
+    /// 动作结束时的自定义 preview 条目数（含标注正文；断言"撤销/重做带着正文一起走"）。
+    pub previews_total: usize,
 }
 
 /// 整次回放的报告。
@@ -973,6 +975,7 @@ pub fn run(
             annotations: 0,
             annotation_bounds: None,
             floats: 0,
+            previews_total: 0,
         };
         harness.apply_action(app, action);
         // 每个动作开始时清空诊断缓冲：这一行只属于这个动作
@@ -1076,6 +1079,7 @@ pub fn run(
         }
         action_report.annotations = app.annotations.len();
         action_report.floats = app.floats.len();
+        action_report.previews_total = app.custom_previews.len();
         action_report.annotation_bounds = app
             .annotations
             .iter()
@@ -1791,6 +1795,7 @@ mod tests {
             annotations: 0,
             annotation_bounds: None,
             floats: 0,
+            previews_total: 0,
         };
         action.frames_data.push(FrameStat {
             frame: 1,

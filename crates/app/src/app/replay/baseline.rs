@@ -663,6 +663,7 @@ mod tests {
             annotations: 0,
             annotation_bounds: None,
             floats: 0,
+            previews_total: 0,
         }
     }
 

@@ -154,6 +154,17 @@ fn undo_and_redo_walk_the_annotation_stack() {
     assert_eq!(action("undo1").annotations, 2, "撤销一次剩两条");
     assert_eq!(action("undo2").annotations, 1, "再撤销一次剩一条");
     assert_eq!(action("redo1").annotations, 2, "重做一次回到两条");
+    // 正文条目必须跟着标注一起撤销/重做（否则重做回来的标注点开是"正文已丢失"）
+    assert_eq!(
+        action("undo2").previews_total,
+        1,
+        "撤销后正文条目也应只剩一条"
+    );
+    assert_eq!(
+        action("redo1").previews_total,
+        2,
+        "重做后正文条目必须一起回来"
+    );
 }
 
 #[test]
