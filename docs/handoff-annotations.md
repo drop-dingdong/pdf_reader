@@ -1,9 +1,9 @@
 # 交接：注释功能（另一个会话从这里继续）
 
-> 分支 `feat/annotations`，最后提交 `2fdc8bd`。S0–S3 已完成并通过门禁；**S4a（墨迹模型 + `ink` 回放 +
-> 标注图层 v2）已完成**；S4b/c（墨迹工具与手势、性能验收）与 S5（写回 PDF）未开始。
-> 权威决策见 [`decisions/log.md`](decisions/log.md) 的 **D-118**（阶段计划）与 **D-119**（墨迹第一批的决策）；
-> 本文只记录进度、陷阱与下一步。
+> 分支 `feat/annotations`，最后提交 `c0350b0`。S0–S3 + **S4a/S4b（墨迹：模型、图层 v2、回放、工具与手势）已完成**；
+> 只剩 **S4c（性能验收 + 人工手感）** 与 S5（写回 PDF）。
+> 权威决策见 [`decisions/log.md`](decisions/log.md) 的 **D-118**（阶段计划）、**D-119**（墨迹模型/图层 v2）、
+> **D-120**（墨迹工具与手势）；本文只记录进度、陷阱与下一步。
 
 ## 1. 已完成（按提交顺序）
 
@@ -19,7 +19,8 @@
 | **S3b** | 标注接入撤销（`Ctrl+Z` / `Ctrl+Shift+Z`）+ 可视历史列表 + 右键删除 | `a048e8e`、`8948704`、`d2cd65d` |
 | — | 删除自定义 preview 进栈 | `b616f31` |
 | — | 引用点重选进栈 | `739b0bc` |
-| **S4a** | `AnnotationKind::Ink`（页面空间折线 + 线宽、折线命中、半线宽包围盒）+ `annot.json` **v2**（`points`/`width`）+ 回放动作 `ink` + 墨迹绘制与悬停 | `2fdc8bd` |
+| **S4a** | `AnnotationKind::Ink`（页面空间折线 + 线宽、折线命中、半线宽包围盒）+ `annot.json` **v2**（`points`/`width`）+ 墨迹绘制与悬停 | `2fdc8bd` |
+| **S4b** | 墨迹工具：`Tool::Ink` + 手势状态机（`ink.rs`：0.5 抽稀 / 2000 上限 / 单点不成笔）+ 抬笔才入库 + `Esc`/切工具丢弃 + 回放改真实拖拽（`set_tool`、手势内按键）+ JSONL 补标注字段 | `c0350b0` |
 
 ## 2. 代码地图（新增/改动最多的地方）
 
@@ -29,8 +30,9 @@
 | `crates/pdfcore/src/text.rs` | `PageText::range_for_page_rect`（矩形 → 字符范围 → 复用按行合并） |
 | `crates/app/src/persist.rs` | 末尾"标注图层"段：`ANNOT_VERSION = 2` / `SavedOverlay` / `SavedAnnotation`（含 `points`/`width`）/ `annot_path` / `write_atomic` / `annotation_body_title` / `annotation_kind_from_saved` / `overlay_from_store` / `store_from_overlay` |
 | `crates/app/src/history.rs` | `History<T>`（单栈、按字节裁剪、`descriptions()` 供可视列表） |
-| `crates/app/src/app.rs` | `AppEdit`（编辑命令）、`apply_edit`（唯一修改点）、`undo_edit` / `redo_edit`、`add_annotation`（所有"新建标注"的唯一入口）/ `add_highlight` / `annotate_ink`、`annotation_at`、`open_annotation_note`、`delete_hovered_annotation`、`shift_float_custom_indices`、`draw_history_window`、`DEFAULT_INK_WIDTH` |
-| `crates/app/src/app/replay.rs` | 动作 `click` / `drag` / `highlight` / `ink` / `save` / `undo` / `redo`；报告字段 `page_after` / `scroll_after` / `annotations` / `annotation_bounds` / `floats` / `previews_total` |
+| `crates/app/src/ink.rs` | 墨迹手势状态机（纯逻辑）：页面空间采样、0.5 抽稀、2000 点上限、收笔判定；`cargo test -p app --lib ink::` |
+| `crates/app/src/app.rs` | `AppEdit`（编辑命令）、`apply_edit`（唯一修改点）、`undo_edit` / `redo_edit`、`add_annotation`（所有"新建标注"的唯一入口）/ `add_highlight` / `annotate_ink`、`annotation_at`、`page_at_content`、`open_annotation_note`、`delete_hovered_annotation`、`shift_float_custom_indices`、`draw_history_window`、`DEFAULT_INK_WIDTH`、**`Tool::Ink` / `DragMode::Ink` / `switch_tool` / `handle_ink_pointer`（墨迹手势）** |
+| `crates/app/src/app/replay.rs` | 动作 `click` / `drag` / `highlight` / `ink`（真实拖拽，需先 `set_tool ink`）/ `set_tool` / `save` / `undo` / `redo`；手势帧可携带同帧按键（Esc 取消）；JSONL 现在也写 `annotations` / `annotation_bounds` / `floats` / `previews_total` |
 | `scripts/replay/*.json` + `perf/baseline/*.json` | 新脚本：`click_link` / `drag_pan` / `annotate_zoom` / `undo_redo` / **`ink`**（结构基线已入库，共 9 条） |
 | 测试 | `crates/app/tests/{annot_roundtrip,annot_click}.rs`、`replay_scripts.rs` 里的 `annotation_geometry_*` 与 `undo_and_redo_*` |
 
@@ -48,6 +50,8 @@
    点集外扩半个线宽（`contains` / `bounds` 已实现）。
 9. **写墨迹就必须是图层 v2**（`points` + `width`）：v1 的读取端会把 `ink` 当未知种类
    静默丢掉，再保存就是真丢数据。v1 文件仍可读，不需要迁移。
+10. **墨迹只在抬笔时入库**：拖动中采样点只存在 `InkStroke`（不产生命令、不进撤销栈）；
+    `Esc` / 切走工具 = 丢掉它。任何"拖动中就 `apply_edit`"的写法都会让取消留下半条。
 
 ## 4. 验证方式
 
@@ -76,6 +80,8 @@ export PATH=/tmp/rust/cargo/bin:$PATH CARGO_HOME=/tmp/rust/cargo RUSTUP_HOME=/tm
 | 新增 `AnnotationKind` 变体 | 绘制、存档、`describe` 的 `match` 全都不穷尽 | 这是好事，逐个补全；**别用 `_ => {}` 糊过去**，否则新种类会被静默忽略 |
 | 用包围盒做墨迹命中 | L 形墨迹的包围盒里有大片空白，"点在空白处却选中了墨迹" | 点到折线距离 + 半线宽（`contains` 已实现） |
 | 墨迹基线里 `提交=0` | 看起来像"录制跑错" | 上传字节 > 0 就是正常（页面早渲染完，动作只是加标注）；与 `undo_redo` 基线一致 |
+| 起笔只取按下点 | 一笔的开头少一段（快速起笔尤其明显） | 用 `pointer.press_origin()` **并**补采 `drag_started` 那一帧的当前位置 |
+| 回放里"拖到一半取消" | 普通 `key` 动作只能发生在两个动作之间，打断不了正在跑的手势 | 手势帧自带 `keys`（`GestureFrame`），`ink` 动作的 `cancel: true` 就是这么注入 Esc 的 |
 
 ## 6. 下一步
 
@@ -86,17 +92,18 @@ export PATH=/tmp/rust/cargo/bin:$PATH CARGO_HOME=/tmp/rust/cargo RUSTUP_HOME=/tm
 `add_annotation` 统一入口；测试 `annotation::tests::ink_*`、`persist::annot_tests::ink_*`、
 回放 `ink_stroke_is_one_annotation_that_undo_and_redo_can_move`、`annot_roundtrip` 的墨迹重开断言。
 
-**下一批（S4b：工具与手势）** —— 仍需人眼验收手感：
+**已完成（S4b，`c0350b0`，D-120）**：`Tool::Ink`、手势状态机（`ink.rs`）、抬笔才入库、
+`Esc` / 切工具丢弃、起笔补采、不透明深色默认、回放真实拖拽（`set_tool` + `cancel`）、
+JSONL 标注字段。回放断言：一次拖拽 = 1 条、撤销/重做、Esc 后数量不变、1×/2× 包围盒逐值相同。
 
-- `Tool::Ink`：工具栏按钮 + 快捷键（`Tool` 目前只有平移/选字，[app.rs](../crates/app/src/app.rs) 的 `Tool::label` 与工具栏都要加）；
-- 状态机：`press → move… → release` 期间在**页面空间**累积点，**抬起时**调 `annotate_ink`（入口已就绪）；
-- 抽稀：相邻点距离 < 0.5（**页面空间**，与缩放无关）丢弃；上限 2000 点/笔；
-- 丢弃：Esc / 指针移出窗口 / 切工具 → 整笔丢弃（不产生命令、不留半条）；
-- 回放：`ink` 现在是"直接建标注"，S4b 后应改为**真实拖拽**（需 `set_tool` 与 `key` 动作，
-  注意 egui 的 `hovered` 滞后两帧与 `quiet_now` 判定这两个老坑）。
+**S4c：性能与人工验收**（剩下的全部）：
 
-**S4c：验收** —— 1000 条以内忙帧 p99 不明显退化（新压力脚本 + 基线）；
-以及人工验收：切到墨迹工具画一笔、Esc 取消、缩放后笔画粗细/位置一致、悬停 + Delete 能删。
+1. 1000 条墨迹以内忙帧 p99 不明显退化：新压力脚本（可以先 `ink` 动作循环造 N 笔，
+   或临时加一个"批量造标注"的模型级动作 —— 注意别把压力脚本塞进 `every_script` 的常规门禁里，
+   它的帧数会拖慢 `check.sh`）；
+2. 人工验收（`agent.md` 分工，必须真窗口）：切到「墨迹」画一笔是否跟手、`Esc` 是否干净丢弃、
+   缩放后笔画粗细与位置是否一致、悬停 + `Delete` 能否删、撤销后是否整笔消失；
+3. 顺带记录两个已知边界：指针移出窗口不特殊处理（egui 继续给 `dragged`）、单击不产生点（单点不成笔）。
 
 ### S5 写回 PDF（单独评估，不承诺）
 
@@ -113,5 +120,5 @@ export PATH=/tmp/rust/cargo/bin:$PATH CARGO_HOME=/tmp/rust/cargo RUSTUP_HOME=/tm
 1. `git log --oneline -15` + 读本文；
 2. `./scripts/check.sh` 确认基线仍绿；
 3. 读 `crates/app/src/app.rs` 里的 `AppEdit` / `apply_edit` / `undo_edit`（这是所有编辑的唯一入口）；
-4. S4b 从 `Tool::Ink` 的状态机开始：回放动作 `ink`、模型、持久化都已入库
-   （`scripts/replay/ink.json` 是现成的回归脚本），接手势时把 `annotate_ink` 接到"抬笔"那一帧。
+4. 墨迹三件套（模型/持久化/工具）都已入库；`scripts/replay/ink.json` 是现成的回归脚本。
+   S4c 直接做压力脚本与人工验收清单，不要再改 `InkStroke` 的语义（抬笔入库是硬约定）。
