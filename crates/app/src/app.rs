@@ -436,9 +436,13 @@ impl AppEdit {
         match self {
             Self::AddAnnotation { annotation } => {
                 let page = annotation.page.display_number();
-                match annotation.kind.quads().len() {
-                    1 => format!("高亮（第 {page} 页）"),
-                    rows => format!("高亮（第 {page} 页，{rows} 行）"),
+                match &annotation.kind {
+                    // 墨迹没有行矩形：按 quads 数描述会写成"高亮（第 N 页，0 行）"
+                    AnnotationKind::Ink { .. } => format!("墨迹（第 {page} 页）"),
+                    _ => match annotation.kind.quads().len() {
+                        1 => format!("高亮（第 {page} 页）"),
+                        rows => format!("高亮（第 {page} 页，{rows} 行）"),
+                    },
                 }
             }
             Self::DeleteAnnotation { annotation } => {
@@ -5490,4 +5494,50 @@ fn canvas_to_content(canvas: egui::Rect, screen_position: egui::Pos2, scroll: Ve
         ),
         scroll,
     )
+}
+
+#[cfg(test)]
+mod edit_describe_tests {
+    use super::*;
+
+    fn ink() -> pdfcore::annotation::Annotation {
+        pdfcore::annotation::Annotation::new(
+            PageIndex::FIRST,
+            AnnotationKind::Ink {
+                points: vec![Point::new(0.0, 0.0), Point::new(10.0, 10.0)],
+                width: 2.0,
+            },
+        )
+        .expect("有效墨迹")
+    }
+
+    #[test]
+    fn undo_list_calls_an_ink_stroke_ink_not_a_zero_row_highlight() {
+        let edit = AppEdit::AddAnnotation { annotation: ink() };
+        let description = edit.describe();
+        assert!(
+            description.starts_with("墨迹"),
+            "历史列表必须说人话：实际 {description}"
+        );
+        assert!(
+            !description.contains("0 行"),
+            "墨迹没有行矩形，不能按行数描述：实际 {description}"
+        );
+    }
+
+    #[test]
+    fn undo_list_keeps_the_row_count_for_text_marks() {
+        let annotation = pdfcore::annotation::Annotation::new(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![
+                    Rect::new(0.0, 0.0, 10.0, 2.0),
+                    Rect::new(0.0, 4.0, 10.0, 2.0),
+                ],
+            },
+        )
+        .expect("有效高亮");
+        let edit = AppEdit::AddAnnotation { annotation };
+        assert_eq!(edit.describe(), "高亮（第 1 页，2 行）");
+    }
 }
