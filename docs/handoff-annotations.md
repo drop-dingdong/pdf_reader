@@ -1,8 +1,9 @@
 # 交接：注释功能（另一个会话从这里继续）
 
 > 分支 `feat/annotations`，最后提交见 `git log`。**S0–S4（模型 / 图层 v2 / 撤销 / 墨迹 / 压力门槛）已完成**并通过门禁。
-> **S5（写回 PDF）的评估已产出**（[`decisions/evaluations/s5-writeback.md`](decisions/evaluations/s5-writeback.md)），
-> 实现**未开始**，等用户确认评估 §10 的 5 个决策（形态 / overlay 去留 / 范围 / 加密签名策略 / 命名）。
+> **S5（写回 PDF）已完成评估 + S5a spike**（[`decisions/evaluations/s5-writeback.md`](decisions/evaluations/s5-writeback.md)，D-123），
+> 5 个决策已由用户确认：**导出副本 / 保留 overlay / 四种都写 / 受限文档拒绝 / 不覆盖**。
+> **S5b（导出实现）未开始**。
 > 人工验收（真窗口）：画一笔跟手、整笔撤销/重做、Esc 丢弃、800% 粗细与位置、两种删除方式，用户已确认通过。
 > 权威决策：[`decisions/log.md`](decisions/log.md) 的 **D-118**（阶段计划）、**D-119**（墨迹模型/图层 v2）、
 > **D-120**（墨迹工具与手势）、**D-121**（S4c：悬停闸门、历史虚拟化、压力门槛）；本文只记录进度、陷阱与下一步。
@@ -120,8 +121,18 @@ export PATH=/tmp/rust/cargo/bin:$PATH CARGO_HOME=/tmp/rust/cargo RUSTUP_HOME=/tm
    要自带一层小 FFI；而 FFI 绕过它的全局锁，会和后台渲染线程竞争 → 建议**子进程**写回。
 3. **我们读不回 PDF 注释** → 不能"写成功后删 overlay"，S5 先做**导出副本**（overlay 保留）。
 
-下一步（等用户确认后）：S5a spike（验证 `SetAttachmentPoints` 对高亮、`AppendObject` 生成墨迹 AP、
-保存 flags、UTF-16 正文往返）→ S5b 导出副本 → S5c 原地替换（依赖 S6 读回注释）。
+**S5a spike 已完成**（D-123，example 可复现：`cargo run -p backend-pdfium --example s5_spike`）：
+
+- 墨迹 `AddInkStroke` + 外观、高亮/下划线/删除线 `AppendAttachmentPoints`（= `/QuadPoints`）全部可用；
+- **下划线/删除线没有 `/AP` 就不可见**（下划线 0 px；删除线只覆盖文字 24 px）；`AppendObject` 对下划线失败；
+- **`FPDFAnnot_SetAP` 是通用解**：Form 的 `/BBox` = `/Rect`、内容用页面坐标、**没有 `/Resources`**（不能设透明度）；
+- `/Contents` UTF-16LE 往返正确；保存 flags 0/2 同尺寸可重开；既有链接/页数不受影响；
+- **旋转页位置未验证**（spike 渲染传了 `Rotation::None`）→ S5b 必测。
+
+下一步 S5b（导出副本，2–4 天）：子进程 `--writeback <job.json>` + `CreateAnnot`（`InkList`/`QuadPoints`）
++ `SetAP` 外观（**高亮不写 AP**）+ `FPDF_NO_INCREMENTAL` 保存 + 父进程校验 + UI「导出带标注的 PDF…」。
+拒绝：加密 / 有签名 / `annotate == false`。输出 `<原名>.annotated.pdf`，**不覆盖**。
+S5c（原地替换 + 迁移）依赖 S6（能读回 PDF 注释）。
 
 ### 已知未做（不是 bug，是没到）
 
@@ -134,6 +145,8 @@ export PATH=/tmp/rust/cargo/bin:$PATH CARGO_HOME=/tmp/rust/cargo RUSTUP_HOME=/tm
 1. `git log --oneline -15` + 读本文；
 2. `./scripts/check.sh` 确认基线仍绿；
 3. 读 `crates/app/src/app.rs` 里的 `AppEdit` / `apply_edit` / `undo_edit`（这是所有编辑的唯一入口）；
-4. S0–S4 已全部完成（`ink.json` / `ink_many.json` 是现成回归脚本）。S5 的评估也已完成，
-   **下一步是等用户对评估 §10 的 5 个决策拍板，然后做 S5a spike**（spike 代码一次性、不入库）。
+4. S0–S4 已全部完成（`ink.json` / `ink_many.json` 是现成回归脚本），S5 的评估与 spike 也已完成。
+   **下一步直接开 S5b（导出副本）**：spike 的 FFI/AP 写法在
+   `crates/backend-pdfium/examples/s5_spike.rs`，可以先把它整理成 `backend-pdfium` 内部的
+   `writeback` 模块（子进程用），再加 `--writeback` 子命令与 UI 入口。
    墨迹相关不要再动语义（抬笔入库、页面空间几何、图层 v2 都是硬约定）。

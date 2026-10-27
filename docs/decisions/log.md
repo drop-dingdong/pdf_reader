@@ -690,6 +690,33 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **回退**：纯文档，`git revert` 本条即可。
 - **状态**：评估完成；**实现待确认**。
 
+### D-123 S5 形态确认 + S5a spike：四种都能写，统一用 `SetAP` 生成外观
+
+- **决定**（用户 2026-10-27 确认，全部按评估 §10 的建议）：
+  1. **形态 = 导出副本** `<原名>.annotated.pdf`，不动原文件；
+  2. **overlay 保留**（导出不删 `<pdf>.annot.json`）；
+  3. **四种标注都写**；
+  4. 加密 / 有数字签名 / `annotate == false` → **拒绝并说明原因**；
+  5. 输出**不覆盖**（同名已存在则报错/加序号）。
+- **S5a spike 结论**（可复现：`cargo run -p backend-pdfium --example s5_spike`）：
+  * 墨迹：`CreateAnnot(Ink)` + `AddInkStroke`（返回 0 = 0 基索引，不是失败）+ 外观 →
+    重开后注释数 1、渲染 220 红色像素，包围盒 (40,259)-(259,259)（页面坐标直写）；
+  * 文本类：`AppendAttachmentPoints` 写的就是 `/QuadPoints`（高亮渲染包围盒精确到 (40,240)-(259,259)）；
+  * **下划线/删除线没有 AP 就不可见**（下划线 0 像素；删除线 24 像素只覆盖文字，空页 0）；
+    `AppendObject` 对下划线返回失败（文档也只支持 ink/stamp）；
+  * **`FPDFAnnot_SetAP` 是通用解**：PDFium 建出 `/BBox` = `/Rect`、无 `/Matrix`、**无 `/Resources`** 的
+    Form XObject，内容用页面坐标 → 下划线 440 像素、墨迹两条子路径 618 像素，位置都精确；
+  * `/Contents` 用 UTF-16LE 往返正确（中文）；`flags=0` 与 `FPDF_NO_INCREMENTAL` 同尺寸且都能重开；
+    真实样本写回后页数与既有链接都保留。
+- **理由**：把"外观"这一层从 `AppendObject`（只支持 ink/stamp）换成 `SetAP`（任意子类型），
+  方案从"部分可写"变成"四种全可写"，且不需要引入 lopdf（离线不可得）。
+- **影响**：新增 `crates/backend-pdfium/examples/s5_spike.rs`（一次性探针，非产品代码）与
+  `libloading` 的开发依赖；评估文档新增 §12 并修正 §1/§3.3/§6/§10。**产品代码未改**。
+- **验证**：example 的 7 组断言/输出（见评估 §12）；文档检查通过。
+- **未做 / 下一步**：S5b（子进程 `--writeback` + 导出副本 + 写后校验）未开始；
+  **旋转页上的注释位置**是 S5b 的必测项（spike 的渲染调用传的是 `Rotation::None`）。
+- **状态**：有效（S5b 待启动）。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

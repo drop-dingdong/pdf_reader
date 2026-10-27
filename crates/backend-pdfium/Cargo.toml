@@ -12,3 +12,7 @@ pdfcore = { path = "../pdfcore" }
 # 说明：pdfium-render 在**运行期**绑定 PDFium 动态库（见 scripts/fetch-pdfium.sh），
 # 因此本 crate 编译不需要 PDFium，只有跑测试/运行程序时需要。
 pdfium-render = "0.9"
+
+[dev-dependencies]
+# S5a spike 一次性使用：自带 FFI 调 FPDFAnnot_*（pdfium-render 0.9.4 没有注释 API）
+libloading = "0.8"
