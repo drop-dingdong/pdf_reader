@@ -182,17 +182,26 @@ fn writes_all_four_kinds_at_page_coordinates_and_preserves_the_rest() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// **旋转页**：目前只断言"写进去的几何是页面空间、注释数正确"。
-///
-/// 为什么不断言像素位置：PDFium 的 `FPDF_RenderPageBitmap`（pdfium-render 走的就是它）
-/// 在**页面自带 `/Rotate`** 时对注释应用了一个带纵横比缩放的错误矩阵 ——
-/// 用**原始 PDF**（不经过我们的写回）复现同样错位：`/Rotate 90` + 四角
-/// 渲染时，页面空间 (50,100)-(150,120) 的高亮会出现在 (50,100)-(59,299)。
-/// 这是渲染器路径的问题，不是写回的几何问题（`/QuadPoints` 与输入逐值相同）。
-/// 真实阅读器（Chrome 的注释绘制走 `FPDF_FFLDraw`）需要**人工验收**，见
-/// `docs/current/writeback.md` 的"已知限制"。
+/// 旋转页：`/QuadPoints` 保持页面空间，且渲染位置正确（旋转只应用一次）。
+fn yellow_bbox(image: &RasterImage) -> Option<(u32, u32, u32, u32)> {
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0, 0);
+    for y in 0..image.height {
+        for x in 0..image.width {
+            let index = ((y * image.width + x) * 4) as usize;
+            let pixel = &image.data()[index..index + 4];
+            if pixel[2] > 200 && pixel[1] > 200 && pixel[0] < 120 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    (min_x != u32::MAX).then_some((min_x, min_y, max_x, max_y))
+}
+
 #[test]
-fn a_rotated_page_keeps_page_space_geometry_and_the_right_annotation_count() {
+fn a_highlight_on_a_rotated_page_lands_where_the_rotation_says() {
     if !backend_available() {
         return;
     }
@@ -208,17 +217,33 @@ fn a_rotated_page_keeps_page_space_geometry_and_the_right_annotation_count() {
     let bytes = std::fs::read(&spec.output).expect("读输出");
     let opened = backend.open(Source::Bytes(&bytes), None).expect("重开");
     let page = PageIndex::new(1);
-    assert_eq!(
-        opened.document.page_rotation(page).expect("页旋转"),
-        Rotation::Clockwise90,
-        "夹具第 2 页的 /Rotate 必须原样保留"
-    );
+    let rotation = opened.document.page_rotation(page).expect("页旋转");
+    assert_eq!(rotation, Rotation::Clockwise90, "夹具第 2 页是 /Rotate 90");
 
-    // 保存后的字典里仍应是**未旋转页面空间**的 QuadPoints（原点在左下）
+    // 保存后的字典里仍应是**未旋转页面空间**的 QuadPoints
     let text = String::from_utf8_lossy(&bytes);
     assert!(
         text.contains("QuadPoints[ 50 120 150 120 50 100 150 100]"),
         "旋转页的 QuadPoints 必须保持页面空间、不得预旋转"
+    );
+
+    let image = opened
+        .raster
+        .render(&RenderRequest::new(page, Scale::IDENTITY, rotation))
+        .expect("渲染旋转页");
+    assert_eq!(
+        (image.width, image.height),
+        (400, 200),
+        "旋转 90 后宽高互换"
+    );
+
+    // 页面空间 quad (50,100,100,20) 在顺时针 90° 下的显示位置：
+    // (x,y) → (y, x)，所以显示区域 = x 100..120、y 50..150
+    let found = yellow_bbox(&image).expect("旋转页上应当有高亮");
+    let close = |a: u32, b: u32| (a as i32 - b as i32).abs() <= 3;
+    assert!(
+        close(found.0, 100) && close(found.1, 50) && close(found.2, 119) && close(found.3, 149),
+        "旋转页上的高亮位置不对：{found:?}（期望 x 100..120、y 50..150）"
     );
 
     std::fs::remove_dir_all(&dir).ok();

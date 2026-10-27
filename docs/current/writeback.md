@@ -187,7 +187,8 @@
 **注意**：
 
 * 导出是**同步**调用：等待子进程与冒烟渲染期间 UI 会短暂停顿（通常几十毫秒；超大文件另说）；
-* 父进程**不比较像素**：PDFium 整页渲染在旋转页上有已知偏差（L3），所以位置验收只能人工；
+* 父进程**不比较像素**：冒烟校验只保证"文件能打开、页数对、渲染不报错"；
+  旋转页的像素位置由 `backend-pdfium` 的回归测试守（INV-12 / L3 已修正），真实阅读器仍需人工抽查；
 * 正文从 `custom_previews` 里按哨兵标题 `#annot:<id>` 取；空正文不写 `/Contents`；
 * 目标文件名**不含** `.pdf` 之外的后缀拼接坑：`a.b.pdf` → `a.b.annotated.pdf`（只替换最后一个扩展名）。
 
@@ -226,7 +227,7 @@
 | --- | --- | --- |
 | L1 | **透明度丢失** | AP 没有 `/Resources`，无法用 ExtGState；`/CA` 没有公开 setter。高亮靠阅读器合成，下划线/删除线本来就实色 |
 | L2 | 文本类线宽固定 2pt | 界面是 2 屏幕像素，非 100% 缩放时观感不同 |
-| L3 | **旋转页的渲染验证不可信** | PDFium 的 `FPDF_RenderPageBitmap`（pdfium-render 走它）在页面自带 `/Rotate` 时对注释用了带纵横比缩放的错误矩阵：**原始 PDF** 也能复现（`/Rotate 90` 下，页面空间 (50,100)-(150,120) 的高亮渲染成 (50,100)-(59,299)）。所以自动测试只断言"`/QuadPoints` 保持页面空间 + 注释数正确"，真实位置**必须人工**在 Chrome/Acrobat 里看 |
+| L3 | ~~旋转页的渲染验证不可信~~ **已修正（D-126）** | 早先以为 PDFium 对旋转页注释有 bug；实际是**适配层把"最终旋转"又传了一遍**（PDFium 自己会应用 intrinsic `/Rotate`），导致 180° + 压扁。修正后旋转页的位置可用像素断言：`writeback` 的 `a_highlight_on_a_rotated_page_lands_where_the_rotation_says` 与 `intrinsic_rotation` 测试都过了。人工验收仍建议做（Chrome/Acrobat 的注释绘制路径与我们的渲染器不同） |
 | L4 | 加密 / 签名文档不支持 | 见 §12；无夹具 |
 | L5 | 全量重写的内存峰值 | 文件大小量级；大文件（>100MB）需要实测 |
 | L6 | PDFium 版本未固定 | `scripts/fetch-pdfium.sh` 取 latest；`SetAP` 的 Form 形状依赖它的实现，升级后需重跑 spike/测试 |

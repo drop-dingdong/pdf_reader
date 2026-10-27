@@ -5,6 +5,8 @@ vendor/
 # 回放器样本（现场生成，不入库）
 scripts/replay/*.pdf
 scripts/replay/*.pdf.json
+# 标注图层 sidecar（手工测试/回放会生成，不入库）
+scripts/replay/*.annot.json
 
 # 性能基线（每台机器自己记录，不入库）
 perf/*

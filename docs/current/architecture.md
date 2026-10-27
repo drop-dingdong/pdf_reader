@@ -130,6 +130,8 @@ PDF 页面坐标 --Rotation::map_point--> 旋转后页内坐标 --×Scale + 页�
 | INV-9 | 预览图不存像素，只存元数据 + 分辨率；按记录分辨率重建 | `persist.rs`、`app.rs::preview_texture` | `persist::tests::v*`、`region_render_feeds_the_preview_at_the_recorded_scale` |
 | INV-10 | UI 线程不直接调后端；渲染只经 `RenderScheduler` | `session.rs` | 结构约束（后端只以 `Arc<dyn …>` 出现在会话里） |
 | INV-11 | 取消必须补发 `Cancelled` 事件 | `scheduler.rs`、`testkit.rs` | `scheduler::tests::cancelling_*` |
+| INV-12 | **页面 `/Rotate` 只应用一次**：`RenderRequest.rotation` 是最终旋转，后端把它减掉 intrinsic 后才交给 PDFium | `backend-pdfium/raster.rs` | `intrinsic_rotation_is_applied_exactly_once`（已知位置的矩形） |
+| INV-13 | `DocumentInfo.encrypted` 只在 security handler 不是 `Unprotected` 时为真 | `backend-pdfium/document.rs` | `unencrypted_documents_are_not_reported_as_encrypted` |
 
 ## 8. 资源与性能要点
 

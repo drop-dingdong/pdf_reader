@@ -776,6 +776,37 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   加密/签名夹具、S5c（原地替换，依赖 S6）。
 - **状态**：有效（S5b 完成）。
 
+### D-126 修正：`DocumentInfo.encrypted` 恒真；页面 `/Rotate` 被应用两次
+
+- **问题（用户实测）**：
+  1. 导出任何普通 PDF 都提示“加密文档暂不支持导出”，但 Okular 能正常批注保存；
+  2. `/Rotate 90` 的页在本程序里显示成 **180° + 被压扁**（其他阅读器正常）。
+- **根因与修复**：
+  1. **`encrypted` 判据错**：`pdfium-render` 对**未加密**文档返回 `Ok(PdfSecurityHandlerRevision::Unprotected)`
+     （PDFium 的 -1），而旧代码写的是 `.is_ok()` —— 于是**每个**文档都被判成加密，导出被父进程一律拒绝。
+     改为：`Ok(Unprotected) => false`；`Ok(Revision2/3/4) => true`；`Err(未知修订，如 AES-256 的 5/6) => true`（保守）。
+  2. **旋转被应用两次**：`FPDF_RenderPageBitmap` 自己会应用页面自带的 `/Rotate`
+     （pdfium-render 的 display transform 已包含 intrinsic rotation），而适配层把
+     “页面 `/Rotate` ⊕ 用户旋转”的**最终**旋转又传给 `.rotate()`。`/Rotate 90` 的页于是转 180°，
+     位图按 90° 的尺寸、内容按 180° 画 → 压扁。修复：后端把 intrinsic 减掉，
+     只把 `request.rotation ⊖ geometry.rotation` 交给 PDFium。
+- **连带纠正**：D-124 / 评估 §12 里把“旋转页注释错位”归因为 PDFium 的 bug（L3）是**误判** ——
+  那是同一个双重旋转问题（原始 PDF 也能复现是因为渲染参数错，不是 PDFium 错）。
+  修正后旋转页的注释位置已能用像素断言覆盖。
+- **影响**：`backend-pdfium/src/document.rs`（encrypted）、`backend-pdfium/src/raster.rs`（旋转）、
+  `docs/current/{writeback,architecture}.md`（L3 改写、INV-12/13）、评估 §12。
+- **验证**：
+  * `intrinsic_rotation_is_applied_exactly_once`：200×400 `/Rotate 90` 页上画已知位置黑矩形，
+    分别按“最终旋转 90”和“最终旋转 0”渲染，断言像素矩形落在 `Rotation::map_point` 给出的位置
+    （修复前会落到 180° 的象限）；
+  * `writeback::a_highlight_on_a_rotated_page_lands_where_the_rotation_says`：导出的高亮在
+    `/Rotate 90` 页上位置正确（x 100..120、y 50..150）；
+  * `unencrypted_documents_are_not_reported_as_encrypted`：普通 PDF 不得被判为加密且 `annotate == true`；
+  * `check.sh` 全绿（321 tests）。
+- **未做**：加密文档的**写回**仍拒绝（没有加密夹具，PDFium 保存需要 owner 密码）；
+  旋转页在 Chrome/Acrobat 里的人工抽查仍建议做。
+- **状态**：修复生效。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

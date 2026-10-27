@@ -136,6 +136,10 @@ export PATH=/tmp/rust/cargo/bin:$PATH CARGO_HOME=/tmp/rust/cargo RUSTUP_HOME=/tm
 `app --writeback <job.json>` 子进程入口、四种标注、加密/签名闸门、拒绝 `source == output`；
 完整 FFI/排查文档在 [`current/writeback.md`](current/writeback.md)。
 
+**已修正两个用户实测问题（D-126）**：`DocumentInfo.encrypted` 不再恒真（之前所有文档都被当成加密，
+导出被拒）；页面 `/Rotate` 不再被应用两次（之前 `/Rotate 90` 的页显示成 180° + 压扁）。
+旋转页的注释位置现在有像素级回归测试（`intrinsic_rotation`、`writeback` 旋转页断言）。
+
 **S5b-2 已完成**（D-125）：工具栏「导出标注 PDF」→ 同目录 `<stem>.annotated.pdf`；
 temp + 冒烟校验 + rename，**不覆盖**；加密文档父进程预检，签名在子进程拒绝；
 正文按 `#annot:<id>` 取。细节见 [`current/writeback.md`](current/writeback.md)。
@@ -163,7 +167,8 @@ temp + 冒烟校验 + rename，**不覆盖**；加密文档父进程预检，签
 3. 读 `crates/app/src/app.rs` 里的 `AppEdit` / `apply_edit` / `undo_edit`（这是所有编辑的唯一入口）；
 4. S0–S5 都已完成（回放脚本 `ink.json`/`ink_many.json`、写回 example/测试都在）。
    **下一步是人工验收 + 夹具补齐**，不是新功能：
-   * 按 `current/writeback.md` §14 的 L3 与 §16 的步骤，在 Chrome/Acrobat 里看旋转页与四种标注；
+   * 在 Chrome/Acrobat 里抽查旋转页与四种标注（本仓库渲染器的问题已在 D-126 修正，
+     但外部阅读器的注释绘制路径仍值得看一眼）；
    * 补加密/签名夹具，把两道闸门从"代码审查级"升到"自动化"；
    * S5c/S6 之前不要改 `InkStroke` 语义、几何坐标系与图层 v2。
    不要在主进程里调用写回 FFI（D-124）。

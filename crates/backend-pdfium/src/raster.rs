@@ -89,6 +89,14 @@ impl PageRaster for PdfiumRaster {
         let mut bitmap = PdfBitmap::empty(bitmap_size.0, bitmap_size.1, PdfBitmapFormat::BGRA)
             .map_err(to_core_error)?;
 
+        // **只把"用户旋转"交给 PDFium**：`FPDF_RenderPageBitmap` 会自己应用页面自带的
+        // `/Rotate`（见 pdfium-render 的注释：display transform 已包含 intrinsic rotation）。
+        // `request.rotation` 是"页面 /Rotate ⊕ 用户旋转"的**最终**旋转，直接传会叠加两次：
+        // /Rotate 90 的页会显示成 180°，而且目标位图按 90° 算、内容按 180° 画 → 被压扁。
+        // 这里先减掉页面自带的旋转，剩下的才是要额外施加的旋转。
+        let page_rotation = geometry.rotation;
+        let extra_rotation = request.rotation.compose(page_rotation.inverse());
+        //
         // 旋转由本适配层全权负责（`automatic_orientation = false`）：
         // 位图方向因此严格等于 `request.rotation`，与 `PagePlacement` 的约定一一对应。
         // **必须显式关闭**：`PdfRenderConfig::new()` 默认打开
@@ -100,7 +108,7 @@ impl PageRaster for PdfiumRaster {
             .set_reverse_byte_order(false)
             .set_fixed_size(page_px.0, page_px.1)
             .set_origin(origin.0, origin.1)
-            .rotate(to_pdfium_rotation(request.rotation), false);
+            .rotate(to_pdfium_rotation(extra_rotation), false);
 
         page.render_into_bitmap_with_config(&mut bitmap, &config)
             .map_err(to_core_error)?;
