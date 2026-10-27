@@ -539,6 +539,11 @@ pub struct PdfReaderApp {
     pending_annotate: bool,
     /// 是否正在等"原地写入 PDF"的确认（S5c）。
     pending_in_place: bool,
+    /// 原地写入重开后要恢复的视图（页、缩放、滚动、剩余帧数）。
+    ///
+    /// 延迟两帧：**先让新会话收到真实的视口尺寸**，否则 `SetScroll` 会被按旧/默认视口夹紧，
+    /// 表现为"缩放对了、滚动偏了一点"（用户实测）。
+    pending_view_restore: Option<(PageIndex, f32, Vec2, u8)>,
     /// 标注图层是否有未保存的改动（Ctrl+S 用它决定要不要写）。
     overlay_dirty: bool,
     /// 编辑历史（注释 + 重选截图/引用点，单栈时间序）。
@@ -745,6 +750,7 @@ impl PdfReaderApp {
             ink: None,
             pending_annotate: false,
             pending_in_place: false,
+            pending_view_restore: None,
             overlay_dirty: false,
             history: crate::history::History::new(),
             orphan_bodies: std::collections::HashMap::new(),
@@ -954,6 +960,26 @@ impl PdfReaderApp {
     ///
     /// 顺序固定：先主存档（正文在里面）、再图层；两份各自原子写，互不依赖，
     /// 所以即使图层写失败，正文也已经落盘（加载时缺图层只是"没有标注"，不会崩）。
+    /// 原地写入重开之后，**等视口尺寸生效**再恢复页/缩放/滚动。
+    fn apply_pending_view_restore(&mut self, ctx: &egui::Context) {
+        let Some((page, zoom, scroll, remaining)) = self.pending_view_restore else {
+            return;
+        };
+        if self.session.is_none() {
+            self.pending_view_restore = None;
+            return;
+        }
+        if remaining == 0 {
+            self.commands.push(ViewerCommand::GoToPage(page));
+            self.commands.push(ViewerCommand::SetZoom(zoom));
+            self.commands.push(ViewerCommand::SetScroll(scroll));
+            self.pending_view_restore = None;
+        } else {
+            self.pending_view_restore = Some((page, zoom, scroll, remaining - 1));
+            ctx.request_repaint();
+        }
+    }
+
     /// 原地写入的确认框（S5c）。确认后覆盖原文件；取消则什么都不做。
     fn draw_in_place_dialog(&mut self, ctx: &egui::Context) {
         if !self.pending_in_place {
@@ -1086,9 +1112,8 @@ impl PdfReaderApp {
         // 重开并恢复视图
         self.open(&pdf, None);
         if self.session.is_some() {
-            self.commands.push(ViewerCommand::GoToPage(page));
-            self.commands.push(ViewerCommand::SetZoom(zoom));
-            self.commands.push(ViewerCommand::SetScroll(scroll));
+            // 两帧后再恢复：先让新会话收到真实视口尺寸（见 `pending_view_restore` 的注释）
+            self.pending_view_restore = Some((page, zoom, scroll, 2));
             self.message = format!(
                 "已原地写入 {} 条标注：{}（备份：{}）",
                 items.len(),
@@ -5432,6 +5457,7 @@ impl eframe::App for PdfReaderApp {
         self.handle_dropped_files(&ctx);
         // 原地写入的确认框必须在借用 session 之前处理：确认后要**关掉会话**才能替换文件
         self.draw_in_place_dialog(&ctx);
+        self.apply_pending_view_restore(&ctx);
         self.draw_history_window(&ctx);
 
         // 把会话临时取出，避免与 `self` 的其它字段发生借用冲突

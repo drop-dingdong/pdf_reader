@@ -25,7 +25,6 @@
 //! 实测依据（无 AP 时的渲染结果）：墨迹不可见（1 px）、下划线 0 px、删除线只覆盖文字（24 px）、
 //! 高亮可被 PDFium 合成（文字仍可读）。详见评估 §12。
 
-use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void, CString};
 use std::os::raw::c_float;
 use std::path::{Path, PathBuf};
@@ -152,16 +151,6 @@ pub fn write(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
     // 期望的逐页注释数（同步之后）；保存后用它核对
     let mut expected: Vec<usize>;
     let mut added_total = 0usize;
-    // 每一页"期望存在"的标记 id 集合（只来自 spec）
-    let mut desired: HashMap<u32, HashSet<u64>> = HashMap::new();
-    for page in &spec.pages {
-        let entry = desired.entry(page.page.get()).or_default();
-        for annotation in &page.annotations {
-            if let Some(id) = annotation.id {
-                entry.insert(id);
-            }
-        }
-    }
     unsafe {
         let document = (ffi.load_document)(source.as_ptr(), std::ptr::null());
         if document.is_null() {
@@ -219,20 +208,19 @@ pub fn write(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
                 });
             }
             let count = (ffi.annot_count)(handle).max(0) as usize;
-            let wanted = desired.get(&(index as u32));
-            let mut present: HashSet<u64> = HashSet::new();
+            // 先删掉**所有**我们标记过的注释，再按 overlay 重建。
+            //
+            // 为什么不是"就地更新"：PDFium 的 `FPDFAnnot_SetColor` 对**已存在**的墨迹注释
+            // 返回失败（新建的可以，实测），`SetStringValue` 也不能保证；重建最简单、
+            // 语义也明确（PDF 里我们的注释 = overlay 的投影）。其它程序加的注释（无标记）不碰。
             let mut remove_indices: Vec<c_int> = Vec::new();
             for annot_index in 0..count as c_int {
                 let annot = (ffi.get_annot)(handle, annot_index);
                 if annot.is_null() {
                     continue;
                 }
-                if let Some(id) = read_marker(&ffi, annot) {
-                    if wanted.is_some_and(|set| set.contains(&id)) {
-                        present.insert(id);
-                    } else {
-                        remove_indices.push(annot_index);
-                    }
+                if read_marker(&ffi, annot).is_some() {
+                    remove_indices.push(annot_index);
                 }
                 (ffi.close_annot)(annot);
             }
@@ -256,11 +244,6 @@ pub fn write(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
                 .find(|page| page.page.get() as usize == index)
             {
                 for annotation in &page.annotations {
-                    if let Some(id) = annotation.id {
-                        if present.contains(&id) {
-                            continue; // 上次已经写进去了
-                        }
-                    }
                     add_annotation(&ffi, handle, annotation)?;
                     added += 1;
                 }

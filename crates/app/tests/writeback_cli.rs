@@ -104,8 +104,8 @@ fn running_the_same_job_twice_does_not_duplicate_annotations() {
     .expect("写 job2");
     let summary = app::writeback::run_job(&second_job).expect("第二次写回");
     assert!(
-        summary.contains("0 条标注"),
-        "第二次不应新增注释（实际：{summary}）"
+        summary.contains("2 条标注"),
+        "第二次写回应当重建 2 条标记注释（实际：{summary}）"
     );
     let counts = backend_pdfium::writeback::count_annotations(&dir.join("out2.pdf")).expect("数");
     assert_eq!(counts, vec![3, 0], "重复写回不能叠加");

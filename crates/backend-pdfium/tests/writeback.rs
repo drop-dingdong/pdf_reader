@@ -390,8 +390,8 @@ fn writing_twice_is_idempotent_and_drops_stale_marked_annotations() {
     let second = dir.join("out2.pdf");
     assert_eq!(
         write_once(&first, &second, pages.clone()).expect("第二次"),
-        0,
-        "已存在的标记注释必须跳过"
+        3,
+        "标记注释会被删掉后按 overlay 重建（不是叠加）"
     );
     assert_eq!(
         writeback::count_annotations(&second).expect("数注释"),
@@ -407,14 +407,65 @@ fn writing_twice_is_idempotent_and_drops_stale_marked_annotations() {
     }];
     assert_eq!(
         write_once(&second, &third, reduced).expect("第三次"),
-        0,
-        "留下的那条已在 PDF 里"
+        1,
+        "只重建留下的一条"
     );
     assert_eq!(
         writeback::count_annotations(&third).expect("数注释"),
         vec![2, 0],
         "第 1 页 = 链接 + 1 条；第 2 页的标记注释应被删掉"
     );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 已存在的标记注释要**同步正文与颜色**：删/改 overlay 里的正文后，下次写回不能还是旧文本。
+#[test]
+fn rewriting_updates_contents_of_existing_marked_annotations() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("contents");
+    let source = dir.join("in.pdf");
+    std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+
+    let write_with_body =
+        |source: &std::path::Path, output: &std::path::Path, body: Option<&str>| {
+            let spec = WritebackSpec {
+                source: source.to_path_buf(),
+                output: output.to_path_buf(),
+                pages: vec![WritebackPage {
+                    page: PageIndex::FIRST,
+                    annotations: vec![WritebackAnnotation {
+                        id: Some(7),
+                        kind: AnnotationKind::Highlight {
+                            quads: vec![Rect::new(50.0, 660.0, 200.0, 14.0)],
+                        },
+                        color: [255, 255, 0],
+                        opacity: 0.35,
+                        body: body.map(str::to_string),
+                    }],
+                }],
+            };
+            writeback::write(&spec).expect("写回")
+        };
+
+    let first = dir.join("out1.pdf");
+    write_with_body(&source, &first, Some("OLD"));
+    let second = dir.join("out2.pdf");
+    write_with_body(&first, &second, Some("NEW"));
+    let second_bytes = std::fs::read(&second).expect("读输出");
+    let text = String::from_utf8_lossy(&second_bytes);
+    assert!(text.contains("(NEW)"), "正文必须更新成 NEW：{text}");
+    assert!(!text.contains("(OLD)"), "旧正文不能残留：{text}");
+
+    // overlay 里正文被删掉（None）→ 写回应当清空 /Contents
+    let third = dir.join("out3.pdf");
+    write_with_body(&second, &third, None);
+    let third_bytes = std::fs::read(&third).expect("读输出");
+    let text = String::from_utf8_lossy(&third_bytes);
+    assert!(!text.contains("(NEW)"), "正文删除后不能残留：{text}");
 
     std::fs::remove_dir_all(&dir).ok();
 }
