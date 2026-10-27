@@ -166,11 +166,13 @@ MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
 
 * 外观内容用**页面坐标**直接写，不需要任何变换；
 * **不能用 ExtGState**（没有 Resources）→ 无法表达透明度；
-* 内容格式（本模块生成）：`q <r> <g> <b> RG <w> w 1 J 1 j <x y> m <x y> l … S Q`；
-  RGB 用 0..1（2 位小数），数字固定 2 位小数，非有限值一律写 `0.00`。
-* **一条墨迹笔画 = 一个子路径**：只有第一个点写 `m`，其余写 `l`；`1 J`（圆头端帽）与
-  `1 j`（圆角连接）保证任意夹角不漏。早先每段都写 `m … l`，等于每段独立成子路径、各自带平头端帽，
-  直角外侧会留下一个菱形缺口（用户实测的"拐角裂缝"，D-129）。
+* **墨迹的外观由 PDFium 原生生成**：`FPDFPageObj_CreateNewPath` + `FPDFPath_LineTo` 构造一条
+  路径（一条笔画 = 一个子路径），设描边颜色/线宽后 `FPDFAnnot_AppendObject`。生成的 Form XObject
+  带 `/BBox`（=注释 Rect）、`/Matrix`、`/Resources` —— 别的编辑器（Okular）保存时不会因为缺键报错（D-132）。
+  线宽同时写进 `/BS`（`/Border`）。
+* **下划线/删除线**仍用 `SetAP` 写一段页面坐标的内容流（`AppendObject` 只支持 ink/stamp）：
+  `q <r> <g> <b> RG <w> w <x y> m <x y> l … S Q`；RGB 用 0..1（2 位小数），
+  数字固定 2 位小数，非有限值一律写 `0.00`。
 
 文本类的导出线宽固定 `TEXT_MARK_LINE_WIDTH = 2.0`（页面 pt）。界面里的下划线/删除线画的是
 2 **屏幕**像素（与缩放无关），所以非 100% 缩放下导出线的视觉粗细会与界面不同 —— 已知差异。
@@ -296,7 +298,8 @@ MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
 | 注释数量不符 | 是否把已有的链接注释算漏 | 用 `count_annotations` 看真实数量；`verify` 的期望值是"原有 + 新增" |
 | 中文乱码 | `/Contents` 编码 | 必须 UTF-16LE（`wide_string`），不要传 UTF-8 |
 | 位置偏移 | 是否预旋转了几何 | 几何必须保持**未旋转页面空间**；旋转页见 L3 |
-| 导出的墨迹拐角有缝 | AP 里每条笔画是否只有一个 `m`、是否带 `1 J 1 j` | 见 §9 的内容格式；`writeback` 单测与 `a_thick_right_angle_has_no_gap_at_the_joint` 守这条 |
+| 导出的墨迹拐角有缝 | 墨迹 AP 是否由 `AppendObject` 生成（一条子路径、miter 连接） | 见 §9；`a_thick_right_angle_has_no_gap_at_the_joint` 守这条 |
+| Okular 改注释后保存报“文件有问题” | 我们的 AP Form 是否缺 `/Resources`/`/Matrix` | 墨迹已改用 `AppendObject`（D-132）；下划线/删除线仍是 `SetAP`，若也报错再评估 |
 | 原地写入后注释叠了两遍 | job 里有没有 `"id"`、写回是否走了同步段 | 见 §10.0；`writing_twice_is_idempotent_*` 守这条 |
 | 写入后本程序里还能看到/编辑标注 | **预期** | overlay 保留（S6 之前删了就等于丢编辑能力） |
 | 删掉/改了正文后再写回，其它软件仍显示旧文本 | 已修（D-131） | 写回时会更新已有标记注释的 `/Contents`；`rewriting_updates_contents_of_existing_marked_annotations` 守这条 |

@@ -30,7 +30,7 @@ use std::os::raw::c_float;
 use std::path::{Path, PathBuf};
 
 use pdfcore::annotation::{Annotation, AnnotationKind};
-use pdfcore::prelude::{PageIndex, Rect};
+use pdfcore::prelude::{PageIndex, Point, Rect};
 
 // ============================================================ 对外类型
 
@@ -403,6 +403,11 @@ unsafe fn add_annotation(
         }
     }
 
+    // 线宽写进 /BS（编辑器要知道笔宽；PDFium 不会替我们补）
+    if let AnnotationKind::Ink { width, .. } = &annotation.kind {
+        let _ = (ffi.set_border)(handle, 0.0, 0.0, *width);
+    }
+
     // 语义字段：墨迹写 /InkList；文本类写 /QuadPoints
     match &annotation.kind {
         AnnotationKind::Ink { points, .. } => {
@@ -439,15 +444,26 @@ unsafe fn add_annotation(
         }
     }
 
-    // 外观：高亮不写（见模块文档），其余写一段页面坐标的内容流
-    if let Some(content) = appearance_content(&annotation.kind, annotation.color) {
-        let wide = wide_string(&content);
-        if (ffi.set_ap)(handle, 0, wide.as_ptr()) == 0 {
-            (ffi.close_annot)(handle);
-            return Err(WritebackError::Pdfium {
-                stage: "FPDFAnnot_SetAP",
-                message: "外观写入失败".to_string(),
-            });
+    // 外观：
+    // * 墨迹用 `AppendObject`（PDFium 原生的 Form XObject，带 /Resources 与 /Matrix；
+    //   Okular 保存时对只有 /BBox 的 Form 会报错，见 D-132）；
+    // * 下划线/删除线只能 `SetAP`（AppendObject 文档明确只支持 ink/stamp）；
+    // * 高亮不写（见模块文档）。
+    match &annotation.kind {
+        AnnotationKind::Ink { points, width } => {
+            append_ink_object(ffi, handle, points, *width, annotation.color)?;
+        }
+        _ => {
+            if let Some(content) = appearance_content(&annotation.kind, annotation.color) {
+                let wide = wide_string(&content);
+                if (ffi.set_ap)(handle, 0, wide.as_ptr()) == 0 {
+                    (ffi.close_annot)(handle);
+                    return Err(WritebackError::Pdfium {
+                        stage: "FPDFAnnot_SetAP",
+                        message: "外观写入失败".to_string(),
+                    });
+                }
+            }
         }
     }
 
@@ -469,26 +485,69 @@ fn appearance_content(kind: &AnnotationKind, color: [u8; 3]) -> Option<String> {
     match kind {
         // 高亮不写 AP：写了就是不透明填充，会盖住文字；让阅读器按 /QuadPoints 合成
         AnnotationKind::Highlight { .. } => None,
-        AnnotationKind::Ink { points, width } => {
-            let first = points.first()?;
-            // **一条笔画 = 一个子路径**：早先每段都写 `m … l`，等于每段各自是一条独立子路径，
-            // 段落自带平头端帽，拐角处就留下一个菱形缺口（用户实测的"裂缝"）。
-            // `1 J`（圆头端帽）+ `1 j`（圆角连接）保证任意夹角都不漏。
-            let mut content = format!(
-                "q {stroke} {} w 1 J 1 j {} {} m",
-                number(*width),
-                number(first.x),
-                number(first.y)
-            );
-            for point in &points[1..] {
-                content.push_str(&format!(" {} {} l", number(point.x), number(point.y)));
-            }
-            content.push_str(" S Q");
-            Some(content)
-        }
+        AnnotationKind::Ink { .. } => None,
         AnnotationKind::Underline { quads } => Some(lines_at(quads, false, &stroke)),
         AnnotationKind::StrikeOut { quads } => Some(lines_at(quads, true, &stroke)),
     }
+}
+
+/// 用 PDFium 的路径对象生成墨迹外观，并 `AppendObject` 到注释上。
+///
+/// PDFium 会生成标准的 Form XObject（含 `/Resources`、`/Matrix`）——别的编辑器
+/// （例如 Okular）保存时对缺少这些键的 Form 会报错（D-132）。
+/// 失败时由这里负责 `Destroy` 未被接管的路径对象。
+unsafe fn append_ink_object(
+    ffi: &Ffi,
+    annot: *mut c_void,
+    points: &[Point],
+    width: f32,
+    color: [u8; 3],
+) -> WritebackResult<()> {
+    let Some(first) = points.first() else {
+        return Err(WritebackError::Invalid("墨迹没有顶点".to_string()));
+    };
+    let object = (ffi.new_path)(first.x, first.y);
+    if object.is_null() {
+        return Err(WritebackError::Pdfium {
+            stage: "FPDFPageObj_CreateNewPath",
+            message: String::new(),
+        });
+    }
+    let mut ok = true;
+    for point in &points[1..] {
+        if (ffi.path_line_to)(object, point.x, point.y) == 0 {
+            ok = false;
+            break;
+        }
+    }
+    let [r, g, b] = color;
+    if ok {
+        ok = (ffi.page_obj_set_stroke_color)(object, r as c_uint, g as c_uint, b as c_uint, 255)
+            != 0;
+    }
+    if ok {
+        ok = (ffi.page_obj_set_stroke_width)(object, width) != 0;
+    }
+    // 只描边、不填充
+    if ok {
+        ok = (ffi.path_set_draw_mode)(object, 0, 1) != 0;
+    }
+    if !ok {
+        (ffi.page_obj_destroy)(object);
+        return Err(WritebackError::Pdfium {
+            stage: "FPDFPath/PageObj",
+            message: "构造墨迹路径失败".to_string(),
+        });
+    }
+    // 成功后对象所有权归注释
+    if (ffi.append_object)(annot, object) == 0 {
+        (ffi.page_obj_destroy)(object);
+        return Err(WritebackError::Pdfium {
+            stage: "FPDFAnnot_AppendObject",
+            message: "外观追加失败".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// 每个 quad 一条线：`middle == false` 画底部（下划线），`true` 画中线（删除线）。
@@ -741,6 +800,15 @@ struct Ffi {
     add_ink_stroke: unsafe extern "C" fn(*mut c_void, *const FsPointF, usize) -> c_int,
     append_quad: unsafe extern "C" fn(*mut c_void, *const FsQuadPointsF) -> c_int,
     set_ap: unsafe extern "C" fn(*mut c_void, c_uint, *const u16) -> c_int,
+    set_border: unsafe extern "C" fn(*mut c_void, c_float, c_float, c_float) -> c_int,
+    new_path: unsafe extern "C" fn(c_float, c_float) -> *mut c_void,
+    path_line_to: unsafe extern "C" fn(*mut c_void, c_float, c_float) -> c_int,
+    path_set_draw_mode: unsafe extern "C" fn(*mut c_void, c_int, c_int) -> c_int,
+    page_obj_set_stroke_color:
+        unsafe extern "C" fn(*mut c_void, c_uint, c_uint, c_uint, c_uint) -> c_int,
+    page_obj_set_stroke_width: unsafe extern "C" fn(*mut c_void, c_float) -> c_int,
+    append_object: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int,
+    page_obj_destroy: unsafe extern "C" fn(*mut c_void),
     save_as_copy: unsafe extern "C" fn(*mut c_void, *mut FpdfFileWrite, c_uint) -> c_int,
     security_revision: unsafe extern "C" fn(*mut c_void) -> c_int,
     signature_count: unsafe extern "C" fn(*mut c_void) -> c_int,
@@ -830,6 +898,35 @@ impl Ffi {
                 "FPDFAnnot_SetAP",
                 unsafe extern "C" fn(*mut c_void, c_uint, *const u16) -> c_int
             ),
+            set_border: sym!(
+                "FPDFAnnot_SetBorder",
+                unsafe extern "C" fn(*mut c_void, c_float, c_float, c_float) -> c_int
+            ),
+            new_path: sym!(
+                "FPDFPageObj_CreateNewPath",
+                unsafe extern "C" fn(c_float, c_float) -> *mut c_void
+            ),
+            path_line_to: sym!(
+                "FPDFPath_LineTo",
+                unsafe extern "C" fn(*mut c_void, c_float, c_float) -> c_int
+            ),
+            path_set_draw_mode: sym!(
+                "FPDFPath_SetDrawMode",
+                unsafe extern "C" fn(*mut c_void, c_int, c_int) -> c_int
+            ),
+            page_obj_set_stroke_color: sym!(
+                "FPDFPageObj_SetStrokeColor",
+                unsafe extern "C" fn(*mut c_void, c_uint, c_uint, c_uint, c_uint) -> c_int
+            ),
+            page_obj_set_stroke_width: sym!(
+                "FPDFPageObj_SetStrokeWidth",
+                unsafe extern "C" fn(*mut c_void, c_float) -> c_int
+            ),
+            append_object: sym!(
+                "FPDFAnnot_AppendObject",
+                unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int
+            ),
+            page_obj_destroy: sym!("FPDFPageObj_Destroy", unsafe extern "C" fn(*mut c_void)),
             save_as_copy: sym!(
                 "FPDF_SaveAsCopy",
                 unsafe extern "C" fn(*mut c_void, *mut FpdfFileWrite, c_uint) -> c_int
@@ -855,7 +952,9 @@ mod tests {
     use pdfcore::prelude::Point;
 
     #[test]
-    fn ink_content_is_one_subpath_with_round_caps_and_joins() {
+    fn ink_uses_pdfium_native_appearance_not_a_handwritten_stream() {
+        // 墨迹的外观由 `AppendObject` 生成（PDFium 会补 /Resources、/Matrix，
+        // 别的编辑器保存时才不会报错，D-132）；不再走手写内容流。
         let kind = AnnotationKind::Ink {
             points: vec![
                 Point::new(10.0, 20.0),
@@ -864,20 +963,7 @@ mod tests {
             ],
             width: 2.0,
         };
-        let content = appearance_content(&kind, [255, 0, 0]).expect("墨迹必须写 AP");
-        assert!(
-            content.starts_with("q 1.00 0.00 0.00 RG 2.00 w 1 J 1 j "),
-            "实际：{content}"
-        );
-        // 一条子路径：恰好一个 m，后续全是 l（每段各写 m 会在拐角留缺口）
-        assert_eq!(
-            content.matches(" m").count(),
-            1,
-            "只能有一个子路径起点：{content}"
-        );
-        assert_eq!(content.matches(" l").count(), 2, "两段折线：{content}");
-        assert!(content.contains("10.00 20.00 m 30.00 40.00 l 50.00 20.00 l"));
-        assert!(content.ends_with(" S Q"));
+        assert!(appearance_content(&kind, [255, 0, 0]).is_none());
     }
 
     #[test]

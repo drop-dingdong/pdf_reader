@@ -920,6 +920,26 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   * 反向的"PDF 改了什么 → overlay 跟着变"要等 S6（读回），不在本阶段。
 - **状态**：修复生效。
 
+### D-132 Okular 保存兼容：墨迹外观改用 PDFium 原生 `AppendObject`（带 `/Resources`/`/Matrix`）
+
+- **问题（用户实测）**：在 Okular 里修改我们写回的墨迹颜色，保存阶段 Okular 提示“文件有问题”
+  （控制台只有 `kf.kio.workers.file: copy()` 那一行，看不出具体原因）。用户提供了一份用 Okular
+  自己画的 freehand 注释（同属 `/Ink`）作参照。
+- **对比结论**：Okular 自己的 ink 注释**没有 `/AP`**，只有 `/InkList` + `/NM(okular-{uuid})`；
+  我们之前用 `FPDFAnnot_SetAP` 生成的 Form **只有 `/BBox`**，缺 `/Resources` 与 `/Matrix`。
+  这是最可疑的兼容性缺口（PDF 规范里不是硬性必需，但 Poppler 的 PDF 写入器会挑剔）。
+- **修复**：
+  1. 墨迹外观改成 `FPDFPageObj_CreateNewPath` + `FPDFPath_LineTo` + `FPDFPageObj_SetStroke*`
+     + `FPDFAnnot_AppendObject` —— PDFium 生成完整的 Form（`/BBox`、`/Matrix`、`/Resources`），
+     并自动把路径对象挂到注释上；
+  2. 同时 `FPDFAnnot_SetBorder` 写 `/BS` 笔宽（编辑器改颜色/线宽时需要）。
+- **影响**：`backend-pdfium/src/writeback.rs`（FFI 表 + `append_ink_object`）、`docs/current/writeback.md` §6/§9/§15。
+- **验证**：`a_thick_right_angle_has_no_gap_at_the_joint` 仍通过（原生路径是 miter 连接，直角无缝）；
+  写出的 AP 字典经检查含 `Matrix[1 0 0 1 0 0]` 与 `Resources<</ExtGState…>>`。`check.sh` 全绿（326 tests）。
+- **备注**：D-129 的 `1 J 1 j` 是旧 `SetAP` 方案；墨迹改为原生 AP 后由 PDFium 生成（miter），
+  直角不再有缺口，锐角由 PDF 的 miter limit 决定。下划线/删除线仍是 `SetAP`。
+- **状态**：已实现；需要用户在 Okular 里复测“改墨迹颜色 → 保存”。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |
