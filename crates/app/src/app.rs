@@ -127,6 +127,12 @@ const ANNOTATION_HIT_TOLERANCE_PX: f32 = 4.0;
 /// 墨迹的默认线宽（**页面空间**单位；回放动作与 S4 的墨迹工具共用）。
 const DEFAULT_INK_WIDTH: f32 = 2.0;
 
+/// 历史窗口每行的高度（虚拟化列表要求等行高）。
+const HISTORY_ROW_HEIGHT: f32 = 18.0;
+
+/// 历史窗口列表的最大高度（超出滚动；虚拟化只排版可见行）。
+const HISTORY_MAX_HEIGHT: f32 = 360.0;
+
 // 链接框颜色（红/绿）由 `view::link_box_color` 决定，见 D-116。
 
 /// 每帧最多上传几张纹理。
@@ -2604,6 +2610,28 @@ impl PdfReaderApp {
         }
     }
 
+    /// **压力测试专用**：在页内铺开 `count` 笔短墨迹（回放动作 `seed_ink`）。
+    ///
+    /// 与真实绘制走同一个 `annotate_ink` 入口（所以每条都有配对正文、都进撤销栈）；
+    /// 布局是确定性的：40 行，行距 18，列距 22，每笔是一个 4 点的小锯齿。
+    /// 只给"1000 条以内忙帧 p99"的压力脚本用，不暴露给 UI。
+    fn seed_ink_strokes(&mut self, page: PageIndex, count: u32, width: f32) {
+        for index in 0..count {
+            let row = (index % 40) as f32;
+            let column = (index / 40) as f32;
+            let x = 40.0 + column * 22.0;
+            let y = 80.0 + row * 18.0;
+            let points = [
+                Point::new(x, y),
+                Point::new(x + 6.0, y + 6.0),
+                Point::new(x + 12.0, y),
+                Point::new(x + 18.0, y + 6.0),
+            ];
+            self.annotate_ink(page, &points, width);
+        }
+        self.message = format!("已造 {count} 笔墨迹（压力测试）");
+    }
+
     /// 把页面上的一笔墨迹变成标注（页面空间折线 + 页面空间线宽，D-118 S4）。
     ///
     /// 回放动作 `ink` 与（S4c 的）墨迹工具都调用它：**抬笔时调用一次**，
@@ -2822,13 +2850,23 @@ impl PdfReaderApp {
             .show(ctx, |ui| {
                 ui.label(format!(
                     "可撤销 {} 步 · 可重做 {} 步",
-                    self.history.descriptions().count(),
+                    self.history.len(),
                     if self.history.can_redo() { 1 } else { 0 }
                 ));
                 ui.separator();
-                for (index, description) in self.history.descriptions().enumerate() {
-                    ui.label(format!("{}. {description}", index + 1));
-                }
+                // 虚拟化：只排版可见行。1000 条编辑时整表渲染要 300ms+（实测），
+                // 而这里按行高只画十几行 —— 历史窗口打开着也不影响帧时间。
+                let row_height = ui.spacing().interact_size.y.max(HISTORY_ROW_HEIGHT);
+                egui::ScrollArea::vertical()
+                    .max_height(HISTORY_MAX_HEIGHT)
+                    .auto_shrink([false, true])
+                    .show_rows(ui, row_height, self.history.len(), |ui, range| {
+                        for index in range {
+                            if let Some(description) = self.history.description(index) {
+                                ui.label(format!("{}. {description}", index + 1));
+                            }
+                        }
+                    });
                 if self.history.dropped() > 0 {
                     ui.separator();
                     ui.weak(format!(
@@ -3862,7 +3900,11 @@ impl PdfReaderApp {
             .is_some_and(|deadline| self.clock.now() < deadline);
         let float_rects: Vec<egui::Rect> = self.floats.iter().map(|window| window.rect).collect();
         let over_float = pointer.is_some_and(|position| pointer_over_any(position, &float_rects));
-        if !hover_preview_allowed(scrolling, over_float) {
+        // 3. **画墨迹期间**不弹出（用户实测：笔画压住链接时不该出现目的地预览）。
+        //    `ink` 要等指针移过拖动阈值才建，所以"按住但还没成笔"这一小段也算绘制中。
+        let drawing = self.tool == Tool::Ink
+            && (self.ink.is_some() || ui.input(|input| input.pointer.primary_down()));
+        if !hover_preview_allowed(scrolling, over_float, drawing) {
             self.hover_tip = None;
             return;
         }

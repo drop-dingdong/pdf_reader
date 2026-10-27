@@ -638,6 +638,37 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **未做**：1000 条以内的忙帧 p99（S4c）、线宽/颜色 UI、指针移出窗口的丢弃、手写笔压力。
 - **状态**：S4b 生效；S4 只剩性能验收与人工手感验收。
 
+### D-121 S4c：绘制期间屏蔽链接悬停；历史列表虚拟化；1000 条墨迹门槛
+
+- **决定**：
+  1. **绘制期间不响应链接悬停**（用户实测：墨迹压住链接时弹出了目的地预览，打断绘制）。
+     `hover_preview_allowed` 增加第三个闸门 `drawing`；`drawing` 的判定是
+     "墨迹工具 &&（已成笔 || 主键按下）" —— 后者覆盖"按住但还没成笔"的那一小段
+     （`ink` 要等指针移过拖动阈值才建立，只用 `ink.is_some()` 会留一个窗口）。
+  2. S4b 写的"切走工具 → 丢弃正在画的一笔"**在 UI 上不可触达**（拖动时根本点不到工具栏）。
+     代码保留为防御（回放 `set_tool` 能触发），但文档不再把它当可验收项。
+  3. 压力脚本暴露了一个真实的 p99：1000 条标注本身画一帧只要 ~2ms，
+     但**撤销后自动打开的历史窗口**一次排版 1001 行 = **323ms**。
+     改成 `ScrollArea::show_rows` 虚拟化（行高 18、最大高 360），并给 `History`
+     增加 `len` / `description(index)` 的按行访问 —— 同一帧降到 ~16ms。
+  4. 压力脚本用新动作 `seed_ink`（模型级造 N 笔，走与绘制相同的 `annotate_ink`）。
+     不用手势造 1000 笔：每笔 8 帧、上万帧，门禁会变慢且噪声大。
+  5. 性能门槛分两类：
+     * **结构门槛（强，与机器无关，进 check.sh）**：造标注时 `submitted == 0`、纹理层峰值不变
+       —— 这是 D-118"注释不进渲染管线"的直接证据，基线 `perf/baseline/ink_many.json`；
+     * **时间门槛（弱，debug 宽松上限，只在测试里）**：画 1000 条一帧 < 50ms、
+       造 900 笔 < 100ms、撤销 + 历史窗口帧 < 100ms、100→1000 的帧时间 < 25 倍（反二次退化）。
+       实测值随测试打印（造 100 笔 2.9ms / 造 1000 笔 4.0ms / 画 1000 笔一帧 3.1ms / 撤销 17ms）。
+- **影响**：`view::hover_preview_allowed` 签名与测试、`app::update_hover_preview`、
+  `app::draw_history_window`（虚拟化 + 两个常量）、`history::{len,is_empty,description}`（含单测）、
+  `replay::Action::SeedInk` 与 `app::seed_ink_strokes`、`scripts/replay/ink_many.json` + 结构基线。
+- **验证**：`view::tests::hover_preview_*` 三个闸门；`history::tests::descriptions_are_indexable_*`；
+  回放 `a_thousand_ink_annotations_stay_out_of_the_render_pipeline_and_cheap`
+  （结构：seed/settle 的 `submitted==0`、纹理峰值不变、1000 条后还能再画一笔；
+  时间：四条上限），`ink_many.json` 结构基线逐项一致。
+- **未做**：release 构建在固定机器上的时序门禁（仍是开放项）、线宽/颜色 UI、指针移出窗口的丢弃。
+- **状态**：S4 完成（S4a `2fdc8bd` / S4b `c0350b0` / S4c 本条）。下一步是 S5 的**评估**（会改用户文件）。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

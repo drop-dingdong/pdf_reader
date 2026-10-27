@@ -33,6 +33,8 @@ const CASES: &[(&str, Sample)] = &[
     ("undo_redo.json", Sample::Rotated),
     // S4：墨迹（一笔一标注、包围盒按半线宽外扩）
     ("ink.json", Sample::Rotated),
+    // S4c：1000 条墨迹的压力脚本（结构基线：标注不得进入渲染管线）
+    ("ink_many.json", Sample::Rotated),
 ];
 
 /// 脚本目录（测试的工作目录是 crate 目录，不是工作区根）。
@@ -244,6 +246,89 @@ fn ink_stroke_is_one_annotation_that_undo_and_redo_can_move() {
             "同一组页面空间点在不同缩放下的墨迹几何必须相同：{saved:?} vs {zoomed:?}"
         );
     }
+}
+
+/// S4c：1000 条墨迹 —— **结构上**不进渲染管线（确定、与机器无关），
+/// **时间上**不退化成 O(n²)（阈值是 debug 构建的宽松上限，数字会打印出来备查）。
+///
+/// 时间数字（本机 debug）：造 100 笔 ~2.6ms、造 1000 笔 ~3.9ms、画 1000 笔一帧 ~2.0ms、
+/// 撤销后打开历史窗口 ~16ms。最后一项曾经是 **323ms** —— 历史列表一次排版 1001 行；
+/// 虚拟化之后才降下来，这个断言就是它的回归网。
+#[test]
+fn a_thousand_ink_annotations_stay_out_of_the_render_pipeline_and_cheap() {
+    if !backend_available() {
+        return;
+    }
+    let report = run("ink_many.json", Sample::Rotated);
+    let action = |id: &str| {
+        report
+            .actions
+            .iter()
+            .find(|action| action.id == id)
+            .unwrap_or_else(|| panic!("缺动作 {id}"))
+    };
+    let frame_max = |id: &str| {
+        action(id)
+            .frames_data
+            .iter()
+            .map(|frame| frame.cpu_ms)
+            .fold(0.0_f64, f64::max)
+    };
+
+    assert_eq!(action("seed_100").annotations, 100);
+    assert_eq!(action("seed_900").annotations, 1000);
+
+    // 结构断言（与硬件无关）：标注不产生渲染请求，也不改变纹理层峰值
+    let baseline_peak = action("settle").texture_bytes_peak;
+    for id in ["seed_100", "settle_100", "seed_900", "settle_1000"] {
+        assert_eq!(
+            action(id).submitted,
+            0,
+            "{id}: 造标注不得提交渲染请求（注释不进渲染管线）"
+        );
+        assert_eq!(
+            action(id).texture_bytes_peak,
+            baseline_peak,
+            "{id}: 标注不得占用纹理层"
+        );
+    }
+    assert_eq!(
+        action("stroke").annotations,
+        1001,
+        "1000 条之后还能再画一笔"
+    );
+
+    // 时间断言：宽松的 debug 上限 + 反二次退化
+    let at_100 = action("settle_100").frames_data.len();
+    assert!(at_100 > 0, "settle_100 应当跑过至少一帧");
+    let draw_100 = frame_max("settle_100").max(0.5);
+    let draw_1000 = frame_max("settle_1000");
+    eprintln!(
+        "[S4c] 造 100 笔 {:.2}ms / 造 1000 笔 {:.2}ms / 画 100 笔一帧 {:.2}ms /          画 1000 笔一帧 {draw_1000:.2}ms / 撤销+历史窗口 {:.2}ms",
+        frame_max("seed_100"),
+        frame_max("seed_900"),
+        draw_100,
+        frame_max("undo1"),
+    );
+    assert!(
+        draw_1000 < 50.0,
+        "1000 条墨迹的绘制帧 {draw_1000:.2}ms 超过 50ms（debug 上限）"
+    );
+    assert!(
+        draw_1000 <= 25.0 * draw_100,
+        "标注从 100 增到 1000，帧时间涨了 {:.1} 倍（>25 倍说明退化成 O(n²)）",
+        draw_1000 / draw_100
+    );
+    assert!(
+        frame_max("seed_900") < 100.0,
+        "造 900 笔卡了 {:.2}ms（上限 100ms）",
+        frame_max("seed_900")
+    );
+    assert!(
+        frame_max("undo1") < 100.0,
+        "撤销后打开历史窗口的帧 {:.2}ms 超过 100ms —— 历史列表是不是又没虚拟化？         （虚拟化之前实测 323ms）",
+        frame_max("undo1")
+    );
 }
 
 #[test]

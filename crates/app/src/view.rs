@@ -953,12 +953,14 @@ pub fn find_float_for_target(
 
 /// 悬停预览是否应当出现。
 ///
-/// 两个约束（用户要求）：
+/// 三个约束（用户要求）：
 /// 1. **滚动/缩放进行中或刚进行过**（静默窗口内）不出现 —— 否则滚动时预览会不断闪现；
 /// 2. 指针在**任何浮窗**（永久或临时）之上时不出现 —— 浮窗会屏蔽主视图的动作，
-///    被浮窗覆盖的链接不应再有悬停反馈（点击本来就已经被浮窗拦掉了）。
-pub fn hover_preview_allowed(scrolling: bool, pointer_over_float: bool) -> bool {
-    !scrolling && !pointer_over_float
+///    被浮窗覆盖的链接不应再有悬停反馈（点击本来就已经被浮窗拦掉了）；
+/// 3. **正在画墨迹时不出现** —— 笔画可能压住链接，这时弹目的地预览会打断绘制
+///    （用户实测反馈：墨迹覆盖链接时不该出现目的地预览）。
+pub fn hover_preview_allowed(scrolling: bool, pointer_over_float: bool, drawing: bool) -> bool {
+    !scrolling && !pointer_over_float && !drawing
 }
 
 /// 指针是否落在任一矩形内（用于"浮窗是否遮住了指针"）。
@@ -3413,16 +3415,21 @@ mod tests {
     /// 悬停预览的两个约束：滚动期间不出现；浮窗之下不出现。
     #[test]
     fn hover_preview_is_blocked_while_scrolling_and_under_floats() {
-        assert!(hover_preview_allowed(false, false), "正常情况应出现");
+        assert!(hover_preview_allowed(false, false, false), "正常情况应出现");
         assert!(
-            !hover_preview_allowed(true, false),
+            !hover_preview_allowed(true, false, false),
             "滚动/缩放静默窗口内不出现"
         );
         assert!(
-            !hover_preview_allowed(false, true),
+            !hover_preview_allowed(false, true, false),
             "指针在浮窗上不出现（浮窗屏蔽主视图）"
         );
-        assert!(!hover_preview_allowed(true, true));
+        assert!(
+            !hover_preview_allowed(false, false, true),
+            "画墨迹期间不出现（笔画可能压住链接）"
+        );
+        assert!(!hover_preview_allowed(true, true, false));
+        assert!(!hover_preview_allowed(false, true, true));
 
         let rects = [
             egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(100.0, 50.0)),

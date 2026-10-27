@@ -111,9 +111,27 @@ impl<T> History<T> {
         self.redo.last()
     }
 
-    /// 当前可撤销的全部描述（旧 → 新），可视列表直接渲染它。
+    /// 当前可撤销的全部描述（旧 → 新）。
     pub fn descriptions(&self) -> impl Iterator<Item = &str> {
         self.undo.iter().map(|entry| entry.description.as_str())
+    }
+
+    /// 可撤销的条数（虚拟化列表要知道总行数）。
+    pub fn len(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// 是否没有任何可撤销的记录。
+    pub fn is_empty(&self) -> bool {
+        self.undo.is_empty()
+    }
+
+    /// 第 `index` 条（旧 → 新）的描述；越界返回 `None`。
+    ///
+    /// 可视列表按**行号**取：1000 条编辑时不能每帧把所有描述都排版一遍
+    /// （实测 undo 那一帧 323ms，其中几乎全是 1001 个 `ui.label` 的布局与布局缓存）。
+    pub fn description(&self, index: usize) -> Option<&str> {
+        self.undo.get(index).map(|entry| entry.description.as_str())
     }
 
     /// 已丢弃的条数。
@@ -177,6 +195,18 @@ mod tests {
             vec!["a", "c"],
             "撤销掉的那条不应留在撤销栈里"
         );
+    }
+
+    #[test]
+    fn descriptions_are_indexable_for_virtualized_lists() {
+        let mut history = History::new();
+        assert!(history.is_empty());
+        history.push("高亮（第 1 页）", 1u32, 1);
+        history.push("墨迹（第 2 页）", 2u32, 1);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.description(0), Some("高亮（第 1 页）"));
+        assert_eq!(history.description(1), Some("墨迹（第 2 页）"));
+        assert_eq!(history.description(2), None, "越界不能 panic");
     }
 
     #[test]

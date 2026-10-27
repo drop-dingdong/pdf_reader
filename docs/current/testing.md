@@ -98,6 +98,7 @@ cargo test -p app --test replay_scripts
 | `annotate_zoom.json` | rotated | 同一区域在 1× 与 8× 下标注几何逐值相同（"只存页面空间"的守卫） |
 | `undo_redo.json` | rotated | 3 画 2 撤 1 重做；配对正文条目跟着一起走 |
 | `ink.json` | rotated | **真实拖拽**画一笔 = 一条标注；Esc 取消整笔丢弃；1× 与 2× 下同一组页面空间点的包围盒逐值相同 |
+| `ink_many.json` | rotated | 1000 笔墨迹的压力脚本（`seed_ink`）：结构基线要求"造标注不提交渲染请求、不占纹理层"；测试里另有 debug 宽松的时间上限与反二次退化断言 |
 
 脚本格式（JSON，每个动作（`resize` / `zoom` / `scroll_by` / `set_scroll` / `go_to_page` / `hover_link` / `unhover` /
 `click` / `drag` / `highlight` / `ink` / `save` / `undo` / `redo` / `open_preview` / `wait`：`click`、`drag`
@@ -120,6 +121,7 @@ cargo test -p app --test replay_scripts
 `set_tool`（`tool`: `pan` / `select` / `ink`）、
 `ink`（`page` + `points:[[x,y],…]` + 可选 `cancel`：**真实拖拽**画一笔，要求先 `set_tool ink`；
 `cancel: true` 在抬起前按 Esc，验证整笔丢弃）、
+`seed_ink`（`page/count/width`：**压力测试专用**，直接造 N 笔墨迹，不走手势）、
 `save`（等价于点"保存"/Ctrl+S）、`undo` / `redo`（等价于 Ctrl+Z / Ctrl+Shift+Z）。
 
 ### 4.5.1 确定性从哪来

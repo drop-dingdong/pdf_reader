@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use pdfcore::prelude::*;
 
-use super::{CustomKind, PdfReaderApp, Tool};
+use super::{CustomKind, PdfReaderApp, Tool, DEFAULT_INK_WIDTH};
 use crate::clock::Clock;
 use crate::diag::Diagnostics;
 use crate::json::{Json, JsonLookup};
@@ -137,6 +137,18 @@ pub enum Action {
         /// 工具名。
         tool: String,
     },
+    /// **压力测试专用**：直接造 `count` 笔墨迹（不走手势，否则造 1000 笔要上万帧）。
+    ///
+    /// 走与真实绘制相同的 `annotate_ink` 入口，所以每条都带配对正文；
+    /// 几何是页内确定性的小折线（40 行 × 每行 25 列），便于比较不同笔数下的帧耗时。
+    SeedInk {
+        /// 页号（0 起）。
+        page: u32,
+        /// 笔数。
+        count: u32,
+        /// 线宽（页面空间）。
+        width: f32,
+    },
     /// 把页面上的一块矩形变成高亮标注（**页面空间**；S1 用它在回放里造标注）。
     Highlight {
         /// 页号（0 起）。
@@ -179,6 +191,7 @@ impl Action {
             Self::Click { .. } => "click",
             Self::Ink { .. } => "ink",
             Self::SetTool { .. } => "set_tool",
+            Self::SeedInk { .. } => "seed_ink",
             Self::Highlight { .. } => "highlight",
             Self::Save => "save",
             Self::Undo => "undo",
@@ -218,6 +231,7 @@ impl Action {
                 format!("ink p{page} {} 点{suffix}", points.len())
             }
             Self::SetTool { tool } => format!("set_tool {tool}"),
+            Self::SeedInk { page, count, .. } => format!("seed_ink p{page} ×{count}"),
             Self::Highlight {
                 page,
                 x,
@@ -659,6 +673,11 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
                     .and_then(|value| value.as_str())
                     .ok_or_else(|| format!("{id}: 缺 tool"))?
                     .to_string(),
+            },
+            "seed_ink" => Action::SeedInk {
+                page: number("page")? as u32,
+                count: number("count")? as u32,
+                width: number("width").unwrap_or(DEFAULT_INK_WIDTH),
             },
             "highlight" => Action::Highlight {
                 page: number("page")? as u32,
@@ -1275,6 +1294,10 @@ impl Harness {
             app.annotate_page_rect(PageIndex::new(*page), Rect::new(*x, *y, *width, *height));
             return;
         }
+        if let Action::SeedInk { page, count, width } = action {
+            app.seed_ink_strokes(PageIndex::new(*page), *count, *width);
+            return;
+        }
         if let Action::SetTool { tool } = action {
             if let Some(tool) = Tool::from_key(tool) {
                 app.switch_tool(tool);
@@ -1338,6 +1361,7 @@ impl Harness {
             | Action::Highlight { .. }
             | Action::Ink { .. }
             | Action::SetTool { .. }
+            | Action::SeedInk { .. }
             | Action::Save => {}
             Action::HoverLink { .. } | Action::Unhover => {
                 // 指针位置必须走 egui 的输入事件：在 `run_frame` 里按帧重放
