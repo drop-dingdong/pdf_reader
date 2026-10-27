@@ -36,6 +36,7 @@ pub mod error;
 pub mod fixtures;
 pub mod library;
 pub mod raster;
+pub mod readback;
 pub mod text;
 pub mod writeback;
 

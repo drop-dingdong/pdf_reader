@@ -957,6 +957,37 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **需要你确认**：合并策略 / 外部注释范围 / 迁移时机 / 读回进程模型（见评估 §12）。
 - **状态**：评估完成，未实现。
 
+### D-134 S6 决策：overlay 优先 / 外部只读几何 / 迁移显式做 / 读回放主进程
+
+- **用户确认的四个选择**：
+  1. 合并策略 **overlay 优先**：`.annot.json` 存在时它是编辑源；PDF 只用于校验/恢复；
+     overlay 里没有的标记注释视为已删除（下次写回删掉）；
+  2. 外部注释（无 `pd-fr:` 标记）到**只读几何**为止：不改、不删、不进 overlay 文件；
+  3. 迁移**先不做**；之后加显式"以 PDF 为准重建 overlay"命令（先备份）；
+  4. 读回放**主进程**，打开新文档时**先关旧会话**（而不是子进程）。
+- **实现约束（D-135 落实）**：裸 FFI 不经过 pdfium-render 的全局锁，所以 `open()` 里
+  必须在读回前 `self.session = None`（drop 会 join 渲染 worker）；打开期间不能有别的 PDFium 调用。
+
+### D-135 S6a 实现：读回标记注释 + overlay 合并
+
+- **实现**：`backend-pdfium/src/readback.rs`（GetSubtype/GetColor/GetBorder/GetAttachmentPoints/
+  GetInkList*/GetStringValue/GetAP），`app.open` 里读回，`merge_readback` 按 D-134 合并；
+  状态栏提示"已从 PDF 恢复 N 条标注"。
+- **实现中踩到的四个坑**：
+  1. 分类常量：Ink = **15**、StrikeOut = 12；一开始读回只收 9..12，墨迹全丢；
+  2. `FPDFAnnot_GetColor` 对**带 AP 的注释必定失败**（文档明说）—— 改为解析 AP 内容流的
+     `RG/rg/G/g` 与 `CA/ca`；`GetAP` 返回的是 **UTF-16LE**，不是字节流；
+  3. 写回原先没写 `/CA`，高亮读回恒为 1.0 —— 写回改为把 `opacity` 写进 `/CA`，
+     下划线/删除线的 AP 里也写 `CA/ca`；
+  4. 读回是裸 FFI：app 的回放测试默认多线程并行，和 pdfium-render 渲染线程并发直接 **SIGSEGV**。
+     给 `replay_scripts` 加了进程内互斥锁串行执行（生产路径由"先 drop 旧会话"保证串行）。
+- **验证**：`backend-pdfium/tests/readback.rs` 4 条（四类 round-trip 含 id/正文/颜色/透明度、
+  重写后稳定、旋转页坐标不变、无标记注释 id=None）；`replay_scripts` 新增
+  `annotations_are_recovered_from_the_pdf_when_the_overlay_is_missing`（overlay 缺失时恢复 1 条）；
+  `check.sh` 全绿（331 tests）。
+- **未做**：S6b（外部注释只读几何 + 多笔迹）、S6c（显式迁移）；外部注释目前直接跳过。
+- **状态**：S6a 完成，S6b/S6c 待做。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

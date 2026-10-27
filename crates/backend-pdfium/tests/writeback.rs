@@ -55,7 +55,9 @@ fn is_red(pixel: &[u8]) -> bool {
 }
 
 fn is_yellow(pixel: &[u8]) -> bool {
-    pixel[2] > 200 && pixel[1] > 200 && pixel[0] < 120
+    // 高亮带 /CA=0.35，叠在白底上 B≈166；用"B 明显低于 G"识别偏黄，
+    // 避免把灰白的抗锯齿像素也算进来（BGRA：0=B、1=G、2=R）
+    pixel[2] > 200 && pixel[1] > 200 && pixel[0] as u16 + 15 < pixel[1] as u16
 }
 
 fn spec_for_all_kinds(dir: &std::path::Path) -> WritebackSpec {
@@ -194,7 +196,7 @@ fn yellow_bbox(image: &RasterImage) -> Option<(u32, u32, u32, u32)> {
         for x in 0..image.width {
             let index = ((y * image.width + x) * 4) as usize;
             let pixel = &image.data()[index..index + 4];
-            if pixel[2] > 200 && pixel[1] > 200 && pixel[0] < 120 {
+            if pixel[2] > 200 && pixel[1] > 200 && pixel[0] as u16 + 15 < pixel[1] as u16 {
                 min_x = min_x.min(x);
                 min_y = min_y.min(y);
                 max_x = max_x.max(x);

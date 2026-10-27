@@ -369,7 +369,9 @@ unsafe fn add_annotation(
         });
     }
     let [r, g, b] = annotation.color;
-    if (ffi.set_color)(handle, 0, r as c_uint, g as c_uint, b as c_uint, 255) == 0 {
+    // alpha 同时写进 /CA（透明度）：不写的话读回永远是 1.0，round-trip 不保真（D-134）
+    let alpha = (annotation.opacity.clamp(0.0, 1.0) * 255.0).round() as c_uint;
+    if (ffi.set_color)(handle, 0, r as c_uint, g as c_uint, b as c_uint, alpha) == 0 {
         (ffi.close_annot)(handle);
         return Err(WritebackError::Pdfium {
             stage: "FPDFAnnot_SetColor",
@@ -454,7 +456,9 @@ unsafe fn add_annotation(
             append_ink_object(ffi, handle, points, *width, annotation.color)?;
         }
         _ => {
-            if let Some(content) = appearance_content(&annotation.kind, annotation.color) {
+            if let Some(content) =
+                appearance_content(&annotation.kind, annotation.color, annotation.opacity)
+            {
                 let wide = wide_string(&content);
                 if (ffi.set_ap)(handle, 0, wide.as_ptr()) == 0 {
                     (ffi.close_annot)(handle);
@@ -475,7 +479,7 @@ unsafe fn add_annotation(
 ///
 /// `FPDFAnnot_SetAP` 会让 PDFium 建出 `/BBox` = `/Rect` 的 Form XObject，所以这里
 /// 直接写页面坐标即可；数字一律保留 2 位小数，避免科学计数法。
-fn appearance_content(kind: &AnnotationKind, color: [u8; 3]) -> Option<String> {
+fn appearance_content(kind: &AnnotationKind, color: [u8; 3], opacity: f32) -> Option<String> {
     let stroke = format!(
         "{} {} {} RG",
         channel(color[0]),
@@ -486,8 +490,8 @@ fn appearance_content(kind: &AnnotationKind, color: [u8; 3]) -> Option<String> {
         // 高亮不写 AP：写了就是不透明填充，会盖住文字；让阅读器按 /QuadPoints 合成
         AnnotationKind::Highlight { .. } => None,
         AnnotationKind::Ink { .. } => None,
-        AnnotationKind::Underline { quads } => Some(lines_at(quads, false, &stroke)),
-        AnnotationKind::StrikeOut { quads } => Some(lines_at(quads, true, &stroke)),
+        AnnotationKind::Underline { quads } => Some(lines_at(quads, false, &stroke, opacity)),
+        AnnotationKind::StrikeOut { quads } => Some(lines_at(quads, true, &stroke, opacity)),
     }
 }
 
@@ -551,8 +555,14 @@ unsafe fn append_ink_object(
 }
 
 /// 每个 quad 一条线：`middle == false` 画底部（下划线），`true` 画中线（删除线）。
-fn lines_at(quads: &[Rect], middle: bool, stroke: &str) -> String {
-    let mut content = format!("q {stroke} {} w", number(TEXT_MARK_LINE_WIDTH));
+fn lines_at(quads: &[Rect], middle: bool, stroke: &str, opacity: f32) -> String {
+    // 把透明度也写进内容流（`CA` 描边 / `ca` 非描边）：`FPDFAnnot_GetColor` 对带 AP 的注释
+    // 会失败，读回时只能从这里解析（D-134）
+    let alpha = number(opacity.clamp(0.0, 1.0));
+    let mut content = format!(
+        "q {stroke} {} w {alpha} CA {alpha} ca",
+        number(TEXT_MARK_LINE_WIDTH)
+    );
     for quad in quads {
         let y = if middle {
             quad.y + quad.height * 0.5
@@ -691,12 +701,12 @@ fn marker_value(id: u64) -> String {
     format!("{MARKER_PREFIX}{id}")
 }
 
-fn marker_id(value: &str) -> Option<u64> {
+pub(crate) fn marker_id(value: &str) -> Option<u64> {
     value.strip_prefix(MARKER_PREFIX)?.parse().ok()
 }
 
 /// 读一条注释的 `/NM`（UTF-16LE），解析出我们的 id。
-unsafe fn read_marker(ffi: &Ffi, annot: *mut c_void) -> Option<u64> {
+pub(crate) unsafe fn read_marker(ffi: &Ffi, annot: *mut c_void) -> Option<u64> {
     let key = CString::new("NM").ok()?;
     let mut buffer = vec![0u16; 64];
     let length = (ffi.get_string)(
@@ -713,10 +723,10 @@ unsafe fn read_marker(ffi: &Ffi, annot: *mut c_void) -> Option<u64> {
     marker_id(text.trim_end_matches('\0'))
 }
 
-const ANNOT_HIGHLIGHT: c_uint = 9;
-const ANNOT_UNDERLINE: c_uint = 10;
-const ANNOT_STRIKEOUT: c_uint = 12;
-const ANNOT_INK: c_uint = 15;
+pub(crate) const ANNOT_HIGHLIGHT: c_uint = 9;
+pub(crate) const ANNOT_UNDERLINE: c_uint = 10;
+pub(crate) const ANNOT_STRIKEOUT: c_uint = 12;
+pub(crate) const ANNOT_INK: c_uint = 15;
 const ANNOT_FLAG_PRINT: c_int = 4;
 const FPDF_NO_INCREMENTAL: c_uint = 2;
 /// 文本类标注的导出线宽（**页面空间** pt）。
@@ -727,28 +737,28 @@ const TEXT_MARK_LINE_WIDTH: f32 = 2.0;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
-struct FsPointF {
-    x: c_float,
-    y: c_float,
+pub(crate) struct FsPointF {
+    pub(crate) x: c_float,
+    pub(crate) y: c_float,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
-struct FsQuadPointsF {
-    x1: c_float,
-    y1: c_float,
-    x2: c_float,
-    y2: c_float,
-    x3: c_float,
-    y3: c_float,
-    x4: c_float,
-    y4: c_float,
+pub(crate) struct FsQuadPointsF {
+    pub(crate) x1: c_float,
+    pub(crate) y1: c_float,
+    pub(crate) x2: c_float,
+    pub(crate) y2: c_float,
+    pub(crate) x3: c_float,
+    pub(crate) y3: c_float,
+    pub(crate) x4: c_float,
+    pub(crate) y4: c_float,
 }
 
 /// `/Rect` 的字段顺序是 left、top、right、bottom。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
-struct FsRectF {
+pub(crate) struct FsRectF {
     left: c_float,
     top: c_float,
     right: c_float,
@@ -756,7 +766,7 @@ struct FsRectF {
 }
 
 #[repr(C)]
-struct FpdfFileWrite {
+pub(crate) struct FpdfFileWrite {
     version: c_int,
     write_block: Option<unsafe extern "C" fn(*mut FpdfFileWrite, *const c_void, c_ulong) -> c_int>,
 }
@@ -781,42 +791,63 @@ unsafe extern "C" fn write_block(
     1
 }
 
-struct Ffi {
-    load_document: unsafe extern "C" fn(*const c_char, *const c_char) -> *mut c_void,
-    close_document: unsafe extern "C" fn(*mut c_void),
-    page_count: unsafe extern "C" fn(*mut c_void) -> c_int,
-    load_page: unsafe extern "C" fn(*mut c_void, c_int) -> *mut c_void,
-    close_page: unsafe extern "C" fn(*mut c_void),
-    annot_count: unsafe extern "C" fn(*mut c_void) -> c_int,
-    get_annot: unsafe extern "C" fn(*mut c_void, c_int) -> *mut c_void,
-    remove_annot: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
-    create_annot: unsafe extern "C" fn(*mut c_void, c_uint) -> *mut c_void,
-    close_annot: unsafe extern "C" fn(*mut c_void),
-    set_rect: unsafe extern "C" fn(*mut c_void, *const FsRectF) -> c_int,
-    set_color: unsafe extern "C" fn(*mut c_void, c_uint, c_uint, c_uint, c_uint, c_uint) -> c_int,
-    set_flags: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
-    set_string: unsafe extern "C" fn(*mut c_void, *const c_char, *const u16) -> c_int,
-    get_string: unsafe extern "C" fn(*mut c_void, *const c_char, *mut u16, c_ulong) -> c_ulong,
-    add_ink_stroke: unsafe extern "C" fn(*mut c_void, *const FsPointF, usize) -> c_int,
-    append_quad: unsafe extern "C" fn(*mut c_void, *const FsQuadPointsF) -> c_int,
-    set_ap: unsafe extern "C" fn(*mut c_void, c_uint, *const u16) -> c_int,
-    set_border: unsafe extern "C" fn(*mut c_void, c_float, c_float, c_float) -> c_int,
-    new_path: unsafe extern "C" fn(c_float, c_float) -> *mut c_void,
-    path_line_to: unsafe extern "C" fn(*mut c_void, c_float, c_float) -> c_int,
-    path_set_draw_mode: unsafe extern "C" fn(*mut c_void, c_int, c_int) -> c_int,
-    page_obj_set_stroke_color:
+pub(crate) struct Ffi {
+    pub(crate) load_document: unsafe extern "C" fn(*const c_char, *const c_char) -> *mut c_void,
+    pub(crate) close_document: unsafe extern "C" fn(*mut c_void),
+    pub(crate) page_count: unsafe extern "C" fn(*mut c_void) -> c_int,
+    pub(crate) load_page: unsafe extern "C" fn(*mut c_void, c_int) -> *mut c_void,
+    pub(crate) close_page: unsafe extern "C" fn(*mut c_void),
+    pub(crate) annot_count: unsafe extern "C" fn(*mut c_void) -> c_int,
+    pub(crate) get_annot: unsafe extern "C" fn(*mut c_void, c_int) -> *mut c_void,
+    pub(crate) remove_annot: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
+    pub(crate) create_annot: unsafe extern "C" fn(*mut c_void, c_uint) -> *mut c_void,
+    pub(crate) close_annot: unsafe extern "C" fn(*mut c_void),
+    pub(crate) set_rect: unsafe extern "C" fn(*mut c_void, *const FsRectF) -> c_int,
+    pub(crate) set_color:
+        unsafe extern "C" fn(*mut c_void, c_uint, c_uint, c_uint, c_uint, c_uint) -> c_int,
+    pub(crate) set_flags: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
+    pub(crate) set_string: unsafe extern "C" fn(*mut c_void, *const c_char, *const u16) -> c_int,
+    pub(crate) get_string:
+        unsafe extern "C" fn(*mut c_void, *const c_char, *mut u16, c_ulong) -> c_ulong,
+    pub(crate) add_ink_stroke: unsafe extern "C" fn(*mut c_void, *const FsPointF, usize) -> c_int,
+    pub(crate) append_quad: unsafe extern "C" fn(*mut c_void, *const FsQuadPointsF) -> c_int,
+    pub(crate) set_ap: unsafe extern "C" fn(*mut c_void, c_uint, *const u16) -> c_int,
+    pub(crate) set_border: unsafe extern "C" fn(*mut c_void, c_float, c_float, c_float) -> c_int,
+    pub(crate) new_path: unsafe extern "C" fn(c_float, c_float) -> *mut c_void,
+    pub(crate) path_line_to: unsafe extern "C" fn(*mut c_void, c_float, c_float) -> c_int,
+    pub(crate) path_set_draw_mode: unsafe extern "C" fn(*mut c_void, c_int, c_int) -> c_int,
+    pub(crate) page_obj_set_stroke_color:
         unsafe extern "C" fn(*mut c_void, c_uint, c_uint, c_uint, c_uint) -> c_int,
-    page_obj_set_stroke_width: unsafe extern "C" fn(*mut c_void, c_float) -> c_int,
-    append_object: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int,
-    page_obj_destroy: unsafe extern "C" fn(*mut c_void),
-    save_as_copy: unsafe extern "C" fn(*mut c_void, *mut FpdfFileWrite, c_uint) -> c_int,
-    security_revision: unsafe extern "C" fn(*mut c_void) -> c_int,
-    signature_count: unsafe extern "C" fn(*mut c_void) -> c_int,
-    _library: libloading::Library,
+    pub(crate) page_obj_set_stroke_width: unsafe extern "C" fn(*mut c_void, c_float) -> c_int,
+    pub(crate) append_object: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int,
+    pub(crate) page_obj_destroy: unsafe extern "C" fn(*mut c_void),
+    pub(crate) get_subtype: unsafe extern "C" fn(*mut c_void) -> c_int,
+    pub(crate) get_ap: unsafe extern "C" fn(*mut c_void, c_int, *mut c_void, c_ulong) -> c_ulong,
+    pub(crate) get_color: unsafe extern "C" fn(
+        *mut c_void,
+        c_int,
+        *mut c_uint,
+        *mut c_uint,
+        *mut c_uint,
+        *mut c_uint,
+    ) -> c_int,
+    pub(crate) get_border:
+        unsafe extern "C" fn(*mut c_void, *mut c_float, *mut c_float, *mut c_float) -> c_int,
+    pub(crate) get_flags: unsafe extern "C" fn(*mut c_void) -> c_int,
+    pub(crate) count_attachment_points: unsafe extern "C" fn(*mut c_void) -> usize,
+    pub(crate) get_attachment_points:
+        unsafe extern "C" fn(*mut c_void, usize, *mut FsQuadPointsF) -> c_int,
+    pub(crate) ink_list_count: unsafe extern "C" fn(*mut c_void) -> c_ulong,
+    pub(crate) ink_list_path:
+        unsafe extern "C" fn(*mut c_void, c_ulong, *mut FsPointF, c_ulong) -> c_ulong,
+    pub(crate) save_as_copy: unsafe extern "C" fn(*mut c_void, *mut FpdfFileWrite, c_uint) -> c_int,
+    pub(crate) security_revision: unsafe extern "C" fn(*mut c_void) -> c_int,
+    pub(crate) signature_count: unsafe extern "C" fn(*mut c_void) -> c_int,
+    pub(crate) _library: libloading::Library,
 }
 
 impl Ffi {
-    fn load() -> WritebackResult<Self> {
+    pub(crate) fn load() -> WritebackResult<Self> {
         let path = super::library::pdfium_library_path().ok_or_else(|| {
             WritebackError::Library(
                 "找不到 PDFium 动态库（scripts/fetch-pdfium.sh 或 PDFIUM_PATH）".to_string(),
@@ -927,6 +958,54 @@ impl Ffi {
                 unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int
             ),
             page_obj_destroy: sym!("FPDFPageObj_Destroy", unsafe extern "C" fn(*mut c_void)),
+            get_subtype: sym!(
+                "FPDFAnnot_GetSubtype",
+                unsafe extern "C" fn(*mut c_void) -> c_int
+            ),
+            get_ap: sym!(
+                "FPDFAnnot_GetAP",
+                unsafe extern "C" fn(*mut c_void, c_int, *mut c_void, c_ulong) -> c_ulong
+            ),
+            get_color: sym!(
+                "FPDFAnnot_GetColor",
+                unsafe extern "C" fn(
+                    *mut c_void,
+                    c_int,
+                    *mut c_uint,
+                    *mut c_uint,
+                    *mut c_uint,
+                    *mut c_uint,
+                ) -> c_int
+            ),
+            get_border: sym!(
+                "FPDFAnnot_GetBorder",
+                unsafe extern "C" fn(
+                    *mut c_void,
+                    *mut c_float,
+                    *mut c_float,
+                    *mut c_float,
+                ) -> c_int
+            ),
+            get_flags: sym!(
+                "FPDFAnnot_GetFlags",
+                unsafe extern "C" fn(*mut c_void) -> c_int
+            ),
+            count_attachment_points: sym!(
+                "FPDFAnnot_CountAttachmentPoints",
+                unsafe extern "C" fn(*mut c_void) -> usize
+            ),
+            get_attachment_points: sym!(
+                "FPDFAnnot_GetAttachmentPoints",
+                unsafe extern "C" fn(*mut c_void, usize, *mut FsQuadPointsF) -> c_int
+            ),
+            ink_list_count: sym!(
+                "FPDFAnnot_GetInkListCount",
+                unsafe extern "C" fn(*mut c_void) -> c_ulong
+            ),
+            ink_list_path: sym!(
+                "FPDFAnnot_GetInkListPath",
+                unsafe extern "C" fn(*mut c_void, c_ulong, *mut FsPointF, c_ulong) -> c_ulong
+            ),
             save_as_copy: sym!(
                 "FPDF_SaveAsCopy",
                 unsafe extern "C" fn(*mut c_void, *mut FpdfFileWrite, c_uint) -> c_int
@@ -963,7 +1042,7 @@ mod tests {
             ],
             width: 2.0,
         };
-        assert!(appearance_content(&kind, [255, 0, 0]).is_none());
+        assert!(appearance_content(&kind, [255, 0, 0], 1.0).is_none());
     }
 
     #[test]
@@ -972,7 +1051,8 @@ mod tests {
         assert!(
             appearance_content(
                 &AnnotationKind::Highlight { quads: vec![quad] },
-                [255, 255, 0]
+                [255, 255, 0],
+                0.35
             )
             .is_none(),
             "高亮不写 AP（否则不透明填充会盖住文字）"
@@ -980,15 +1060,21 @@ mod tests {
         let underline = appearance_content(
             &AnnotationKind::Underline { quads: vec![quad] },
             [255, 0, 0],
+            0.8,
         )
         .expect("下划线必须写 AP");
         assert!(
             underline.contains("10.00 20.00 m 110.00 20.00 l"),
             "底线在 y=20：{underline}"
         );
+        assert!(
+            underline.contains("0.80 CA 0.80 ca"),
+            "透明度要写进 AP（读回靠它）：{underline}"
+        );
         let strike = appearance_content(
             &AnnotationKind::StrikeOut { quads: vec![quad] },
             [255, 0, 0],
+            0.6,
         )
         .expect("删除线必须写 AP");
         assert!(

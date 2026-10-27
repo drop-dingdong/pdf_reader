@@ -74,9 +74,74 @@ fn run(script: &str, sample: Sample) -> Report {
     replay::run_script_file(&path, None).expect("回放应能跑完")
 }
 
+/// S6a：写过注释、但 overlay 文件不存在的 PDF，打开时应从 PDF 读回标注。
+#[test]
+fn annotations_are_recovered_from_the_pdf_when_the_overlay_is_missing() {
+    let _guard = test_lock();
+    if !backend_available() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "pdf-readback-open-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("建临时目录");
+    let pdf = dir.join("rotated_2p.pdf");
+    Sample::Rotated.write_to(&pdf).expect("写样本");
+
+    // 用写回把一条带标记/正文的高亮写进 PDF（先写 out，再替换成样本路径）
+    let staged = dir.join("out.pdf");
+    backend_pdfium::writeback::write(&backend_pdfium::writeback::WritebackSpec {
+        source: pdf.clone(),
+        output: staged.clone(),
+        pages: vec![backend_pdfium::writeback::WritebackPage {
+            page: pdfcore::prelude::PageIndex::FIRST,
+            annotations: vec![backend_pdfium::writeback::WritebackAnnotation {
+                id: Some(7),
+                kind: pdfcore::annotation::AnnotationKind::Highlight {
+                    quads: vec![pdfcore::prelude::Rect::new(50.0, 660.0, 100.0, 14.0)],
+                },
+                color: [255, 255, 0],
+                opacity: 0.35,
+                body: Some("从 PDF 恢复的正文".to_string()),
+            }],
+        }],
+    })
+    .expect("写回");
+    std::fs::rename(&staged, &pdf).expect("替换样本");
+    // 没有 .annot.json：模拟 overlay 丢失
+
+    let script = dir.join("readback.json");
+    std::fs::write(
+        &script,
+        r#"{"name":"readback","pdf":"rotated_2p.pdf","actions":[
+             {"id":"settle","op":"wait","frames":6}
+           ]}"#,
+    )
+    .expect("写脚本");
+    let report = replay::run_script_file(&script, None).expect("回放");
+    assert_eq!(
+        report.actions.last().map(|action| action.annotations),
+        Some(1),
+        "缺少 overlay 时应当从 PDF 读回 1 条标注"
+    );
+    // 读回后正文条目也要恢复（侧栏/点击正文能看到）
+    assert!(
+        !dir.join("rotated_2p.pdf.annot.json").exists(),
+        "读回不应自动创建 overlay 文件"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// S0：`click` / `drag` 动作必须真的驱动 UI，而不是"跑完没报错"。
 #[test]
 fn click_navigates_and_drag_pans() {
+    let _guard = test_lock();
     if !backend_available() {
         return;
     }
@@ -113,6 +178,7 @@ fn click_navigates_and_drag_pans() {
 /// 两条 bounds 就会分叉。
 #[test]
 fn annotation_geometry_does_not_depend_on_zoom() {
+    let _guard = test_lock();
     if !backend_available() {
         return;
     }
@@ -143,6 +209,7 @@ fn annotation_geometry_does_not_depend_on_zoom() {
 /// S3 验收：3 条标注 → 撤销 2 次剩 1 → 重做 1 次回到 2。
 #[test]
 fn undo_and_redo_walk_the_annotation_stack() {
+    let _guard = test_lock();
     if !backend_available() {
         return;
     }
@@ -179,6 +246,7 @@ fn undo_and_redo_walk_the_annotation_stack() {
 /// 3. 1× 与 2× 下画同一组**页面空间**点 → 包围盒逐值相同（笔画中心不随缩放漂移）。
 #[test]
 fn ink_stroke_is_one_annotation_that_undo_and_redo_can_move() {
+    let _guard = test_lock();
     if !backend_available() {
         return;
     }
@@ -256,6 +324,7 @@ fn ink_stroke_is_one_annotation_that_undo_and_redo_can_move() {
 /// 虚拟化之后才降下来，这个断言就是它的回归网。
 #[test]
 fn a_thousand_ink_annotations_stay_out_of_the_render_pipeline_and_cheap() {
+    let _guard = test_lock();
     if !backend_available() {
         return;
     }
@@ -333,6 +402,7 @@ fn a_thousand_ink_annotations_stay_out_of_the_render_pipeline_and_cheap() {
 
 #[test]
 fn every_script_finishes_with_no_violations() {
+    let _guard = test_lock();
     if !backend_available() {
         eprintln!("跳过：未找到 PDFium 动态库（scripts/fetch-pdfium.sh）");
         return;
@@ -360,6 +430,7 @@ fn every_script_finishes_with_no_violations() {
 /// 且等于"区域 × 记录分辨率"（800% 波段 10.486：150×80pt → 1573×839）。
 #[test]
 fn preview_size_does_not_depend_on_the_current_zoom() {
+    let _guard = test_lock();
     if !backend_available() {
         eprintln!("跳过：未找到 PDFium 动态库");
         return;
@@ -398,6 +469,7 @@ fn preview_size_does_not_depend_on_the_current_zoom() {
 /// 动作会"用光帧数却没稳定"，并把一份什么都没做的基线记录下来）。
 #[test]
 fn timing_mode_settles_and_actually_renders() {
+    let _guard = test_lock();
     if !backend_available() {
         eprintln!("跳过：未找到 PDFium 动态库");
         return;
@@ -419,6 +491,7 @@ fn timing_mode_settles_and_actually_renders() {
 /// **不能**崩、**不能**露白，只是把底料/旧内容让出来（并把提示写进诊断）。
 #[test]
 fn a_tiny_texture_budget_still_keeps_the_view_correct() {
+    let _guard = test_lock();
     if !backend_available() {
         eprintln!("跳过：未找到 PDFium 动态库");
         return;
@@ -444,6 +517,7 @@ fn a_tiny_texture_budget_still_keeps_the_view_correct() {
 /// 性能基线：记录一次 → 立刻比较，不应出现**门禁级**结论（时序提示允许，机器噪声）。
 #[test]
 fn a_freshly_recorded_baseline_has_no_gate_findings() {
+    let _guard = test_lock();
     if !backend_available() {
         eprintln!("跳过：未找到 PDFium 动态库");
         return;
@@ -469,6 +543,7 @@ fn a_freshly_recorded_baseline_has_no_gate_findings() {
 /// 脚本文件本身的自检：能被解析、动作数 > 0、样本名合法（不需要 PDFium）。
 #[test]
 fn all_scripts_parse() {
+    let _guard = test_lock();
     for (script, sample) in CASES {
         let path = scripts_dir().join(script);
         let parsed = replay::load_script(&path).unwrap_or_else(|error| panic!("{script}: {error}"));
@@ -479,4 +554,11 @@ fn all_scripts_parse() {
             "{script} 引用的样本应与用例表一致"
         );
     }
+}
+
+/// 这些回放测试会真的打开 PDF/渲染；读回（S6a）用的是裸 FFI，必须串行，否则和
+/// pdfium-render 的渲染线程并发会踩内存（实测 SIGSEGV）。用一把进程内锁把测试串起来。
+fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
 }

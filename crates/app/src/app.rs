@@ -21,7 +21,9 @@ use egui::{
     Align2, Color32, CornerRadius, Id, Key, Modifiers, RichText, Sense, Stroke, StrokeKind,
     Vec2 as EVec2,
 };
-use pdfcore::annotation::{AnnotationId, AnnotationKind, AnnotationStore, INK_COLOR, INK_OPACITY};
+use pdfcore::annotation::{
+    Annotation, AnnotationId, AnnotationKind, AnnotationStore, INK_COLOR, INK_OPACITY,
+};
 use pdfcore::prelude::*;
 
 use crate::ink::InkStroke;
@@ -1303,10 +1305,90 @@ impl PdfReaderApp {
             .map_err(|error| format!("标注图层无法加载（{error}），已按空处理"))
     }
 
+    /// S6a：把 PDF 里带 `pd-fr:<id>` 标记的注释并进当前 overlay。
+    ///
+    /// 规则（D-134）：
+    /// * overlay 里已有同 id → **overlay 赢**（PDF 只用来校验）；
+    /// * overlay 文件存在、PDF 有标记但 overlay 没有该 id → 忽略（用户删了它，下次写回会删）；
+    /// * overlay 文件**不存在** → 导入为可编辑（id 取自标记），正文优先用已有 `custom_texts`，
+    ///   没有才用 `/Contents` 新建条目。
+    /// * 没有标记的外部注释：S6b 再做（只读），这里先跳过。
+    fn merge_readback(
+        &mut self,
+        readback: &backend_pdfium::readback::Readback,
+        overlay_exists: bool,
+    ) -> usize {
+        if overlay_exists {
+            return 0;
+        }
+        let mut restored = 0;
+        for item in &readback.annotations {
+            let Some(raw_id) = item.id else {
+                continue; // 外部注释：S6b（只读）再处理
+            };
+            let id = AnnotationId(raw_id);
+            if self.annotations.get(id).is_some() {
+                continue;
+            }
+            let Some(mut annotation) = Annotation::new(item.page, item.kind.clone()) else {
+                continue;
+            };
+            annotation.id = id;
+            annotation.color = item.color;
+            annotation.opacity = item.opacity;
+            let title = persist::annotation_body_title(id);
+            let has_body = self
+                .custom_previews
+                .iter()
+                .any(|preview| preview.title == title);
+            if !has_body {
+                if let Some(body) = &item.body {
+                    if let Some(bounds) = annotation.bounds() {
+                        let point = Point::new(
+                            bounds.x + bounds.width * 0.5,
+                            bounds.y + bounds.height * 0.5,
+                        );
+                        self.custom_previews.push(CustomPreview {
+                            page: item.page,
+                            point,
+                            rect: zero_rect_at(point),
+                            kind: CustomKind::Text,
+                            title: title.clone(),
+                            text: Some(body.clone()),
+                            snapshot: None,
+                            body_size: DEFAULT_CUSTOM_TEXT_BODY,
+                            scale: 1.0,
+                        });
+                    }
+                }
+            }
+            if self
+                .custom_previews
+                .iter()
+                .any(|preview| preview.title == title)
+            {
+                annotation.body_title = Some(title);
+            }
+            self.annotations.insert(annotation);
+            restored += 1;
+        }
+        restored
+    }
+
     fn open(&mut self, path: &std::path::Path, password: Option<&str>) {
         let backend = PdfiumBackend::new();
         match backend.open(Source::Path(path), password) {
             Ok(opened) => {
+                // S6a：读回 PDF 注释。裸 FFI 不经过 pdfium-render 的全局锁，
+                // 所以**必须先放掉旧会话**（它的渲染 worker 可能还在跑）——D-134 选择的方案。
+                self.session = None;
+                let readback = match backend_pdfium::readback::read(path, password) {
+                    Ok(readback) => readback,
+                    Err(error) => {
+                        eprintln!("[readback] {error}");
+                        backend_pdfium::readback::Readback::default()
+                    }
+                };
                 let raster = opened.raster.clone();
                 let concurrency = opened.capabilities.max_concurrency as usize;
                 let cache = Arc::new(LruCache::with_default_capacity());
@@ -1338,6 +1420,7 @@ impl PdfReaderApp {
                         // 标注图层（<pdf>.annot.json）：缺文件 = 空；坏文件只提示，不影响打开文档
                         self.annotations.clear();
                         self.overlay_dirty = false;
+                        let overlay_exists = persist::annot_path(path).exists();
                         match Self::load_overlay_file(path) {
                             Ok(store) => self.annotations = store,
                             Err(message) => self.message = message,
@@ -1472,6 +1555,7 @@ impl PdfReaderApp {
                                 }
                             }
                         }
+                        let restored = self.merge_readback(&readback, overlay_exists);
                         self.next_float_id = 1;
                         self.capture = None;
                         let title = session.opened().document.info().to_string();
@@ -1495,6 +1579,11 @@ impl PdfReaderApp {
                             );
                         } else {
                             self.message = format!("已打开：{title}");
+                        }
+                        if restored > 0 {
+                            self.message
+                                .push_str(&format!("（已从 PDF 恢复 {restored} 条标注）"));
+                            self.overlay_dirty = true; // 恢复出来的应当存进 overlay
                         }
                         self.sidecar_migrated = false;
                         self.password_for = None;
