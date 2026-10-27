@@ -30,6 +30,7 @@
 | [decisions/log.md](decisions/log.md) | **决策索引**：D-00a … D-101 每条一行；**新决策从 D-102 起追加在这里** |
 | [decisions/rationale.md](decisions/rationale.md) | 架构说明：当前设计的关键理由与取舍（按主题，引决策 ID） |
 | [decisions/history.md](decisions/history.md) | 历史变化：演进阶段、被推翻的做法、踩过的坑与教训 |
+| [decisions/evaluations/](decisions/evaluations/) | 动手前的评估：可行性、风险、方案对比、待确认的决策（如 S5 写回 PDF） |
 
 ## 三、旧文档去哪了
 

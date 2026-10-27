@@ -1,7 +1,8 @@
 # 交接：注释功能（另一个会话从这里继续）
 
-> 分支 `feat/annotations`，最后提交 `3ea1e22`。**S0–S4（模型 / 图层 v2 / 撤销 / 墨迹 / 压力门槛）已完成**并通过门禁，
-> 只剩 **S5（写回 PDF）** —— 那一步会改用户文件，动手前先出评估。
+> 分支 `feat/annotations`，最后提交见 `git log`。**S0–S4（模型 / 图层 v2 / 撤销 / 墨迹 / 压力门槛）已完成**并通过门禁。
+> **S5（写回 PDF）的评估已产出**（[`decisions/evaluations/s5-writeback.md`](decisions/evaluations/s5-writeback.md)），
+> 实现**未开始**，等用户确认评估 §10 的 5 个决策（形态 / overlay 去留 / 范围 / 加密签名策略 / 命名）。
 > 人工验收（真窗口）：画一笔跟手、整笔撤销/重做、Esc 丢弃、800% 粗细与位置、两种删除方式，用户已确认通过。
 > 权威决策：[`decisions/log.md`](decisions/log.md) 的 **D-118**（阶段计划）、**D-119**（墨迹模型/图层 v2）、
 > **D-120**（墨迹工具与手势）、**D-121**（S4c：悬停闸门、历史虚拟化、压力门槛）；本文只记录进度、陷阱与下一步。
@@ -109,9 +110,18 @@ export PATH=/tmp/rust/cargo/bin:$PATH CARGO_HOME=/tmp/rust/cargo RUSTUP_HOME=/tm
 - 性能（本机 debug）：1000 条标注画一帧 ~3ms；造 1000 笔 ~4ms；撤销+历史窗口 ~17ms（虚拟化前 323ms）；
   结构门槛：造标注 `submitted == 0`、纹理层峰值不变（`ink_many` 基线）。
 
-### S5 写回 PDF（下一步，先评估，不承诺）
+### S5 写回 PDF（评估完成，实现待确认）
 
-- `FPDFAnnot_*` 创建/更新；原子保存（临时文件 + rename）；写成功后**单向迁移**：删除 `<pdf>.annot.json` 与被引用的 `custom_texts` 条目；加密/权限（`Permissions::annotate`）/只读路径；备份策略。**这一步会修改用户文件**，动手前先出一份评估（风险清单 + 回滚方案 + 只读/加密/权限的失败提示），评估通过再动手。
+评估：[`decisions/evaluations/s5-writeback.md`](decisions/evaluations/s5-writeback.md)（D-122）。三条硬结论：
+
+1. **墨迹必须自己生成 `/AP`**：无 AP 的 `/Ink` 在 PDFium 里只有 1 个彩色像素（不可见），补 AP 后 162 个；
+   文本类相反（无 AP 时 PDFium 合成高亮：黄色 3996 px，文字仍可读）。
+2. **`pdfium-render 0.9.4` 帮不上忙**：无注释 API、句柄 `pub(crate)`、save flags 写死 0 →
+   要自带一层小 FFI；而 FFI 绕过它的全局锁，会和后台渲染线程竞争 → 建议**子进程**写回。
+3. **我们读不回 PDF 注释** → 不能"写成功后删 overlay"，S5 先做**导出副本**（overlay 保留）。
+
+下一步（等用户确认后）：S5a spike（验证 `SetAttachmentPoints` 对高亮、`AppendObject` 生成墨迹 AP、
+保存 flags、UTF-16 正文往返）→ S5b 导出副本 → S5c 原地替换（依赖 S6 读回注释）。
 
 ### 已知未做（不是 bug，是没到）
 
@@ -124,6 +134,6 @@ export PATH=/tmp/rust/cargo/bin:$PATH CARGO_HOME=/tmp/rust/cargo RUSTUP_HOME=/tm
 1. `git log --oneline -15` + 读本文；
 2. `./scripts/check.sh` 确认基线仍绿；
 3. 读 `crates/app/src/app.rs` 里的 `AppEdit` / `apply_edit` / `undo_edit`（这是所有编辑的唯一入口）；
-4. S0–S4 已全部完成（`ink.json` / `ink_many.json` 是现成回归脚本）。下一步只做 S5 **评估**：
-   先读 `crates/backend-pdfium` 里 `Permissions` 与保存路径的现状，产出风险清单，不要直接改用户文件。
+4. S0–S4 已全部完成（`ink.json` / `ink_many.json` 是现成回归脚本）。S5 的评估也已完成，
+   **下一步是等用户对评估 §10 的 5 个决策拍板，然后做 S5a spike**（spike 代码一次性、不入库）。
    墨迹相关不要再动语义（抬笔入库、页面空间几何、图层 v2 都是硬约定）。
