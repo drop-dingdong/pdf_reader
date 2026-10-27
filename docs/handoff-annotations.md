@@ -1,9 +1,10 @@
 # 交接：注释功能（另一个会话从这里继续）
 
-> 分支 `feat/annotations`，最后提交 `c0350b0`。S0–S3 + **S4a/S4b（墨迹：模型、图层 v2、回放、工具与手势）已完成**；
-> 只剩 **S4c（性能验收 + 人工手感）** 与 S5（写回 PDF）。
-> 权威决策见 [`decisions/log.md`](decisions/log.md) 的 **D-118**（阶段计划）、**D-119**（墨迹模型/图层 v2）、
-> **D-120**（墨迹工具与手势）；本文只记录进度、陷阱与下一步。
+> 分支 `feat/annotations`，最后提交 `3ea1e22`。**S0–S4（模型 / 图层 v2 / 撤销 / 墨迹 / 压力门槛）已完成**并通过门禁，
+> 只剩 **S5（写回 PDF）** —— 那一步会改用户文件，动手前先出评估。
+> 人工验收（真窗口）：画一笔跟手、整笔撤销/重做、Esc 丢弃、800% 粗细与位置、两种删除方式，用户已确认通过。
+> 权威决策：[`decisions/log.md`](decisions/log.md) 的 **D-118**（阶段计划）、**D-119**（墨迹模型/图层 v2）、
+> **D-120**（墨迹工具与手势）、**D-121**（S4c：悬停闸门、历史虚拟化、压力门槛）；本文只记录进度、陷阱与下一步。
 
 ## 1. 已完成（按提交顺序）
 
@@ -21,6 +22,7 @@
 | — | 引用点重选进栈 | `739b0bc` |
 | **S4a** | `AnnotationKind::Ink`（页面空间折线 + 线宽、折线命中、半线宽包围盒）+ `annot.json` **v2**（`points`/`width`）+ 墨迹绘制与悬停 | `2fdc8bd` |
 | **S4b** | 墨迹工具：`Tool::Ink` + 手势状态机（`ink.rs`：0.5 抽稀 / 2000 上限 / 单点不成笔）+ 抬笔才入库 + `Esc`/切工具丢弃 + 回放改真实拖拽（`set_tool`、手势内按键）+ JSONL 补标注字段 | `c0350b0` |
+| **S4c** | 绘制期间屏蔽链接悬停（第三闸门）+ `seed_ink` 压力脚本（1000 条）+ **历史列表虚拟化**（323ms → 16ms）+ 结构/时间门槛 + `ink_many` 基线 | `3ea1e22` |
 
 ## 2. 代码地图（新增/改动最多的地方）
 
@@ -29,11 +31,11 @@
 | `crates/pdfcore/src/annotation.rs` | 标注模型与 `AnnotationStore`（页空间几何、id 不复用、`bounds` / `contains(tol)`）；`Ink` 的折线几何、`is_valid`、`kind.ink()` 访问器 |
 | `crates/pdfcore/src/text.rs` | `PageText::range_for_page_rect`（矩形 → 字符范围 → 复用按行合并） |
 | `crates/app/src/persist.rs` | 末尾"标注图层"段：`ANNOT_VERSION = 2` / `SavedOverlay` / `SavedAnnotation`（含 `points`/`width`）/ `annot_path` / `write_atomic` / `annotation_body_title` / `annotation_kind_from_saved` / `overlay_from_store` / `store_from_overlay` |
-| `crates/app/src/history.rs` | `History<T>`（单栈、按字节裁剪、`descriptions()` 供可视列表） |
+| `crates/app/src/history.rs` | `History<T>`（单栈、按字节裁剪、`descriptions()` 供可视列表；`len` / `description(index)` 供**虚拟化**列表） |
 | `crates/app/src/ink.rs` | 墨迹手势状态机（纯逻辑）：页面空间采样、0.5 抽稀、2000 点上限、收笔判定；`cargo test -p app --lib ink::` |
-| `crates/app/src/app.rs` | `AppEdit`（编辑命令）、`apply_edit`（唯一修改点）、`undo_edit` / `redo_edit`、`add_annotation`（所有"新建标注"的唯一入口）/ `add_highlight` / `annotate_ink`、`annotation_at`、`page_at_content`、`open_annotation_note`、`delete_hovered_annotation`、`shift_float_custom_indices`、`draw_history_window`、`DEFAULT_INK_WIDTH`、**`Tool::Ink` / `DragMode::Ink` / `switch_tool` / `handle_ink_pointer`（墨迹手势）** |
-| `crates/app/src/app/replay.rs` | 动作 `click` / `drag` / `highlight` / `ink`（真实拖拽，需先 `set_tool ink`）/ `set_tool` / `save` / `undo` / `redo`；手势帧可携带同帧按键（Esc 取消）；JSONL 现在也写 `annotations` / `annotation_bounds` / `floats` / `previews_total` |
-| `scripts/replay/*.json` + `perf/baseline/*.json` | 新脚本：`click_link` / `drag_pan` / `annotate_zoom` / `undo_redo` / **`ink`**（结构基线已入库，共 9 条） |
+| `crates/app/src/app.rs` | `AppEdit`（编辑命令）、`apply_edit`（唯一修改点）、`undo_edit` / `redo_edit`、`add_annotation`（所有"新建标注"的唯一入口）/ `add_highlight` / `annotate_ink`、`annotation_at`、`page_at_content`、`open_annotation_note`、`delete_hovered_annotation`、`shift_float_custom_indices`、`draw_history_window`（**虚拟化**）、`DEFAULT_INK_WIDTH`、**`Tool::Ink` / `DragMode::Ink` / `switch_tool` / `handle_ink_pointer`（墨迹手势）**、`seed_ink_strokes`（压力测试） |
+| `crates/app/src/app/replay.rs` | 动作 `click` / `drag` / `highlight` / `ink`（真实拖拽，需先 `set_tool ink`）/ `set_tool` / `seed_ink`（压力测试）/ `save` / `undo` / `redo`；手势帧可携带同帧按键（Esc 取消）；JSONL 也写 `annotations` / `annotation_bounds` / `floats` / `previews_total` |
+| `scripts/replay/*.json` + `perf/baseline/*.json` | 新脚本：`click_link` / `drag_pan` / `annotate_zoom` / `undo_redo` / **`ink`** / **`ink_many`**（1000 条压力，结构基线已入库，共 10 条） |
 | 测试 | `crates/app/tests/{annot_roundtrip,annot_click}.rs`、`replay_scripts.rs` 里的 `annotation_geometry_*` 与 `undo_and_redo_*` |
 
 ## 3. 不可破坏的约定
@@ -52,6 +54,10 @@
    静默丢掉，再保存就是真丢数据。v1 文件仍可读，不需要迁移。
 10. **墨迹只在抬笔时入库**：拖动中采样点只存在 `InkStroke`（不产生命令、不进撤销栈）；
     `Esc` / 切走工具 = 丢掉它。任何"拖动中就 `apply_edit`"的写法都会让取消留下半条。
+11. **画墨迹期间关闭链接悬停预览**（`hover_preview_allowed` 的 `drawing` 闸门）：
+    笔画会压住链接，这时弹目的地预览会打断绘制（用户实测）。
+12. **长列表必须虚拟化**：历史窗口曾整表排版 1001 行 = 一帧 323ms；现在用
+    `ScrollArea::show_rows` + `History::description(index)`。新增任何"可能上千行"的列表都照此办理。
 
 ## 4. 验证方式
 
@@ -82,6 +88,8 @@ export PATH=/tmp/rust/cargo/bin:$PATH CARGO_HOME=/tmp/rust/cargo RUSTUP_HOME=/tm
 | 墨迹基线里 `提交=0` | 看起来像"录制跑错" | 上传字节 > 0 就是正常（页面早渲染完，动作只是加标注）；与 `undo_redo` 基线一致 |
 | 起笔只取按下点 | 一笔的开头少一段（快速起笔尤其明显） | 用 `pointer.press_origin()` **并**补采 `drag_started` 那一帧的当前位置 |
 | 回放里"拖到一半取消" | 普通 `key` 动作只能发生在两个动作之间，打断不了正在跑的手势 | 手势帧自带 `keys`（`GestureFrame`），`ink` 动作的 `cancel: true` 就是这么注入 Esc 的 |
+| 历史窗口整表渲染 | 1000 条编辑时撤销那一帧 **323ms**（`ui.label` 逐行排版 + 布局缓存） | `ScrollArea::show_rows` + 按行取描述；压力脚本 `ink_many.json` 的 `undo1` 帧 < 100ms 是回归网 |
+| 用"拖动"造 1000 笔 | 每笔 8 帧，压力脚本要上万帧，门禁变慢且噪声大 | 压力脚本用模型级 `seed_ink`（仍走 `annotate_ink` 的真实入口） |
 
 ## 6. 下一步
 
@@ -92,22 +100,18 @@ export PATH=/tmp/rust/cargo/bin:$PATH CARGO_HOME=/tmp/rust/cargo RUSTUP_HOME=/tm
 `add_annotation` 统一入口；测试 `annotation::tests::ink_*`、`persist::annot_tests::ink_*`、
 回放 `ink_stroke_is_one_annotation_that_undo_and_redo_can_move`、`annot_roundtrip` 的墨迹重开断言。
 
-**已完成（S4b，`c0350b0`，D-120）**：`Tool::Ink`、手势状态机（`ink.rs`）、抬笔才入库、
-`Esc` / 切工具丢弃、起笔补采、不透明深色默认、回放真实拖拽（`set_tool` + `cancel`）、
-JSONL 标注字段。回放断言：一次拖拽 = 1 条、撤销/重做、Esc 后数量不变、1×/2× 包围盒逐值相同。
+**S4 已全部完成**：S4a（`2fdc8bd`）、S4b（`c0350b0`）、S4c（`3ea1e22`）。
 
-**S4c：性能与人工验收**（剩下的全部）：
+- 人工验收（用户确认）：画一笔跟手 / 松手整笔出现且历史描述"墨迹（第 N 页）" /
+  `Esc` 立刻消失不留东西 / 800% 下更粗且已画位置不飘 / 两种删除方式可用；
+- 已知边界（不是 bug）：单击不产生点（单点不成笔）；指针移出窗口不特殊处理（egui 仍给 `dragged`）；
+  "绘制中切工具"在 UI 上不可触达（拖动时点不到工具栏），代码仅作防御；
+- 性能（本机 debug）：1000 条标注画一帧 ~3ms；造 1000 笔 ~4ms；撤销+历史窗口 ~17ms（虚拟化前 323ms）；
+  结构门槛：造标注 `submitted == 0`、纹理层峰值不变（`ink_many` 基线）。
 
-1. 1000 条墨迹以内忙帧 p99 不明显退化：新压力脚本（可以先 `ink` 动作循环造 N 笔，
-   或临时加一个"批量造标注"的模型级动作 —— 注意别把压力脚本塞进 `every_script` 的常规门禁里，
-   它的帧数会拖慢 `check.sh`）；
-2. 人工验收（`agent.md` 分工，必须真窗口）：切到「墨迹」画一笔是否跟手、`Esc` 是否干净丢弃、
-   缩放后笔画粗细与位置是否一致、悬停 + `Delete` 能否删、撤销后是否整笔消失；
-3. 顺带记录两个已知边界：指针移出窗口不特殊处理（egui 继续给 `dragged`）、单击不产生点（单点不成笔）。
+### S5 写回 PDF（下一步，先评估，不承诺）
 
-### S5 写回 PDF（单独评估，不承诺）
-
-- `FPDFAnnot_*` 创建/更新；原子保存（临时文件 + rename）；写成功后**单向迁移**：删除 `<pdf>.annot.json` 与被引用的 `custom_texts` 条目；加密/权限（`Permissions::annotate`）/只读路径；备份策略。**这一步会修改用户文件**，动手前先出一份评估。
+- `FPDFAnnot_*` 创建/更新；原子保存（临时文件 + rename）；写成功后**单向迁移**：删除 `<pdf>.annot.json` 与被引用的 `custom_texts` 条目；加密/权限（`Permissions::annotate`）/只读路径；备份策略。**这一步会修改用户文件**，动手前先出一份评估（风险清单 + 回滚方案 + 只读/加密/权限的失败提示），评估通过再动手。
 
 ### 已知未做（不是 bug，是没到）
 
@@ -120,5 +124,6 @@ JSONL 标注字段。回放断言：一次拖拽 = 1 条、撤销/重做、Esc �
 1. `git log --oneline -15` + 读本文；
 2. `./scripts/check.sh` 确认基线仍绿；
 3. 读 `crates/app/src/app.rs` 里的 `AppEdit` / `apply_edit` / `undo_edit`（这是所有编辑的唯一入口）；
-4. 墨迹三件套（模型/持久化/工具）都已入库；`scripts/replay/ink.json` 是现成的回归脚本。
-   S4c 直接做压力脚本与人工验收清单，不要再改 `InkStroke` 的语义（抬笔入库是硬约定）。
+4. S0–S4 已全部完成（`ink.json` / `ink_many.json` 是现成回归脚本）。下一步只做 S5 **评估**：
+   先读 `crates/backend-pdfium` 里 `Permissions` 与保存路径的现状，产出风险清单，不要直接改用户文件。
+   墨迹相关不要再动语义（抬笔入库、页面空间几何、图层 v2 都是硬约定）。
