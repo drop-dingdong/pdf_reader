@@ -249,6 +249,86 @@ fn a_highlight_on_a_rotated_page_lands_where_the_rotation_says() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// 粗墨迹的直角拐弯处不能有缺口。
+///
+/// 旧实现给每一段都写 `m … l`（各自一条子路径、平头端帽），拐角外侧会留一个菱形缺口；
+/// 现在一条笔画一个子路径 + 圆角连接，拐角内侧的点必须是实色。
+#[test]
+fn a_thick_right_angle_has_no_gap_at_the_joint() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("corner");
+    let source = dir.join("in.pdf");
+    std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+    let spec = WritebackSpec {
+        source,
+        output: dir.join("out.pdf"),
+        pages: vec![WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![WritebackAnnotation {
+                // 从下往上，再向右：顶点 (100,760)，线宽 10 → 半径 5
+                kind: AnnotationKind::Ink {
+                    points: vec![
+                        Point::new(100.0, 700.0),
+                        Point::new(100.0, 760.0),
+                        Point::new(160.0, 760.0),
+                    ],
+                    width: 10.0,
+                },
+                color: [255, 0, 0],
+                opacity: 1.0,
+                body: None,
+            }],
+        }],
+    };
+    writeback::write(&spec).expect("写回成功");
+
+    let bytes = std::fs::read(&spec.output).expect("读输出");
+    let backend = PdfiumBackend::new();
+    let opened = backend.open(Source::Bytes(&bytes), None).expect("重开");
+    let scale = 2.0;
+    let image = opened
+        .raster
+        .render(&RenderRequest::new(
+            PageIndex::FIRST,
+            Scale(scale),
+            Rotation::None,
+        ))
+        .expect("渲染");
+
+    let pixel = |page_x: f32, page_y: f32| -> [u8; 4] {
+        let x = (page_x * scale) as u32;
+        let y = ((792.0 - page_y) * scale) as u32;
+        let index = ((y * image.width + x) * 4) as usize;
+        [
+            image.data()[index],
+            image.data()[index + 1],
+            image.data()[index + 2],
+            image.data()[index + 3],
+        ]
+    };
+    // 拐角内侧：距顶点 (100,760) 约 3.6pt < 半径 5 → 必须是红色。
+    // 旧实现（每段一条子路径）这里是白的。
+    let inside = pixel(97.0, 762.0);
+    assert!(
+        inside[2] > 150 && inside[1] < 100 && inside[0] < 100,
+        "拐角处有缺口：页面 (97,762) 的像素是 {inside:?}（BGRA，应当是红色）"
+    );
+    // 顶点本身也必须实心
+    let joint = pixel(100.0, 760.0);
+    assert!(joint[2] > 150 && joint[1] < 100, "顶点处不实心：{joint:?}");
+    // 远离笔画的地方保持白底（防止把整页染色当成通过）
+    let outside = pixel(80.0, 780.0);
+    assert!(
+        outside[2] > 200 && outside[1] > 200 && outside[0] > 200,
+        "笔画外的像素不应被染色：{outside:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn refuses_to_overwrite_the_source_file() {
     if !backend_available() {

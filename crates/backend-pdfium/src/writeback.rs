@@ -413,15 +413,18 @@ fn appearance_content(kind: &AnnotationKind, color: [u8; 3]) -> Option<String> {
         // 高亮不写 AP：写了就是不透明填充，会盖住文字；让阅读器按 /QuadPoints 合成
         AnnotationKind::Highlight { .. } => None,
         AnnotationKind::Ink { points, width } => {
-            let mut content = format!("q {stroke} {} w", number(*width));
-            for pair in points.windows(2) {
-                content.push_str(&format!(
-                    " {} {} m {} {} l",
-                    number(pair[0].x),
-                    number(pair[0].y),
-                    number(pair[1].x),
-                    number(pair[1].y)
-                ));
+            let first = points.first()?;
+            // **一条笔画 = 一个子路径**：早先每段都写 `m … l`，等于每段各自是一条独立子路径，
+            // 段落自带平头端帽，拐角处就留下一个菱形缺口（用户实测的"裂缝"）。
+            // `1 J`（圆头端帽）+ `1 j`（圆角连接）保证任意夹角都不漏。
+            let mut content = format!(
+                "q {stroke} {} w 1 J 1 j {} {} m",
+                number(*width),
+                number(first.x),
+                number(first.y)
+            );
+            for point in &points[1..] {
+                content.push_str(&format!(" {} {} l", number(point.x), number(point.y)));
             }
             content.push_str(" S Q");
             Some(content)
@@ -752,17 +755,28 @@ mod tests {
     use pdfcore::prelude::Point;
 
     #[test]
-    fn ink_content_lists_every_segment_in_page_space() {
+    fn ink_content_is_one_subpath_with_round_caps_and_joins() {
         let kind = AnnotationKind::Ink {
-            points: vec![Point::new(10.0, 20.0), Point::new(30.0, 40.0)],
+            points: vec![
+                Point::new(10.0, 20.0),
+                Point::new(30.0, 40.0),
+                Point::new(50.0, 20.0),
+            ],
             width: 2.0,
         };
         let content = appearance_content(&kind, [255, 0, 0]).expect("墨迹必须写 AP");
         assert!(
-            content.starts_with("q 1.00 0.00 0.00 RG 2.00 w "),
+            content.starts_with("q 1.00 0.00 0.00 RG 2.00 w 1 J 1 j "),
             "实际：{content}"
         );
-        assert!(content.contains("10.00 20.00 m 30.00 40.00 l"));
+        // 一条子路径：恰好一个 m，后续全是 l（每段各写 m 会在拐角留缺口）
+        assert_eq!(
+            content.matches(" m").count(),
+            1,
+            "只能有一个子路径起点：{content}"
+        );
+        assert_eq!(content.matches(" l").count(), 2, "两段折线：{content}");
+        assert!(content.contains("10.00 20.00 m 30.00 40.00 l 50.00 20.00 l"));
         assert!(content.ends_with(" S Q"));
     }
 
