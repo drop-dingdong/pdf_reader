@@ -807,6 +807,21 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   旋转页在 Chrome/Acrobat 里的人工抽查仍建议做。
 - **状态**：修复生效。
 
+### D-127 修正：导出 job 里的路径没有绝对化（子进程解析到 /tmp）
+
+- **问题（用户实测）**：`cargo run -p app -- scripts/replay/rotated_2p.pdf` 后点导出，报
+  `源文件不存在：/tmp/scripts/replay/rotated_2p.pdf`。
+- **根因**：`document_path` 是命令行给的**相对路径**；`export::job_json` 原样写进 job，
+  而 job 落在系统临时目录，子进程按“相对 job 文件所在目录”解析 → `/tmp/scripts/...`。
+- **修复**：父进程在 `export_with` 开头把 `pdf`/`output` 绝对化（`current_dir().join(path)`；
+  MSRV 1.75 下不能用 `std::path::absolute`）。临时文件与 rename 也用绝对路径；
+  子进程的相对路径解析保留作防御。
+- **影响**：`app/src/export.rs`（绝对化 + 一个回归测试）；`docs/current/writeback.md` §5/§15。
+- **验证**：`job_paths_are_absolutized_before_the_child_resolves_them` —— 用相对路径
+  `Cargo.toml` 当源、假子进程把 job 回显到 stderr，断言 `"pdf"` 是 `cwd/Cargo.toml`
+  且不含相对形式；`check.sh` 全绿（322 tests）。
+- **状态**：修复生效。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

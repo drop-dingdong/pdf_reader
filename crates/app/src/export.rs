@@ -193,6 +193,11 @@ fn export_with(
     items: &[ExportItem],
     expected_pages: u32,
 ) -> Result<ExportReport, String> {
+    // 子进程按"相对 job 文件所在目录"解析路径，而 job 写在系统临时目录里 ——
+    // 所以父进程必须先把路径转成绝对路径（用户实测：相对路径被解析成 /tmp/scripts/...）。
+    let pdf = absolute_path(pdf)?;
+    let output = absolute_path(output)?;
+    let (pdf, output) = (pdf.as_path(), output.as_path());
     ensure_destination_free(output)?;
     if items.is_empty() {
         return Err("当前文档没有标注，没有可导出的内容".to_string());
@@ -285,6 +290,19 @@ fn smoke_check(path: &Path, expected_pages: u32, items: &[ExportItem]) -> Result
         .render(&RenderRequest::new(page, Scale(0.5), Rotation::None))
         .map_err(|error| format!("导出的文件渲染失败：{error}"))?;
     Ok(())
+}
+
+/// 转成绝对路径（只用 `current_dir`，不访问文件系统、不要求存在）。
+///
+/// 不用 `std::path::absolute`：它 1.79 才稳定，而本项目的 MSRV 是 1.75
+/// （clippy 的 `incompatible_msrv` 会拦）。
+fn absolute_path(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|directory| directory.join(path))
+        .map_err(|error| format!("当前目录不可用（无法绝对化 {}）：{error}", path.display()))
 }
 
 fn temporary_path(output: &Path) -> PathBuf {
@@ -527,6 +545,58 @@ mod tests {
             })
             .collect();
         assert!(leftovers.is_empty(), "临时文件必须被清理：{leftovers:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 回归：父进程传给子进程的 job 里，路径**必须是绝对路径**。
+    ///
+    /// 用户实测事故：`cargo run -p app -- scripts/replay/x.pdf` 打开文档后导出，
+    /// job 里写的是相对路径，子进程按 job 所在目录（/tmp）解析 → `/tmp/scripts/...` 找不到。
+    #[cfg(unix)]
+    #[test]
+    fn job_paths_are_absolutized_before_the_child_resolves_them() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let cwd = std::env::current_dir().expect("当前目录");
+        // 用一个**相对路径**的已存在文件当源（内容不重要：假子进程不解析 PDF）
+        let relative_pdf = Path::new("Cargo.toml");
+        assert!(
+            relative_pdf.is_file(),
+            "测试前提：crate 目录下应有 Cargo.toml"
+        );
+        let expected_pdf = cwd.join(relative_pdf);
+
+        let dir = std::env::temp_dir().join(format!(
+            "pdf-export-absolute-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let fake_child = dir.join("dump-job.sh");
+        // 把 job（$2）原样打到 stderr，然后失败退出
+        std::fs::write(&fake_child, "#!/bin/sh\ncat \"$2\" >&2\nexit 1\n").expect("写脚本");
+        std::fs::set_permissions(&fake_child, std::fs::Permissions::from_mode(0o755))
+            .expect("加执行位");
+
+        let error = export_with(
+            &fake_child,
+            relative_pdf,
+            &dir.join("out.pdf"),
+            &[highlight()],
+            1,
+        )
+        .expect_err("假子进程必然失败");
+
+        let expected = format!("\"pdf\": \"{}\"", expected_pdf.display());
+        assert!(
+            error.contains(&expected),
+            "job 里的 pdf 必须是绝对路径 {expected:?}，实际错误：{error}"
+        );
+        assert!(
+            !error.contains("\"pdf\": \"Cargo.toml\""),
+            "不得把相对路径原样写进 job：{error}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

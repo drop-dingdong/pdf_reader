@@ -136,7 +136,9 @@ export PATH=/tmp/rust/cargo/bin:$PATH CARGO_HOME=/tmp/rust/cargo RUSTUP_HOME=/tm
 `app --writeback <job.json>` 子进程入口、四种标注、加密/签名闸门、拒绝 `source == output`；
 完整 FFI/排查文档在 [`current/writeback.md`](current/writeback.md)。
 
-**已修正两个用户实测问题（D-126）**：`DocumentInfo.encrypted` 不再恒真（之前所有文档都被当成加密，
+**已修正用户实测的三个问题**：D-127（导出 job 的路径未绝对化，子进程找到 `/tmp/scripts/…`）、
+D-126（`encrypted` 恒真、页面 `/Rotate` 应用两次）。摘要：
+`DocumentInfo.encrypted` 不再恒真（之前所有文档都被当成加密，
 导出被拒）；页面 `/Rotate` 不再被应用两次（之前 `/Rotate 90` 的页显示成 180° + 压扁）。
 旋转页的注释位置现在有像素级回归测试（`intrinsic_rotation`、`writeback` 旋转页断言）。
 

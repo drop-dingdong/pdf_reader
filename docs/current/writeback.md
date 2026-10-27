@@ -64,7 +64,10 @@
 
 ## 5. job.json（`app::writeback`）
 
-路径相对 **job 文件所在目录**：
+**父进程写 job 前会把 `pdf`/`output` 转成绝对路径**（`current_dir().join(path)`；
+MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
+子进程仍按“相对 job 文件所在目录”解析 —— 只是防御，正常路径不会走到。
+（用户实测事故：相对路径被按 job 目录解析成 `/tmp/scripts/...`，见 D-127。）
 
 ```json
 {
@@ -250,6 +253,7 @@
 | 按钮是灰的 | 没打开 PDF / 没有标注 | 打开一个带标注的 PDF；`annotations` 为空时故意禁用 |
 | “已存在同名文件” | 上次导出留下的 `<stem>.annotated.pdf` | 改名或删除旧文件（**不会**自动覆盖） |
 | “写回子进程失败” | 子进程 stderr | 消息里已带原因；手动跑 `cargo run -p app -- --writeback <job>` 复现 |
+| “源文件不存在：/tmp/scripts/…” | job 里写的是相对路径 | 父进程必须绝对化（D-127）；job 里 `pdf` 应为 `/…/scripts/replay/x.pdf` |
 | “导出的文件打不开 / 页数变了” | 冒烟校验失败 | 临时文件已删；检查磁盘/权限，重试 |
 
 ## 16. 复现与调试
