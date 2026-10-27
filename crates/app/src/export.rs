@@ -19,6 +19,8 @@ use pdfcore::prelude::{PageIndex, PdfBackend, RenderRequest, Rotation, Scale, So
 /// 一条要导出的标注（已从 overlay 与正文表里取好）。
 #[derive(Debug, Clone)]
 pub struct ExportItem {
+    /// 标注 id（写回时用作 `/NM` 标记，保证重复写回幂等）。
+    pub id: Option<u64>,
     /// 页号。
     pub page: PageIndex,
     /// 种类与几何（页面空间）。
@@ -104,6 +106,9 @@ pub fn job_json(pdf: &Path, output: &Path, items: &[ExportItem]) -> String {
 
 fn annotation_json(item: &ExportItem) -> String {
     let mut fields: Vec<String> = Vec::new();
+    if let Some(id) = item.id {
+        fields.push(format!("\"id\": {id}"));
+    }
     match &item.kind {
         AnnotationKind::Highlight { quads } => {
             fields.push("\"kind\": \"highlight\"".to_string());
@@ -210,37 +215,9 @@ fn export_with(
     let temporary = temporary_path(output);
     let _ = std::fs::remove_file(&temporary);
 
-    let job_path = std::env::temp_dir().join(format!(
-        "pdf-export-{}-{}.json",
-        std::process::id(),
-        unique_suffix()
-    ));
-    std::fs::write(&job_path, job_json(pdf, &temporary, items))
-        .map_err(|error| format!("写 job {} 失败：{error}", job_path.display()))?;
-
-    let child = std::process::Command::new(executable)
-        .arg("--writeback")
-        .arg(&job_path)
-        .output();
-    let _ = std::fs::remove_file(&job_path);
-
-    let child = match child {
-        Ok(child) => child,
-        Err(error) => {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(format!("启动写回子进程失败：{error}"));
-        }
-    };
-    if !child.status.success() {
+    if let Err(error) = run_child(executable, pdf, &temporary, items) {
         let _ = std::fs::remove_file(&temporary);
-        let stderr = String::from_utf8_lossy(&child.stderr);
-        let stdout = String::from_utf8_lossy(&child.stdout);
-        let detail = if stderr.trim().is_empty() {
-            stdout.trim().to_string()
-        } else {
-            stderr.trim().to_string()
-        };
-        return Err(format!("写回子进程失败：{detail}"));
+        return Err(error);
     }
 
     let report = finalize(&temporary, output, expected_pages, items);
@@ -248,6 +225,79 @@ fn export_with(
         let _ = std::fs::remove_file(&temporary);
     }
     report
+}
+
+/// 起子进程，把 `pdf` 的标注写到 `temporary`（已绝对化的路径）。
+fn run_child(
+    executable: &Path,
+    pdf: &Path,
+    temporary: &Path,
+    items: &[ExportItem],
+) -> Result<(), String> {
+    let job_path = std::env::temp_dir().join(format!(
+        "pdf-export-{}-{}.json",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::write(&job_path, job_json(pdf, temporary, items))
+        .map_err(|error| format!("写 job {} 失败：{error}", job_path.display()))?;
+    let child = std::process::Command::new(executable)
+        .arg("--writeback")
+        .arg(&job_path)
+        .output();
+    let _ = std::fs::remove_file(&job_path);
+    let child = child.map_err(|error| format!("启动写回子进程失败：{error}"))?;
+    if child.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&child.stderr);
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim().to_string()
+    } else {
+        stderr.trim().to_string()
+    };
+    Err(format!("写回子进程失败：{detail}"))
+}
+
+/// **原地写回的“暂存”阶段**：把标注写成源文件同目录的临时文件（不替换、不删源）。
+///
+/// 返回临时文件路径；调用方负责：关闭文档 → 备份 → `rename` → 重开。
+/// 失败时临时文件已被清理。
+pub fn stage_in_place(
+    pdf: &Path,
+    items: &[ExportItem],
+    expected_pages: u32,
+) -> Result<PathBuf, String> {
+    let pdf = absolute_path(pdf)?;
+    if items.is_empty() {
+        return Err("当前文档没有标注，没有可写入的内容".to_string());
+    }
+    if !pdf.is_file() {
+        return Err(format!("源文件不存在：{}", pdf.display()));
+    }
+    let executable =
+        std::env::current_exe().map_err(|error| format!("找不到自身可执行文件：{error}"))?;
+    let temporary = temporary_path(&pdf);
+    let _ = std::fs::remove_file(&temporary);
+    if let Err(error) = run_child(&executable, &pdf, &temporary, items) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = smoke_check(&temporary, expected_pages, items) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(temporary)
+}
+
+/// 原地写回前的备份路径：`<pdf>.bak-<nanos>`（不覆盖旧备份）。
+pub fn backup_path(pdf: &Path) -> PathBuf {
+    let name = pdf
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "document.pdf".to_string());
+    pdf.with_file_name(format!("{name}.bak-{}", unique_suffix()))
 }
 
 /// 校验临时文件并原子改名（失败时**不**删除临时文件，由调用方决定）。
@@ -331,6 +381,7 @@ mod tests {
 
     fn highlight() -> ExportItem {
         ExportItem {
+            id: Some(1),
             page: PageIndex::FIRST,
             kind: AnnotationKind::Highlight {
                 quads: vec![pdfcore::prelude::Rect::new(10.0, 20.0, 100.0, 12.0)],
@@ -392,6 +443,7 @@ mod tests {
     #[test]
     fn job_json_groups_multiple_annotations_by_page() {
         let ink = ExportItem {
+            id: Some(2),
             page: PageIndex::new(2),
             kind: AnnotationKind::Ink {
                 points: vec![
@@ -466,6 +518,7 @@ mod tests {
             pages: vec![backend_pdfium::writeback::WritebackPage {
                 page: PageIndex::FIRST,
                 annotations: vec![backend_pdfium::writeback::WritebackAnnotation {
+                    id: Some(1),
                     kind: AnnotationKind::Highlight {
                         quads: vec![pdfcore::prelude::Rect::new(50.0, 660.0, 200.0, 14.0)],
                     },
@@ -478,6 +531,7 @@ mod tests {
         backend_pdfium::writeback::write(&spec).expect("先写一份真实 PDF");
 
         let items = [ExportItem {
+            id: Some(1),
             page: PageIndex::FIRST,
             kind: AnnotationKind::Highlight {
                 quads: vec![pdfcore::prelude::Rect::new(50.0, 660.0, 200.0, 14.0)],

@@ -99,6 +99,10 @@ fn parse_annotation(value: &Json, context: &str) -> Result<WritebackAnnotation, 
         .as_object()
         .ok_or_else(|| format!("{context} 不是对象"))?;
     let kind_name = string(object, "kind")?;
+    let id = object
+        .field("id")
+        .and_then(|value| value.as_number())
+        .map(|value| value as u64);
     let color = color(object).unwrap_or([255, 214, 0]);
     let opacity = object
         .field("opacity")
@@ -126,6 +130,7 @@ fn parse_annotation(value: &Json, context: &str) -> Result<WritebackAnnotation, 
         other => return Err(format!("{context}：未知标注种类 {other:?}")),
     };
     Ok(WritebackAnnotation {
+        id,
         kind,
         color,
         opacity,

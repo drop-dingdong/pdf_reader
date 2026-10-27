@@ -69,6 +69,7 @@ fn spec_for_all_kinds(dir: &std::path::Path) -> WritebackSpec {
                 page: PageIndex::FIRST,
                 annotations: vec![
                     WritebackAnnotation {
+                        id: Some(1),
                         kind: AnnotationKind::Ink {
                             points: vec![Point::new(50.0, 720.0), Point::new(300.0, 720.0)],
                             width: 2.0,
@@ -78,6 +79,7 @@ fn spec_for_all_kinds(dir: &std::path::Path) -> WritebackSpec {
                         body: Some("墨迹".to_string()),
                     },
                     WritebackAnnotation {
+                        id: Some(2),
                         kind: AnnotationKind::Highlight {
                             quads: vec![Rect::new(50.0, 660.0, 200.0, 14.0)],
                         },
@@ -86,6 +88,7 @@ fn spec_for_all_kinds(dir: &std::path::Path) -> WritebackSpec {
                         body: None,
                     },
                     WritebackAnnotation {
+                        id: Some(3),
                         kind: AnnotationKind::Underline {
                             quads: vec![Rect::new(50.0, 620.0, 200.0, 14.0)],
                         },
@@ -94,6 +97,7 @@ fn spec_for_all_kinds(dir: &std::path::Path) -> WritebackSpec {
                         body: None,
                     },
                     WritebackAnnotation {
+                        id: Some(4),
                         kind: AnnotationKind::StrikeOut {
                             quads: vec![Rect::new(50.0, 580.0, 200.0, 14.0)],
                         },
@@ -107,6 +111,7 @@ fn spec_for_all_kinds(dir: &std::path::Path) -> WritebackSpec {
             WritebackPage {
                 page: PageIndex::new(1),
                 annotations: vec![WritebackAnnotation {
+                    id: Some(5),
                     kind: AnnotationKind::Highlight {
                         quads: vec![Rect::new(50.0, 100.0, 100.0, 20.0)],
                     },
@@ -268,7 +273,7 @@ fn a_thick_right_angle_has_no_gap_at_the_joint() {
         pages: vec![WritebackPage {
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
-                // 从下往上，再向右：顶点 (100,760)，线宽 10 → 半径 5
+                id: Some(6), // 从下往上，再向右：顶点 (100,760)，线宽 10 → 半径 5
                 kind: AnnotationKind::Ink {
                     points: vec![
                         Point::new(100.0, 700.0),
@@ -329,6 +334,91 @@ fn a_thick_right_angle_has_no_gap_at_the_joint() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// 原地重复写回必须**幂等**：靠 `/NM` 标记跳过已写入的，删掉 overlay 里已不存在的标记注释，
+/// 其它注释（链接等）不动。
+#[test]
+fn writing_twice_is_idempotent_and_drops_stale_marked_annotations() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("sync");
+    let source = dir.join("in.pdf");
+    std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+
+    let highlight = |id: u64, x: f32| WritebackAnnotation {
+        id: Some(id),
+        kind: AnnotationKind::Highlight {
+            quads: vec![Rect::new(x, 660.0, 100.0, 14.0)],
+        },
+        color: [255, 255, 0],
+        opacity: 0.35,
+        body: None,
+    };
+    let first = dir.join("out1.pdf");
+    let write_once =
+        |source: &std::path::Path, output: &std::path::Path, pages: Vec<WritebackPage>| {
+            let spec = WritebackSpec {
+                source: source.to_path_buf(),
+                output: output.to_path_buf(),
+                pages,
+            };
+            writeback::write(&spec).map(|report| report.annotations)
+        };
+
+    let pages = vec![
+        WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![highlight(1, 50.0), highlight(2, 200.0)],
+        },
+        WritebackPage {
+            page: PageIndex::new(1),
+            annotations: vec![highlight(3, 50.0)],
+        },
+    ];
+    assert_eq!(
+        write_once(&source, &first, pages.clone()).expect("第一次"),
+        3
+    );
+    // 第 1 页原有 1 个链接 + 2 条新注释；第 2 页 1 条
+    assert_eq!(
+        writeback::count_annotations(&first).expect("数注释"),
+        vec![3, 1]
+    );
+
+    // 同一份 overlay 再写一次：一条都不应该重复添加
+    let second = dir.join("out2.pdf");
+    assert_eq!(
+        write_once(&first, &second, pages.clone()).expect("第二次"),
+        0,
+        "已存在的标记注释必须跳过"
+    );
+    assert_eq!(
+        writeback::count_annotations(&second).expect("数注释"),
+        vec![3, 1],
+        "重复写回不能把注释叠两遍"
+    );
+
+    // overlay 里删掉 id=2 与第 2 页的 id=3：再写应当把它们从 PDF 里删掉，链接保留
+    let third = dir.join("out3.pdf");
+    let reduced = vec![WritebackPage {
+        page: PageIndex::FIRST,
+        annotations: vec![highlight(1, 50.0)],
+    }];
+    assert_eq!(
+        write_once(&second, &third, reduced).expect("第三次"),
+        0,
+        "留下的那条已在 PDF 里"
+    );
+    assert_eq!(
+        writeback::count_annotations(&third).expect("数注释"),
+        vec![2, 0],
+        "第 1 页 = 链接 + 1 条；第 2 页的标记注释应被删掉"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn refuses_to_overwrite_the_source_file() {
     if !backend_available() {
@@ -344,6 +434,7 @@ fn refuses_to_overwrite_the_source_file() {
         pages: vec![WritebackPage {
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
+                id: Some(7),
                 kind: AnnotationKind::Highlight {
                     quads: vec![Rect::new(10.0, 10.0, 20.0, 10.0)],
                 },
@@ -376,7 +467,7 @@ fn rejects_geometry_that_the_model_would_reject() {
         pages: vec![WritebackPage {
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
-                // 单点墨迹：模型不变量应当拒绝
+                id: Some(8), // 单点墨迹：模型不变量应当拒绝
                 kind: AnnotationKind::Ink {
                     points: vec![Point::new(10.0, 10.0)],
                     width: 2.0,

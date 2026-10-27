@@ -25,6 +25,7 @@
 //! 实测依据（无 AP 时的渲染结果）：墨迹不可见（1 px）、下划线 0 px、删除线只覆盖文字（24 px）、
 //! 高亮可被 PDFium 合成（文字仍可读）。详见评估 §12。
 
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void, CString};
 use std::os::raw::c_float;
 use std::path::{Path, PathBuf};
@@ -60,6 +61,8 @@ pub struct WritebackPage {
 /// 写到 PDF 的 `/Contents`。
 #[derive(Debug, Clone)]
 pub struct WritebackAnnotation {
+    /// 标注 id（用于 `/NM` 标记，保证重复写回不会叠两遍）。`None` 表示不打标记。
+    pub id: Option<u64>,
     /// 种类与几何。
     pub kind: AnnotationKind,
     /// RGB。
@@ -146,8 +149,19 @@ pub fn write(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
     let source = CString::new(spec.source.to_string_lossy().as_ref())
         .map_err(|_| WritebackError::Invalid("源路径含 NUL 字节".to_string()))?;
 
-    // 写入前每页原有的注释数；保存后用它核对（在 unsafe 块外声明，校验阶段要用）
-    let mut before: Vec<usize>;
+    // 期望的逐页注释数（同步之后）；保存后用它核对
+    let mut expected: Vec<usize>;
+    let mut added_total = 0usize;
+    // 每一页"期望存在"的标记 id 集合（只来自 spec）
+    let mut desired: HashMap<u32, HashSet<u64>> = HashMap::new();
+    for page in &spec.pages {
+        let entry = desired.entry(page.page.get()).or_default();
+        for annotation in &page.annotations {
+            if let Some(id) = annotation.id {
+                entry.insert(id);
+            }
+        }
+    }
     unsafe {
         let document = (ffi.load_document)(source.as_ptr(), std::ptr::null());
         if document.is_null() {
@@ -178,7 +192,7 @@ pub fn write(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
 
         let page_count = (ffi.page_count)(document).max(0) as usize;
 
-        before = vec![0usize; page_count];
+        expected = vec![0usize; page_count];
         // 写之前先确认页号合法，避免写了一半才失败
         for page in &spec.pages {
             let index = page.page.get() as usize;
@@ -191,20 +205,68 @@ pub fn write(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
             }
         }
 
-        for page in &spec.pages {
-            let index = page.page.get() as c_int;
-            let handle = (ffi.load_page)(document, index);
+        // **同步**（S5c）：以 `/NM` 标记识别"上次写回的注释"。
+        // 目标页上：标记存在且 id 仍在集合里 → 跳过；标记存在但 id 已不在 → 删除；
+        // 非目标页上的标记（overlay 里已被删掉的）→ 一律删除。其它注释（链接等）不碰。
+        // 这样原地重复写回是幂等的，不会把注释叠两遍。
+        for (index, expected_slot) in expected.iter_mut().enumerate() {
+            let handle = (ffi.load_page)(document, index as c_int);
             if handle.is_null() {
                 (ffi.close_document)(document);
                 return Err(WritebackError::Pdfium {
                     stage: "FPDF_LoadPage",
-                    message: format!("第 {} 页加载失败", page.page.display_number()),
+                    message: format!("第 {} 页加载失败", index + 1),
                 });
             }
-            before[index as usize] = (ffi.annot_count)(handle).max(0) as usize;
-            for annotation in &page.annotations {
-                add_annotation(&ffi, handle, annotation)?;
+            let count = (ffi.annot_count)(handle).max(0) as usize;
+            let wanted = desired.get(&(index as u32));
+            let mut present: HashSet<u64> = HashSet::new();
+            let mut remove_indices: Vec<c_int> = Vec::new();
+            for annot_index in 0..count as c_int {
+                let annot = (ffi.get_annot)(handle, annot_index);
+                if annot.is_null() {
+                    continue;
+                }
+                if let Some(id) = read_marker(&ffi, annot) {
+                    if wanted.is_some_and(|set| set.contains(&id)) {
+                        present.insert(id);
+                    } else {
+                        remove_indices.push(annot_index);
+                    }
+                }
+                (ffi.close_annot)(annot);
             }
+            let mut remaining = count;
+            for annot_index in remove_indices.iter().rev() {
+                if (ffi.remove_annot)(handle, *annot_index) == 0 {
+                    (ffi.close_page)(handle);
+                    (ffi.close_document)(document);
+                    return Err(WritebackError::Pdfium {
+                        stage: "FPDFPage_RemoveAnnot",
+                        message: format!("第 {} 页 #{}", index + 1, annot_index),
+                    });
+                }
+                remaining -= 1;
+            }
+
+            let mut added = 0usize;
+            if let Some(page) = spec
+                .pages
+                .iter()
+                .find(|page| page.page.get() as usize == index)
+            {
+                for annotation in &page.annotations {
+                    if let Some(id) = annotation.id {
+                        if present.contains(&id) {
+                            continue; // 上次已经写进去了
+                        }
+                    }
+                    add_annotation(&ffi, handle, annotation)?;
+                    added += 1;
+                }
+            }
+            *expected_slot = remaining + added;
+            added_total += added;
             (ffi.close_page)(handle);
         }
 
@@ -219,10 +281,10 @@ pub fn write(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
         })?;
     }
 
-    verify_counts(spec, &before, &ffi)?;
+    verify_counts(spec, &expected, &ffi)?;
 
     Ok(WritebackReport {
-        annotations: spec.pages.iter().map(|page| page.annotations.len()).sum(),
+        annotations: added_total,
         bytes: std::fs::metadata(&spec.output)
             .map(|metadata| metadata.len())
             .unwrap_or(0),
@@ -333,6 +395,18 @@ unsafe fn add_annotation(
     }
     // 打印标志（PDF 的 /F 位 3 = Print）。用户打印时注释应该出现。
     let _ = (ffi.set_flags)(handle, ANNOT_FLAG_PRINT);
+
+    if let Some(id) = annotation.id {
+        let marker = wide_string(&marker_value(id));
+        let key = CString::new("NM").expect("字面量");
+        if (ffi.set_string)(handle, key.as_ptr(), marker.as_ptr()) == 0 {
+            (ffi.close_annot)(handle);
+            return Err(WritebackError::Pdfium {
+                stage: "FPDFAnnot_SetStringValue(NM)",
+                message: format!("id={id}"),
+            });
+        }
+    }
 
     if let Some(body) = &annotation.body {
         let wide = wide_string(body);
@@ -510,7 +584,7 @@ unsafe fn save(ffi: &Ffi, document: *mut c_void) -> WritebackResult<Vec<u8>> {
     Ok(writer.data)
 }
 
-fn verify_counts(spec: &WritebackSpec, before: &[usize], ffi: &Ffi) -> WritebackResult<()> {
+fn verify_counts(spec: &WritebackSpec, expected: &[usize], ffi: &Ffi) -> WritebackResult<()> {
     let counts = {
         let c_path = CString::new(spec.output.to_string_lossy().as_ref())
             .map_err(|_| WritebackError::Invalid("输出路径含 NUL 字节".to_string()))?;
@@ -541,25 +615,21 @@ fn verify_counts(spec: &WritebackSpec, before: &[usize], ffi: &Ffi) -> Writeback
         }
     };
 
-    if counts.len() != before.len() {
+    if counts.len() != expected.len() {
         return Err(WritebackError::Pdfium {
             stage: "verify",
-            message: format!("页数变了：{} → {}", before.len(), counts.len()),
+            message: format!("页数变了：{} → {}", expected.len(), counts.len()),
         });
     }
-    for (index, page) in spec.pages.iter().enumerate() {
-        let target = page.page.get() as usize;
-        let expected = before[target] + page.annotations.len();
-        if counts[target] != expected {
+    for (index, want) in expected.iter().enumerate() {
+        if counts[index] != *want {
             return Err(WritebackError::Pdfium {
                 stage: "verify",
                 message: format!(
-                    "第 {} 页注释数 {}，期望 {}（原有 {} + 新增 {}）",
+                    "第 {} 页注释数 {}，期望 {}（同步后的计数）",
                     index + 1,
-                    counts[target],
-                    expected,
-                    before[target],
-                    page.annotations.len()
+                    counts[index],
+                    want
                 ),
             });
         }
@@ -568,6 +638,38 @@ fn verify_counts(spec: &WritebackSpec, before: &[usize], ffi: &Ffi) -> Writeback
 }
 
 // ============================================================ FFI（详见 docs/current/writeback.md）
+
+/// 写回标记的前缀：`/NM` = `pd-fr:<id>`。
+///
+/// 用途：区分"我们写回的注释"与用户/其它程序加的注释，使**原地重复写回幂等**
+/// （已有则跳过、overlay 里没了则删掉；其它注释不碰）。见 `write()` 的同步段。
+const MARKER_PREFIX: &str = "pd-fr:";
+
+fn marker_value(id: u64) -> String {
+    format!("{MARKER_PREFIX}{id}")
+}
+
+fn marker_id(value: &str) -> Option<u64> {
+    value.strip_prefix(MARKER_PREFIX)?.parse().ok()
+}
+
+/// 读一条注释的 `/NM`（UTF-16LE），解析出我们的 id。
+unsafe fn read_marker(ffi: &Ffi, annot: *mut c_void) -> Option<u64> {
+    let key = CString::new("NM").ok()?;
+    let mut buffer = vec![0u16; 64];
+    let length = (ffi.get_string)(
+        annot,
+        key.as_ptr(),
+        buffer.as_mut_ptr(),
+        (buffer.len() * 2) as c_ulong,
+    );
+    if length == 0 {
+        return None;
+    }
+    let units = (length as usize / 2).min(buffer.len());
+    let text = String::from_utf16_lossy(&buffer[..units]);
+    marker_id(text.trim_end_matches('\0'))
+}
 
 const ANNOT_HIGHLIGHT: c_uint = 9;
 const ANNOT_UNDERLINE: c_uint = 10;
@@ -644,12 +746,15 @@ struct Ffi {
     load_page: unsafe extern "C" fn(*mut c_void, c_int) -> *mut c_void,
     close_page: unsafe extern "C" fn(*mut c_void),
     annot_count: unsafe extern "C" fn(*mut c_void) -> c_int,
+    get_annot: unsafe extern "C" fn(*mut c_void, c_int) -> *mut c_void,
+    remove_annot: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
     create_annot: unsafe extern "C" fn(*mut c_void, c_uint) -> *mut c_void,
     close_annot: unsafe extern "C" fn(*mut c_void),
     set_rect: unsafe extern "C" fn(*mut c_void, *const FsRectF) -> c_int,
     set_color: unsafe extern "C" fn(*mut c_void, c_uint, c_uint, c_uint, c_uint, c_uint) -> c_int,
     set_flags: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
     set_string: unsafe extern "C" fn(*mut c_void, *const c_char, *const u16) -> c_int,
+    get_string: unsafe extern "C" fn(*mut c_void, *const c_char, *mut u16, c_ulong) -> c_ulong,
     add_ink_stroke: unsafe extern "C" fn(*mut c_void, *const FsPointF, usize) -> c_int,
     append_quad: unsafe extern "C" fn(*mut c_void, *const FsQuadPointsF) -> c_int,
     set_ap: unsafe extern "C" fn(*mut c_void, c_uint, *const u16) -> c_int,
@@ -697,6 +802,14 @@ impl Ffi {
                 "FPDFPage_GetAnnotCount",
                 unsafe extern "C" fn(*mut c_void) -> c_int
             ),
+            get_annot: sym!(
+                "FPDFPage_GetAnnot",
+                unsafe extern "C" fn(*mut c_void, c_int) -> *mut c_void
+            ),
+            remove_annot: sym!(
+                "FPDFPage_RemoveAnnot",
+                unsafe extern "C" fn(*mut c_void, c_int) -> c_int
+            ),
             create_annot: sym!(
                 "FPDFPage_CreateAnnot",
                 unsafe extern "C" fn(*mut c_void, c_uint) -> *mut c_void
@@ -717,6 +830,10 @@ impl Ffi {
             set_string: sym!(
                 "FPDFAnnot_SetStringValue",
                 unsafe extern "C" fn(*mut c_void, *const c_char, *const u16) -> c_int
+            ),
+            get_string: sym!(
+                "FPDFAnnot_GetStringValue",
+                unsafe extern "C" fn(*mut c_void, *const c_char, *mut u16, c_ulong) -> c_ulong
             ),
             add_ink_stroke: sym!(
                 "FPDFAnnot_AddInkStroke",

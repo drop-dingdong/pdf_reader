@@ -64,6 +64,55 @@ fn a_job_file_exports_the_annotations_next_to_it() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// 同一份 job 跑两次（第二次以第一次的输出为源）不能把注释叠两遍。
+#[test]
+fn running_the_same_job_twice_does_not_duplicate_annotations() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("twice");
+    std::fs::write(dir.join("in.pdf"), backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+    let annotations = r#"
+      { "id": 1, "kind": "highlight", "quads": [[50, 660, 200, 14]],
+        "color": [255, 255, 0], "opacity": 0.35 },
+      { "id": 2, "kind": "ink", "points": [[50, 720], [300, 720]],
+        "width": 2.0, "color": [255, 0, 0], "opacity": 1.0 }
+    "#;
+    let first_job = dir.join("job1.json");
+    std::fs::write(
+        &first_job,
+        format!(
+            r#"{{ "pdf": "in.pdf", "output": "out1.pdf",
+                   "pages": [ {{ "page": 0, "annotations": [ {annotations} ] }} ] }}"#
+        ),
+    )
+    .expect("写 job1");
+    app::writeback::run_job(&first_job).expect("第一次写回");
+    let counts = backend_pdfium::writeback::count_annotations(&dir.join("out1.pdf")).expect("数");
+    assert_eq!(counts, vec![3, 0], "链接 + 2 条");
+
+    // 第二次：源 = 第一次的输出，标注 id 相同
+    let second_job = dir.join("job2.json");
+    std::fs::write(
+        &second_job,
+        format!(
+            r#"{{ "pdf": "out1.pdf", "output": "out2.pdf",
+                   "pages": [ {{ "page": 0, "annotations": [ {annotations} ] }} ] }}"#
+        ),
+    )
+    .expect("写 job2");
+    let summary = app::writeback::run_job(&second_job).expect("第二次写回");
+    assert!(
+        summary.contains("0 条标注"),
+        "第二次不应新增注释（实际：{summary}）"
+    );
+    let counts = backend_pdfium::writeback::count_annotations(&dir.join("out2.pdf")).expect("数");
+    assert_eq!(counts, vec![3, 0], "重复写回不能叠加");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn an_unknown_kind_is_rejected_before_touching_any_file() {
     if !backend_available() {

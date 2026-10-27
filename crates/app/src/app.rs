@@ -537,6 +537,8 @@ pub struct PdfReaderApp {
     ink: Option<InkStroke>,
     /// "下一步把当前选区变成标注"（由快捷键/按钮置位，在画布绘制时执行）。
     pending_annotate: bool,
+    /// 是否正在等"原地写入 PDF"的确认（S5c）。
+    pending_in_place: bool,
     /// 标注图层是否有未保存的改动（Ctrl+S 用它决定要不要写）。
     overlay_dirty: bool,
     /// 编辑历史（注释 + 重选截图/引用点，单栈时间序）。
@@ -742,6 +744,7 @@ impl PdfReaderApp {
             annotations: AnnotationStore::new(),
             ink: None,
             pending_annotate: false,
+            pending_in_place: false,
             overlay_dirty: false,
             history: crate::history::History::new(),
             orphan_bodies: std::collections::HashMap::new(),
@@ -951,6 +954,156 @@ impl PdfReaderApp {
     ///
     /// 顺序固定：先主存档（正文在里面）、再图层；两份各自原子写，互不依赖，
     /// 所以即使图层写失败，正文也已经落盘（加载时缺图层只是"没有标注"，不会崩）。
+    /// 原地写入的确认框（S5c）。确认后覆盖原文件；取消则什么都不做。
+    fn draw_in_place_dialog(&mut self, ctx: &egui::Context) {
+        if !self.pending_in_place {
+            return;
+        }
+        let path = self
+            .document_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        let mut decision: Option<bool> = None;
+        egui::Modal::new(Id::unique("in-place-confirm")).show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.heading("写入 PDF（原地覆盖）");
+            ui.label(format!("将把当前标注写入：{path}"));
+            ui.label("写入前会先备份原文件为 `<文件名>.bak-<时间>`；`.annot.json` 保留。");
+            ui.label("重复写入是幂等的：按注释里的 /NM 标记同步，不会叠加。");
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("取消").clicked() {
+                    decision = Some(false);
+                }
+                if ui.button("备份并写入").clicked() {
+                    decision = Some(true);
+                }
+            });
+        });
+        match decision {
+            Some(false) => self.pending_in_place = false,
+            Some(true) => {
+                self.pending_in_place = false;
+                self.perform_in_place_writeback();
+            }
+            None => {}
+        }
+    }
+
+    /// 原地写入（S5c）：暂存 → 关闭会话 → 备份 → 原子替换 → 重开并恢复视图。
+    ///
+    /// 注释不删 overlay（S6 才能读回 PDF 注释；删了本程序就看不到/改不了它们了）。
+    /// 写回本身在子进程里（见 `docs/current/writeback.md`）。
+    fn perform_in_place_writeback(&mut self) {
+        let Some(pdf) = self.document_path.clone() else {
+            self.message = "先打开一个 PDF 再写入".to_string();
+            return;
+        };
+        // 一次性取出快照，随后要释放会话的借用
+        let Some((page, zoom, scroll, pages)) = self.session.as_ref().map(|session| {
+            (
+                session.state().current_page,
+                session.state().zoom,
+                session.viewport().scroll,
+                session.page_count(),
+            )
+        }) else {
+            self.message = "没有打开的文档".to_string();
+            return;
+        };
+        {
+            let Some(session) = self.session.as_ref() else {
+                return;
+            };
+            if session.opened().document.info().encrypted {
+                self.message = "加密文档暂不支持原地写入".to_string();
+                return;
+            }
+        }
+        if self.annotations.is_empty() {
+            self.message = "当前文档没有标注".to_string();
+            return;
+        }
+        let items: Vec<crate::export::ExportItem> = self
+            .annotations
+            .iter()
+            .map(|annotation| {
+                let body = annotation.body_title.as_ref().and_then(|title| {
+                    self.custom_previews
+                        .iter()
+                        .find(|preview| &preview.title == title)
+                        .and_then(|preview| preview.text.clone())
+                        .filter(|text| !text.is_empty())
+                });
+                crate::export::ExportItem {
+                    id: Some(annotation.id.get()),
+                    page: annotation.page,
+                    kind: annotation.kind.clone(),
+                    color: annotation.color,
+                    opacity: annotation.opacity,
+                    body,
+                }
+            })
+            .collect();
+
+        // 先把 sidecar 落盘：重开会从磁盘重新加载 overlay/正文，未保存的改动会丢
+        self.save_all();
+        if self.data_dirty || self.overlay_dirty {
+            self.message = "有改动未能保存（存档被占用？），已取消写入".to_string();
+            return;
+        }
+
+        let temporary = match crate::export::stage_in_place(&pdf, &items, pages) {
+            Ok(path) => path,
+            Err(error) => {
+                self.message = format!("写入失败（原文件未改动）：{error}");
+                return;
+            }
+        };
+
+        // 关闭会话：释放 PDFium 的文件句柄（Windows 上不放开就无法替换原文件）
+        self.session = None;
+        self.textures.clear();
+
+        let backup = crate::export::backup_path(&pdf);
+        if let Err(error) = std::fs::copy(&pdf, &backup) {
+            let _ = std::fs::remove_file(&temporary);
+            self.open(&pdf, None);
+            self.message = format!("备份失败，已取消（原文件未改动）：{error}");
+            return;
+        }
+        if let Err(error) = std::fs::rename(&temporary, &pdf) {
+            let _ = std::fs::remove_file(&temporary);
+            self.open(&pdf, None);
+            self.message = format!(
+                "替换原文件失败（原文件未改动，备份在 {}）：{error}",
+                backup.display()
+            );
+            return;
+        }
+
+        // 重开并恢复视图
+        self.open(&pdf, None);
+        if self.session.is_some() {
+            self.commands.push(ViewerCommand::GoToPage(page));
+            self.commands.push(ViewerCommand::SetZoom(zoom));
+            self.commands.push(ViewerCommand::SetScroll(scroll));
+            self.message = format!(
+                "已原地写入 {} 条标注：{}（备份：{}）",
+                items.len(),
+                pdf.display(),
+                backup.display()
+            );
+        } else {
+            self.message = format!(
+                "写入完成，但重新打开失败：{}（备份：{}）",
+                pdf.display(),
+                backup.display()
+            );
+        }
+    }
+
     /// 导出带标注的 PDF（S5b-2）：overlay + 正文 → job → 子进程 → 校验 → 原子改名。
     ///
     /// 目标固定为同目录 `<stem>.annotated.pdf`，**不覆盖**已有文件；
@@ -982,6 +1135,7 @@ impl PdfReaderApp {
                         .filter(|text| !text.is_empty())
                 });
                 crate::export::ExportItem {
+                    id: Some(annotation.id.get()),
                     page: annotation.page,
                     kind: annotation.kind.clone(),
                     color: annotation.color,
@@ -1734,6 +1888,22 @@ impl PdfReaderApp {
                                 self.save_all();
                             }
                         }
+                    }
+                    ui.add_space(6.0);
+                    // 原地写入（S5c）：会覆盖原文件，先弹确认 + 自动备份
+                    let can_write =
+                        self.document_path.is_some() && !self.annotations.is_empty();
+                    let write_back =
+                        ui.add_enabled(can_write, egui::Button::new("写入 PDF"));
+                    let write_back = if can_write {
+                        write_back.on_hover_text(
+                            "把标注写进原 PDF（会先备份、再原子替换；重复写入是幂等的）",
+                        )
+                    } else {
+                        write_back.on_disabled_hover_text("需要打开一个 PDF，且至少有一条标注")
+                    };
+                    if write_back.clicked() {
+                        self.pending_in_place = true;
                     }
                     ui.add_space(6.0);
                     // 导出带标注的 PDF（S5b-2）：写新文件，不覆盖；真正的写回在子进程里
@@ -5260,6 +5430,8 @@ impl eframe::App for PdfReaderApp {
 
         // 拖放打开：**空状态下也必须处理**（v1 只在已有会话时读取，导致启动后拖入无反应）
         self.handle_dropped_files(&ctx);
+        // 原地写入的确认框必须在借用 session 之前处理：确认后要**关掉会话**才能替换文件
+        self.draw_in_place_dialog(&ctx);
         self.draw_history_window(&ctx);
 
         // 把会话临时取出，避免与 `self` 的其它字段发生借用冲突

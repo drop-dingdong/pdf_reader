@@ -861,6 +861,34 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   * `check.sh` 全绿（323 tests）。
 - **状态**：修复生效。
 
+### D-130 S5c：原地写入（按 `/NM` 标记同步，保留 overlay）
+
+- **决定**：
+  1. **原地写入**取代"导出副本"作为第二个入口：工具栏「写入 PDF」→ 确认框 → 备份 → 原子替换；
+  2. **不删 overlay**：读回 PDF 注释（S6）之前，删掉 `.annot.json` 就等于让标注在本程序里消失、
+     不可编辑；因此 S5c 只做"把 PDF 同步成 overlay 的样子"，不做迁移；
+  3. **幂等靠 `/NM` 标记**：每条写回的注释设 `/NM = "pd-fr:<id>"`。写回时逐页枚举：
+     标记 id 仍在 overlay → 跳过；标记 id 已不在 → `FPDFPage_RemoveAnnot` 删除；
+     非目标页上的标记 → 删除；**没有标记的注释（链接、其它程序加的）一律不碰**；
+  4. 执行顺序：保存脏 sidecar（重开会从磁盘加载 overlay）→ 子进程写临时文件（同步）→
+     冒烟校验 → **关闭会话**（释放 PDFium 文件句柄，Windows 才能替换）→
+     备份 `<文件名>.bak-<纳秒>` → `fs::rename` → 重开并恢复 页/缩放/滚动。
+- **理由**：没有读回能力时，"覆盖原文件 + 删 overlay"会让功能在界面上倒退；而"覆盖 + 保留 overlay"
+  必须解决重复写回叠加的问题 —— 标记同步是最小且可验证的方案。标记同时写进导出副本，
+  所以导出文件之后再做原地写入也能识别。
+- **影响**：`backend-pdfium/src/writeback.rs`（`id` 字段、`/NM` 写入/读取、同步段、期望计数校验）、
+  `app/src/{export,writeback,app}.rs`（`stage_in_place`、备份路径、确认框与执行流程）、
+  `docs/current/{writeback,app-ui}.md`。
+- **验证**：
+  * `writing_twice_is_idempotent_and_drops_stale_marked_annotations`：第一次写 3 条；第二次报告
+    **新增 0**、总数不变；删掉 overlay 里两条后再写 → PDF 里对应标记被删、链接保留；
+  * `running_the_same_job_twice_does_not_duplicate_annotations`（job 层，含 `id` 解析）；
+  * `check.sh` 全绿（325 tests）。
+- **已知边界**：不更新已存在标记注释的几何/颜色（overlay 没有这类编辑）；写完后 undo/redo 只改 overlay，
+  PDF 等下次写入同步；备份不自动清理；加密/签名文档仍拒绝；原地写入的"关闭→替换→重开"是 UI 层流程，
+  只能人工验收。
+- **状态**：有效（S5c 完成；S6 未开始）。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

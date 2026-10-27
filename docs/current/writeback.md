@@ -8,7 +8,8 @@
 
 * **是**：把本程序内存里的标注（墨迹 / 高亮 / 下划线 / 删除线）写成**真正的 PDF 注释**，
   保存到一个**新文件**（`<stem>.annotated.pdf`），由主进程编排、子进程执行（S5b-2）。
-* **不是**：不是 UI（S5b-2 才接按钮）、不是原地覆盖（S5c）、不是"读回 PDF 注释"（S6）。
+* **不是**："读回 PDF 注释"（S6）。读回之前，`.annot.json` 仍是本程序的编辑来源；
+  原地写回（S5c）也**不删** overlay。
 * **不在主进程里跑**：写回直接在 PDFium 里创建注释，`pdfium-render 0.9.4` 没有这层 API，
   所以我们用 `libloading` 自己绑定了 18 个 C 函数；这些调用**绕过 pdfium-render 的全局锁**，
   与后台渲染线程并发会让 PDFium 崩溃。因此产品路径是**隐藏子命令 + 子进程**。
@@ -101,7 +102,10 @@ MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
 | `FPDF_GetPageCount` | `(doc) -> c_int` | 页数 | 负数表示失败 |
 | `FPDF_LoadPage` | `(doc, index: c_int) -> FPDF_PAGE` | 取页 | 返回 null |
 | `FPDF_ClosePage` | `(page)` | 释放页 | 无返回 |
-| `FPDFPage_GetAnnotCount` | `(page) -> c_int` | 数注释（写前/校验） | 负数 |
+| `FPDFPage_GetAnnotCount` | `(page) -> c_int` | 数注释（同步/校验） | 负数 |
+| `FPDFPage_GetAnnot` | `(page, index) -> FPDF_ANNOTATION` | 枚举注释（读 `/NM`） | null |
+| `FPDFPage_RemoveAnnot` | `(page, index) -> c_int` | 删除过期标记注释 | 0 |
+| `FPDFAnnot_GetStringValue` | `(annot, key, *mut u16, len) -> c_ulong` | 读 `/NM`（UTF-16LE） | 0 / 长度 |
 | `FPDFPage_CreateAnnot` | `(page, subtype: c_uint) -> FPDF_ANNOTATION` | 建注释 | 返回 null（子类型不支持） |
 | `FPDFPage_CloseAnnot` | `(annot)` | 释放注释句柄（**不删除**注释） | 无返回 |
 | `FPDFAnnot_SetRect` | `(annot, *const FS_RECTF) -> c_int` | `/Rect` | 0 |
@@ -153,6 +157,9 @@ MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
 | 下划线 | 同上 | `SetAP`（每个 quad 底部一条线） | 无 AP 时 **0 px**（完全不渲染） |
 | 删除线 | 同上 | `SetAP`（每个 quad 中线一条线） | 无 AP 时只覆盖文字（24 px），空页 0 |
 
+**`/NM` 标记**：写回时设 `/NM = "pd-fr:<id>"`；`id` 来自 job 的 `"id"` 字段（overlay 的标注 id）。
+没有 `id` 的标注不打标记（每次都会新增，仅用于兼容旧 job）。
+
 **`SetAP` 的实际行为**（核对过保存后的 PDF）：PDFium 会生成
 `/AP << /N <Form XObject> >>`，该 Form 的 `/BBox` = 注释的 `/Rect`，**没有 `/Matrix`、没有 `/Resources`**，
 流内容就是我们传入的字符串。因此：
@@ -175,6 +182,39 @@ MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
 * 先保存到**内存缓冲**，再 `std::fs::write(spec.output)`；`spec.output` 由调用方给临时路径，
   rename 与冲突处理由调用方做。
 * **拒绝 `source == output`**：写回永远不直接覆盖输入（原子替换是调用方的责任）。
+
+## 10.0 原地写入（S5c）
+
+入口：工具栏「写入 PDF」→ 确认框「备份并写入」。
+
+```text
+保存脏 sidecar（重开会从磁盘重新加载 overlay/正文）
+  → 子进程写同目录临时文件（与导出相同的 job，但源 = 原文件；内部按 /NM 同步）
+  → 冒烟校验（重开 + 页数 + 渲染一页）
+  → 关闭会话（释放 PDFium 文件句柄；Windows 上不放开就没法替换）
+  → 备份：<文件名>.bak-<纳秒>
+  → fs::rename(临时文件 → 原文件)
+  → 重新打开原文件并恢复 页 / 缩放 / 滚动
+```
+
+**为什么不会把注释叠两遍**：每条写回的注释都带 `/NM = "pd-fr:<id>"`。写回时逐页枚举已有注释：
+
+| 情况 | 处理 |
+| --- | --- |
+| `/NM` 标记的 id 在当前 overlay 里 | **跳过**（已经写过了） |
+| `/NM` 标记的 id 已不在 overlay（用户删了） | `FPDFPage_RemoveAnnot` 删除 |
+| 非目标页上的标记（overlay 里整页都没了） | 删除 |
+| 没有 `/NM`（链接、其它程序加的注释） | **一律不碰** |
+
+因此"写入 → 再写入"是幂等的；导出副本也带同样的标记，后续原地写入能识别。
+
+**已知边界**：
+
+* 本程序**不更新**已存在标记注释的几何/颜色（overlay 没有"改几何/颜色"入口）；如果别的程序改了它们，
+  以 PDF 里的为准，overlay 只会决定"哪些该存在"；
+* 写完后界面里仍显示 overlay（这是有意的：读回 PDF 注释（S6）之前，删 overlay 等于让标注在本程序里消失）；
+* 写完后 undo/redo 只改 overlay，PDF 要等下一次写入才同步；
+* 每次写入都会留一份 `.bak-<纳秒>`，不会自动清理。
 
 ## 10.1 主进程编排（S5b-2）
 
@@ -254,6 +294,9 @@ MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
 | 中文乱码 | `/Contents` 编码 | 必须 UTF-16LE（`wide_string`），不要传 UTF-8 |
 | 位置偏移 | 是否预旋转了几何 | 几何必须保持**未旋转页面空间**；旋转页见 L3 |
 | 导出的墨迹拐角有缝 | AP 里每条笔画是否只有一个 `m`、是否带 `1 J 1 j` | 见 §9 的内容格式；`writeback` 单测与 `a_thick_right_angle_has_no_gap_at_the_joint` 守这条 |
+| 原地写入后注释叠了两遍 | job 里有没有 `"id"`、写回是否走了同步段 | 见 §10.0；`writing_twice_is_idempotent_*` 守这条 |
+| 写入后本程序里还能看到/编辑标注 | **预期** | overlay 保留（S6 之前删了就等于丢编辑能力） |
+| 原地写入提示“有改动未能保存” | sidecar 被更新版本占用或只读目录 | 先解决 sidecar 保存问题（`Ctrl+S` 看错误），再写入 |
 | 按钮是灰的 | 没打开 PDF / 没有标注 | 打开一个带标注的 PDF；`annotations` 为空时故意禁用 |
 | “已存在同名文件” | 上次导出留下的 `<stem>.annotated.pdf` | 改名或删除旧文件（**不会**自动覆盖） |
 | “写回子进程失败” | 子进程 stderr | 消息里已带原因；手动跑 `cargo run -p app -- --writeback <job>` 复现 |
@@ -265,6 +308,9 @@ MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
 * **S5a 探针**（一次性、保留在仓库）：`cargo run -p backend-pdfium --example s5_spike`
   会打印墨迹/高亮/下划线/删除线/SetAP/保存 flags/真实样本的实测数字，
   是判断"PDFium 行为变了没有"最快的办法。
+* **从界面原地写入**：打开带标注的 PDF → 工具栏「写入 PDF」→ 确认「备份并写入」→
+  同目录出现 `<文件名>.bak-<时间>`，原文件被原子替换；状态栏显示备份路径。
+  再点一次应当打印“已原地写入 N 条标注”（PDF 里数量不变，不会叠加）。
 * **从界面导出**：打开带标注的 PDF → 工具栏「导出标注 PDF」→ 同目录出现 `<stem>.annotated.pdf`；
   状态栏显示“已导出 N 条标注：…（字节）”。再点一次会因“不覆盖”被拒绝（这是预期）。
 * **手工跑一次写回**：
