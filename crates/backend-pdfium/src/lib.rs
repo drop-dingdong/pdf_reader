@@ -37,6 +37,7 @@ pub mod fixtures;
 pub mod library;
 pub mod raster;
 pub mod text;
+pub mod writeback;
 
 pub use backend::PdfiumBackend;
 pub use error::to_core_error;

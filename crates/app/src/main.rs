@@ -12,6 +12,31 @@ use app::PdfReaderApp;
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // 写回模式（S5b）：隐藏子进程入口。**必须在主进程之外执行**——这个分支直接调 PDFium 的
+    // 注释 API，与主进程的后台渲染线程并发会崩（见 docs/current/writeback.md）。
+    if args.first().map(String::as_str) == Some("--writeback") {
+        let Some(job) = args.get(1).map(PathBuf::from) else {
+            eprintln!("用法：app --writeback <job.json>");
+            std::process::exit(2);
+        };
+        // 先初始化 PDFium（writeback 模块的契约：调用方负责初始化）
+        match backend_pdfium::pdfium() {
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("写回失败：{error}");
+                std::process::exit(1);
+            }
+        }
+        match app::writeback::run_job(&job) {
+            Ok(summary) => println!("{summary}"),
+            Err(error) => {
+                eprintln!("写回失败：{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     // 回放模式：不需要窗口，也不需要 PDFium 的窗口集成
     if args.first().map(String::as_str) == Some("--replay") {
         let Some(script) = args.get(1).map(PathBuf::from) else {

@@ -717,6 +717,42 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   **旋转页上的注释位置**是 S5b 的必测项（spike 的渲染调用传的是 `Rotation::None`）。
 - **状态**：有效（S5b 待启动）。
 
+### D-124 S5b-1：写回落地；"关闭 PDFium 再写"留给原地覆盖再议
+
+- **决定**（回应用户关于"写回期间关闭 PDFium、写完重载"的提问）：
+  * **S5b（导出副本）不采用**：子进程已经隔离了 PDFium 的全局状态与线程安全；
+    关闭会话反而要付 UX 成本（撤销栈、纹理缓存、选区、滚动恢复、重渲染），
+    而且解决不了"半写文件"（仍要 temp + rename + 校验）；
+  * **S5c（原地覆盖）技术上可行**：`WorkerScheduler::Drop` 会 join 工作线程，
+    `DocumentSession` 释放后 PDFium 文档句柄归零；Windows 上替换原文件本来也**必须**先放开。
+    但必须满足四条：①写入期间"任何线程都进不了 PDFium"要有**唯一闸门**（不是"尽量停"）；
+    ②temp + rename + 写后校验 + 失败回滚；③写失败要重新打开并恢复视图；④FFI 崩了会带走整个阅读器
+    （子进程只死子进程）。→ S5c 时在"关-写-重载"与"子进程 + 关闭父文档后 rename"之间再评估。
+- **S5b-1 实现决定**：
+  1. 新增 `backend-pdfium::writeback`：18 个 FFI 符号（`libloading` 转入常驻依赖），
+     `write(spec)` 创建注释 + 生成外观 + `FPDF_NO_INCREMENTAL` 保存 + **重开自检**；
+  2. 子进程入口 `app --writeback <job.json>`（新增 `app::writeback` 解析 job）；
+  3. 四种标注：`AddInkStroke` / `AppendAttachmentPoints` 写语义字段，`SetAP` 生成外观
+     （**高亮不写 AP**，否则不透明填充盖住文字）；文本类线宽固定 2pt（页面空间）；
+  4. 闸门：加密（`FPDF_GetSecurityHandlerRevision >= 0`）与数字签名（`FPDF_GetSignatureCount > 0`）
+     一律拒绝；`annotate == false` 只出现在加密文档，被加密闸门覆盖；
+  5. **拒绝 `source == output`**：原子替换永远由调用方做；
+  6. 留存文档：`docs/current/writeback.md`（函数表、ABI、坐标系、AP 规则、闸门、排查手册）。
+- **旋转页的实测发现**：PDFium 的 `FPDF_RenderPageBitmap`（pdfium-render 走它）在页面自带 `/Rotate`
+  时对注释应用了带纵横比缩放的错误矩阵 —— 用**原始 PDF**（不经过写回）同样复现：
+  `/Rotate 90` 下页面空间 (50,100)-(150,120) 的高亮被渲染成 (50,100)-(59,299)。
+  → 自动测试只断言"`/QuadPoints` 保持页面空间 + 注释数正确"，真实位置列为**人工验收**（Chrome/Acrobat）；
+  这也解释了为什么不能拿本仓库的渲染器给写回位置背书。
+- **影响**：`backend-pdfium/src/{writeback,library}.rs`、`app/src/{writeback,main,lib}.rs`、
+  `backend-pdfium/tests/writeback.rs`、`app/tests/writeback_cli.rs`、新文档与索引；
+  `libloading` 从开发依赖转为常驻依赖；S5a 探针仍保留为 example。
+- **验证**：`writeback` 单测 5（内容流/QuadPoints 顺序/数字格式/拒覆盖）、
+  端到端 4（四种标注位置与计数、链接保留、旋转页几何、退化几何）、
+  app CLI 3（job 相对路径、未知 kind、单点墨迹）；`check.sh` 全绿。
+- **未做 / 下一步**：S5b-2（主进程起子进程、写后校验、temp/rename、UI「导出带标注的 PDF…」、
+  拒绝原因提示）；加密/签名夹具；旋转页人工验收。
+- **状态**：S5b-1 有效；S5b-2 未开始。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

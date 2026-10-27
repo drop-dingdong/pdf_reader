@@ -23,6 +23,7 @@ pub(crate) mod ink;
 pub(crate) mod json;
 pub mod persist;
 pub mod view;
+pub mod writeback;
 
 pub use app::replay;
 

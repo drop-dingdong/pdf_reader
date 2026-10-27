@@ -25,7 +25,7 @@
 | crate | 行数 | 角色 |
 | --- | --- | --- |
 | `pdfcore` | ~7.3k | 接口层：9 个 trait、领域类型、会话装配点 `DocumentSession`、纯逻辑模块（几何/布局/分块/波段/缓存/调度/文本）、测试替身 `testkit` |
-| `backend-pdfium` | ~1.0k | 真实后端：文档几何表、导航索引、整页/块渲染、字符级文本 |
+| `backend-pdfium` | ~1.5k | 真实后端：文档几何表、导航索引、整页/块渲染、字符级文本；`writeback` 模块（S5）用自带 FFI 写注释，**只在子进程**里跑 |
 | `app` | ~8.0k | egui 外壳：`view`（纯逻辑，可测）+ `app`（胶水，需真机）+ `persist`（存档 JSON） |
 
 依赖只允许指向 `pdfcore`；`pdfcore` 不依赖任何第三方 crate（`#![forbid(unsafe_code)]`）。

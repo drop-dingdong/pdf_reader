@@ -21,6 +21,7 @@
 | [persistence.md](current/persistence.md) | 自定义数据存档（`.pdf.json`）v2、版本与迁移规则、预览图重建 | 动存档格式或预览图时 |
 | [diagnostics.md](current/diagnostics.md) | 所有诊断开关与输出格式、常见问题的排查路径 | 定位真机问题时 |
 | [testing.md](current/testing.md) | 测试分层与命令、真实 PDF 夹具、**人工验收清单** | 交付前；写测试时 |
+| [writeback.md](current/writeback.md) | **写回 PDF（S5）**：子进程模型、18 个 FFI 函数与 ABI、AP 生成规则、闸门、**排查手册** | 改 `writeback.rs` 或排查导出问题时 |
 
 ## 二、决策与背景（`decisions/`）
 

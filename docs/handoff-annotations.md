@@ -3,7 +3,7 @@
 > 分支 `feat/annotations`，最后提交见 `git log`。**S0–S4（模型 / 图层 v2 / 撤销 / 墨迹 / 压力门槛）已完成**并通过门禁。
 > **S5（写回 PDF）已完成评估 + S5a spike**（[`decisions/evaluations/s5-writeback.md`](decisions/evaluations/s5-writeback.md)，D-123），
 > 5 个决策已由用户确认：**导出副本 / 保留 overlay / 四种都写 / 受限文档拒绝 / 不覆盖**。
-> **S5b（导出实现）未开始**。
+> **S5b-1（后端写回 + 子进程入口）已完成**；S5b-2（主进程编排 + UI）未开始。
 > 人工验收（真窗口）：画一笔跟手、整笔撤销/重做、Esc 丢弃、800% 粗细与位置、两种删除方式，用户已确认通过。
 > 权威决策：[`decisions/log.md`](decisions/log.md) 的 **D-118**（阶段计划）、**D-119**（墨迹模型/图层 v2）、
 > **D-120**（墨迹工具与手势）、**D-121**（S4c：悬停闸门、历史虚拟化、压力门槛）；本文只记录进度、陷阱与下一步。
@@ -129,10 +129,19 @@ export PATH=/tmp/rust/cargo/bin:$PATH CARGO_HOME=/tmp/rust/cargo RUSTUP_HOME=/tm
 - `/Contents` UTF-16LE 往返正确；保存 flags 0/2 同尺寸可重开；既有链接/页数不受影响；
 - **旋转页位置未验证**（spike 渲染传了 `Rotation::None`）→ S5b 必测。
 
-下一步 S5b（导出副本，2–4 天）：子进程 `--writeback <job.json>` + `CreateAnnot`（`InkList`/`QuadPoints`）
-+ `SetAP` 外观（**高亮不写 AP**）+ `FPDF_NO_INCREMENTAL` 保存 + 父进程校验 + UI「导出带标注的 PDF…」。
-拒绝：加密 / 有签名 / `annotate == false`。输出 `<原名>.annotated.pdf`，**不覆盖**。
-S5c（原地替换 + 迁移）依赖 S6（能读回 PDF 注释）。
+**S5b-1 已完成（D-124）**：`backend-pdfium::writeback`（18 个 FFI 符号 + AP 生成 + 保存 + 自检）、
+`app --writeback <job.json>` 子进程入口、四种标注、加密/签名闸门、拒绝 `source == output`；
+完整 FFI/排查文档在 [`current/writeback.md`](current/writeback.md)。
+
+**S5b-2（下一步）**：
+1. 主进程编排：把当前标注导出成 job（正文从 `custom_previews` 按 `#annot:<id>` 取）、
+   起子进程（`std::process::Command`，取当前 exe）、写后校验（重开 + 渲染抽样 + 注释计数）；
+2. 文件落盘：先写 `<原名>.annotated.pdf.tmp-<pid>`，校验通过再改名到 `<原名>.annotated.pdf`
+   （**不覆盖**已有文件；失败清理临时文件）；
+3. UI：菜单/按钮「导出带标注的 PDF…」，成功/失败都要有明确提示（拒绝原因要能说出口径）；
+4. 人工验收（必做）：**旋转页**上导出文件在 Chrome/Acrobat 里的位置（见 L3）、中文正文、四种标注外观。
+
+**S5c（原地替换 + 迁移）依赖 S6（能读回 PDF 注释）**；届时再评估"关-写-重载"与"子进程"两条路（D-124）。
 
 ### 已知未做（不是 bug，是没到）
 
@@ -145,8 +154,8 @@ S5c（原地替换 + 迁移）依赖 S6（能读回 PDF 注释）。
 1. `git log --oneline -15` + 读本文；
 2. `./scripts/check.sh` 确认基线仍绿；
 3. 读 `crates/app/src/app.rs` 里的 `AppEdit` / `apply_edit` / `undo_edit`（这是所有编辑的唯一入口）；
-4. S0–S4 已全部完成（`ink.json` / `ink_many.json` 是现成回归脚本），S5 的评估与 spike 也已完成。
-   **下一步直接开 S5b（导出副本）**：spike 的 FFI/AP 写法在
-   `crates/backend-pdfium/examples/s5_spike.rs`，可以先把它整理成 `backend-pdfium` 内部的
-   `writeback` 模块（子进程用），再加 `--writeback` 子命令与 UI 入口。
+4. S0–S4、S5 的评估/spike、**S5b-1（后端写回 + 子进程入口）** 都已完成。
+   **下一步 S5b-2**：主进程编排 + 落盘（temp→rename，不覆盖）+ UI 入口 + 写后校验。
+   FFI 的契约与排查手册先读 [`current/writeback.md`](current/writeback.md)；
+   不要在主进程里调用写回 FFI（D-124）。
    墨迹相关不要再动语义（抬笔入库、页面空间几何、图层 v2 都是硬约定）。
