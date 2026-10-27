@@ -3,7 +3,8 @@
 > 分支 `feat/annotations`，最后提交见 `git log`。**S0–S4（模型 / 图层 v2 / 撤销 / 墨迹 / 压力门槛）已完成**并通过门禁。
 > **S5（写回 PDF）已完成评估 + S5a spike**（[`decisions/evaluations/s5-writeback.md`](decisions/evaluations/s5-writeback.md)，D-123），
 > 5 个决策已由用户确认：**导出副本 / 保留 overlay / 四种都写 / 受限文档拒绝 / 不覆盖**。
-> **S5b-1（后端写回 + 子进程入口）已完成**；S5b-2（主进程编排 + UI）未开始。
+> **S5a/S5b（写回 PDF）已完成**：`backend-pdfium::writeback`、`app --writeback`、工具栏「导出标注 PDF」。
+> 只剩**人工验收**（旋转页 / 四种标注外观 / 中文正文）与 S5c/S6。
 > 人工验收（真窗口）：画一笔跟手、整笔撤销/重做、Esc 丢弃、800% 粗细与位置、两种删除方式，用户已确认通过。
 > 权威决策：[`decisions/log.md`](decisions/log.md) 的 **D-118**（阶段计划）、**D-119**（墨迹模型/图层 v2）、
 > **D-120**（墨迹工具与手势）、**D-121**（S4c：悬停闸门、历史虚拟化、压力门槛）；本文只记录进度、陷阱与下一步。
@@ -25,6 +26,8 @@
 | **S4a** | `AnnotationKind::Ink`（页面空间折线 + 线宽、折线命中、半线宽包围盒）+ `annot.json` **v2**（`points`/`width`）+ 墨迹绘制与悬停 | `2fdc8bd` |
 | **S4b** | 墨迹工具：`Tool::Ink` + 手势状态机（`ink.rs`：0.5 抽稀 / 2000 上限 / 单点不成笔）+ 抬笔才入库 + `Esc`/切工具丢弃 + 回放改真实拖拽（`set_tool`、手势内按键）+ JSONL 补标注字段 | `c0350b0` |
 | **S4c** | 绘制期间屏蔽链接悬停（第三闸门）+ `seed_ink` 压力脚本（1000 条）+ **历史列表虚拟化**（323ms → 16ms）+ 结构/时间门槛 + `ink_many` 基线 | `3ea1e22` |
+| **S5a** | 写回可行性探针：PDFium C API 能力 + 外观流实测（无 AP 的墨迹不可见、下划线 0 px）+ `SetAP` 通用解 | `89ac8f3` |
+| **S5** | `backend-pdfium::writeback`（18 个 FFI、AP 生成、保存自检、加密/签名闸门）+ `app --writeback` + 工具栏「导出标注 PDF」（temp→rename、不覆盖、冒烟校验）+ FFI 说明文档 | `d6a4304` + 见 `git log` |
 
 ## 2. 代码地图（新增/改动最多的地方）
 
@@ -133,13 +136,17 @@ export PATH=/tmp/rust/cargo/bin:$PATH CARGO_HOME=/tmp/rust/cargo RUSTUP_HOME=/tm
 `app --writeback <job.json>` 子进程入口、四种标注、加密/签名闸门、拒绝 `source == output`；
 完整 FFI/排查文档在 [`current/writeback.md`](current/writeback.md)。
 
-**S5b-2（下一步）**：
-1. 主进程编排：把当前标注导出成 job（正文从 `custom_previews` 按 `#annot:<id>` 取）、
-   起子进程（`std::process::Command`，取当前 exe）、写后校验（重开 + 渲染抽样 + 注释计数）；
-2. 文件落盘：先写 `<原名>.annotated.pdf.tmp-<pid>`，校验通过再改名到 `<原名>.annotated.pdf`
-   （**不覆盖**已有文件；失败清理临时文件）；
-3. UI：菜单/按钮「导出带标注的 PDF…」，成功/失败都要有明确提示（拒绝原因要能说出口径）；
-4. 人工验收（必做）：**旋转页**上导出文件在 Chrome/Acrobat 里的位置（见 L3）、中文正文、四种标注外观。
+**S5b-2 已完成**（D-125）：工具栏「导出标注 PDF」→ 同目录 `<stem>.annotated.pdf`；
+temp + 冒烟校验 + rename，**不覆盖**；加密文档父进程预检，签名在子进程拒绝；
+正文按 `#annot:<id>` 取。细节见 [`current/writeback.md`](current/writeback.md)。
+
+**剩下的（按顺序）**：
+
+1. **人工验收（必做，只能看）**：导出的文件在 **Chrome/Acrobat** 里打开 ——
+   旋转页（第 2 页）上的高亮位置是否正确（我们的渲染器有已知偏差 L3）、
+   四种标注外观、中文正文、撤销后重新导出；
+2. 已知缺口的夹具：加密文档 / 带数字签名的文档（目前闸门只有代码审查级保障）；
+3. S5c（原地替换 + 迁移）依赖 S6（读回 PDF 注释）；届时再评估"关-写-重载"与"子进程"（D-124）。
 
 **S5c（原地替换 + 迁移）依赖 S6（能读回 PDF 注释）**；届时再评估"关-写-重载"与"子进程"两条路（D-124）。
 
@@ -154,8 +161,9 @@ export PATH=/tmp/rust/cargo/bin:$PATH CARGO_HOME=/tmp/rust/cargo RUSTUP_HOME=/tm
 1. `git log --oneline -15` + 读本文；
 2. `./scripts/check.sh` 确认基线仍绿；
 3. 读 `crates/app/src/app.rs` 里的 `AppEdit` / `apply_edit` / `undo_edit`（这是所有编辑的唯一入口）；
-4. S0–S4、S5 的评估/spike、**S5b-1（后端写回 + 子进程入口）** 都已完成。
-   **下一步 S5b-2**：主进程编排 + 落盘（temp→rename，不覆盖）+ UI 入口 + 写后校验。
-   FFI 的契约与排查手册先读 [`current/writeback.md`](current/writeback.md)；
+4. S0–S5 都已完成（回放脚本 `ink.json`/`ink_many.json`、写回 example/测试都在）。
+   **下一步是人工验收 + 夹具补齐**，不是新功能：
+   * 按 `current/writeback.md` §14 的 L3 与 §16 的步骤，在 Chrome/Acrobat 里看旋转页与四种标注；
+   * 补加密/签名夹具，把两道闸门从"代码审查级"升到"自动化"；
+   * S5c/S6 之前不要改 `InkStroke` 语义、几何坐标系与图层 v2。
    不要在主进程里调用写回 FFI（D-124）。
-   墨迹相关不要再动语义（抬笔入库、页面空间几何、图层 v2 都是硬约定）。

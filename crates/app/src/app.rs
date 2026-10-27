@@ -951,6 +951,60 @@ impl PdfReaderApp {
     ///
     /// 顺序固定：先主存档（正文在里面）、再图层；两份各自原子写，互不依赖，
     /// 所以即使图层写失败，正文也已经落盘（加载时缺图层只是"没有标注"，不会崩）。
+    /// 导出带标注的 PDF（S5b-2）：overlay + 正文 → job → 子进程 → 校验 → 原子改名。
+    ///
+    /// 目标固定为同目录 `<stem>.annotated.pdf`，**不覆盖**已有文件；
+    /// 真正的 FFI 写回在子进程里（见 `docs/current/writeback.md`），这里只做编排与冒烟校验。
+    fn export_annotated_pdf(&mut self, session: &DocumentSession) {
+        let Some(pdf) = self.document_path.clone() else {
+            self.message = "先打开一个 PDF 再导出".to_string();
+            return;
+        };
+        // 加密文档在子进程里也会被拒绝；这里先给一个即时、可读的原因
+        if session.opened().document.info().encrypted {
+            self.message = "加密文档暂不支持导出（权限位可能不允许批注）".to_string();
+            return;
+        }
+        if self.annotations.is_empty() {
+            self.message = "当前文档没有标注".to_string();
+            return;
+        }
+        let items: Vec<crate::export::ExportItem> = self
+            .annotations
+            .iter()
+            .map(|annotation| {
+                // 正文按哨兵标题从 custom_texts 里取；空正文不写 /Contents
+                let body = annotation.body_title.as_ref().and_then(|title| {
+                    self.custom_previews
+                        .iter()
+                        .find(|preview| &preview.title == title)
+                        .and_then(|preview| preview.text.clone())
+                        .filter(|text| !text.is_empty())
+                });
+                crate::export::ExportItem {
+                    page: annotation.page,
+                    kind: annotation.kind.clone(),
+                    color: annotation.color,
+                    opacity: annotation.opacity,
+                    body,
+                }
+            })
+            .collect();
+        let output = crate::export::default_output_path(&pdf);
+        self.message = "正在导出标注…".to_string();
+        match crate::export::export(&pdf, &output, &items, session.page_count()) {
+            Ok(report) => {
+                self.message = format!(
+                    "已导出 {} 条标注：{}（{} 字节）",
+                    report.annotations,
+                    report.output.display(),
+                    report.bytes
+                );
+            }
+            Err(error) => self.message = format!("导出失败：{error}"),
+        }
+    }
+
     fn save_all(&mut self) {
         if let Some((found, supported)) = self.sidecar_locked {
             self.message = format!(
@@ -1680,6 +1734,21 @@ impl PdfReaderApp {
                                 self.save_all();
                             }
                         }
+                    }
+                    ui.add_space(6.0);
+                    // 导出带标注的 PDF（S5b-2）：写新文件，不覆盖；真正的写回在子进程里
+                    let can_export =
+                        self.document_path.is_some() && !self.annotations.is_empty();
+                    let export = ui.add_enabled(can_export, egui::Button::new("导出标注 PDF"));
+                    let export = if can_export {
+                        export.on_hover_text(
+                            "把当前标注写成真正的 PDF 注释，保存为同目录的 <原名>.annotated.pdf（不覆盖）",
+                        )
+                    } else {
+                        export.on_disabled_hover_text("需要打开一个 PDF，且至少有一条标注")
+                    };
+                    if export.clicked() {
+                        self.export_annotated_pdf(session);
                     }
                 });
             });

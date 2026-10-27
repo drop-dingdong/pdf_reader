@@ -7,7 +7,7 @@
 ## 1. 这是什么，不是什么
 
 * **是**：把本程序内存里的标注（墨迹 / 高亮 / 下划线 / 删除线）写成**真正的 PDF 注释**，
-  保存到一个**新文件**（`<原名>.annotated.pdf`）。
+  保存到一个**新文件**（`<stem>.annotated.pdf`），由主进程编排、子进程执行（S5b-2）。
 * **不是**：不是 UI（S5b-2 才接按钮）、不是原地覆盖（S5c）、不是"读回 PDF 注释"（S6）。
 * **不在主进程里跑**：写回直接在 PDFium 里创建注释，`pdfium-render 0.9.4` 没有这层 API，
   所以我们用 `libloading` 自己绑定了 18 个 C 函数；这些调用**绕过 pdfium-render 的全局锁**，
@@ -16,16 +16,18 @@
 ## 2. 调用链与进程模型
 
 ```text
-主进程（阅读器）
-  └─ 生成 job.json（临时文件）
-       └─ std::process::Command：app --writeback <job.json>     ← 子进程（S5b-2 接）
-            └─ app::writeback::run_job（解析 JSON）
+主进程（阅读器，工具栏「导出标注 PDF」）
+  └─ app::export：overlay + 正文 → job.json（系统临时目录）
+       ├─ std::process::Command：<自身 exe> --writeback <job.json>     ← 子进程
+       │    └─ app::writeback::run_job（解析 JSON）
                  └─ backend_pdfium::writeback::write（FFI）
-                      ├─ FPDF_LoadDocument（只读源文件）
-                      ├─ FPDFPage_CreateAnnot + 语义字段 + SetAP
-                      ├─ FPDF_SaveAsCopy（FPDF_NO_INCREMENTAL）→ 内存缓冲
-                      ├─ 写 spec.output
-                      └─ 重开 output、逐页核对注释数
+                      │    ├─ FPDF_LoadDocument（只读源文件）
+                      │    ├─ FPDFPage_CreateAnnot + 语义字段 + SetAP
+                      │    ├─ FPDF_SaveAsCopy（FPDF_NO_INCREMENTAL）→ 内存缓冲
+                      │    ├─ 写 spec.output（= 目标同目录的临时文件）
+                      │    └─ 重开 output、逐页核对注释数
+       ├─ smoke_check：重开 + 页数一致 + 渲染一页（0.5×）
+       └─ fs::rename(temp → <stem>.annotated.pdf)
 ```
 
 **为什么是子进程**（而不是"关掉文档再写"）：
@@ -168,6 +170,27 @@
   rename 与冲突处理由调用方做。
 * **拒绝 `source == output`**：写回永远不直接覆盖输入（原子替换是调用方的责任）。
 
+## 10.1 主进程编排（S5b-2）
+
+入口：工具栏第 0 行的“导出标注 PDF”（需要已打开 PDF 且 `annotations` 非空，否则禁用并说明原因）。
+
+| 步骤 | 实现 | 失败时 |
+| --- | --- | --- |
+| 预检 | 父进程看 `DocumentInfo.encrypted`；标注为空直接返回 | 状态栏给出原因，不起子进程 |
+| 目标命名 | `book.pdf` → **同目录 `book.annotated.pdf`**（`export::default_output_path`） | — |
+| 不覆盖 | `ensure_destination_free`：目标已存在直接拒绝 | “已存在同名文件，不覆盖：…” |
+| 组 job | `ExportItem`（几何/颜色/不透明/正文）→ `job_json`（按页分组、绝对路径、正文转义） | 写 job 失败即中止 |
+| 起子进程 | `<current_exe> --writeback <job>`，捕获 stdout/stderr；子进程把标注写进**目标同目录的临时文件** | 把子进程 stderr 原样放进消息；删除临时文件 |
+| 冒烟校验 | `smoke_check`：后端重开临时文件、页数一致、渲染一页（`Scale(0.5)`） | 删除临时文件，原文件不受影响 |
+| 落盘 | `fs::rename(temp → 目标)`（同目录，原子） | 删除临时文件并报错 |
+
+**注意**：
+
+* 导出是**同步**调用：等待子进程与冒烟渲染期间 UI 会短暂停顿（通常几十毫秒；超大文件另说）；
+* 父进程**不比较像素**：PDFium 整页渲染在旋转页上有已知偏差（L3），所以位置验收只能人工；
+* 正文从 `custom_previews` 里按哨兵标题 `#annot:<id>` 取；空正文不写 `/Contents`；
+* 目标文件名**不含** `.pdf` 之外的后缀拼接坑：`a.b.pdf` → `a.b.annotated.pdf`（只替换最后一个扩展名）。
+
 ## 11. 自检（`write()` 内置）
 
 保存后重新打开 `spec.output`，逐页比对：
@@ -207,6 +230,7 @@
 | L4 | 加密 / 签名文档不支持 | 见 §12；无夹具 |
 | L5 | 全量重写的内存峰值 | 文件大小量级；大文件（>100MB）需要实测 |
 | L6 | PDFium 版本未固定 | `scripts/fetch-pdfium.sh` 取 latest；`SetAP` 的 Form 形状依赖它的实现，升级后需重跑 spike/测试 |
+| L8 | 导出同步阻塞 | 子进程 + 冒烟渲染在 UI 线程上等待；大文件可能造成可感知停顿（暂无进度条/取消） |
 | L7 | 只支持 little-endian | `FPDF_WIDESTRING` 直接传 `u16` 序列；当前只发布 x86_64/arm64 的 LE 平台 |
 
 ## 15. 排查手册
@@ -222,12 +246,18 @@
 | 注释数量不符 | 是否把已有的链接注释算漏 | 用 `count_annotations` 看真实数量；`verify` 的期望值是"原有 + 新增" |
 | 中文乱码 | `/Contents` 编码 | 必须 UTF-16LE（`wide_string`），不要传 UTF-8 |
 | 位置偏移 | 是否预旋转了几何 | 几何必须保持**未旋转页面空间**；旋转页见 L3 |
+| 按钮是灰的 | 没打开 PDF / 没有标注 | 打开一个带标注的 PDF；`annotations` 为空时故意禁用 |
+| “已存在同名文件” | 上次导出留下的 `<stem>.annotated.pdf` | 改名或删除旧文件（**不会**自动覆盖） |
+| “写回子进程失败” | 子进程 stderr | 消息里已带原因；手动跑 `cargo run -p app -- --writeback <job>` 复现 |
+| “导出的文件打不开 / 页数变了” | 冒烟校验失败 | 临时文件已删；检查磁盘/权限，重试 |
 
 ## 16. 复现与调试
 
 * **S5a 探针**（一次性、保留在仓库）：`cargo run -p backend-pdfium --example s5_spike`
   会打印墨迹/高亮/下划线/删除线/SetAP/保存 flags/真实样本的实测数字，
   是判断"PDFium 行为变了没有"最快的办法。
+* **从界面导出**：打开带标注的 PDF → 工具栏「导出标注 PDF」→ 同目录出现 `<stem>.annotated.pdf`；
+  状态栏显示“已导出 N 条标注：…（字节）”。再点一次会因“不覆盖”被拒绝（这是预期）。
 * **手工跑一次写回**：
 
   ```bash
