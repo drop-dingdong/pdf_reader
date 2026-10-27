@@ -3558,21 +3558,16 @@ impl PdfReaderApp {
                         // 墨迹：折线的每个顶点都要换算（含旋转），所以不能走下面的"按矩形"循环。
                         // 线宽乘布局比例，高倍下才跟着变粗；悬停命中走与点击相同的折线距离判定。
                         if let Some((ink_points, ink_width)) = annotation.kind.ink() {
-                            let screen_points: Vec<egui::Pos2> = ink_points
-                                .iter()
-                                .map(|point| {
-                                    let content = placement.page_to_content(*point);
-                                    egui::pos2(
-                                        canvas.min.x + content.x - scroll.x,
-                                        canvas.min.y + content.y - scroll.y,
-                                    )
-                                })
-                                .collect();
                             let stroke_width = (ink_width * placement.scale.0).max(1.0);
-                            painter.add(egui::Shape::line(
-                                screen_points,
-                                Stroke::new(stroke_width, color),
-                            ));
+                            paint_ink(
+                                &painter,
+                                &placement,
+                                canvas,
+                                scroll,
+                                ink_points,
+                                stroke_width,
+                                color,
+                            );
                             if annotation.body_title.is_some() {
                                 if let Some(pointer) = pointer {
                                     let content_point = Point::new(
@@ -3658,28 +3653,15 @@ impl PdfReaderApp {
                             alpha,
                         );
                         let width = (stroke.width() * placement.scale.0).max(1.0);
-                        let screen_points: Vec<egui::Pos2> = stroke
-                            .points()
-                            .iter()
-                            .map(|point| {
-                                let content = placement.page_to_content(*point);
-                                egui::pos2(
-                                    canvas.min.x + content.x - scroll.x,
-                                    canvas.min.y + content.y - scroll.y,
-                                )
-                            })
-                            .collect();
-                        if let Some(first) = screen_points.first() {
-                            if screen_points.len() == 1 {
-                                // 刚起笔还没拖动：画一个点，让"按下有反应"可见
-                                painter.circle_filled(*first, width * 0.5, color);
-                            } else {
-                                painter.add(egui::Shape::line(
-                                    screen_points,
-                                    Stroke::new(width, color),
-                                ));
-                            }
-                        }
+                        paint_ink(
+                            &painter,
+                            &placement,
+                            canvas,
+                            scroll,
+                            stroke.points(),
+                            width,
+                            color,
+                        );
                     }
                 }
             }
@@ -5605,6 +5587,61 @@ fn canvas_to_content(canvas: egui::Rect, screen_position: egui::Pos2, scroll: Ve
         ),
         scroll,
     )
+}
+
+/// 画一杆墨迹：**按页面矩形裁剪**，并在折角补圆点。
+///
+/// * 裁剪：墨迹属于起笔那一页；指针跨到下一页时，采样点在起始页坐标系里会落到页面之外。
+///   不裁剪的话它会“画到相邻页的空白上”（用户实测），而保存成 PDF 后阅读器会按页面裁剪 ——
+///   于是编辑时与导出后不一致。这里统一按页面矩形裁剪（与阅读器一致）。
+/// * 折角补点：egui 的折线是逐段四边形，直角/锐角拐角会漏出一道缝（用户实测）；
+///   在每个内部顶点补一个半径 = 半个线宽的圆即可补上，视觉上也更接近 PDF 的 miter 连接。
+fn paint_ink(
+    painter: &egui::Painter,
+    placement: &PagePlacement,
+    canvas: egui::Rect,
+    scroll: Vec2,
+    points: &[Point],
+    width: f32,
+    color: Color32,
+) {
+    if points.is_empty() {
+        return;
+    }
+    let page_screen = egui::Rect::from_min_max(
+        egui::pos2(
+            canvas.min.x + placement.rect.x - scroll.x,
+            canvas.min.y + placement.rect.y - scroll.y,
+        ),
+        egui::pos2(
+            canvas.min.x + placement.rect.x + placement.rect.width - scroll.x,
+            canvas.min.y + placement.rect.y + placement.rect.height - scroll.y,
+        ),
+    );
+    let painter = painter.with_clip_rect(page_screen);
+    let screen_points: Vec<egui::Pos2> = points
+        .iter()
+        .map(|point| {
+            let content = placement.page_to_content(*point);
+            egui::pos2(
+                canvas.min.x + content.x - scroll.x,
+                canvas.min.y + content.y - scroll.y,
+            )
+        })
+        .collect();
+    let radius = (width * 0.5).max(0.5);
+    if let [only] = screen_points.as_slice() {
+        // 刚起笔还没拖动：画一个点，让"按下有反应"可见
+        painter.circle_filled(*only, radius, color);
+        return;
+    }
+    painter.add(egui::Shape::line(
+        screen_points.clone(),
+        Stroke::new(width, color),
+    ));
+    for joint in &screen_points[1..screen_points.len() - 1] {
+        painter.circle_filled(*joint, radius, color);
+    }
 }
 
 #[cfg(test)]

@@ -74,6 +74,18 @@ RenderRegion { page_rect: Rect /*PDF 页面空间*/, pixel_size: (u32, u32) }
 
 ## 4. 后端渲染路径（`backend-pdfium/src/raster.rs`）
 
+**旋转契约（INV-12）**：`RenderRequest.rotation` 是"页面自带 `/Rotate` ⊕ 用户旋转"的**最终**旋转，
+`pdfcore` 的布局、网格、摆放都假设后端产出的位图方向**恰好**等于它。
+PDFium 的 `FPDF_RenderPageBitmap` 会自己应用页面的 intrinsic `/Rotate`，
+因此适配层必须先减掉它，只把差值交给 `.rotate()`：
+
+```rust
+let extra = request.rotation.compose(geometry.rotation.inverse());
+```
+
+漏掉这一步的后果是旋转被应用两次：`/Rotate 90` 的页显示成 180°，且位图按 90° 算、内容按 180° 画 → 被压扁
+（D-126 修的就是这个；`intrinsic_rotation_is_applied_exactly_once` 守它）。
+
 ```text
 整页在渲染比例下的像素 page_px = round(旋转后页尺寸 × 渲染比例)   // 与 render_px 同一表达式
 page_rect --Rotation::map_point--> 显示坐标 --×渲染比例--> 设备像素 → 取整得到 (left, top, size)

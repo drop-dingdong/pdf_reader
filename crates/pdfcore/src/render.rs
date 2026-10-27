@@ -271,6 +271,10 @@ pub struct RenderRequest {
     /// `u = 显示比例 / 本比例` 换算每块的显示尺寸（见 `TileGrid::display_rect`）。
     pub scale: Scale,
     /// 旋转（真机上是"页面自带 `/Rotate` ⊕ 用户旋转"的结果）。
+    ///
+    /// **契约**：后端产出的位图方向必须**恰好**等于这个值；页面自带的 `/Rotate`
+    /// 也由后端负责消化（PDFium 会自己应用 intrinsic `/Rotate`，所以 `backend-pdfium`
+    /// 会先把 intrinsic 减掉再交给它，见 INV-12）。
     pub rotation: Rotation,
     /// 瓦片坐标；`None` 表示整页。
     pub tile: Option<TileSpec>,
