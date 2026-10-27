@@ -145,7 +145,7 @@ fn writes_all_four_kinds_at_page_coordinates_and_preserves_the_rest() {
     assert_eq!(counts, vec![5, 1], "第 1 页应有 4 条新注释 + 1 个链接");
 
     // 用现有后端重开：页数、链接、页面上的可见位置都要对
-    let backend = PdfiumBackend::new();
+    let backend = PdfiumBackend::new().with_annotations(true);
     let bytes = std::fs::read(&spec.output).expect("读输出");
     let opened = backend.open(Source::Bytes(&bytes), None).expect("重开");
     assert_eq!(opened.document.info().page_count, 2);
@@ -220,7 +220,7 @@ fn a_highlight_on_a_rotated_page_lands_where_the_rotation_says() {
     let counts = writeback::count_annotations(&spec.output).expect("数注释");
     assert_eq!(counts, vec![5, 1], "旋转页上的高亮必须写进去");
 
-    let backend = PdfiumBackend::new();
+    let backend = PdfiumBackend::new().with_annotations(true);
     let bytes = std::fs::read(&spec.output).expect("读输出");
     let opened = backend.open(Source::Bytes(&bytes), None).expect("重开");
     let page = PageIndex::new(1);
@@ -293,7 +293,7 @@ fn a_thick_right_angle_has_no_gap_at_the_joint() {
     writeback::write(&spec).expect("写回成功");
 
     let bytes = std::fs::read(&spec.output).expect("读输出");
-    let backend = PdfiumBackend::new();
+    let backend = PdfiumBackend::new().with_annotations(true);
     let opened = backend.open(Source::Bytes(&bytes), None).expect("重开");
     let scale = 2.0;
     let image = opened
@@ -468,6 +468,65 @@ fn rewriting_updates_contents_of_existing_marked_annotations() {
     let third_bytes = std::fs::read(&third).expect("读输出");
     let text = String::from_utf8_lossy(&third_bytes);
     assert!(!text.contains("(NEW)"), "正文删除后不能残留：{text}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 页面位图**默认不含 PDF 注释**（应用叠层自己画）；显式 `with_annotations(true)` 才烤进去。
+///
+/// 否则写回之后 overlay 会再画一遍，而且"删掉 overlay 注释"在界面上不会消失
+/// （注释还烤在 PDF 位图里）。见 INV-14。
+#[test]
+fn annotations_are_not_baked_into_the_bitmap_by_default() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("not-baked");
+    let source = dir.join("in.pdf");
+    std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+    let spec = WritebackSpec {
+        source,
+        output: dir.join("out.pdf"),
+        pages: vec![WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![WritebackAnnotation {
+                id: Some(1),
+                kind: AnnotationKind::Ink {
+                    points: vec![Point::new(100.0, 700.0), Point::new(300.0, 700.0)],
+                    width: 6.0,
+                },
+                color: [255, 0, 0],
+                opacity: 1.0,
+                body: None,
+            }],
+        }],
+    };
+    writeback::write(&spec).expect("写回");
+    let bytes = std::fs::read(&spec.output).expect("读输出");
+
+    let render = |backend: PdfiumBackend| {
+        let opened = backend.open(Source::Bytes(&bytes), None).expect("重开");
+        opened
+            .raster
+            .render(&RenderRequest::new(
+                PageIndex::FIRST,
+                Scale::IDENTITY,
+                Rotation::None,
+            ))
+            .expect("渲染")
+    };
+    let plain = render(PdfiumBackend::new());
+    assert_eq!(
+        count_in_band(&plain, 60, 120, is_red),
+        0,
+        "默认不应把注释烤进位图"
+    );
+    let baked = render(PdfiumBackend::new().with_annotations(true));
+    assert!(
+        count_in_band(&baked, 60, 120, is_red) > 100,
+        "显式开启后注释应当出现在位图里"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

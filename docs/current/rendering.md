@@ -74,6 +74,11 @@ RenderRegion { page_rect: Rect /*PDF 页面空间*/, pixel_size: (u32, u32) }
 
 ## 4. 后端渲染路径（`backend-pdfium/src/raster.rs`）
 
+**注释渲染（INV-14）**：`PdfRenderConfig` 默认会带上 `FPDF_ANNOT` 把注释烤进位图；我们**默认关闭**
+（`PdfiumBackend::new()`），注释只由应用叠层绘制。原因：写回的 PDF 里已经有注释，烤进来会与 overlay 双份；
+而且删掉 overlay 注释后位图里还会留着。只有验证写回外观的测试用 `with_annotations(true)` 显式打开。
+副作用：外部阅读器加的注释在 S6b 之前不会出现在我们页面里（叠层只有 overlay）。
+
 **旋转契约（INV-12）**：`RenderRequest.rotation` 是"页面自带 `/Rotate` ⊕ 用户旋转"的**最终**旋转，
 `pdfcore` 的布局、网格、摆放都假设后端产出的位图方向**恰好**等于它。
 PDFium 的 `FPDF_RenderPageBitmap` 会自己应用页面的 intrinsic `/Rotate`，

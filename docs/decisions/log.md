@@ -988,6 +988,22 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **未做**：S6b（外部注释只读几何 + 多笔迹）、S6c（显式迁移）；外部注释目前直接跳过。
 - **状态**：S6a 完成，S6b/S6c 待做。
 
+### D-136 页面位图默认不渲染 PDF 注释（`FPDF_ANNOT` 关闭）
+
+- **起因（用户提问）**：PDFium 渲染页面时是否一定会渲染注释？
+  不是：`FPDF_RenderPageBitmap` 由 `FPDF_ANNOT` flag 控制；`pdfium-render` 的 `PdfRenderConfig`
+  **默认打开**（`do_set_flag_render_annotations = true`），而我们之前没有关。
+- **影响**：写回后的 PDF 里已有注释，位图又烤一遍，与 overlay 双份绘制；删除 overlay 注释后
+  界面上不会消失（位图里还留着）。S6b 的外部注释也会被烤进来，和"只读叠层"的设计分叉。
+- **决定**：`PdfiumBackend::new()` **默认不渲染注释**（`render_annotations(false)`），
+  应用只画 overlay；验证写回外观的测试显式 `with_annotations(true)`。
+  这样"页面位图 = 纯页面内容"成为后端不变量（INV-14）。
+- **影响文件**：`backend-pdfium/src/backend.rs`、`raster.rs`、`tests/writeback.rs`、
+  `docs/current/rendering.md`、`architecture.md`。
+- **验证**：`annotations_are_not_baked_into_the_bitmap_by_default` —— 同一份写回 PDF：
+  默认渲染红色像素 0，`with_annotations(true)` 后 >100。`check.sh` 全绿（332 tests）。
+- **状态**：生效。注意：**外部注释在 S6b 之前完全不可见**（这是有意的，避免烤进不可交互的位图）。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

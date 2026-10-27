@@ -132,6 +132,7 @@ PDF 页面坐标 --Rotation::map_point--> 旋转后页内坐标 --×Scale + 页�
 | INV-11 | 取消必须补发 `Cancelled` 事件 | `scheduler.rs`、`testkit.rs` | `scheduler::tests::cancelling_*` |
 | INV-12 | **页面 `/Rotate` 只应用一次**：`RenderRequest.rotation` 是最终旋转，后端把它减掉 intrinsic 后才交给 PDFium | `backend-pdfium/raster.rs` | `intrinsic_rotation_is_applied_exactly_once`（已知位置的矩形） |
 | INV-13 | `DocumentInfo.encrypted` 只在 security handler 不是 `Unprotected` 时为真 | `backend-pdfium/document.rs` | `unencrypted_documents_are_not_reported_as_encrypted` |
+| INV-14 | **页面位图不含 PDF 注释**（`FPDF_ANNOT` 默认关闭）：注释只由应用叠层绘制；否则会双份，且删掉 overlay 后仍从 PDF 位图里显示 | `backend-pdfium`: `PdfiumBackend::new()` / `raster.rs` | `annotations_are_not_baked_into_the_bitmap_by_default`（默认 0 红像素、显式开启后 >100） |
 
 ## 8. 资源与性能要点
 

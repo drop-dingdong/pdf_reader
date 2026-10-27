@@ -23,7 +23,11 @@ use crate::document::{to_pdfium_rotation, SharedDocument};
 use crate::error::to_core_error;
 
 /// [`PageRaster`] 的 PDFium 实现。
-pub struct PdfiumRaster(pub(crate) Arc<SharedDocument>);
+pub struct PdfiumRaster {
+    pub(crate) shared: Arc<SharedDocument>,
+    /// 是否把 PDF 注释渲染进位图；应用默认关闭（叠层自己画），测试可开。
+    pub(crate) render_annotations: bool,
+}
 
 impl PageRaster for PdfiumRaster {
     fn render(&self, request: &RenderRequest) -> Result<Arc<RasterImage>> {
@@ -31,9 +35,9 @@ impl PageRaster for PdfiumRaster {
             return Err(CoreError::Cancelled);
         }
 
-        let page_count = self.0.geometries.len() as u32;
+        let page_count = self.shared.geometries.len() as u32;
         let geometry = self
-            .0
+            .shared
             .geometries
             .get(request.page.get() as usize)
             .copied()
@@ -41,7 +45,7 @@ impl PageRaster for PdfiumRaster {
                 page: request.page,
                 page_count,
             })?;
-        let page = self.0.page(request.page)?;
+        let page = self.shared.page(request.page)?;
 
         let scale = request.scale.0;
         if !(scale > 0.0) {
@@ -105,6 +109,7 @@ impl PageRaster for PdfiumRaster {
         // 红蓝就对调了（实测现象：黄色页显示成青色、蓝色字显示成红色）。
         // 关掉它，`PdfBitmapFormat::BGRA` 才真的是 B,G,R,A，与 `PixelFormat::Bgra8` 一致。
         let config = PdfRenderConfig::new()
+            .render_annotations(self.render_annotations)
             .set_reverse_byte_order(false)
             .set_fixed_size(page_px.0, page_px.1)
             .set_origin(origin.0, origin.1)
