@@ -180,6 +180,69 @@ fn foreign_annotations_are_shown_read_only() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// S7 P1：v2 的 `#annot:` 正文在打开时搬进注释 body，写 v3 图层、清掉 `.json` 里的旧条目。
+#[test]
+fn v2_overlay_body_migrates_into_annotation_body() {
+    let _guard = test_lock();
+    if !backend_available() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "pdf-annot-v2-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("建目录");
+    let pdf = dir.join("rotated_2p.pdf");
+    Sample::Rotated.write_to(&pdf).expect("写样本");
+    std::fs::write(
+        dir.join("rotated_2p.pdf.annot.json"),
+        r##"{"version":2,"pages":[[
+          {"id":1,"kind":"highlight","color":[255,255,0],"opacity":0.35,
+           "quads":[[10,20,30,8]],"body":"#annot:1"}
+        ]]}"##,
+    )
+    .expect("写 v2 A");
+    std::fs::write(
+        dir.join("rotated_2p.pdf.json"),
+        r##"{"version":2,"custom_texts":[
+          {"page":0,"point":[10,20],"rect":[10,20,30,8],"body":[280,150],
+           "title":"#annot:1","text":"迁移正文","scale":1.0}
+        ]}"##,
+    )
+    .expect("写 J");
+    let script = dir.join("migrate.json");
+    std::fs::write(
+        &script,
+        r#"{"name":"migrate","pdf":"rotated_2p.pdf","actions":[
+             {"id":"settle","op":"wait","frames":4},
+             {"id":"save","op":"save"}
+           ]}"#,
+    )
+    .expect("写脚本");
+    replay::run_script_file(&script, None).expect("回放");
+    let overlay = std::fs::read_to_string(dir.join("rotated_2p.pdf.annot.json")).expect("读 A");
+    assert!(overlay.contains("\"version\": 3"), "A 应升到 v3：{overlay}");
+    assert!(
+        overlay.contains("\"body\": \"迁移正文\""),
+        "正文应搬进注释：{overlay}"
+    );
+    assert!(
+        !overlay.contains("#annot:1"),
+        "旧哨兵标题必须消失：{overlay}"
+    );
+    let sidecar = std::fs::read_to_string(dir.join("rotated_2p.pdf.json")).expect("读 J");
+    assert!(
+        !sidecar.contains("#annot:1"),
+        "J 里不应再有注释正文条目：{sidecar}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// S0：`click` / `drag` 动作必须真的驱动 UI，而不是"跑完没报错"。
 #[test]
 fn click_navigates_and_drag_pans() {
@@ -267,17 +330,13 @@ fn undo_and_redo_walk_the_annotation_stack() {
     assert_eq!(action("undo1").annotations, 2, "撤销一次剩两条");
     assert_eq!(action("undo2").annotations, 1, "再撤销一次剩一条");
     assert_eq!(action("redo1").annotations, 2, "重做一次回到两条");
-    // 正文条目必须跟着标注一起撤销/重做（否则重做回来的标注点开是"正文已丢失"）
+    // 注释正文已经属于注释，不再出现在自定义 preview 列表里
     assert_eq!(
         action("undo2").previews_total,
-        1,
-        "撤销后正文条目也应只剩一条"
+        0,
+        "注释正文不应占用 preview 条目"
     );
-    assert_eq!(
-        action("redo1").previews_total,
-        2,
-        "重做后正文条目必须一起回来"
-    );
+    assert_eq!(action("redo1").previews_total, 0);
 }
 
 /// S4b：`ink` 走**真实拖拽**（按下 → 移动 → 抬起），一笔 = 一条标注 = 一次撤销。
@@ -303,7 +362,7 @@ fn ink_stroke_is_one_annotation_that_undo_and_redo_can_move() {
 
     let stroke = action("stroke");
     assert_eq!(stroke.annotations, 1, "一次拖拽应当只产生一条标注");
-    assert_eq!(stroke.previews_total, 1, "墨迹也要有配对的正文条目");
+    assert_eq!(stroke.previews_total, 0, "注释正文不再占用 preview 条目");
     let saved = stroke.annotation_bounds.expect("墨迹包围盒");
     for (label, actual, expected) in [
         ("x", saved.0, 279.0),
@@ -324,22 +383,14 @@ fn ink_stroke_is_one_annotation_that_undo_and_redo_can_move() {
         "撤销必须同时收走配对正文条目"
     );
     assert_eq!(action("redo1").annotations, 1, "重做后墨迹回来");
-    assert_eq!(
-        action("redo1").previews_total,
-        1,
-        "重做必须同时放回配对正文条目"
-    );
+    assert_eq!(action("redo1").previews_total, 0);
 
     assert_eq!(
         action("cancel").annotations,
         1,
         "拖到一半按 Esc：整笔丢弃，既不多一条也不该弄丢已有的那条"
     );
-    assert_eq!(
-        action("cancel").previews_total,
-        1,
-        "取消的一笔不该留下正文条目"
-    );
+    assert_eq!(action("cancel").previews_total, 0);
 
     // 2× 下再画同一组页面空间点：几何必须逐值相同（缩放不参与几何）
     let at_200 = action("stroke_200");

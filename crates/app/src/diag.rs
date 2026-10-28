@@ -76,6 +76,11 @@ impl Diagnostics {
     }
 }
 
+/// 测试/回放辅助：不读环境变量的诊断去处。
+pub fn diagnostics_for_tests() -> Diagnostics {
+    Diagnostics::default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

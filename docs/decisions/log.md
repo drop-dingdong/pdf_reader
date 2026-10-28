@@ -1237,6 +1237,23 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   撤销、P2 身份/写回协议/Popup、测试、提交顺序、风险、待确认）。
 - **状态**：计划待确认，未改代码。
 
+### D-149 P1 实现：正文归注释、浮动对象、A v3 迁移
+
+- **模型**：`Annotation.body: Option<String>`（删除 `body_title`）；正文直接属于注释。
+- **浮动对象**：`FloatOwner::{Annotation, Custom, None}`；注释正文浮窗与自定义 preview 分开，
+  点击注释打开/置顶自己的浮窗；正文编辑走 `AppEdit::SetBody`（可撤销），删除注释时关闭其浮窗。
+- **持久化**：`ANNOT_VERSION = 3`，A 写入 `body`；v2 的 `body`（`#annot:<id>` 标题）通过
+  `SavedOverlay::migrate_v2_bodies` 从 `.json` 的 custom_texts 搬到注释，然后统一删除
+  `#annot:` preview 条目；v2 仍可读（P1.5 再关闭通道）。
+- **加载顺序**：先载 `.json`（自定义 preview），再载 A 并迁移（v2 正文需要 J 的文本）。
+- **导出/读回/写回**：正文都从 `Annotation.body` 取；S6a 导入/补回正文不再创建 preview。
+- **验证**：`annotation_body_tests`（SetBody 可撤销、删除/撤销保留正文、不创建 preview）；
+  `v2_body_titles_migrate_into_body`；replay `v2_overlay_body_migrates_into_annotation_body`
+  （A 升 v3、J 里 `#annot` 消失）；现有 tests 全绿（`annotate_zoom`/`ink`/`ink_many`/`undo_redo`
+  结构基线因不再有正文 preview 而重录）。
+- **未做**：P1.5（关闭 v2→v3 通道）、P2；外部注释仍只读几何。
+- **状态**：P1 实现完成，待人工验真窗口（打开/双击编辑/撤销/保存/重开）。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

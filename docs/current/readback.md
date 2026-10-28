@@ -32,8 +32,8 @@ Squiggly 等一律跳过。隐藏（`/F` Hidden/NoView）跳过。
 | 文件 | 内容 | 谁写 |
 | --- | --- | --- |
 | `<pdf>` | 页面 + 写回的注释（`/NM` 标记、`/Contents`、`/AP`） | 仅「写入 PDF」/「导出标注 PDF」 |
-| `<pdf>.annot.json` | 注释几何/颜色/透明度/`body_title`（按页） | 「保存」（`overlay_dirty` 时） |
-| `<pdf>.json` | 自定义 preview、链接、被引用点；**注释正文**（`#annot:<id>`） | 「保存」（`data_dirty` 时） |
+| `<pdf>.annot.json` | 注释几何/颜色/透明度/**正文**（v3，按页） | 「保存」（`overlay_dirty` 时） |
+| `<pdf>.json` | 自定义 preview、链接、被引用点（**不再含注释正文**） | 「保存」（`data_dirty` 时） |
 
 「保存」按钮（`*保存自定义数据`，Ctrl+S 同路径）会把**有改动的两类文件都写**，但**不碰 PDF**；
 「写入 PDF」会先 `save_all()`（落盘 A/J），再写 PDF、备份、重开；「导出标注 PDF」只写副本，不保存 sidecar。
@@ -42,20 +42,20 @@ Squiggly 等一律跳过。隐藏（`/F` Hidden/NoView）跳过。
 
 | PDF | `.annot.json` | `.json` | 打开后看到什么 |
 | --- | --- | --- | --- |
-| 有 | 无 | 无 | 从 PDF 读回带标记的注释（可编辑），正文来自 `/Contents`（自动建正文条目） |
-| 有 | 有 | 无 | 用 A 的几何；正文条目缺失时**从 `/Contents` 补回**（状态栏“补回 N 条正文”），补不回来就显示“正文已丢失” |
-| 有 | 无 | 有 | 从 PDF 读回注释；正文优先用 J 里的 `#annot:<id>` 条目，缺了才用 `/Contents` |
-| 有 | 有 | 有 | A 的几何 + J 的正文；PDF 只用于补 A 中缺失的正文（overlay 优先） |
+| 有 | 无 | 无 | 从 PDF 读回带标记的注释（可编辑），正文来自 `/Contents` |
+| 有 | 有 | 无 | 用 A 的几何与正文；A 的正文为空时**从 `/Contents` 补回**（状态栏“补回 N 条正文”） |
+| 有 | 无 | 有 | 从 PDF 读回注释；正文来自 `/Contents` |
+| 有 | 有 | 有 | A 的几何 + A 的正文；PDF 只用于补 A 中缺失的正文（overlay 优先） |
 | 有 | 坏文件 | 任意 | A 按“不存在”处理（提示一句），走“无 A”的恢复路径 |
-| 有 | 无 | 有（PDF 无注释） | 没有注释；J 里的正文条目成为**孤儿**（还在 preview 列表里） |
-| 有 | 有 | 无（PDF 无正文） | 注释在；正文显示“正文已丢失”；写入 PDF 时正文为空 |
+| 有 | 无 | 有（PDF 无注释） | 没有注释；J 里只有自定义 preview/链接 |
+| 有 | 有 | 无（PDF 无正文） | 注释在；正文为空；写入 PDF 时正文为空 |
 
 ## 3.2 合并规则（overlay 优先）
 
 | 场景 | 行为 |
 | --- | --- |
 | `.annot.json` 存在 | **overlay 赢**：读取只用于校验；PDF 里多出来的标记注释不导入（用户删掉的，下次写回会删） |
-| `.annot.json` 不存在 | 导入所有带标记的注释为**可编辑**（id 取自 `/NM`）；正文优先复用已有 `custom_texts` 条目，没有才用 `/Contents` 新建 |
+| `.annot.json` 不存在 | 导入所有带标记的注释为**可编辑**（id 取自 `/NM`）；正文来自 `/Contents` |
 | 没有 `/NM` 的外部注释 | **只读显示**（S6b）：不写 overlay、不参与删除/写回 |
 | 读回失败 / 单条坏 | 跳过并计数，打开流程继续 |
 
@@ -103,7 +103,7 @@ Squiggly 等一律跳过。隐藏（`/F` Hidden/NoView）跳过。
 确认框（PDF 里 N 条标记注释 / 当前 overlay X 条标注、Y 条正文）
 → 备份 <pdf>.annot.json 与 <pdf>.json 为 .bak-<纳秒>
 → 删除 <pdf>.annot.json
-→ 只删除 <pdf>.json 里标题以 #annot: 开头的正文条目（链接/自定义 preview 保留）
+→ 删除 A（v3 已自带正文；旧 J 里的 #annot: 条目只是迁移残留）
 → 重开文档：A 不存在 → 走 S6a 从 PDF 导入标注与 /Contents 正文
 → 自动保存新的 A/J（overlay_dirty/data_dirty）
 ```

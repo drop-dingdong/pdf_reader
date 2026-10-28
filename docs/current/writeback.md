@@ -20,7 +20,7 @@
 
 ```text
 主进程（阅读器，工具栏「导出标注 PDF」）
-  └─ app::export：overlay + 正文 → job.json（系统临时目录）
+  └─ app::export：overlay（几何 + 正文）→ job.json（系统临时目录）
        ├─ std::process::Command：<自身 exe> --writeback <job.json>     ← 子进程
        │    └─ app::writeback::run_job（解析 JSON）
                  └─ backend_pdfium::writeback::write（FFI）
@@ -229,7 +229,7 @@ MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
 
 **已知边界**：
 
-* 本程序写回的注释是 **overlay 的投影**：每次写回都会删掉重建，正文/颜色/几何都以 overlay 为准；
+* 本程序写回的注释是 **overlay 的投影**：差分同步，正文/颜色/几何都以 overlay 为准；
   别的程序对这些注释的修改会被覆盖（别的程序**自己新增**的注释不受影响）；
 * 写完后界面里仍显示 overlay（这是有意的：读回 PDF 注释（S6）之前，删 overlay 等于让标注在本程序里消失）；
 * 写完后 undo/redo 只改 overlay，PDF 要等下一次写入才同步；
@@ -254,7 +254,7 @@ MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
 * 导出是**同步**调用：等待子进程与冒烟渲染期间 UI 会短暂停顿（通常几十毫秒；超大文件另说）；
 * 父进程**不比较像素**：冒烟校验只保证"文件能打开、页数对、渲染不报错"；
   旋转页的像素位置由 `backend-pdfium` 的回归测试守（INV-12 / L3 已修正），真实阅读器仍需人工抽查；
-* 正文从 `custom_previews` 里按哨兵标题 `#annot:<id>` 取；空正文不写 `/Contents`；
+* 正文直接从 `Annotation.body` 取；空正文不写 `/Contents`；
 * 目标文件名**不含** `.pdf` 之外的后缀拼接坑：`a.b.pdf` → `a.b.annotated.pdf`（只替换最后一个扩展名）。
 
 ## 11. 自检（`write()` 内置）

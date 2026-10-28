@@ -395,18 +395,26 @@ struct CaptureState {
 /// 命令里**持有旧值**（`Arc` 共享，不做深拷贝）：撤销时把它移回应用即可。
 #[derive(Clone)]
 enum AppEdit {
-    /// 新增一条标注。
-    ///
-    /// **不带正文内容**：正文由 `orphan_bodies` 在"删除那一刻"保管。
-    /// 带创建时的快照会把之后的正文修改丢掉（用户实测：改正文 → 撤销 → 重做，正文没了）。
+    /// 新增一条标注（快照含正文，撤销/重做天然带着走）。
     AddAnnotation {
-        /// 标注本体（含 id，撤销后重做必须用同一个 id）。
+        /// 标注本体（含 id 与正文，撤销后重做必须用同一个 id）。
         annotation: pdfcore::annotation::Annotation,
     },
-    /// 删除一条标注（撤销 = 放回 `orphan_bodies` 里那份正文）。
+    /// 删除一条标注（撤销 = 把快照原样放回）。
     DeleteAnnotation {
-        /// 被删掉的标注。
+        /// 被删掉的标注（含删除那一刻的正文）。
         annotation: pdfcore::annotation::Annotation,
+    },
+    /// 修改注释正文（一条命令一次提交，不按字符记历史）。
+    SetBody {
+        /// 注释 id。
+        id: AnnotationId,
+        /// 所在页（只用于描述）。
+        page: PageIndex,
+        /// 旧正文。
+        before: Option<String>,
+        /// 新正文。
+        after: Option<String>,
     },
     /// 删除一条自定义 preview（撤销 = 按原下标放回）。
     ///
@@ -456,6 +464,9 @@ impl AppEdit {
             Self::DeleteAnnotation { annotation } => {
                 format!("删除标注（第 {} 页）", annotation.page.display_number())
             }
+            Self::SetBody { page, .. } => {
+                format!("修改注释正文（第 {} 页）", page.display_number())
+            }
             Self::DeletePreview { index, .. } => format!("删除自定义preview #{index}"),
             Self::AddPreview { index, .. } => format!("恢复自定义preview #{index}"),
             Self::EditDestMark { page, .. } => {
@@ -482,6 +493,17 @@ enum FloatContent {
     Image(egui::TextureHandle),
 }
 
+/// 浮窗的来源：注释正文是一类独立对象，不与自定义 preview 混用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloatOwner {
+    /// 注释的正文浮窗。
+    Annotation(AnnotationId),
+    /// 自定义文字/图片 preview 的正式浮窗。
+    Custom(usize),
+    /// 测试浮窗、链接预览、截图等。
+    None,
+}
+
 /// 视图区域内的浮窗（始终在画布内部、可移动/改大小/关闭）。
 struct Float {
     /// 唯一 id（用于 egui 的交互标识）。
@@ -492,8 +514,8 @@ struct Float {
     content: FloatContent,
     /// 在**视图区域**（画布）内的矩形；每帧会被夹取回区域内。
     rect: egui::Rect,
-    /// 若是某个自定义 preview 的**正式浮窗**，记录其在 `custom_previews` 中的下标。
-    custom: Option<usize>,
+    /// 来源（注释 / 自定义 preview / 其它）。
+    owner: FloatOwner,
     /// 正文尺寸的**权威值**：只在"创建"与"拖动右下角改大小"时写入。
     ///
     /// 不从 `rect` 每帧反算 —— 那样会带入换算与夹取的亚像素误差，
@@ -503,6 +525,15 @@ struct Float {
     /// 来源：由某个被引用点的悬停预览**固定**而来时记录 `(页号, 下标)`。
     /// 用于"同一目的地再次悬停时高亮并置顶这个浮窗，而不是再弹预览"。
     origin: Option<(PageIndex, usize)>,
+}
+
+impl Float {
+    fn custom_index(&self) -> Option<usize> {
+        match self.owner {
+            FloatOwner::Custom(index) => Some(index),
+            _ => None,
+        }
+    }
 }
 
 /// 应用状态。
@@ -556,8 +587,6 @@ pub struct PdfReaderApp {
     overlay_dirty: bool,
     /// 编辑历史（注释 + 重选截图/引用点，单栈时间序）。
     history: crate::history::History<AppEdit>,
-    /// 被撤销的标注正文（等重做时取回；保留"删除那一刻"的内容）。
-    orphan_bodies: std::collections::HashMap<AnnotationId, CustomPreview>,
     /// 是否显示"编辑历史"可视列表（首次撤销时自动打开）。
     show_history: bool,
     /// 本帧指针悬停在哪个标注上（`Delete` 用它决定删谁）。
@@ -619,7 +648,7 @@ pub struct PdfReaderApp {
     /// 正在编辑题目 `(下标, 草稿)`。
     editing_title: Option<(usize, String)>,
     /// 正在编辑正文 `(下标, 草稿)`（文字预览：固定浮窗内双击正文进入）。
-    editing_body: Option<(usize, String)>,
+    editing_body: Option<(FloatOwner, String)>,
     /// **链接 → 被引用点** 的登记表（与 `navigation.links_by_page` 同构）：
     /// 下标与 `links_on(page)` 一一对应。打开文档时解析一次，
     /// 之后悬停与跳转都直接用它（用户建议：记住索引，而不是每次按位置查）。
@@ -764,7 +793,6 @@ impl PdfReaderApp {
             pending_view_restore: None,
             overlay_dirty: false,
             history: crate::history::History::new(),
-            orphan_bodies: std::collections::HashMap::new(),
             show_history: false,
             hovered_annotation: None,
             outline_rows: Vec::new(),
@@ -860,42 +888,15 @@ impl PdfReaderApp {
         match &edit {
             AppEdit::AddAnnotation { annotation } => {
                 self.annotations.insert(annotation.clone());
-                // 正文：优先取回"上次删除时"保管的那份（含期间的所有修改）；
-                // 首次创建则现造一条空正文（标题就是哨兵标题）。
-                let body = self.orphan_bodies.remove(&annotation.id).or_else(|| {
-                    let title = annotation.body_title.clone()?;
-                    let bounds = annotation.bounds()?;
-                    Some(CustomPreview {
-                        page: annotation.page,
-                        point: bounds.center(),
-                        rect: bounds,
-                        kind: CustomKind::Text,
-                        title,
-                        text: Some(String::new()),
-                        snapshot: None,
-                        body_size: egui::vec2(280.0, 150.0),
-                        scale: 1.0,
-                    })
-                });
-                if let Some(body) = body {
-                    self.custom_previews.push(body);
-                }
             }
             AppEdit::DeleteAnnotation { annotation } => {
                 self.annotations.remove(annotation.id);
-                // 把配对的正文条目**移进 orphan_bodies**（不是丢弃）：重做时要原样放回，
-                // 且必须带上"删除那一刻"的内容（创建时的快照会丢掉之后的修改）。
-                if let Some(title) = annotation.body_title.clone() {
-                    if let Some(index) = self
-                        .custom_previews
-                        .iter()
-                        .position(|preview| preview.title == title)
-                    {
-                        let body = self.custom_previews.remove(index);
-                        self.orphan_bodies.insert(annotation.id, body);
-                        self.shift_float_custom_indices(index);
-                    }
-                }
+                // 关闭这条注释的正文浮窗（不会碰 CustomPreview）
+                self.floats
+                    .retain(|window| window.owner != FloatOwner::Annotation(annotation.id));
+            }
+            AppEdit::SetBody { id, after, .. } => {
+                self.annotations.set_body(*id, after.clone());
             }
             AppEdit::DeletePreview { index, .. } => {
                 if *index < self.custom_previews.len() {
@@ -936,6 +937,17 @@ impl PdfReaderApp {
         let inverse = match entry.command {
             AppEdit::AddAnnotation { annotation } => AppEdit::DeleteAnnotation { annotation },
             AppEdit::DeleteAnnotation { annotation } => AppEdit::AddAnnotation { annotation },
+            AppEdit::SetBody {
+                id,
+                page,
+                before,
+                after,
+            } => AppEdit::SetBody {
+                id,
+                page,
+                before: after,
+                after: before,
+            },
             // 这两个的"逆"由 `apply_edit` 自身根据当前状态判别（见各自的注释）
             AppEdit::DeletePreview { index, preview } => AppEdit::AddPreview { index, preview },
             AppEdit::AddPreview { index, preview } => AppEdit::DeletePreview { index, preview },
@@ -1204,13 +1216,7 @@ impl PdfReaderApp {
             .annotations
             .iter()
             .map(|annotation| {
-                let body = annotation.body_title.as_ref().and_then(|title| {
-                    self.custom_previews
-                        .iter()
-                        .find(|preview| &preview.title == title)
-                        .and_then(|preview| preview.text.clone())
-                        .filter(|text| !text.is_empty())
-                });
+                let body = annotation.body.clone().filter(|text| !text.is_empty());
                 crate::export::ExportItem {
                     id: Some(annotation.id.get()),
                     page: annotation.page,
@@ -1301,13 +1307,7 @@ impl PdfReaderApp {
             .iter()
             .map(|annotation| {
                 // 正文按哨兵标题从 custom_texts 里取；空正文不写 /Contents
-                let body = annotation.body_title.as_ref().and_then(|title| {
-                    self.custom_previews
-                        .iter()
-                        .find(|preview| &preview.title == title)
-                        .and_then(|preview| preview.text.clone())
-                        .filter(|text| !text.is_empty())
-                });
+                let body = annotation.body.clone().filter(|text| !text.is_empty());
                 crate::export::ExportItem {
                     id: Some(annotation.id.get()),
                     page: annotation.page,
@@ -1437,29 +1437,27 @@ impl PdfReaderApp {
 
     /// 载入标注图层；文件不存在 → 空集合，坏文件 → 提示并返回空集合。
     fn load_overlay_file(
+        &mut self,
         path: &std::path::Path,
     ) -> std::result::Result<pdfcore::annotation::AnnotationStore, String> {
         let target = persist::annot_path(path);
-        let text = match std::fs::read_to_string(&target) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(pdfcore::annotation::AnnotationStore::new())
-            }
-            Err(error) => return Err(format!("读取标注图层失败：{error}")),
-        };
-        persist::SavedOverlay::from_json(&text)
-            .map(|overlay| persist::store_from_overlay(&overlay))
-            .map_err(|error| format!("标注图层无法加载（{error}），已按空处理"))
+        let text = std::fs::read_to_string(&target)
+            .map_err(|error| format!("读取标注图层失败：{error}"))?;
+        let mut overlay = persist::SavedOverlay::from_json(&text)
+            .map_err(|error| format!("标注图层无法加载（{error}），已按空处理"))?;
+        // v2：正文在 `.json` 的 `#annot:<id>` 条目里，搬进注释自己的 body
+        let migrated = overlay.migrate_v2_bodies(|title| {
+            self.custom_previews
+                .iter()
+                .find(|preview| preview.title == title)
+                .and_then(|preview| preview.text.clone())
+        });
+        if migrated {
+            self.overlay_dirty = true;
+        }
+        Ok(persist::store_from_overlay(&overlay))
     }
 
-    /// S6a：把 PDF 里带 `pd-fr:<id>` 标记的注释并进当前 overlay。
-    ///
-    /// 规则（D-134）：
-    /// * overlay 里已有同 id → **overlay 赢**（PDF 只用来校验）；
-    /// * overlay 文件存在、PDF 有标记但 overlay 没有该 id → 忽略（用户删了它，下次写回会删）；
-    /// * overlay 文件**不存在** → 导入为可编辑（id 取自标记），正文优先用已有 `custom_texts`，
-    ///   没有才用 `/Contents` 新建条目。
-    /// * 没有标记的外部注释：S6b 再做（只读），这里先跳过。
     fn merge_readback(
         &mut self,
         readback: &backend_pdfium::readback::Readback,
@@ -1473,53 +1471,26 @@ impl PdfReaderApp {
                 .collect();
 
         if overlay_exists {
-            // overlay 赢：不导入新注释。但 overlay 里有 body_title、正文条目却不在
-            // （典型：删了 `<pdf>.json`），从 PDF 的 /Contents 补回 —— 否则下一次写回
-            // 会拿不到正文，把 PDF 里原有的正文清空。
-            let pending: Vec<(AnnotationId, PageIndex, String, Point)> = self
-                .annotations
-                .iter()
-                .filter_map(|annotation| {
-                    let title = annotation.body_title.clone()?;
-                    if self
-                        .custom_previews
-                        .iter()
-                        .any(|preview| preview.title == title)
-                    {
-                        return None;
-                    }
-                    let bounds = annotation.bounds()?;
-                    Some((
-                        annotation.id,
-                        annotation.page,
-                        title,
-                        Point::new(
-                            bounds.x + bounds.width * 0.5,
-                            bounds.y + bounds.height * 0.5,
-                        ),
-                    ))
-                })
-                .collect();
+            // overlay 赢：不导入新注释；但 overlay 的正文为空、PDF 有 /Contents 时补回
             let mut recovered = 0;
-            for (id, page, title, point) in pending {
+            let ids: Vec<AnnotationId> = self.annotations.iter().map(|a| a.id).collect();
+            for id in ids {
+                let missing = self
+                    .annotations
+                    .get(id)
+                    .is_some_and(|annotation| annotation.body.is_none());
+                if !missing {
+                    continue;
+                }
                 let Some(body) = by_id.get(&id.get()).and_then(|item| item.body.as_ref()) else {
                     continue;
                 };
-                self.custom_previews.push(CustomPreview {
-                    page,
-                    point,
-                    rect: zero_rect_at(point),
-                    kind: CustomKind::Text,
-                    title,
-                    text: Some(body.clone()),
-                    snapshot: None,
-                    body_size: DEFAULT_CUSTOM_TEXT_BODY,
-                    scale: 1.0,
-                });
-                recovered += 1;
+                if self.annotations.set_body(id, Some(body.clone())) {
+                    recovered += 1;
+                }
             }
             if recovered > 0 {
-                self.data_dirty = true;
+                self.overlay_dirty = true;
             }
             return (0, recovered);
         }
@@ -1527,7 +1498,7 @@ impl PdfReaderApp {
         let mut restored = 0;
         for item in &readback.annotations {
             let Some(raw_id) = item.id else {
-                continue; // 外部注释：S6b（只读）再处理
+                continue; // 外部注释：S6b 只读层
             };
             let id = AnnotationId(raw_id);
             if self.annotations.get(id).is_some() {
@@ -1539,40 +1510,7 @@ impl PdfReaderApp {
             annotation.id = id;
             annotation.color = item.color;
             annotation.opacity = item.opacity;
-            let title = persist::annotation_body_title(id);
-            if let Some(body) = &item.body {
-                if let Some(bounds) = annotation.bounds() {
-                    let point = Point::new(
-                        bounds.x + bounds.width * 0.5,
-                        bounds.y + bounds.height * 0.5,
-                    );
-                    if !self
-                        .custom_previews
-                        .iter()
-                        .any(|preview| preview.title == title)
-                    {
-                        self.custom_previews.push(CustomPreview {
-                            page: item.page,
-                            point,
-                            rect: zero_rect_at(point),
-                            kind: CustomKind::Text,
-                            title: title.clone(),
-                            text: Some(body.clone()),
-                            snapshot: None,
-                            body_size: DEFAULT_CUSTOM_TEXT_BODY,
-                            scale: 1.0,
-                        });
-                        self.data_dirty = true; // 新建的正文要能落盘
-                    }
-                }
-            }
-            if self
-                .custom_previews
-                .iter()
-                .any(|preview| preview.title == title)
-            {
-                annotation.body_title = Some(title);
-            }
+            annotation.body = item.body.clone();
             self.annotations.insert(annotation);
             restored += 1;
         }
@@ -1580,14 +1518,11 @@ impl PdfReaderApp {
     }
 
     /// S6b：把 PDF 里**没有 `pd-fr:` 标记**的注释放进只读层。
-    ///
-    /// 一条外部墨迹注释可能有多条 `/InkList` path；模型只支持一条折线，
-    /// 这里按 path 拆成多条只读注释显示（不合并、不编辑、不落盘）。
     fn import_foreign(&mut self, readback: &backend_pdfium::readback::Readback) {
         self.foreign_annotations.clear();
         for item in &readback.annotations {
             if item.id.is_some() {
-                continue; // 我们自己的注释：已在 overlay / merge 里
+                continue;
             }
             if let AnnotationKind::Ink { width, .. } = &item.kind {
                 let strokes = if item.ink_strokes.is_empty() {
@@ -1608,6 +1543,7 @@ impl PdfReaderApp {
                     ) {
                         annotation.color = item.color;
                         annotation.opacity = item.opacity;
+                        annotation.body = item.body.clone();
                         self.foreign_annotations.push(annotation);
                     }
                 }
@@ -1616,6 +1552,7 @@ impl PdfReaderApp {
             if let Some(mut annotation) = Annotation::new(item.page, item.kind.clone()) {
                 annotation.color = item.color;
                 annotation.opacity = item.opacity;
+                annotation.body = item.body.clone();
                 self.foreign_annotations.push(annotation);
             }
         }
@@ -1676,14 +1613,6 @@ impl PdfReaderApp {
                         let overlay_file_exists = persist::annot_path(path).exists();
                         // 坏 overlay 当作"不存在"处理：否则 PDF 里明明有注释也恢复不出来
                         let mut overlay_ok = true;
-                        match Self::load_overlay_file(path) {
-                            Ok(store) => self.annotations = store,
-                            Err(message) => {
-                                overlay_ok = false;
-                                open_warning = Some(message);
-                            }
-                        }
-                        let overlay_exists = overlay_file_exists && overlay_ok;
                         // 同目录若有存档（<pdf>.json），载入并**替换**链接与被引用点/自定义数据。
                         // 旧版本就地升级并置脏（下次保存写回当前版本）；**更新版本一律拒绝**（D-107）。
                         let saved = match load_sidecar(path) {
@@ -1814,6 +1743,24 @@ impl PdfReaderApp {
                                 }
                             }
                         }
+                        // 先载入主存档（custom_previews），再载入/迁移 A（v2 的正文在 `.json` 里）
+                        if overlay_file_exists {
+                            match self.load_overlay_file(path) {
+                                Ok(store) => self.annotations = store,
+                                Err(message) => {
+                                    overlay_ok = false;
+                                    open_warning = Some(message);
+                                }
+                            }
+                        }
+                        // 注释正文已经属于注释；旧的 `#annot:` preview 条目一律移除
+                        let before = self.custom_previews.len();
+                        self.custom_previews
+                            .retain(|preview| !preview.title.starts_with("#annot:"));
+                        if self.custom_previews.len() != before {
+                            self.data_dirty = true;
+                        }
+                        let overlay_exists = overlay_file_exists && overlay_ok;
                         let (restored, recovered_bodies) =
                             self.merge_readback(&readback, overlay_exists);
                         self.import_foreign(&readback);
@@ -3056,7 +3003,7 @@ impl PdfReaderApp {
         let mut shown: Vec<usize> = self
             .floats
             .iter()
-            .filter_map(|window| window.custom)
+            .filter_map(|window| window.custom_index())
             .collect();
         shown.sort_unstable();
         shown.dedup();
@@ -3303,13 +3250,12 @@ impl PdfReaderApp {
         self.add_annotation(page, AnnotationKind::Highlight { quads })
     }
 
-    /// 建一条标注 + 配对正文条目，并**记入历史**（所有"新建标注"的唯一入口）。
+    /// 建一条标注并**记入历史**（所有"新建标注"的唯一入口）。
+    /// 正文直接属于注释（初始为空；首次编辑时再写）。
     fn add_annotation(&mut self, page: PageIndex, kind: AnnotationKind) -> bool {
         let Some(id) = self.annotations.add(page, kind) else {
             return false;
         };
-        let title = persist::annotation_body_title(id);
-        self.annotations.set_body(id, Some(title));
         let Some(annotation) = self.annotations.get(id).cloned() else {
             return false;
         };
@@ -3323,13 +3269,14 @@ impl PdfReaderApp {
     /// 删除 `custom_previews[index]` 之后，把浮窗里的下标引用左移并移除指向它的浮窗。
     fn shift_float_custom_indices(&mut self, index: usize) {
         for window in &mut self.floats {
-            if let Some(custom) = window.custom {
+            if let FloatOwner::Custom(custom) = window.owner {
                 if custom > index {
-                    window.custom = Some(custom - 1);
+                    window.owner = FloatOwner::Custom(custom - 1);
                 }
             }
         }
-        self.floats.retain(|window| window.custom != Some(index));
+        self.floats
+            .retain(|window| window.owner != FloatOwner::Custom(index));
     }
 
     /// 删除指针下的标注（`Delete` 键；Ctrl+Z 可撤销）。
@@ -3368,36 +3315,18 @@ impl PdfReaderApp {
         None
     }
 
-    /// 点击标注：按哨兵标题找到正文条目并打开浮窗；找不到时显示"正文已丢失"。
+    /// 点击标注：打开/置顶它的正文浮窗（正文直接属于注释，不再经过 preview）。
     fn open_annotation_note(&mut self, id: AnnotationId, at: egui::Pos2) {
-        let title = persist::annotation_body_title(id);
-        if let Some(index) = self
-            .custom_previews
-            .iter()
-            .position(|preview| preview.title == title)
-        {
-            let rect = egui::Rect::from_min_size(at, EVec2::new(280.0, 150.0));
-            // 走"已存在就高亮置顶、否则新建"的同一条路径 —— 直接 spawn 会导致
-            // 同一个标注每点一次就多一个浮窗（用户实测）。
-            self.activate_custom_preview(index, rect);
+        let Some(annotation) = self.annotations.get(id) else {
             return;
-        }
-        // 正文缺失：保留几何、显示占位（绝不因为找不到正文而崩溃/丢弃标注）。
-        // 区分"本来就没有正文"和"正文引用了但条目丢了"，后者才是真的丢失。
-        let had_body = self
-            .annotations
-            .get(id)
-            .map(|annotation| annotation.body_title.is_some())
-            .unwrap_or(false);
-        let body = if had_body {
-            "（正文已丢失）".to_string()
-        } else {
-            "（没有正文）".to_string()
         };
-        let rect = egui::Rect::from_min_size(at, EVec2::new(280.0, 150.0));
+        let body = annotation.body.clone().unwrap_or_default();
         let title = format!("标注 #{}", id.get());
-        // 同一条标注的占位浮窗也只应有一个：已存在就高亮置顶
-        if let Some(position) = self.floats.iter().position(|window| window.title == title) {
+        if let Some(position) = self
+            .floats
+            .iter()
+            .position(|window| window.owner == FloatOwner::Annotation(id))
+        {
             let window = self.floats.remove(position);
             let float_id = window.id;
             self.floats.push(window);
@@ -3405,6 +3334,7 @@ impl PdfReaderApp {
             self.click_highlight = Some((float_id, self.clock.now() + CLICK_HIGHLIGHT));
             return;
         }
+        let rect = egui::Rect::from_min_size(at, EVec2::new(280.0, 150.0));
         let float_id = self.next_float_id;
         self.next_float_id += 1;
         self.floats.push(Float {
@@ -3412,7 +3342,7 @@ impl PdfReaderApp {
             title,
             content: FloatContent::Text(body),
             rect,
-            custom: None,
+            owner: FloatOwner::Annotation(id),
             body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
             origin: None,
         });
@@ -3441,7 +3371,7 @@ impl PdfReaderApp {
             title,
             content,
             rect,
-            custom: Some(index),
+            owner: FloatOwner::Custom(index),
             body,
             origin: None,
         });
@@ -3460,7 +3390,7 @@ impl PdfReaderApp {
 
     /// 若某个自定义 preview 已有**正式浮窗**，把它高亮并置顶（侧栏悬浮/点击共用）。
     fn highlight_existing_custom_float(&mut self, index: usize) -> Option<u64> {
-        let customs: Vec<Option<usize>> = self.floats.iter().map(|f| f.custom).collect();
+        let customs: Vec<Option<usize>> = self.floats.iter().map(|f| f.custom_index()).collect();
         let position = find_float_for_custom(&customs, index)?;
         let window = self.floats.remove(position);
         let id = window.id;
@@ -3471,7 +3401,7 @@ impl PdfReaderApp {
 
     /// 侧栏条目被点击：生成正式浮窗；若已存在则高亮 + 置顶（一次性高亮有时限）。
     fn activate_custom_preview(&mut self, index: usize, row: egui::Rect) {
-        let customs: Vec<Option<usize>> = self.floats.iter().map(|f| f.custom).collect();
+        let customs: Vec<Option<usize>> = self.floats.iter().map(|f| f.custom_index()).collect();
         if let Some(position) = find_float_for_custom(&customs, index) {
             let window = self.floats.remove(position);
             let id = window.id;
@@ -4172,14 +4102,14 @@ impl PdfReaderApp {
                                 {
                                     // 命中/删除只看几何，与"有没有正文"无关
                                     self.hovered_annotation = Some(annotation.id);
-                                    if let Some(title) = &annotation.body_title {
-                                        if let Some(window) = self
-                                            .floats
-                                            .iter()
-                                            .find(|window| &window.title == title)
-                                        {
-                                            self.highlight_float = Some(window.id);
-                                        }
+                                    if let Some(window) = self
+                                        .floats
+                                        .iter()
+                                        .find(|window| {
+                                            window.owner == FloatOwner::Annotation(annotation.id)
+                                        })
+                                    {
+                                        self.highlight_float = Some(window.id);
                                     }
                                 }
                             }
@@ -4197,12 +4127,14 @@ impl PdfReaderApp {
                                 if screen.contains(pointer) {
                                     // 命中/删除只看几何，与"有没有正文"无关
                                     self.hovered_annotation = Some(annotation.id);
-                                    if let Some(title) = &annotation.body_title {
-                                        if let Some(window) =
-                                            self.floats.iter().find(|window| &window.title == title)
-                                        {
-                                            self.highlight_float = Some(window.id);
-                                        }
+                                    if let Some(window) = self
+                                        .floats
+                                        .iter()
+                                        .find(|window| {
+                                            window.owner == FloatOwner::Annotation(annotation.id)
+                                        })
+                                    {
+                                        self.highlight_float = Some(window.id);
                                     }
                                 }
                             }
@@ -4526,7 +4458,7 @@ impl PdfReaderApp {
                         }
                     }
                 }
-                if let Some(index) = window.custom {
+                if let Some(index) = window.custom_index() {
                     if let Some(preview) = self.custom_previews.get_mut(index) {
                         if body_size_changed(preview.body_size, body) {
                             preview.body_size = body;
@@ -4576,7 +4508,7 @@ impl PdfReaderApp {
                 "这是第 {id} 个测试浮窗。\n目前只显示文字。\n\n可以拖动标题栏移动、\n拖右下角改变大小、\n点右上角 ✕ 关闭。"
             )),
             origin: None,
-            custom: None,
+            owner: FloatOwner::None,
             body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
             rect,
         });
@@ -4804,7 +4736,7 @@ impl PdfReaderApp {
                 title: format!("引用点截图 · 第 {} 页", page.display_number()),
                 content: FloatContent::Image(texture),
                 origin: Some((page, index)),
-                custom: None,
+                owner: FloatOwner::None,
                 body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
                 rect: clamp_float_rect(
                     rect.translate(response.drag_delta()),
@@ -4915,19 +4847,18 @@ impl PdfReaderApp {
         }
     }
 
-    /// 文字 preview 浮窗的**正文原位编辑**：双击进入，输入框失焦即写回并回到阅览模式。
+    /// 浮窗正文的原位编辑：双击进入，失焦提交。
     ///
-    /// 单独成一个 pass（在 `draw_floats` 之后调用），是为了避免与 `draw_floats` 里的
-    /// `painter` 借用冲突 —— 那里只负责"编辑中跳过正文绘制"。
+    /// * 自定义 preview：沿用旧行为（直接写 preview.text，不进撤销栈）；
+    /// * 注释：写入 `Annotation.body`，走 `AppEdit::SetBody`（可撤销）。
     fn draw_float_body_editing(&mut self, ui: &mut egui::Ui) {
-        // 找到正在编辑的那条记录 + 它对应的浮窗
-        let Some((editing_index, _)) = self.editing_body.clone() else {
+        let Some((editing_owner, _)) = self.editing_body.clone() else {
             return;
         };
         let Some(window) = self
             .floats
             .iter()
-            .find(|window| window.custom == Some(editing_index))
+            .find(|window| window.owner == editing_owner)
         else {
             self.editing_body = None;
             return;
@@ -4947,37 +4878,68 @@ impl PdfReaderApp {
                 .desired_rows(6),
         );
         if self.focus_body_edit {
-            // 进入编辑的那一帧就把焦点交给输入框，否则键入无效（"改了没变化"）
             response.request_focus();
             self.focus_body_edit = false;
         }
         if response.lost_focus() {
-            if let Some(preview) = self.custom_previews.get_mut(editing_index) {
-                preview.text = Some(text);
+            match editing_owner {
+                FloatOwner::Custom(index) => {
+                    if let Some(preview) = self.custom_previews.get_mut(index) {
+                        preview.text = Some(text);
+                    }
+                    self.data_dirty = true;
+                }
+                FloatOwner::Annotation(id) => {
+                    let before = self.annotations.get(id).and_then(|a| a.body.clone());
+                    let after = if text.is_empty() { None } else { Some(text) };
+                    if before != after {
+                        let page = self
+                            .annotations
+                            .get(id)
+                            .map(|a| a.page)
+                            .unwrap_or(PageIndex::FIRST);
+                        self.apply_edit(
+                            AppEdit::SetBody {
+                                id,
+                                page,
+                                before,
+                                after,
+                            },
+                            true,
+                        );
+                    }
+                }
+                FloatOwner::None => {}
             }
             self.editing_body = None;
-            self.data_dirty = true;
             self.message = "已更新内容".to_string();
         } else {
-            self.editing_body = Some((editing_index, text));
+            self.editing_body = Some((editing_owner, text));
         }
     }
 
-    /// 双击文字 preview 浮窗的正文 → 进入原位编辑。
+    /// 双击浮窗正文 → 进入原位编辑（自定义文字 preview 或注释正文）。
     fn detect_body_double_click(&mut self, ui: &mut egui::Ui) {
         if self.editing_body.is_some() {
             return;
         }
-        let targets: Vec<(u64, usize, egui::Rect)> = self
+        let targets: Vec<(u64, FloatOwner, egui::Rect)> = self
             .floats
             .iter()
-            .filter_map(|window| {
-                let custom = window.custom?;
-                let preview = self.custom_previews.get(custom)?;
-                (preview.kind == CustomKind::Text).then_some((window.id, custom, window.rect))
+            .filter_map(|window| match window.owner {
+                FloatOwner::Custom(index) => {
+                    let preview = self.custom_previews.get(index)?;
+                    (preview.kind == CustomKind::Text).then_some((
+                        window.id,
+                        window.owner,
+                        window.rect,
+                    ))
+                }
+                FloatOwner::Annotation(_) => Some((window.id, window.owner, window.rect)),
+                FloatOwner::None => None,
             })
             .collect();
-        for (id, custom, rect) in targets {
+        for (id, owner, rect) in targets {
             let body_rect = egui::Rect::from_min_max(
                 rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 4.0),
                 rect.max - EVec2::new(8.0, 8.0),
@@ -4988,11 +4950,22 @@ impl PdfReaderApp {
                 Sense::click(),
             );
             if hit.double_clicked() {
-                if let Some(preview) = self.custom_previews.get(custom) {
-                    self.editing_body = Some((custom, preview.text.clone().unwrap_or_default()));
-                    self.focus_body_edit = true;
-                    ui.ctx().request_repaint();
-                }
+                let text = match owner {
+                    FloatOwner::Custom(index) => self
+                        .custom_previews
+                        .get(index)
+                        .and_then(|preview| preview.text.clone())
+                        .unwrap_or_default(),
+                    FloatOwner::Annotation(id) => self
+                        .annotations
+                        .get(id)
+                        .and_then(|annotation| annotation.body.clone())
+                        .unwrap_or_default(),
+                    FloatOwner::None => String::new(),
+                };
+                self.editing_body = Some((owner, text));
+                self.focus_body_edit = true;
+                ui.ctx().request_repaint();
                 return;
             }
         }
@@ -5581,7 +5554,7 @@ impl PdfReaderApp {
             ),
             rect: egui::Rect::from_min_size(egui::pos2(32.0 + cascade, 32.0 + cascade), size),
             origin: None,
-            custom: None,
+            owner: FloatOwner::None,
         });
         self.message = format!("已把截图放入浮窗 #{id}");
     }
@@ -5730,7 +5703,7 @@ impl PdfReaderApp {
                 Color32::from_gray(120),
             );
             // 自定义 preview 的浮窗：内容从记录里**每帧刷新**，这样"快照迟到"也能自动补上
-            if let Some(custom_index) = self.floats[index].custom {
+            if let Some(custom_index) = self.floats[index].custom_index() {
                 if let Some(preview) = self.custom_previews.get(custom_index) {
                     let fresh = match (preview.kind, preview.snapshot.clone()) {
                         (CustomKind::Image, Some(texture)) => Some(FloatContent::Image(texture)),
@@ -5751,14 +5724,20 @@ impl PdfReaderApp {
                     self.floats[index].title = title;
                 }
             }
-            // 文字预览的浮窗：正在原位编辑时跳过正文绘制（编辑框由
+            // 注释正文：每帧从 Annotation.body 刷新（编辑/撤销后立即同步）
+            if let FloatOwner::Annotation(id) = self.floats[index].owner {
+                if let Some(annotation) = self.annotations.get(id) {
+                    self.floats[index].content =
+                        FloatContent::Text(annotation.body.clone().unwrap_or_default());
+                    self.floats[index].title = format!("标注 #{}", id.get());
+                }
+            }
+            // 正在原位编辑的浮窗：跳过正文绘制（编辑框由
             // `draw_float_body_editing` 单独绘制，见下）
-            let editing_inline = self.floats[index].custom.is_some_and(|custom_index| {
-                self.custom_previews
-                    .get(custom_index)
-                    .is_some_and(|preview| preview.kind == CustomKind::Text)
-                    && self.editing_body.as_ref().map(|(editing, _)| *editing) == Some(custom_index)
-            });
+            let editing_inline = self
+                .editing_body
+                .as_ref()
+                .is_some_and(|(owner, _)| *owner == self.floats[index].owner);
             if editing_inline {
                 continue;
             }
@@ -6343,5 +6322,85 @@ mod edit_describe_tests {
         .expect("有效高亮");
         let edit = AppEdit::AddAnnotation { annotation };
         assert_eq!(edit.describe(), "高亮（第 1 页，2 行）");
+    }
+}
+
+#[cfg(test)]
+mod annotation_body_tests {
+    use super::*;
+
+    fn app() -> PdfReaderApp {
+        PdfReaderApp::new_headless(
+            crate::clock::Clock::system(),
+            crate::diag::diagnostics_for_tests(),
+            None,
+        )
+    }
+
+    #[test]
+    fn body_edit_is_undoable_and_does_not_create_previews() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        let id = app.annotations.iter().next().expect("一条").id;
+        assert!(app.custom_previews.is_empty(), "注释正文不再创建 preview");
+        app.apply_edit(
+            AppEdit::SetBody {
+                id,
+                page: PageIndex::FIRST,
+                before: None,
+                after: Some("第一版".to_string()),
+            },
+            true,
+        );
+        assert_eq!(
+            app.annotations.get(id).and_then(|a| a.body.as_deref()),
+            Some("第一版")
+        );
+        app.undo_edit();
+        assert_eq!(
+            app.annotations.get(id).and_then(|a| a.body.as_deref()),
+            None
+        );
+        app.redo_edit();
+        assert_eq!(
+            app.annotations.get(id).and_then(|a| a.body.as_deref()),
+            Some("第一版")
+        );
+        assert!(app.custom_previews.is_empty());
+    }
+
+    #[test]
+    fn deleting_and_undoing_annotation_keeps_its_body() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        let id = app.annotations.iter().next().expect("一条").id;
+        app.apply_edit(
+            AppEdit::SetBody {
+                id,
+                page: PageIndex::FIRST,
+                before: None,
+                after: Some("正文".to_string()),
+            },
+            true,
+        );
+        let annotation = app.annotations.get(id).cloned().expect("标注");
+        app.apply_edit(AppEdit::DeleteAnnotation { annotation }, true);
+        assert!(app.annotations.get(id).is_none());
+        app.undo_edit();
+        assert_eq!(
+            app.annotations.get(id).and_then(|a| a.body.as_deref()),
+            Some("正文")
+        );
+        assert!(app.custom_previews.is_empty());
     }
 }

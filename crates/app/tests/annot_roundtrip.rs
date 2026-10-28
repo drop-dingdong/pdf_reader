@@ -92,8 +92,8 @@ fn annotation_and_body_survive_a_save_and_reopen() {
         "墨迹的线宽必须落盘（页面空间）：{overlay}"
     );
     assert!(
-        overlay.contains("\"version\": 2"),
-        "墨迹需要 v2 图层（v1 读取端会静默丢掉它）：{overlay}"
+        overlay.contains("\"version\": 3"),
+        "正文归注释后图层应为 v3：{overlay}"
     );
 
     // 第 2 次：重新打开同一份 PDF → 标注应当被加载回来

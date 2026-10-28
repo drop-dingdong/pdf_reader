@@ -142,8 +142,8 @@ pub struct Annotation {
     pub color: [u8; 3],
     /// 不透明度（`0.0..=1.0`）。
     pub opacity: f32,
-    /// 正文的引用（`custom_texts` 里的哨兵标题）；没有正文时为 `None`。
-    pub body_title: Option<String>,
+    /// 正文（直接属于注释；`None` = 没有正文）。
+    pub body: Option<String>,
 }
 
 impl Annotation {
@@ -162,7 +162,7 @@ impl Annotation {
             kind,
             color,
             opacity,
-            body_title: None,
+            body: None,
         })
     }
 
@@ -284,10 +284,10 @@ impl AnnotationStore {
     }
 
     /// 改正文引用（提交时用；S3 的 `SetBody` 命令最终落到这里）。
-    pub fn set_body(&mut self, id: AnnotationId, body_title: Option<String>) -> bool {
+    pub fn set_body(&mut self, id: AnnotationId, body: Option<String>) -> bool {
         match self.items.iter_mut().find(|item| item.id == id) {
             Some(item) => {
-                item.body_title = body_title;
+                item.body = body;
                 true
             }
             None => false,
@@ -633,7 +633,7 @@ mod tests {
 
         assert!(store.set_body(first, Some("#annot:1".to_string())));
         assert_eq!(
-            store.get(first).and_then(|item| item.body_title.as_deref()),
+            store.get(first).and_then(|item| item.body.as_deref()),
             Some("#annot:1")
         );
         assert!(
