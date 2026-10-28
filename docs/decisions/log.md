@@ -1128,6 +1128,19 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   （现在注释已外置）在 Okular 里编辑高亮/颜色后另存，修改应当生效。
 - **状态**：实现完成，等待 Okular 实测。
 
+### D-143 导出副本也改增量保存；`adobe_full` 的报错不再影响产品路径
+
+- **用户实测**：`ours_full` / `ours_incremental`（注释已外置）在 Okular 里编辑后另存，修改终于生效；
+  但 `adobe_full`（PDFium 全量重写 Adobe 的 PDF）另存仍报错；`adobe_incremental` 正常。
+- **结论**：全量重写会展开 Adobe 的对象流、重排所有对象，Poppler 仍会报错；增量保存不动原对象，
+  才是跨阅读器安全的写回方式。注释内联问题（D-142）修好后，产品路径没有理由再用全量重写。
+- **决定**：`export`（导出副本）也改用 `incremental: true`；`write()` 的全量模式只留给测试/工具。
+  导出件现在是“原文件 + 增量段”，因此体积会比源文件大。
+- **影响**：`app/src/export.rs`（export 的 job 也带 incremental）、`docs/current/writeback.md`、
+  job 测试（断言导出 job 里 `"incremental": true`）。
+- **验证**：`check.sh` 全绿（346 tests）。
+- **状态**：实现完成；`adobe_full.pdf` 只是诊断用的“全量重写”样本，产品不再生成这种文件。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

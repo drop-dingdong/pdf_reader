@@ -215,7 +215,9 @@ fn export_with(
     let temporary = temporary_path(output);
     let _ = std::fs::remove_file(&temporary);
 
-    if let Err(error) = run_child(executable, pdf, &temporary, items, false) {
+    // 导出副本也用增量：保留源文件的对象流/外部注释结构。
+    // 用户实测：全量重写 Adobe 的 PDF 后，Okular 另存会报“文件有问题”。
+    if let Err(error) = run_child(executable, pdf, &temporary, items, true) {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
@@ -650,6 +652,10 @@ mod tests {
         assert!(
             !error.contains("\"pdf\": \"Cargo.toml\""),
             "不得把相对路径原样写进 job：{error}"
+        );
+        assert!(
+            error.contains("\"incremental\": true"),
+            "导出副本也应走增量保存：{error}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
