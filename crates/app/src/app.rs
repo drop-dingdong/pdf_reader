@@ -1443,18 +1443,8 @@ impl PdfReaderApp {
         let target = persist::annot_path(path);
         let text = std::fs::read_to_string(&target)
             .map_err(|error| format!("读取标注图层失败：{error}"))?;
-        let mut overlay = persist::SavedOverlay::from_json(&text)
+        let overlay = persist::SavedOverlay::from_json(&text)
             .map_err(|error| format!("标注图层无法加载（{error}），已按空处理"))?;
-        // v2：正文在 `.json` 的 `#annot:<id>` 条目里，搬进注释自己的 body
-        let migrated = overlay.migrate_v2_bodies(|title| {
-            self.custom_previews
-                .iter()
-                .find(|preview| preview.title == title)
-                .and_then(|preview| preview.text.clone())
-        });
-        if migrated {
-            self.overlay_dirty = true;
-        }
         Ok(persist::store_from_overlay(&overlay))
     }
 
@@ -1753,12 +1743,15 @@ impl PdfReaderApp {
                                 }
                             }
                         }
-                        // 注释正文已经属于注释；旧的 `#annot:` preview 条目一律移除
-                        let before = self.custom_previews.len();
-                        self.custom_previews
-                            .retain(|preview| !preview.title.starts_with("#annot:"));
-                        if self.custom_previews.len() != before {
-                            self.data_dirty = true;
+                        // v3 之后注释正文不再使用 preview；清掉可能残留的 `#annot:` 条目。
+                        // v2（已关闭通道）或坏 A 不清理：避免把仍可能属于旧数据的正文丢掉。
+                        if overlay_file_exists && overlay_ok {
+                            let before = self.custom_previews.len();
+                            self.custom_previews
+                                .retain(|preview| !preview.title.starts_with("#annot:"));
+                            if self.custom_previews.len() != before {
+                                self.data_dirty = true;
+                            }
                         }
                         let overlay_exists = overlay_file_exists && overlay_ok;
                         let (restored, recovered_bodies) =

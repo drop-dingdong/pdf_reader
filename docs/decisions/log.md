@@ -1254,6 +1254,30 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **未做**：P1.5（关闭 v2→v3 通道）、P2；外部注释仍只读几何。
 - **状态**：P1 实现完成，待人工验真窗口（打开/双击编辑/撤销/保存/重开）。
 
+### D-150 P1.5：关闭 `.annot.json` v2→v3 迁移通道
+
+- P1 已验证（正文归注释、浮窗编辑、撤销、保存/重开），按计划关闭旧通道：
+  * `SavedAnnotation` 只保留 `body`，删除 `body_title`；
+  * `SavedOverlay::from_json` 遇到 `version < 3` 直接拒绝（提示“v2→v3 迁移通道已关闭”）；
+  * 删除 `migrate_v2_bodies`、`annotation_body_title` 与相关迁移/清理逻辑；
+  * 打开时仅在 A 成功加载（v3）后清理残留 `#annot:` preview，避免 v2/坏 A 时误删旧正文。
+- **影响**：旧 v2 `.annot.json` 不再可直接打开；用户机器上的文件已在 P1 保存为 v3。
+- **验证**：persist 的 v1/v2 用例改为“拒绝”；`check.sh` 全绿（350 tests）。
+- **状态**：P1.5 完成；下一步 P2 的 xref/ObjStm spike。
+
+### D-150 P1.5：关闭 `.annot.json` v2 通道；结构基线排除字体图集
+
+- **P1.5**：P1 验证后关闭 v2→v3：
+  * `SavedAnnotation` 只保留 `body`；`SavedOverlay::from_json` 拒绝 `version < 3`；
+  * 删除 `migrate_v2_bodies`、`annotation_body_title`；打开时只在 A(v3) 成功加载后清理 `#annot:` 残留；
+  * persist 的 v1/v2 用例改为“拒绝”。
+- **顺带修基线抖动**：P1 去掉正文 preview 后，`annotate_zoom` 等基线在 0/120 字节之间翻转。
+  根因是 `upload_bytes` 把 **egui 字体图集**（`TextureId::Managed(0)`）也算进去了；
+  UI 文字/字形缓存变化与页面渲染无关。现在排除字体图集，并重录全部结构基线。
+- **影响**：`app/src/replay.rs`（上传统计）、`perf/baseline/*`、`testing.md`。
+- **验证**：`check.sh` 全绿（350 tests）；重复跑基线稳定。
+- **状态**：P1.5 完成；下一步 P2 的 xref/ObjStm 对象号 spike。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

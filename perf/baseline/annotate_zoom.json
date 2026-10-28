@@ -11,11 +11,11 @@
     "build": "debug"
   },
   "actions": [
-    {"id": "resize", "submitted": 0, "upload_bytes": 7877924, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "resize", "submitted": 0, "upload_bytes": 5780772, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
     {"id": "top", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
     {"id": "settle", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
     {"id": "annotate_100", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
-    {"id": "zoom_800", "submitted": 6, "upload_bytes": 4995360, "textures_peak": 8, "texture_bytes_peak": 10775628, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "zoom_800", "submitted": 6, "upload_bytes": 4994856, "textures_peak": 8, "texture_bytes_peak": 10775628, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
     {"id": "settle_800", "submitted": 0, "upload_bytes": 0, "textures_peak": 8, "texture_bytes_peak": 10775628, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
     {"id": "annotate_800", "submitted": 0, "upload_bytes": 0, "textures_peak": 8, "texture_bytes_peak": 10775628, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null}
   ],

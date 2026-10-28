@@ -1537,12 +1537,15 @@ impl Harness {
         let mut output = self.ctx.end_pass();
         let cpu_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-        // 上传字节：egui 只是排队，这里统计"打算上传多少"，不代表真实 GPU 耗时
+        // 上传字节：egui 只是排队，这里统计"打算上传多少"，不代表真实 GPU 耗时。
+        // **排除字体图集**（egui 约定 `TextureId::Managed(0)`）：它的上传取决于 UI
+        // 文本/字形缓存，与页面渲染无关；混进来会让结构基线随“侧栏多一行文字”抖动。
         let upload_bytes = output
             .textures_delta
             .set
-            .values()
-            .flat_map(|deltas| deltas.iter())
+            .iter()
+            .filter(|(id, _)| !matches!(id, egui::TextureId::Managed(0)))
+            .flat_map(|(_, deltas)| deltas.iter())
             .map(|delta| delta.image.width() * delta.image.height() * 4)
             .sum::<usize>() as u64;
 

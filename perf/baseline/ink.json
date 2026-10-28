@@ -11,17 +11,17 @@
     "build": "debug"
   },
   "actions": [
-    {"id": "resize", "submitted": 0, "upload_bytes": 7877924, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "resize", "submitted": 0, "upload_bytes": 5780772, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
     {"id": "top", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
     {"id": "settle", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
     {"id": "tool", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
-    {"id": "stroke", "submitted": 0, "upload_bytes": 2360, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
-    {"id": "undo1", "submitted": 0, "upload_bytes": 1400, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
-    {"id": "redo1", "submitted": 0, "upload_bytes": 288, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "stroke", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "undo1", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "redo1", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
     {"id": "cancel", "submitted": 0, "upload_bytes": 0, "textures_peak": 2, "texture_bytes_peak": 5780772, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
-    {"id": "zoom_200", "submitted": 3, "upload_bytes": 14809160, "textures_peak": 4, "texture_bytes_peak": 20589428, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
+    {"id": "zoom_200", "submitted": 3, "upload_bytes": 14808656, "textures_peak": 4, "texture_bytes_peak": 20589428, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
     {"id": "settle_200", "submitted": 0, "upload_bytes": 0, "textures_peak": 4, "texture_bytes_peak": 20589428, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null},
-    {"id": "stroke_200", "submitted": 0, "upload_bytes": 216, "textures_peak": 4, "texture_bytes_peak": 20589428, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null}
+    {"id": "stroke_200", "submitted": 0, "upload_bytes": 0, "textures_peak": 4, "texture_bytes_peak": 20589428, "busy_frames": 0, "cpu_ms_total": 0.000, "wall_ms": 0.0, "preview": null}
   ],
   "cpu_ms": {"p50": 0.000, "p95": 0.000, "p99": 0.000, "max": 0.000},
   "cpu_ms_total": 0.000,

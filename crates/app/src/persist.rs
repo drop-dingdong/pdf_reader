@@ -711,9 +711,8 @@ mod tests {
 
 // ====================================================================== 标注图层（D-118）
 //
-// 与 `<pdf>.json` **分开**存放：标注几何是"应用层装饰"，注释正文仍在 `<pdf>.json` 的
-// `custom_texts` 里（哨兵标题 `#annot:<id>` 引用）。这样删掉本文件就等于清空所有标注，
-// 也不会牵动主存档的版本迁移。
+// 与 `<pdf>.json` **分开**存放：v3 起标注的几何、颜色、透明度与**正文**都在这里；
+// `<pdf>.json` 只保存自定义 preview、链接与被引用点。
 
 /// 标注图层的格式版本（与 `SavedData` 独立）。
 ///
@@ -741,11 +740,8 @@ pub struct SavedAnnotation {
     pub color: [u8; 3],
     /// 不透明度。
     pub opacity: f32,
-    /// 正文（v3；直接属于注释）。
+    /// 正文（直接属于注释）。
     pub body: Option<String>,
-    /// **仅用于 v2 迁移**：旧版把正文存在 `custom_texts` 的 `#annot:<id>` 条目里。
-    /// v3 写入时不会写这个字段。
-    pub body_title: Option<String>,
 }
 
 /// 整份标注图层。
@@ -846,16 +842,14 @@ impl SavedOverlay {
                 supported: ANNOT_VERSION,
             });
         }
+        if parsed.version < ANNOT_VERSION {
+            return Err(LoadError::Parse(format!(
+                "标注图层是 v{}（本程序只支持 v{}；v2→v3 迁移通道已关闭）",
+                parsed.version, ANNOT_VERSION
+            )));
+        }
         Ok(parsed)
     }
-}
-
-/// 标注正文的**哨兵标题**：`#annot:<id>`。
-///
-/// 正文本身存在主存档的 `custom_texts` 里（不新增字段），靠这个标题与标注对应。
-/// 用户可见（不隐藏）；保存时做唯一性检查。
-pub fn annotation_body_title(id: pdfcore::annotation::AnnotationId) -> String {
-    format!("#annot:{}", id.get())
 }
 
 /// `<pdf>.annot.json` 的路径。
@@ -965,16 +959,10 @@ fn parse_overlay(text: &str) -> std::result::Result<SavedOverlay, LoadError> {
             if quads.is_empty() && points.is_empty() {
                 continue; // 几何缺失的条目直接跳过（不因为一条坏数据整份加载失败）
             }
-            let raw_body = annotation
+            let body = annotation
                 .field("body")
                 .and_then(|value| value.as_str())
                 .map(str::to_string);
-            // v2 的 "body" 是 `#annot:<id>` 标题；v3 才是正文
-            let (body, body_title) = if version < 3 {
-                (None, raw_body)
-            } else {
-                (raw_body, None)
-            };
             annotations.push(SavedAnnotation {
                 id,
                 kind,
@@ -984,39 +972,12 @@ fn parse_overlay(text: &str) -> std::result::Result<SavedOverlay, LoadError> {
                 color,
                 opacity,
                 body,
-                body_title,
             });
         }
         pages.push(annotations);
         let _ = page;
     }
     Ok(SavedOverlay { version, pages })
-}
-
-impl SavedOverlay {
-    /// v2 → v3：把 `body_title`（`#annot:<id>`）按回调解析成正文，搬进 `body`。
-    ///
-    /// 返回是否发生了迁移；迁移后 `version` 升到 [`ANNOT_VERSION`]。
-    /// 找不到正文的条目不报错：`body = None`，标题丢弃（不再有 preview 中间层）。
-    pub fn migrate_v2_bodies(&mut self, mut lookup: impl FnMut(&str) -> Option<String>) -> bool {
-        if self.version >= ANNOT_VERSION {
-            return false;
-        }
-        let mut migrated = false;
-        for page in &mut self.pages {
-            for saved in page {
-                if let Some(title) = saved.body_title.take() {
-                    saved.body = lookup(&title);
-                    migrated = true;
-                }
-                if saved.body.is_none() && saved.body_title.is_some() {
-                    migrated = true;
-                }
-            }
-        }
-        self.version = ANNOT_VERSION;
-        migrated
-    }
 }
 
 /// 标注种类 → 存档里的字符串。
@@ -1078,7 +1039,6 @@ pub fn overlay_from_store(store: &pdfcore::annotation::AnnotationStore) -> Saved
             color: annotation.color,
             opacity: annotation.opacity,
             body: annotation.body.clone(),
-            body_title: None,
         });
     }
     SavedOverlay {
@@ -1148,20 +1108,12 @@ mod annot_tests {
     }
 
     #[test]
-    fn v2_body_titles_migrate_into_body() {
+    fn v2_overlay_is_refused_after_channel_close() {
         let text = r##"{"version":2,"pages":[[
           {"id":7,"kind":"highlight","color":[255,255,0],"opacity":0.35,
            "quads":[[10,20,30,8]],"body":"#annot:7"}
         ]]}"##;
-        let mut overlay = SavedOverlay::from_json(text).expect("v2 可读");
-        assert_eq!(overlay.pages[0][0].body, None);
-        assert_eq!(overlay.pages[0][0].body_title.as_deref(), Some("#annot:7"));
-        let migrated =
-            overlay.migrate_v2_bodies(|title| (title == "#annot:7").then(|| "旧正文".to_string()));
-        assert!(migrated);
-        assert_eq!(overlay.version, ANNOT_VERSION);
-        assert_eq!(overlay.pages[0][0].body.as_deref(), Some("旧正文"));
-        assert!(overlay.pages[0][0].body_title.is_none());
+        assert!(SavedOverlay::from_json(text).is_err(), "v2 通道已关闭");
     }
 
     #[test]
@@ -1177,7 +1129,7 @@ mod annot_tests {
 
     #[test]
     fn entries_without_geometry_are_skipped_instead_of_failing() {
-        let text = r#"{"version":1,"pages":[[
+        let text = r#"{"version":3,"pages":[[
             {"id":1,"kind":"highlight","quads":[]},
             {"id":2,"kind":"underline","quads":[[1,2,3,4]],"color":[1,2,3],"opacity":1.0}
         ]]}"#;
@@ -1231,22 +1183,16 @@ mod annot_tests {
     }
 
     #[test]
-    fn a_version_1_overlay_still_loads() {
+    fn a_version_1_overlay_is_refused() {
         let text = r#"{"version":1,"pages":[[
             {"id":1,"kind":"highlight","quads":[[1,2,3,4]],"color":[1,2,3],"opacity":1.0}
         ]]}"#;
-        let overlay = SavedOverlay::from_json(text).expect("v1 必须能读");
-        assert_eq!(overlay.version, 1, "旧版本号原样保留");
-        assert_eq!(
-            store_from_overlay(&overlay).len(),
-            1,
-            "v1 的高亮必须无损升级成内存模型"
-        );
+        assert!(SavedOverlay::from_json(text).is_err(), "v1 通道已关闭");
     }
 
     #[test]
     fn ink_with_too_few_points_is_skipped_at_the_model_layer() {
-        let text = r#"{"version":2,"pages":[[
+        let text = r#"{"version":3,"pages":[[
             {"id":1,"kind":"ink","points":[[1,2]],"width":3}
         ]]}"#;
         let overlay = SavedOverlay::from_json(text).expect("坏条目不应让整份失败");

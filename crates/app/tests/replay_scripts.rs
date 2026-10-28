@@ -180,69 +180,6 @@ fn foreign_annotations_are_shown_read_only() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// S7 P1：v2 的 `#annot:` 正文在打开时搬进注释 body，写 v3 图层、清掉 `.json` 里的旧条目。
-#[test]
-fn v2_overlay_body_migrates_into_annotation_body() {
-    let _guard = test_lock();
-    if !backend_available() {
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!(
-        "pdf-annot-v2-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&dir).expect("建目录");
-    let pdf = dir.join("rotated_2p.pdf");
-    Sample::Rotated.write_to(&pdf).expect("写样本");
-    std::fs::write(
-        dir.join("rotated_2p.pdf.annot.json"),
-        r##"{"version":2,"pages":[[
-          {"id":1,"kind":"highlight","color":[255,255,0],"opacity":0.35,
-           "quads":[[10,20,30,8]],"body":"#annot:1"}
-        ]]}"##,
-    )
-    .expect("写 v2 A");
-    std::fs::write(
-        dir.join("rotated_2p.pdf.json"),
-        r##"{"version":2,"custom_texts":[
-          {"page":0,"point":[10,20],"rect":[10,20,30,8],"body":[280,150],
-           "title":"#annot:1","text":"迁移正文","scale":1.0}
-        ]}"##,
-    )
-    .expect("写 J");
-    let script = dir.join("migrate.json");
-    std::fs::write(
-        &script,
-        r#"{"name":"migrate","pdf":"rotated_2p.pdf","actions":[
-             {"id":"settle","op":"wait","frames":4},
-             {"id":"save","op":"save"}
-           ]}"#,
-    )
-    .expect("写脚本");
-    replay::run_script_file(&script, None).expect("回放");
-    let overlay = std::fs::read_to_string(dir.join("rotated_2p.pdf.annot.json")).expect("读 A");
-    assert!(overlay.contains("\"version\": 3"), "A 应升到 v3：{overlay}");
-    assert!(
-        overlay.contains("\"body\": \"迁移正文\""),
-        "正文应搬进注释：{overlay}"
-    );
-    assert!(
-        !overlay.contains("#annot:1"),
-        "旧哨兵标题必须消失：{overlay}"
-    );
-    let sidecar = std::fs::read_to_string(dir.join("rotated_2p.pdf.json")).expect("读 J");
-    assert!(
-        !sidecar.contains("#annot:1"),
-        "J 里不应再有注释正文条目：{sidecar}"
-    );
-
-    std::fs::remove_dir_all(&dir).ok();
-}
-
 /// S0：`click` / `drag` 动作必须真的驱动 UI，而不是"跑完没报错"。
 #[test]
 fn click_navigates_and_drag_pans() {
