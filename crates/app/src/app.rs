@@ -1317,10 +1317,66 @@ impl PdfReaderApp {
         &mut self,
         readback: &backend_pdfium::readback::Readback,
         overlay_exists: bool,
-    ) -> usize {
+    ) -> (usize, usize) {
+        let by_id: std::collections::HashMap<u64, &backend_pdfium::readback::ReadAnnotation> =
+            readback
+                .annotations
+                .iter()
+                .filter_map(|item| item.id.map(|id| (id, item)))
+                .collect();
+
         if overlay_exists {
-            return 0;
+            // overlay 赢：不导入新注释。但 overlay 里有 body_title、正文条目却不在
+            // （典型：删了 `<pdf>.json`），从 PDF 的 /Contents 补回 —— 否则下一次写回
+            // 会拿不到正文，把 PDF 里原有的正文清空。
+            let pending: Vec<(AnnotationId, PageIndex, String, Point)> = self
+                .annotations
+                .iter()
+                .filter_map(|annotation| {
+                    let title = annotation.body_title.clone()?;
+                    if self
+                        .custom_previews
+                        .iter()
+                        .any(|preview| preview.title == title)
+                    {
+                        return None;
+                    }
+                    let bounds = annotation.bounds()?;
+                    Some((
+                        annotation.id,
+                        annotation.page,
+                        title,
+                        Point::new(
+                            bounds.x + bounds.width * 0.5,
+                            bounds.y + bounds.height * 0.5,
+                        ),
+                    ))
+                })
+                .collect();
+            let mut recovered = 0;
+            for (id, page, title, point) in pending {
+                let Some(body) = by_id.get(&id.get()).and_then(|item| item.body.as_ref()) else {
+                    continue;
+                };
+                self.custom_previews.push(CustomPreview {
+                    page,
+                    point,
+                    rect: zero_rect_at(point),
+                    kind: CustomKind::Text,
+                    title,
+                    text: Some(body.clone()),
+                    snapshot: None,
+                    body_size: DEFAULT_CUSTOM_TEXT_BODY,
+                    scale: 1.0,
+                });
+                recovered += 1;
+            }
+            if recovered > 0 {
+                self.data_dirty = true;
+            }
+            return (0, recovered);
         }
+
         let mut restored = 0;
         for item in &readback.annotations {
             let Some(raw_id) = item.id else {
@@ -1337,17 +1393,17 @@ impl PdfReaderApp {
             annotation.color = item.color;
             annotation.opacity = item.opacity;
             let title = persist::annotation_body_title(id);
-            let has_body = self
-                .custom_previews
-                .iter()
-                .any(|preview| preview.title == title);
-            if !has_body {
-                if let Some(body) = &item.body {
-                    if let Some(bounds) = annotation.bounds() {
-                        let point = Point::new(
-                            bounds.x + bounds.width * 0.5,
-                            bounds.y + bounds.height * 0.5,
-                        );
+            if let Some(body) = &item.body {
+                if let Some(bounds) = annotation.bounds() {
+                    let point = Point::new(
+                        bounds.x + bounds.width * 0.5,
+                        bounds.y + bounds.height * 0.5,
+                    );
+                    if !self
+                        .custom_previews
+                        .iter()
+                        .any(|preview| preview.title == title)
+                    {
                         self.custom_previews.push(CustomPreview {
                             page: item.page,
                             point,
@@ -1359,6 +1415,7 @@ impl PdfReaderApp {
                             body_size: DEFAULT_CUSTOM_TEXT_BODY,
                             scale: 1.0,
                         });
+                        self.data_dirty = true; // 新建的正文要能落盘
                     }
                 }
             }
@@ -1372,7 +1429,7 @@ impl PdfReaderApp {
             self.annotations.insert(annotation);
             restored += 1;
         }
-        restored
+        (restored, 0)
     }
 
     fn open(&mut self, path: &std::path::Path, password: Option<&str>) {
@@ -1389,6 +1446,7 @@ impl PdfReaderApp {
                         backend_pdfium::readback::Readback::default()
                     }
                 };
+                let mut open_warning: Option<String> = None;
                 let raster = opened.raster.clone();
                 let concurrency = opened.capabilities.max_concurrency as usize;
                 let cache = Arc::new(LruCache::with_default_capacity());
@@ -1420,11 +1478,17 @@ impl PdfReaderApp {
                         // 标注图层（<pdf>.annot.json）：缺文件 = 空；坏文件只提示，不影响打开文档
                         self.annotations.clear();
                         self.overlay_dirty = false;
-                        let overlay_exists = persist::annot_path(path).exists();
+                        let overlay_file_exists = persist::annot_path(path).exists();
+                        // 坏 overlay 当作"不存在"处理：否则 PDF 里明明有注释也恢复不出来
+                        let mut overlay_ok = true;
                         match Self::load_overlay_file(path) {
                             Ok(store) => self.annotations = store,
-                            Err(message) => self.message = message,
+                            Err(message) => {
+                                overlay_ok = false;
+                                open_warning = Some(message);
+                            }
                         }
+                        let overlay_exists = overlay_file_exists && overlay_ok;
                         // 同目录若有存档（<pdf>.json），载入并**替换**链接与被引用点/自定义数据。
                         // 旧版本就地升级并置脏（下次保存写回当前版本）；**更新版本一律拒绝**（D-107）。
                         let saved = match load_sidecar(path) {
@@ -1555,7 +1619,8 @@ impl PdfReaderApp {
                                 }
                             }
                         }
-                        let restored = self.merge_readback(&readback, overlay_exists);
+                        let (restored, recovered_bodies) =
+                            self.merge_readback(&readback, overlay_exists);
                         self.next_float_id = 1;
                         self.capture = None;
                         let title = session.opened().document.info().to_string();
@@ -1584,6 +1649,13 @@ impl PdfReaderApp {
                             self.message
                                 .push_str(&format!("（已从 PDF 恢复 {restored} 条标注）"));
                             self.overlay_dirty = true; // 恢复出来的应当存进 overlay
+                        }
+                        if recovered_bodies > 0 {
+                            self.message
+                                .push_str(&format!("（已从 PDF 补回 {recovered_bodies} 条正文）"));
+                        }
+                        if let Some(warning) = open_warning {
+                            self.message.push_str(&format!("（{warning}）"));
                         }
                         self.sidecar_migrated = false;
                         self.password_for = None;

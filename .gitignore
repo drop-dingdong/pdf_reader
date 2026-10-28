@@ -7,6 +7,7 @@ scripts/replay/*.pdf
 scripts/replay/*.pdf.json
 # 标注图层 sidecar（手工测试/回放会生成，不入库）
 scripts/replay/*.annot.json
+scripts/replay/*.pdf*.json
 # 原地写回的备份（手工测试会生成，不入库）
 scripts/replay/*.bak-*
 

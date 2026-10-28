@@ -1004,6 +1004,20 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   默认渲染红色像素 0，`with_annotations(true)` 后 >100。`check.sh` 全绿（332 tests）。
 - **状态**：生效。注意：**外部注释在 S6b 之前完全不可见**（这是有意的，避免烤进不可交互的位图）。
 
+### D-137 补回缺失正文（A 在、J 不在）；坏 overlay 当作不存在
+
+- **问题（用户问文件组合时发现）**：只保留 `<pdf>.annot.json`、删掉 `<pdf>.json` 时，
+  overlay 的 `body_title` 还在但正文条目没了 → 点击显示“正文已丢失”；更糟的是**写入 PDF 会拿不到正文**，
+  把 PDF 里原有的 `/Contents` 清空。
+- **修复**：
+  1. 打开时即使 overlay 存在，也把 PDF 读回结果按 id 建表；对“有 `body_title`、正文条目缺失”的注释，
+     从 PDF 的 `/Contents` 补建正文条目（`data_dirty`），状态栏提示“补回 N 条正文”；
+  2. 新建正文条目时置 `data_dirty`（否则保存只写 `.annot.json`，正文又丢）；
+  3. overlay 文件损坏时按“不存在”处理（仍提示警告），允许从 PDF 恢复，而不是显示空图层。
+- **影响**：`app/src/app.rs`（`merge_readback`、open 的 overlay 加载）；`docs/current/readback.md` §3/§3.1。
+- **验证**：现有 332 tests 全绿；人工场景：写回 → 删 `.json` → 重开（正文补回、提示）→ 再写入 PDF（正文仍在）。
+- **状态**：生效。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |
