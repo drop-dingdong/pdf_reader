@@ -6,6 +6,7 @@
 
 use std::sync::Mutex;
 
+use backend_pdfium::readback;
 use backend_pdfium::writeback::{self, WritebackAnnotation, WritebackPage, WritebackSpec};
 use backend_pdfium::PdfiumBackend;
 use pdfcore::annotation::AnnotationKind;
@@ -629,6 +630,93 @@ fn incremental_save_keeps_external_annotations_and_object_streams() {
         writeback::count_annotations(&output).expect("数注释"),
         vec![7, 4],
         "Adobe 的注释（含 Popup 子注释）原样保留"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 我们写的注释必须是**独立对象**（`/Annots [.. 12 0 R ..]`），不能是内联字典。
+/// Okular 对没有对象号的注释会“编辑后保存丢修改”（D-142）。
+#[test]
+fn annotations_are_written_as_indirect_objects() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("indirect");
+    let source = dir.join("in.pdf");
+    std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+    let spec = WritebackSpec {
+        source,
+        output: dir.join("out.pdf"),
+        pages: vec![WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![WritebackAnnotation {
+                id: Some(1),
+                kind: AnnotationKind::Highlight {
+                    quads: vec![Rect::new(50.0, 660.0, 100.0, 14.0)],
+                },
+                color: [255, 255, 0],
+                opacity: 0.35,
+                body: Some("独立对象".to_string()),
+            }],
+        }],
+    };
+    writeback::write(&spec).expect("写回");
+    let text = String::from_utf8_lossy(&std::fs::read(&spec.output).expect("读")).to_string();
+    // 文件里可能还有旧版页面对象（增量更新）；只检查**最后一次**出现的 /Annots
+    let start = text.rfind("/Annots").expect("/Annots");
+    let start = start + text[start..].find('[').expect("[");
+    let end = text[start..].find(']').expect("]") + start;
+    let array = &text[start + 1..end];
+    assert!(!array.contains("<<"), "注释不能内联在 /Annots 里：{array}");
+    assert!(
+        array.contains("0 R"),
+        "/Annots 里应当是对独立对象的引用：{array}"
+    );
+    // 引用要能真的读回来（外部化之后 xref/对象仍然有效）
+    let read = readback::read(&spec.output, None).expect("读回");
+    assert_eq!(read.annotations.len(), 1);
+    assert_eq!(read.annotations[0].id, Some(1));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 全量重写时 Adobe 的注释也会变成内联字典；后处理要把它们全部外置。
+#[test]
+fn full_save_externalizes_external_annotations_too() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("externalize-adobe");
+    let source = dir.join("adobe.pdf");
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/s6b/adobe.pdf");
+    std::fs::copy(&fixture, &source).expect("复制样本");
+    let output = dir.join("out.pdf");
+    writeback::write(&WritebackSpec {
+        source,
+        output: output.clone(),
+        pages: vec![],
+    })
+    .expect("全量保存");
+    let text = String::from_utf8_lossy(&std::fs::read(&output).expect("读")).to_string();
+    let start = text.rfind("/Annots").expect("/Annots");
+    let start = start + text[start..].find('[').expect("[");
+    let end = text[start..].find(']').expect("]") + start;
+    let array = &text[start + 1..end];
+    assert!(!array.contains("<<"), "Adobe 的注释也要外置：{array}");
+    assert_eq!(
+        writeback::count_annotations(&output).expect("数"),
+        vec![7, 4]
+    );
+    assert_eq!(
+        readback::read(&output, None)
+            .expect("读回")
+            .annotations
+            .len(),
+        5
     );
 
     std::fs::remove_dir_all(&dir).ok();

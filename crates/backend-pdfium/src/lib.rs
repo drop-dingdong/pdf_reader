@@ -35,6 +35,7 @@ pub mod error;
 #[doc(hidden)]
 pub mod fixtures;
 pub mod library;
+pub mod pdf_repair;
 pub mod raster;
 pub mod readback;
 pub mod text;

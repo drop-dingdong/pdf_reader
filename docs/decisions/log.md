@@ -1103,6 +1103,31 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   编辑/保存的结果——用于确认“增量保存”够不够，还是必须进一步改 AP 格式（例如去掉 `/AP`）。
 - **状态**：代码已实现；跨阅读器兼容性等待 Okular 实测。
 
+### D-142 跨阅读器兼容（二）：把内联注释外置成独立对象
+
+- **Okular 实测结果**（用户）：
+  * `ours_full` / `ours_incremental`：打开正常、可编辑、另存为**无报错**，但**修改不生效**；
+    导出的 `*_annot_changed.pdf` / `*_color_changed.pdf` 大小与源文件**完全相同**（等于原样复制）；
+  * `adobe_incremental`：修改生效（另存为文件变大，附录里能看到 changed）；
+  * `adobe_full`：另存为报错；
+  * `ours_no_ap`：打开就报错（说明“去掉 AP”不是正确方向）。
+- **根因**：PDFium 新建的注释是**直接内联**在 `/Annots [ <<…>> ]` 里的，没有对象号；
+  Poppler/Okular 的注释对象依赖 `Ref`，保存时对直接字典的修改会丢失。
+  Adobe/Okular 样本的注释都是独立对象（`35 0 R`）；`adobe_incremental` 能工作正因为它没被动过。
+- **修复**：新增 `backend-pdfium/src/pdf_repair.rs`，在 PDFium 保存后追加一段**经典增量更新**：
+  把页面 `/Annots` 里的内联字典复制成新对象、页面对象重写为引用数组、
+  追加 `xref`（每个对象一个子段）与 `trailer <</Size … /Root … /Prev <原 startxref>>>`。
+  全量/增量保存都会走这一步；没有内联注释时返回 `None`（不改字节）。
+- **验证**：
+  * `annotations_are_written_as_indirect_objects`：`/Annots` 里不再有 `<<`，读回 id/正文正常；
+  * `full_save_externalizes_external_annotations_too`：Adobe 全量保存后 11 个注释（含 Popup）
+    全部是引用，读回 5 条；
+  * 既有 12 条 writeback 测试（渲染/计数/增量）全绿；
+  * `check.sh` 全绿（待跑：346 tests）。
+- **待用户验证**：重新生成的 `scripts/replay/sample/compat/ours_full.pdf` / `ours_incremental.pdf`
+  （现在注释已外置）在 Okular 里编辑高亮/颜色后另存，修改应当生效。
+- **状态**：实现完成，等待 Okular 实测。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

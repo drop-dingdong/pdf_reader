@@ -265,7 +265,12 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
             (ffi.close_page)(handle);
         }
 
-        let bytes = save(&ffi, document, incremental)?;
+        let mut bytes = save(&ffi, document, incremental)?;
+        // PDFium 新建的注释是内联字典；Okular 保存这类注释会丢修改（D-142）。
+        // 追加一段增量更新，把它们外置成独立对象。
+        if let Some(fixed) = crate::pdf_repair::externalize_annotations(&bytes) {
+            bytes = fixed;
+        }
         (ffi.close_document)(document);
 
         std::fs::write(&spec.output, &bytes).map_err(|error| {

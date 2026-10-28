@@ -166,7 +166,8 @@ temp + 冒烟校验 + rename，**不覆盖**；加密文档父进程预检，签
    **S6b 已完成**（D-140）：外部注释只读层（Okular/Evince/Firefox/Adobe/Foxit 样本），
    不写 overlay、不参与删除/写回；**S6c** 已完成（D-139）。
    剩余：跨阅读器兼容性（D-141：高亮透明度已统一；原地写入改增量保存，等 Okular 实测
-   `scripts/replay/sample/compat/` 的实验文件）。
+   `scripts/replay/sample/compat/` 的实验文件；D-142 已把内联注释外置成独立对象，
+   等待 Okular 复测 `ours_full` / `ours_incremental`）。
 
 **S5c（原地替换 + 迁移）依赖 S6（能读回 PDF 注释）**；届时再评估"关-写-重载"与"子进程"两条路（D-124）。
 
