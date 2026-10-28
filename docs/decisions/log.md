@@ -1224,6 +1224,19 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **交付物**：[`evaluations/s7-body-overlay.md`](evaluations/s7-body-overlay.md) §13–§14。
 - **状态**：分析第二轮修订完成；下一步写 P1/P2 可执行计划。
 
+### D-148 S7 实施计划（P1/P2）完成，待确认
+
+- **P1 正文归注释**：`Annotation.body`、A v3（几何+正文）、v2→v3 迁移（从 `.json` 的 `#annot:` 搬）、
+  `FloatOwner::{Annotation, Custom}`、注释浮窗正文编辑 + `AppEdit::SetBody`、预览列表移除注释正文。
+- **P1.5**：确认无回归后关闭 v2→v3 通道，固定 v3。
+- **P2 外部正文/删除**：四种注释一视同仁；`pdf_ref: Option<(num,gen)>`；读 `/Contents`、改正文、删除
+  （含 Popup 子注释）；对象号缺失/重复/内联 → 拒绝；外部修改只存内存，由「写入 PDF」落盘。
+- **P2 技术风险**：xref table/stream、ObjStm、内联字典没有对象号；先做 `pdf_index` spike
+  （5 个真实样本），失败则 P2 只支持直接对象并明确提示。
+- **计划文档**：[`evaluations/s7-p1-p2-plan.md`](evaluations/s7-p1-p2-plan.md)（数据模型、v3 迁移、浮窗、
+  撤销、P2 身份/写回协议/Popup、测试、提交顺序、风险、待确认）。
+- **状态**：计划待确认，未改代码。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |
