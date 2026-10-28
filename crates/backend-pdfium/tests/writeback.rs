@@ -722,6 +722,100 @@ fn full_save_externalizes_external_annotations_too() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// 只改正文时应当**原地更新同一个注释对象**（对象号不变），不删旧建新。
+#[test]
+fn content_only_edit_reuses_the_same_annotation_object() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("diff");
+    let source = dir.join("in.pdf");
+    std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+    let make = |quad: Rect, body: &str| WritebackSpec {
+        source: source.clone(),
+        output: dir.join("ignored.pdf"),
+        pages: vec![WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![WritebackAnnotation {
+                id: Some(7),
+                kind: AnnotationKind::Highlight { quads: vec![quad] },
+                color: [255, 255, 0],
+                opacity: 0.35,
+                body: Some(body.to_string()),
+            }],
+        }],
+    };
+    let annots = |path: &std::path::Path| -> String {
+        let text = String::from_utf8_lossy(&std::fs::read(path).expect("读")).to_string();
+        let start = text.rfind("/Annots").expect("/Annots");
+        let start = start + text[start..].find('[').expect("[");
+        let end = text[start..].find(']').expect("]") + start;
+        text[start..=end]
+            .split(|ch: char| ch.is_whitespace() || ch == '[' || ch == ']')
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    let first = dir.join("first.pdf");
+    let spec = WritebackSpec {
+        output: first.clone(),
+        ..make(Rect::new(50.0, 660.0, 100.0, 14.0), "OLD")
+    };
+    writeback::write(&spec).expect("第一次");
+    let refs1 = annots(&first);
+
+    let second = dir.join("second.pdf");
+    let spec = WritebackSpec {
+        source: first.clone(),
+        output: second.clone(),
+        pages: vec![WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![WritebackAnnotation {
+                id: Some(7),
+                kind: AnnotationKind::Highlight {
+                    quads: vec![Rect::new(50.0, 660.0, 100.0, 14.0)],
+                },
+                color: [255, 255, 0],
+                opacity: 0.35,
+                body: Some("NEW".to_string()),
+            }],
+        }],
+    };
+    writeback::write_incremental(&spec).expect("改正文");
+    assert_eq!(
+        refs1,
+        annots(&second),
+        "只改正文不应改变注释对象号（对象复用）"
+    );
+    let read = readback::read(&second, None).expect("读回");
+    assert_eq!(read.annotations[0].body.as_deref(), Some("NEW"));
+
+    // 几何变了：必须换成新对象（引用数组不同）
+    let third = dir.join("third.pdf");
+    let spec = WritebackSpec {
+        source: second.clone(),
+        output: third.clone(),
+        pages: vec![WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![WritebackAnnotation {
+                id: Some(7),
+                kind: AnnotationKind::Highlight {
+                    quads: vec![Rect::new(60.0, 660.0, 100.0, 14.0)],
+                },
+                color: [255, 255, 0],
+                opacity: 0.35,
+                body: Some("NEW".to_string()),
+            }],
+        }],
+    };
+    writeback::write_incremental(&spec).expect("改几何");
+    assert_ne!(refs1, annots(&third), "几何变化必须替换对象");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn refuses_to_overwrite_the_source_file() {
     if !backend_available() {

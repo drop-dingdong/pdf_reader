@@ -25,6 +25,7 @@
 //! 实测依据（无 AP 时的渲染结果）：墨迹不可见（1 px）、下划线 0 px、删除线只覆盖文字（24 px）、
 //! 高亮可被 PDFium 合成（文字仍可读）。详见评估 §12。
 
+use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void, CString};
 use std::os::raw::c_float;
 use std::path::{Path, PathBuf};
@@ -162,7 +163,6 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
 
     // 期望的逐页注释数（同步之后）；保存后用它核对
     let mut expected: Vec<usize>;
-    let mut added_total = 0usize;
     unsafe {
         let document = (ffi.load_document)(source.as_ptr(), std::ptr::null());
         if document.is_null() {
@@ -206,10 +206,29 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
             }
         }
 
+        // 读回当前 PDF 里的标记注释，用来做**差分**：
+        // * 内容只改 /Contents → 原地更新同一个注释对象（对象号不变，像 Okular 那样）；
+        // * 几何/颜色/透明度变了 → 删旧引用 + 新建对象；
+        // * 没变 → 完全不碰；
+        // * 新增/删除 → 只改页面 /Annots 的引用。
+        let existing = crate::readback::read(&spec.source, None).unwrap_or_default();
+        let existing_by_id: HashMap<u64, &crate::readback::ReadAnnotation> = existing
+            .annotations
+            .iter()
+            .filter_map(|annotation| annotation.id.map(|id| (id, annotation)))
+            .collect();
+        let mut desired: HashMap<u32, HashMap<u64, &WritebackAnnotation>> = HashMap::new();
+        for page in &spec.pages {
+            let entry = desired.entry(page.page.get()).or_default();
+            for annotation in &page.annotations {
+                if let Some(id) = annotation.id {
+                    entry.insert(id, annotation);
+                }
+            }
+        }
+
         // **同步**（S5c）：以 `/NM` 标记识别"上次写回的注释"。
-        // 目标页上：标记存在且 id 仍在集合里 → 跳过；标记存在但 id 已不在 → 删除；
-        // 非目标页上的标记（overlay 里已被删掉的）→ 一律删除。其它注释（链接等）不碰。
-        // 这样原地重复写回是幂等的，不会把注释叠两遍。
+        // 其它程序加的注释（无标记）一律不碰。
         for (index, expected_slot) in expected.iter_mut().enumerate() {
             let handle = (ffi.load_page)(document, index as c_int);
             if handle.is_null() {
@@ -220,19 +239,41 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
                 });
             }
             let count = (ffi.annot_count)(handle).max(0) as usize;
-            // 先删掉**所有**我们标记过的注释，再按 overlay 重建。
-            //
-            // 为什么不是"就地更新"：PDFium 的 `FPDFAnnot_SetColor` 对**已存在**的墨迹注释
-            // 返回失败（新建的可以，实测），`SetStringValue` 也不能保证；重建最简单、
-            // 语义也明确（PDF 里我们的注释 = overlay 的投影）。其它程序加的注释（无标记）不碰。
+            let wanted = desired.get(&(index as u32));
+            let mut present: std::collections::HashSet<u64> = std::collections::HashSet::new();
             let mut remove_indices: Vec<c_int> = Vec::new();
             for annot_index in 0..count as c_int {
                 let annot = (ffi.get_annot)(handle, annot_index);
                 if annot.is_null() {
                     continue;
                 }
-                if read_marker(&ffi, annot).is_some() {
-                    remove_indices.push(annot_index);
+                if let Some(id) = read_marker(&ffi, annot) {
+                    let target = wanted.and_then(|map| map.get(&id));
+                    if let Some(target) = target {
+                        if let Some(current) = existing_by_id.get(&id) {
+                            let same_geometry = same_kind(&current.kind, &target.kind);
+                            let same_style = current.color == target.color
+                                && (current.opacity - target.opacity).abs() <= 0.01;
+                            if same_geometry && same_style {
+                                if current.body == target.body {
+                                    // 完全没变：不碰
+                                    present.insert(id);
+                                } else if update_contents(&ffi, annot, target.body.as_deref()) {
+                                    // 只改正文：原地更新同一个对象（不重建）
+                                    present.insert(id);
+                                } else {
+                                    remove_indices.push(annot_index);
+                                }
+                            } else {
+                                // 几何/颜色/透明度变了：旧对象无法可靠就地改（SetColor 对墨迹失败）
+                                remove_indices.push(annot_index);
+                            }
+                        } else {
+                            remove_indices.push(annot_index);
+                        }
+                    } else {
+                        remove_indices.push(annot_index);
+                    }
                 }
                 (ffi.close_annot)(annot);
             }
@@ -256,12 +297,16 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
                 .find(|page| page.page.get() as usize == index)
             {
                 for annotation in &page.annotations {
+                    if let Some(id) = annotation.id {
+                        if present.contains(&id) {
+                            continue; // 内容已原地更新或完全没变
+                        }
+                    }
                     add_annotation(&ffi, handle, annotation)?;
                     added += 1;
                 }
             }
             *expected_slot = remaining + added;
-            added_total += added;
             (ffi.close_page)(handle);
         }
 
@@ -284,7 +329,8 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
     verify_counts(spec, &expected, &ffi)?;
 
     Ok(WritebackReport {
-        annotations: added_total,
+        // 语义：本次 PDF 里"我们的注释"总数（新增 + 更新 + 未变），便于 UI 报"共 N 条"
+        annotations: spec.pages.iter().map(|page| page.annotations.len()).sum(),
         bytes: std::fs::metadata(&spec.output)
             .map(|metadata| metadata.len())
             .unwrap_or(0),
@@ -740,6 +786,58 @@ pub(crate) unsafe fn read_marker(ffi: &Ffi, annot: *mut c_void) -> Option<u64> {
     let units = (length as usize / 2).min(buffer.len());
     let text = String::from_utf16_lossy(&buffer[..units]);
     marker_id(text.trim_end_matches('\0'))
+}
+
+/// 内容（`/Contents`）只是正文；几何/颜色/透明度相同才允许原地更新。
+fn same_kind(left: &AnnotationKind, right: &AnnotationKind) -> bool {
+    const EPS: f32 = 0.01;
+    match (left, right) {
+        (
+            AnnotationKind::Ink {
+                points: a,
+                width: wa,
+            },
+            AnnotationKind::Ink {
+                points: b,
+                width: wb,
+            },
+        ) => {
+            (wa - wb).abs() <= EPS
+                && a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| (x.x - y.x).abs() <= EPS && (x.y - y.y).abs() <= EPS)
+        }
+        _ => {
+            let (AnnotationKind::Highlight { quads: a }
+            | AnnotationKind::Underline { quads: a }
+            | AnnotationKind::StrikeOut { quads: a }) = left
+            else {
+                return false;
+            };
+            let (AnnotationKind::Highlight { quads: b }
+            | AnnotationKind::Underline { quads: b }
+            | AnnotationKind::StrikeOut { quads: b }) = right
+            else {
+                return false;
+            };
+            std::mem::discriminant(left) == std::mem::discriminant(right)
+                && a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|(x, y)| {
+                    (x.x - y.x).abs() <= EPS
+                        && (x.y - y.y).abs() <= EPS
+                        && (x.width - y.width).abs() <= EPS
+                        && (x.height - y.height).abs() <= EPS
+                })
+        }
+    }
+}
+
+/// 只改 `/Contents`：原地更新已有注释对象（对象号不变）。
+unsafe fn update_contents(ffi: &Ffi, annot: *mut c_void, body: Option<&str>) -> bool {
+    let key = CString::new("Contents").expect("字面量");
+    let wide = wide_string(body.unwrap_or(""));
+    (ffi.set_string)(annot, key.as_ptr(), wide.as_ptr()) != 0
 }
 
 pub(crate) const ANNOT_HIGHLIGHT: c_uint = 9;
