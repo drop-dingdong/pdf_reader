@@ -165,7 +165,8 @@ temp + 冒烟校验 + rename，**不覆盖**；加密文档父进程预检，签
    打开时读回 `pd-fr:` 标记的注释、overlay 优先合并、缺 overlay 时恢复（[`current/readback.md`](current/readback.md)）。
    **S6b 已完成**（D-140）：外部注释只读层（Okular/Evince/Firefox/Adobe/Foxit 样本），
    不写 overlay、不参与删除/写回；**S6c** 已完成（D-139）。
-   剩余：跨阅读器兼容性（Okular 修改我们写的注释后保存报“文件有问题”）、可选的迁移/清理。
+   剩余：跨阅读器兼容性（D-141：高亮透明度已统一；原地写入改增量保存，等 Okular 实测
+   `scripts/replay/sample/compat/` 的实验文件）。
 
 **S5c（原地替换 + 迁移）依赖 S6（能读回 PDF 注释）**；届时再评估"关-写-重载"与"子进程"两条路（D-124）。
 

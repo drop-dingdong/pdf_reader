@@ -1078,6 +1078,31 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   Chromium / Xournal++ 的批注 Okular 也识别不了，本程序读不到（用户允许忽略）。
 - **状态**：S6b（只读几何）完成；跨阅读器兼容性（Okular 改我们注释后保存报错）仍待处理。
 
+### D-141 跨阅读器兼容：高亮透明度统一；原地写入改增量保存
+
+- **问题（用户实测）**：
+  1. 外部高亮在我们的阅读器里**不透明**，在 Okular 里透明（我们自己的高亮在 Okular 里透明）；
+  2. 在 `adobe.pdf` 上插入我们的注释、写入、删除再写入后，Okular **无法编辑/保存**（提示文件有问题）。
+- **样本结论**（`tests/fixtures/s6b/`）：
+  * Okular/Evince 的文字注释**没有 `/AP`**；Firefox 有 AP；Foxit 的文件有的有、有的没有；
+  * 高亮大多**没有 `/CA`**（或 `=1`），但 Okular 按“高亮默认半透明”绘制；Adobe 显式写了 `0.40`；
+  * Adobe 的注释在**对象流（ObjStm）**里，PDFium 全量重写会把它展开成普通对象。
+- **修复**：
+  1. 透明度统一：读 `/CA`，**缺失或 ≥1 时高亮按 0.35、其它按 1.0**；显式 `<1` 照用。
+     这样外部高亮与我们自己的高亮观感一致（D-136 的位图不烤注释策略不变）。
+  2. 原地写入改用 `write_incremental`（`FPDF_INCREMENTAL`，job 字段 `"incremental": true`）：
+     追加改动，保留 Adobe/Okular 的对象流与外部注释原结构；导出副本仍用全量重写。
+     `write()` 保持全量；`write_incremental()` 只给原地流程用。
+- **验证**：
+  * `incremental_save_keeps_external_annotations_and_object_streams`：对 Adobe 样本空写回，
+    输出前缀保留原文件、`/ObjStm` 仍在、注释数（含 Popup）不变；
+  * `incremental_job_preserves_external_annotations`（job 层）；
+  * 样本测试补了透明度策略断言（Okular/Evince/Firefox 0.35、Adobe 显式 0.40）；
+  * `check.sh` 全绿（342 tests）。
+- **待用户验证**：`scripts/replay/sample/compat/` 下的 5 个实验文件（见 README）在 Okular 里
+  编辑/保存的结果——用于确认“增量保存”够不够，还是必须进一步改 AP 格式（例如去掉 `/AP`）。
+- **状态**：代码已实现；跨阅读器兼容性等待 Okular 实测。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

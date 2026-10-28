@@ -219,6 +219,18 @@ fn adobe_sample_reads_from_object_streams() {
     let read = read("adobe.pdf");
     assert_common("adobe", &read, true);
     assert_eq!(read.annotations.len(), 5);
+    for annotation in &read.annotations {
+        let expected = match annotation.kind {
+            AnnotationKind::Highlight { .. } => 0.40, // Adobe 显式写了 /CA=0.40
+            _ => 1.0,
+        };
+        assert!(
+            (annotation.opacity - expected).abs() < 0.01,
+            "Adobe 透明度：{:?} = {}（期望 {expected}）",
+            annotation.kind,
+            annotation.opacity
+        );
+    }
     let ink = read
         .annotations
         .iter()

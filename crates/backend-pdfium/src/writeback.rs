@@ -131,6 +131,18 @@ pub type WritebackResult<T> = std::result::Result<T, WritebackError>;
 /// * `FPDF_SaveAsCopy(..., FPDF_NO_INCREMENTAL)` 全量重写；
 /// * 保存后重开输出、逐页核对"原有注释 + 新增"的数量与页数；不一致即报错。
 pub fn write(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
+    write_with_mode(spec, false)
+}
+
+/// 增量保存：把改动追加到原文件之后（保留原有对象/外部注释的原始结构）。
+///
+/// 原地写入用它 —— PDFium 全量重写会把 Adobe 等阅读器的对象流展开，
+/// 有用户实测 Okular 保存时报“文件有问题”；增量保存不动原有对象（D-141）。
+pub fn write_incremental(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
+    write_with_mode(spec, true)
+}
+
+fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<WritebackReport> {
     if spec.source == spec.output {
         return Err(WritebackError::Invalid(
             "输出路径与源文件相同；写回必须写到新文件（替换由调用方原子完成）".to_string(),
@@ -253,7 +265,7 @@ pub fn write(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
             (ffi.close_page)(handle);
         }
 
-        let bytes = save(&ffi, document)?;
+        let bytes = save(&ffi, document, incremental)?;
         (ffi.close_document)(document);
 
         std::fs::write(&spec.output, &bytes).map_err(|error| {
@@ -611,7 +623,7 @@ fn wide_string(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-unsafe fn save(ffi: &Ffi, document: *mut c_void) -> WritebackResult<Vec<u8>> {
+unsafe fn save(ffi: &Ffi, document: *mut c_void, incremental: bool) -> WritebackResult<Vec<u8>> {
     let mut writer = Writer {
         base: FpdfFileWrite {
             version: 1,
@@ -623,7 +635,11 @@ unsafe fn save(ffi: &Ffi, document: *mut c_void) -> WritebackResult<Vec<u8>> {
     if (ffi.save_as_copy)(
         document,
         &mut writer.base as *mut FpdfFileWrite,
-        FPDF_NO_INCREMENTAL,
+        if incremental {
+            FPDF_INCREMENTAL
+        } else {
+            FPDF_NO_INCREMENTAL
+        },
     ) == 0
     {
         return Err(WritebackError::Pdfium {
@@ -727,6 +743,7 @@ pub(crate) const ANNOT_STRIKEOUT: c_uint = 12;
 pub(crate) const ANNOT_INK: c_uint = 15;
 const ANNOT_FLAG_PRINT: c_int = 4;
 const FPDF_NO_INCREMENTAL: c_uint = 2;
+const FPDF_INCREMENTAL: c_uint = 1;
 /// 文本类标注的导出线宽（**页面空间** pt）。
 ///
 /// 界面里的下划线/删除线画的是 2 **屏幕**像素（与缩放无关），导出到 PDF 只能选一个
@@ -821,6 +838,9 @@ pub(crate) struct Ffi {
     pub(crate) page_obj_destroy: unsafe extern "C" fn(*mut c_void),
     pub(crate) get_subtype: unsafe extern "C" fn(*mut c_void) -> c_int,
     pub(crate) get_ap: unsafe extern "C" fn(*mut c_void, c_int, *mut c_void, c_ulong) -> c_ulong,
+    pub(crate) has_key: unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int,
+    pub(crate) get_number_value:
+        unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_float) -> c_int,
     pub(crate) get_color: unsafe extern "C" fn(
         *mut c_void,
         c_int,
@@ -963,6 +983,14 @@ impl Ffi {
             get_ap: sym!(
                 "FPDFAnnot_GetAP",
                 unsafe extern "C" fn(*mut c_void, c_int, *mut c_void, c_ulong) -> c_ulong
+            ),
+            has_key: sym!(
+                "FPDFAnnot_HasKey",
+                unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int
+            ),
+            get_number_value: sym!(
+                "FPDFAnnot_GetNumberValue",
+                unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_float) -> c_int
             ),
             get_color: sym!(
                 "FPDFAnnot_GetColor",

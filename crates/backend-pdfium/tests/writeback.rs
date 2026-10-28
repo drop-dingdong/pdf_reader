@@ -595,6 +595,45 @@ fn empty_spec_removes_all_marked_annotations_but_keeps_links() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// 增量保存要保住外部阅读器的注释与对象流结构（原地写入用它，见 D-141）。
+#[test]
+fn incremental_save_keeps_external_annotations_and_object_streams() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("incremental");
+    let source = dir.join("adobe.pdf");
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/s6b/adobe.pdf");
+    std::fs::copy(&fixture, &source).expect("复制样本");
+    let original = std::fs::read(&source).expect("读原文件");
+
+    let output = dir.join("out.pdf");
+    let report = writeback::write_incremental(&WritebackSpec {
+        source: source.clone(),
+        output: output.clone(),
+        pages: vec![],
+    })
+    .expect("增量保存");
+    let saved = std::fs::read(&output).expect("读输出");
+    assert!(report.annotations == 0);
+    assert!(saved.len() > original.len(), "增量保存应当追加内容");
+    assert!(
+        saved.starts_with(&original[..64]),
+        "增量保存应当保留原文件开头（不是全量重写）"
+    );
+    let text = String::from_utf8_lossy(&saved);
+    assert!(text.contains("/ObjStm"), "原文件的对象流应保留");
+    assert_eq!(
+        writeback::count_annotations(&output).expect("数注释"),
+        vec![7, 4],
+        "Adobe 的注释（含 Popup 子注释）原样保留"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn refuses_to_overwrite_the_source_file() {
     if !backend_available() {

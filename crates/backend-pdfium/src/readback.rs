@@ -174,8 +174,11 @@ unsafe fn read_annotation(
     })
 }
 
-/// 颜色/透明度：先 `GetColor`；**带 AP 的注释它一定失败**（PDFium 文档明说），
-/// 此时从外观流内容里解析 `RG`/`rg`/`G`/`g` 与 `CA`/`ca`。
+/// 颜色/透明度：颜色先 `GetColor`（带 AP 时它必失败），失败再从外观流解析 `RG/rg/G/g`；
+/// 透明度**优先读显式的 `/CA`**，缺失或 =1 时按种类默认值（高亮 0.35，其它 1.0）。
+///
+/// 为什么不能直接用 `GetColor` 的 alpha：外部阅读器的高亮大多没有 `/CA`（或写成 1），
+/// 但 Okular 等按"高亮默认半透明"绘制；统一成我们自己的 0.35 才能和本软件的高亮一致。
 unsafe fn read_color_and_opacity(
     ffi: &Ffi,
     annot: *mut c_void,
@@ -185,18 +188,38 @@ unsafe fn read_color_and_opacity(
     let mut green = 0u32;
     let mut blue = 0u32;
     let mut alpha = 0u32;
-    if (ffi.get_color)(annot, 0, &mut red, &mut green, &mut blue, &mut alpha) != 0 {
-        return (
-            [clamp_byte(red), clamp_byte(green), clamp_byte(blue)],
-            (alpha as f32 / 255.0).clamp(0.0, 1.0),
-        );
+    let color = if (ffi.get_color)(annot, 0, &mut red, &mut green, &mut blue, &mut alpha) != 0 {
+        [clamp_byte(red), clamp_byte(green), clamp_byte(blue)]
+    } else if let Some(content) = read_ap(ffi, annot) {
+        parse_appearance(&content)
+            .map(|(color, _)| color)
+            .unwrap_or(model.color)
+    } else {
+        model.color
+    };
+
+    let explicit = read_number(ffi, annot, "CA");
+    let fallback = match model.kind {
+        AnnotationKind::Highlight { .. } => 0.35,
+        _ => 1.0,
+    };
+    let opacity = match explicit {
+        Some(value) if value < 0.999 => value.clamp(0.0, 1.0),
+        _ => fallback,
+    };
+    (color, opacity)
+}
+
+unsafe fn read_number(ffi: &Ffi, annot: *mut c_void, key: &str) -> Option<f32> {
+    let key = CString::new(key).ok()?;
+    if (ffi.has_key)(annot, key.as_ptr()) == 0 {
+        return None;
     }
-    if let Some(content) = read_ap(ffi, annot) {
-        if let Some((color, opacity)) = parse_appearance(&content) {
-            return (color, opacity.unwrap_or(1.0));
-        }
+    let mut value = 0.0f32;
+    if (ffi.get_number_value)(annot, key.as_ptr(), &mut value) == 0 {
+        return None;
     }
-    (model.color, model.opacity)
+    value.is_finite().then_some(value)
 }
 
 /// 读 AP 内容流：**UTF-16LE**（`FPDFAnnot_GetAP` 的文档语义，不是字节流）。
@@ -227,7 +250,7 @@ unsafe fn read_ap(ffi: &Ffi, annot: *mut c_void) -> Option<String> {
     }
 }
 
-/// 取**最后一个**颜色算子（描边优先），以及可选的 alpha（`CA`/`ca`）。
+/// 取**最后一个**颜色算子（描边优先）；alpha 由 `read_number("CA")` 负责。
 fn parse_appearance(content: &str) -> Option<([u8; 3], Option<f32>)> {
     let tokens: Vec<&str> = content.split_whitespace().collect();
     let mut color: Option<[u8; 3]> = None;

@@ -113,6 +113,39 @@ fn running_the_same_job_twice_does_not_duplicate_annotations() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `"incremental": true`：保留原文件结构/外部注释（原地写入走这条）。
+#[test]
+fn incremental_job_preserves_external_annotations() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("incremental");
+    let source = dir.join("adobe.pdf");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../backend-pdfium/tests/fixtures/s6b/adobe.pdf");
+    std::fs::copy(&fixture, &source).expect("复制样本");
+    let original = std::fs::read(&source).expect("读");
+    let output = dir.join("out.pdf");
+    let job = dir.join("job.json");
+    std::fs::write(
+        &job,
+        r#"{ "pdf": "adobe.pdf", "output": "out.pdf", "incremental": true, "pages": [] }"#,
+    )
+    .expect("写 job");
+    app::writeback::run_job(&job).expect("增量写回");
+    let saved = std::fs::read(&output).expect("读输出");
+    assert!(saved.len() > original.len());
+    assert!(saved.starts_with(&original[..64]), "增量保存不应全量重写");
+    assert_eq!(
+        backend_pdfium::writeback::count_annotations(&output).expect("数"),
+        vec![7, 4],
+        "外部注释（含 Popup）应原样保留"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn an_unknown_kind_is_rejected_before_touching_any_file() {
     if !backend_available() {

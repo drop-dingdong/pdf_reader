@@ -38,8 +38,13 @@ use crate::json::{Json, JsonLookup};
 
 /// 执行一个 job 文件，返回给人看的一句话（成功时）。
 pub fn run_job(path: &Path) -> Result<String, String> {
-    let spec = read_spec(path)?;
-    let report = backend::write(&spec).map_err(|error| error.to_string())?;
+    let (spec, incremental) = read_spec_mode(path)?;
+    let report = if incremental {
+        backend::write_incremental(&spec)
+    } else {
+        backend::write(&spec)
+    }
+    .map_err(|error| error.to_string())?;
     Ok(format!(
         "已导出 {} 条标注 → {}（{} 字节）",
         report.annotations,
@@ -48,7 +53,7 @@ pub fn run_job(path: &Path) -> Result<String, String> {
     ))
 }
 
-fn read_spec(path: &Path) -> Result<WritebackSpec, String> {
+fn read_spec_mode(path: &Path) -> Result<(WritebackSpec, bool), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("读 job {} 失败：{error}", path.display()))?;
     let root = Json::parse(&text).map_err(|error| format!("job JSON 解析失败：{error}"))?;
@@ -87,11 +92,18 @@ fn read_spec(path: &Path) -> Result<WritebackSpec, String> {
         });
     }
 
-    Ok(WritebackSpec {
-        source,
-        output,
-        pages,
-    })
+    let incremental = root
+        .field("incremental")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    Ok((
+        WritebackSpec {
+            source,
+            output,
+            pages,
+        },
+        incremental,
+    ))
 }
 
 fn parse_annotation(value: &Json, context: &str) -> Result<WritebackAnnotation, String> {

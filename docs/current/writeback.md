@@ -26,7 +26,7 @@
                  └─ backend_pdfium::writeback::write（FFI）
                       │    ├─ FPDF_LoadDocument（只读源文件）
                       │    ├─ FPDFPage_CreateAnnot + 语义字段 + SetAP
-                      │    ├─ FPDF_SaveAsCopy（FPDF_NO_INCREMENTAL）→ 内存缓冲
+                      │    ├─ FPDF_SaveAsCopy（导出：NO_INCREMENTAL；原地：INCREMENTAL）→ 内存缓冲
                       │    ├─ 写 spec.output（= 目标同目录的临时文件）
                       │    └─ 重开 output、逐页核对注释数
        ├─ smoke_check：重开 + 页数一致 + 渲染一页（0.5×）
@@ -181,8 +181,11 @@ MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
 
 ## 10. 保存策略
 
-* `FPDF_SaveAsCopy(..., FPDF_NO_INCREMENTAL)`（`flags=2`）：全量重写，避免在可能被其它工具
-  改过的文件上叠增量段。实测 `flags=0` 与 `2` 对同一文档产物同样大小、都能重开。
+* 保存模式（D-141）：
+  * **导出副本**用 `FPDF_NO_INCREMENTAL`（`flags=2`）全量重写，产物干净；
+  * **原地写入**用 `FPDF_INCREMENTAL`（`flags=1`）：追加改动、保留原文件的对象流与外部注释结构。
+    用户实测 PDFium 全量重写 Adobe 注释后再由 Okular 保存会报“文件有问题”，增量保存不动原有对象。
+    代价：每次原地写入都会追加一段（文件变大），不自动压缩。
 * 先保存到**内存缓冲**，再 `std::fs::write(spec.output)`；`spec.output` 由调用方给临时路径，
   rename 与冲突处理由调用方做。
 * **拒绝 `source == output`**：写回永远不直接覆盖输入（原子替换是调用方的责任）。

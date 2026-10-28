@@ -67,7 +67,7 @@ pub fn ensure_destination_free(output: &Path) -> Result<(), String> {
 /// 生成子进程的 job JSON：按页分组，路径用绝对路径。
 ///
 /// 手写序列化（与 `persist` 一样的极简风格），正文按 JSON 规则转义。
-pub fn job_json(pdf: &Path, output: &Path, items: &[ExportItem]) -> String {
+pub fn job_json(pdf: &Path, output: &Path, items: &[ExportItem], incremental: bool) -> String {
     let mut pages: Vec<(u32, Vec<&ExportItem>)> = Vec::new();
     for item in items {
         let index = item.page.get();
@@ -83,6 +83,9 @@ pub fn job_json(pdf: &Path, output: &Path, items: &[ExportItem]) -> String {
         "  \"output\": {},\n",
         quote(&output.to_string_lossy())
     ));
+    if incremental {
+        out.push_str("  \"incremental\": true,\n");
+    }
     out.push_str("  \"pages\": [\n");
     for (page_index, (page, group)) in pages.iter().enumerate() {
         out.push_str(&format!("    {{ \"page\": {page}, \"annotations\": [\n"));
@@ -212,7 +215,7 @@ fn export_with(
     let temporary = temporary_path(output);
     let _ = std::fs::remove_file(&temporary);
 
-    if let Err(error) = run_child(executable, pdf, &temporary, items) {
+    if let Err(error) = run_child(executable, pdf, &temporary, items, false) {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
@@ -230,13 +233,14 @@ fn run_child(
     pdf: &Path,
     temporary: &Path,
     items: &[ExportItem],
+    incremental: bool,
 ) -> Result<(), String> {
     let job_path = std::env::temp_dir().join(format!(
         "pdf-export-{}-{}.json",
         std::process::id(),
         unique_suffix()
     ));
-    std::fs::write(&job_path, job_json(pdf, temporary, items))
+    std::fs::write(&job_path, job_json(pdf, temporary, items, incremental))
         .map_err(|error| format!("写 job {} 失败：{error}", job_path.display()))?;
     let child = std::process::Command::new(executable)
         .arg("--writeback")
@@ -274,7 +278,7 @@ pub fn stage_in_place(
         std::env::current_exe().map_err(|error| format!("找不到自身可执行文件：{error}"))?;
     let temporary = temporary_path(&pdf);
     let _ = std::fs::remove_file(&temporary);
-    if let Err(error) = run_child(&executable, &pdf, &temporary, items) {
+    if let Err(error) = run_child(&executable, &pdf, &temporary, items, true) {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
@@ -404,6 +408,7 @@ mod tests {
             Path::new("/tmp/in.pdf"),
             Path::new("/tmp/out.pdf"),
             &[highlight()],
+            false,
         );
         let root = crate::json::Json::parse(&job).expect("job 必须是合法 JSON");
         let root = root.as_object().expect("顶层对象");
@@ -454,6 +459,7 @@ mod tests {
             Path::new("/tmp/a.pdf"),
             Path::new("/tmp/b.pdf"),
             &[highlight(), ink],
+            false,
         );
         let root = crate::json::Json::parse(&job).expect("合法 JSON");
         let pages = root
