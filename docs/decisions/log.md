@@ -1278,6 +1278,24 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **验证**：`check.sh` 全绿（350 tests）；重复跑基线稳定。
 - **状态**：P1.5 完成；下一步 P2 的 xref/ObjStm 对象号 spike。
 
+### D-151 P2 spike：页面树与 /Annots 对象号定位跑通
+
+- **目标**：不依赖 PDFium，从 PDF 字节得到“页序 + 每页 /Annots 的 `(num,gen)` 引用”，
+  为 P2 的“一视同仁 + xref 身份”做准备。
+- **实现**（`backend-pdfium/src/pdf_index.rs`）：
+  * 扫直接对象、可 FlateDecode 的 **ObjStm**；
+  * 从 trailer `/Root` → `/Pages` → `/Kids` 走页面树（支持 `/Annots` / `/Kids` 是独立数组对象的情况）；
+  * `/Annots` 返回 `Some((num,gen))` 或 `None`（内联）；
+  * 新增 `flate2` 依赖。
+- **样本结果**（引用数含 Popup）：
+  * Okular [5,1]；Evince [7,2]；Firefox [5,2]；Adobe（ObjStm）[7,4]；Foxit [9,2]；
+  * 所有样本都是独立对象，没有内联注释。
+- **意义**：Adobe 的 ObjStm 也能定位；对象号可用于 P2 的差分（改正文/删除）。
+  注意：`/Annots` 里包含 Popup 子对象，P2 需要按 `/Subtype` 过滤出四种注释，不能把索引直接当注释顺序。
+- **验证**：`pdf_index::tests::page_annotation_refs_for_real_samples`（6 个 fixture，精确引用数）；
+  `check.sh` 全绿（351 tests）。
+- **状态**：spike 完成；下一步 P2：`Annotation.pdf_ref`、统一读入、正文编辑/删除（含 Popup）与 job 协议。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |
