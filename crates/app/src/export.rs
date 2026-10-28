@@ -204,9 +204,6 @@ fn export_with(
     let output = absolute_path(output)?;
     let (pdf, output) = (pdf.as_path(), output.as_path());
     ensure_destination_free(output)?;
-    if items.is_empty() {
-        return Err("当前文档没有标注，没有可导出的内容".to_string());
-    }
     if !pdf.is_file() {
         return Err(format!("源文件不存在：{}", pdf.display()));
     }
@@ -270,9 +267,6 @@ pub fn stage_in_place(
     expected_pages: u32,
 ) -> Result<PathBuf, String> {
     let pdf = absolute_path(pdf)?;
-    if items.is_empty() {
-        return Err("当前文档没有标注，没有可写入的内容".to_string());
-    }
     if !pdf.is_file() {
         return Err(format!("源文件不存在：{}", pdf.display()));
     }
@@ -655,8 +649,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg(unix)]
     #[test]
-    fn exporting_nothing_is_an_error_before_any_process_starts() {
+    fn empty_export_is_allowed_and_reaches_the_child() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = std::env::temp_dir().join(format!(
             "pdf-export-empty-{}-{}",
             std::process::id(),
@@ -665,8 +662,13 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("建目录");
         let pdf = dir.join("in.pdf");
         std::fs::write(&pdf, b"%PDF-1.4\n").expect("写占位");
-        let error = export(&pdf, &dir.join("out.pdf"), &[], 1).expect_err("必须拒绝");
-        assert!(error.contains("没有标注"), "实际：{error}");
+        let child = dir.join("fail.sh");
+        std::fs::write(&child, "#!/bin/sh\nexit 3\n").expect("写脚本");
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).expect("加执行位");
+        // 空集合不再被"没有标注"提前拒绝：会走到子进程（然后由假子进程失败）
+        let error =
+            export_with(&child, &pdf, &dir.join("out.pdf"), &[], 1).expect_err("假子进程必然失败");
+        assert!(error.contains("写回子进程失败"), "实际：{error}");
         assert!(!dir.join("out.pdf").exists());
         std::fs::remove_dir_all(&dir).ok();
     }

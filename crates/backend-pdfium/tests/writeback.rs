@@ -531,6 +531,70 @@ fn annotations_are_not_baked_into_the_bitmap_by_default() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// 空 `pages` = **把写过的注释全部删掉**（叠层删光后仍要能写回 PDF）。
+#[test]
+fn empty_spec_removes_all_marked_annotations_but_keeps_links() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("empty");
+    let source = dir.join("in.pdf");
+    std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+    let annotated = dir.join("annotated.pdf");
+    writeback::write(&WritebackSpec {
+        source,
+        output: annotated.clone(),
+        pages: vec![WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![WritebackAnnotation {
+                id: Some(1),
+                kind: AnnotationKind::Highlight {
+                    quads: vec![Rect::new(50.0, 660.0, 100.0, 14.0)],
+                },
+                color: [255, 255, 0],
+                opacity: 0.35,
+                body: Some("要删掉的正文".to_string()),
+            }],
+        }],
+    })
+    .expect("先写一条");
+    assert_eq!(
+        writeback::count_annotations(&annotated).expect("数"),
+        vec![2, 0],
+        "链接 + 1 条"
+    );
+
+    let cleared = dir.join("cleared.pdf");
+    let report = writeback::write(&WritebackSpec {
+        source: annotated.clone(),
+        output: cleared.clone(),
+        pages: vec![],
+    })
+    .expect("空集合写回");
+    assert_eq!(report.annotations, 0, "没有新增");
+    assert_eq!(
+        writeback::count_annotations(&cleared).expect("数"),
+        vec![1, 0],
+        "标记注释应被删掉；链接保留"
+    );
+
+    // 再跑一次仍然稳定
+    let again = dir.join("again.pdf");
+    writeback::write(&WritebackSpec {
+        source: cleared,
+        output: again.clone(),
+        pages: vec![],
+    })
+    .expect("再删一次");
+    assert_eq!(
+        writeback::count_annotations(&again).expect("数"),
+        vec![1, 0]
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn refuses_to_overwrite_the_source_file() {
     if !backend_available() {

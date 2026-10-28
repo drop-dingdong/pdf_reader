@@ -311,9 +311,7 @@ pub fn count_annotations(path: &Path) -> WritebackResult<Vec<usize>> {
 // ============================================================ 内部：校验/写入/外观
 
 fn validate(spec: &WritebackSpec) -> WritebackResult<()> {
-    if spec.pages.is_empty() {
-        return Err(WritebackError::Invalid("没有要写入的标注".to_string()));
-    }
+    // `pages` 允许为空：表示"把 PDF 里我们写过的注释全部删掉"（叠层已清空时写回）。
     for page in &spec.pages {
         for annotation in &page.annotations {
             // 复用模型的不变量：退化几何/NaN 在入口就拒绝，避免写坏文件

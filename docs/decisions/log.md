@@ -1032,6 +1032,27 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **验证**：332 tests 全绿；人工场景：写回一条无正文注释 → 删 A/J → 重开（注释可 hover/删除）。
 - **状态**：修复生效。
 
+### D-139 S6c：从 PDF 重建标注；空标注也能写回/导出
+
+- **问题（用户实测）**：界面上把标注删光后，「写入 PDF」「导出标注 PDF」都变灰 ——
+  条件是“内存里至少一条标注”。于是“PDF 里写过、现在全删了”这种状态无法写回（PDF 里的注释删不掉）。
+- **修复**：
+  1. `PdfReaderApp.pdf_marked_annotations`：打开时记录 PDF 里带 `pd-fr:` 标记的注释数；
+     按钮条件改为 `有标注 || pdf_marked > 0`，删光之后仍可写回/导出“空集合”；
+  2. `writeback` 允许 `pages: []`（`validate` 不再拒绝）——同步段会删掉所有标记注释、保留链接；
+     `export`/`stage_in_place` 也允许空 items；
+  3. **S6c「从 PDF 重建」**：确认框 → 备份 A/J → 删 A、只删 J 的 `#annot:` 正文 →
+     重开（S6a 从 PDF 导入）→ 自动落盘；清空撤销历史、恢复视图。
+- **影响**：`backend-pdfium/src/writeback.rs`（validate）、`app/src/export.rs`（空集合）、
+  `app/src/app.rs`（计数、按钮、重建流程/确认框）、`docs/current/{app-ui,writeback,readback}.md`。
+- **验证**：
+  * `empty_spec_removes_all_marked_annotations_but_keeps_links`：写 1 条 → 空 pages 写回 →
+    只剩链接；再跑稳定；
+  * `empty_export_is_allowed_and_reaches_the_child`：空集合不再提前拒绝；
+  * `check.sh` 全绿（333 tests）；
+  * 重建流程是 UI 流程，交人工验收（备份文件、正文恢复、未写回标注丢失）。
+- **状态**：S6c 完成；S6b 等外部样本。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

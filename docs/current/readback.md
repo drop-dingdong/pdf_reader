@@ -70,7 +70,26 @@ Squiggly 等一律跳过。隐藏（`/F` Hidden/NoView）跳过。
 * 别的程序把 `/NM` 去掉后，这条注释会被当成外部注释；下次写回可能重复添加（评估 §9 的风险）。
 * 读回在**主进程**；如果将来在打开期间还有别的 PDFium 调用（后台任务、第二个窗口），必须迁到子进程。
 
-## 5. 手动验收
+## 5. 从 PDF 重建（S6c）
+
+工具栏「从 PDF 重建」（PDF 里至少有一条 `pd-fr:` 标记时才可用）：
+
+```text
+确认框（PDF 里 N 条标记注释 / 当前 overlay X 条标注、Y 条正文）
+→ 备份 <pdf>.annot.json 与 <pdf>.json 为 .bak-<纳秒>
+→ 删除 <pdf>.annot.json
+→ 只删除 <pdf>.json 里标题以 #annot: 开头的正文条目（链接/自定义 preview 保留）
+→ 重开文档：A 不存在 → 走 S6a 从 PDF 导入标注与 /Contents 正文
+→ 自动保存新的 A/J（overlay_dirty/data_dirty）
+```
+
+语义是“**以 PDF 为准**”：
+
+* overlay 里有、PDF 里没有的标注（还没写回的）会丢；
+* 正文只认 PDF `/Contents`；J 里那些 `#annot:` 正文先被删掉，再按 PDF 重建；
+* 备份保留，出问题可以手工恢复。
+
+## 6. 手动验收
 
 ```bash
 # 1) 写一份带注释的 PDF（界面「写入 PDF」），2) 删掉旁边的 .annot.json，3) 重开

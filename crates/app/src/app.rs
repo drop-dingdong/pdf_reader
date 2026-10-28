@@ -541,6 +541,10 @@ pub struct PdfReaderApp {
     pending_annotate: bool,
     /// 是否正在等"原地写入 PDF"的确认（S5c）。
     pending_in_place: bool,
+    /// 是否正在等"从 PDF 重建标注"的确认（S6c）。
+    pending_rebuild: bool,
+    /// 上次打开时 PDF 里带 `pd-fr:` 标记的注释数（决定空 overlay 能否写回/导出）。
+    pdf_marked_annotations: usize,
     /// 原地写入重开后要恢复的视图（页、缩放、滚动、剩余帧数）。
     ///
     /// 延迟两帧：**先让新会话收到真实的视口尺寸**，否则 `SetScroll` 会被按旧/默认视口夹紧，
@@ -752,6 +756,8 @@ impl PdfReaderApp {
             ink: None,
             pending_annotate: false,
             pending_in_place: false,
+            pending_rebuild: false,
+            pdf_marked_annotations: 0,
             pending_view_restore: None,
             overlay_dirty: false,
             history: crate::history::History::new(),
@@ -982,6 +988,144 @@ impl PdfReaderApp {
         }
     }
 
+    /// 「从 PDF 重建标注」确认框（S6c）。
+    fn draw_rebuild_dialog(&mut self, ctx: &egui::Context) {
+        if !self.pending_rebuild {
+            return;
+        }
+        let overlay = self.annotations.len();
+        let bodies = self
+            .custom_previews
+            .iter()
+            .filter(|preview| preview.title.starts_with("#annot:"))
+            .count();
+        let marked = self.pdf_marked_annotations;
+        let mut decision: Option<bool> = None;
+        egui::Modal::new(Id::unique("rebuild-from-pdf")).show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.heading("从 PDF 重建标注");
+            ui.label(format!(
+                "PDF 里有 {marked} 条带标记的注释。将先备份 `.annot.json` / `.json`，                 然后**丢弃当前 overlay**，按 PDF 重建："
+            ));
+            ui.label(format!(
+                "当前 overlay：{overlay} 条标注、{bodies} 条正文，都会被替换。"
+            ));
+            ui.label("没有被写进 PDF 的标注（以及它们独有的正文）会丢失。");
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("取消").clicked() {
+                    decision = Some(false);
+                }
+                if ui.button("备份并重建").clicked() {
+                    decision = Some(true);
+                }
+            });
+        });
+        match decision {
+            Some(false) => self.pending_rebuild = false,
+            Some(true) => {
+                self.pending_rebuild = false;
+                self.perform_rebuild_from_pdf();
+            }
+            None => {}
+        }
+    }
+
+    /// 以 PDF 为准重建：备份 → 删 A/J 里的注释正文 → 重开（S6a 会从 PDF 导入）→ 落盘。
+    fn perform_rebuild_from_pdf(&mut self) {
+        let Some(pdf) = self.document_path.clone() else {
+            self.message = "先打开一个 PDF".to_string();
+            return;
+        };
+        if self.pdf_marked_annotations == 0 {
+            self.message = "PDF 里没有可用来重建的标记注释".to_string();
+            return;
+        }
+        if self.sidecar_locked.is_some() {
+            self.message = "主存档由更新版本写入，拒绝重建（否则会破坏它）".to_string();
+            return;
+        }
+        let Some((page, zoom, scroll)) = self.session.as_ref().map(|session| {
+            (
+                session.state().current_page,
+                session.state().zoom,
+                session.viewport().scroll,
+            )
+        }) else {
+            self.message = "没有打开的文档".to_string();
+            return;
+        };
+
+        // 1) 备份 A/J（存在才备份）
+        let annot_path = persist::annot_path(&pdf);
+        let sidecar_path = persist::sidecar_path(&pdf);
+        let mut backups: Vec<std::path::PathBuf> = Vec::new();
+        for path in [&annot_path, &sidecar_path] {
+            if path.exists() {
+                let backup = crate::export::backup_path(path);
+                if let Err(error) = std::fs::copy(path, &backup) {
+                    self.message = format!("备份 {} 失败，已取消：{error}", path.display());
+                    return;
+                }
+                backups.push(backup);
+            }
+        }
+
+        // 2) 删 A；保留 J 里的链接/自定义 preview，只删 `#annot:` 正文条目
+        if annot_path.exists() {
+            if let Err(error) = std::fs::remove_file(&annot_path) {
+                self.message = format!("删除 {} 失败，已取消：{error}", annot_path.display());
+                return;
+            }
+        }
+        self.custom_previews
+            .retain(|preview| !preview.title.starts_with("#annot:"));
+        self.data_dirty = true;
+        self.save_custom_data();
+        if self.data_dirty {
+            // J 没写成：把 A 恢复回去（有备份的话），避免 A 丢了而 J 也缺正文
+            if let Some(backup) = backups
+                .iter()
+                .find(|path| path.to_string_lossy().contains(".annot.json.bak-"))
+            {
+                let _ = std::fs::copy(backup, &annot_path);
+            }
+            self.message = format!("保存主存档失败，已取消重建：{}", self.message);
+            return;
+        }
+
+        // 3) 重开：A 不在 → S6a 从 PDF 导入标注，正文从 /Contents 重建
+        self.history.clear();
+        self.open(&pdf, None);
+        if self.session.is_some() {
+            self.pending_view_restore = Some((page, zoom, scroll, 2));
+            self.save_all();
+            let names = backups
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join("、");
+            self.message = if names.is_empty() {
+                format!("已从 PDF 重建 {} 条标注", self.pdf_marked_annotations)
+            } else {
+                format!(
+                    "已从 PDF 重建 {} 条标注（备份：{names}）",
+                    self.pdf_marked_annotations
+                )
+            };
+        } else {
+            self.message = format!(
+                "重建后重新打开失败：{}（备份：{}）",
+                pdf.display(),
+                backups
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            );
+        }
+    }
+
     /// 原地写入的确认框（S5c）。确认后覆盖原文件；取消则什么都不做。
     fn draw_in_place_dialog(&mut self, ctx: &egui::Context) {
         if !self.pending_in_place {
@@ -1049,7 +1193,7 @@ impl PdfReaderApp {
                 return;
             }
         }
-        if self.annotations.is_empty() {
+        if self.annotations.is_empty() && self.pdf_marked_annotations == 0 {
             self.message = "当前文档没有标注".to_string();
             return;
         }
@@ -1145,7 +1289,7 @@ impl PdfReaderApp {
             self.message = "加密文档暂不支持导出（权限位可能不允许批注）".to_string();
             return;
         }
-        if self.annotations.is_empty() {
+        if self.annotations.is_empty() && self.pdf_marked_annotations == 0 {
             self.message = "当前文档没有标注".to_string();
             return;
         }
@@ -1446,6 +1590,11 @@ impl PdfReaderApp {
                         backend_pdfium::readback::Readback::default()
                     }
                 };
+                self.pdf_marked_annotations = readback
+                    .annotations
+                    .iter()
+                    .filter(|annotation| annotation.id.is_some())
+                    .count();
                 let mut open_warning: Option<String> = None;
                 let raster = opened.raster.clone();
                 let concurrency = opened.capabilities.max_concurrency as usize;
@@ -2076,9 +2225,11 @@ impl PdfReaderApp {
                         }
                     }
                     ui.add_space(6.0);
-                    // 原地写入（S5c）：会覆盖原文件，先弹确认 + 自动备份
-                    let can_write =
-                        self.document_path.is_some() && !self.annotations.is_empty();
+                    // 原地写入（S5c）：会覆盖原文件，先弹确认 + 自动备份。
+                    // 允许"空标注"：把 PDF 里写过的注释删干净（界面上删光之后要能写回）。
+                    let has_write_work =
+                        !self.annotations.is_empty() || self.pdf_marked_annotations > 0;
+                    let can_write = self.document_path.is_some() && has_write_work;
                     let write_back =
                         ui.add_enabled(can_write, egui::Button::new("写入 PDF"));
                     let write_back = if can_write {
@@ -2086,22 +2237,41 @@ impl PdfReaderApp {
                             "把标注写进原 PDF（会先备份、再原子替换；重复写入是幂等的）",
                         )
                     } else {
-                        write_back.on_disabled_hover_text("需要打开一个 PDF，且至少有一条标注")
+                        write_back.on_disabled_hover_text(
+                            "需要打开一个 PDF；当前没有标注，PDF 里也没有写回的注释",
+                        )
                     };
                     if write_back.clicked() {
                         self.pending_in_place = true;
                     }
                     ui.add_space(6.0);
+                    // S6c：丢弃 overlay，按 PDF 里写回的注释重建（先备份 A/J）
+                    let can_rebuild =
+                        self.document_path.is_some() && self.pdf_marked_annotations > 0;
+                    let rebuild =
+                        ui.add_enabled(can_rebuild, egui::Button::new("从 PDF 重建"));
+                    let rebuild = if can_rebuild {
+                        rebuild.on_hover_text(
+                            "用 PDF 里写回的注释替换当前标注数据（先备份 .annot.json / .json）",
+                        )
+                    } else {
+                        rebuild.on_disabled_hover_text("PDF 里还没有带标记的注释可用来重建")
+                    };
+                    if rebuild.clicked() {
+                        self.pending_rebuild = true;
+                    }
+                    ui.add_space(6.0);
                     // 导出带标注的 PDF（S5b-2）：写新文件，不覆盖；真正的写回在子进程里
-                    let can_export =
-                        self.document_path.is_some() && !self.annotations.is_empty();
+                    let can_export = self.document_path.is_some() && has_write_work;
                     let export = ui.add_enabled(can_export, egui::Button::new("导出标注 PDF"));
                     let export = if can_export {
                         export.on_hover_text(
                             "把当前标注写成真正的 PDF 注释，保存为同目录的 <原名>.annotated.pdf（不覆盖）",
                         )
                     } else {
-                        export.on_disabled_hover_text("需要打开一个 PDF，且至少有一条标注")
+                        export.on_disabled_hover_text(
+                            "需要打开一个 PDF；当前没有标注，PDF 里也没有写回的注释",
+                        )
                     };
                     if export.clicked() {
                         self.export_annotated_pdf(session);
@@ -5630,6 +5800,7 @@ impl eframe::App for PdfReaderApp {
         self.handle_dropped_files(&ctx);
         // 原地写入的确认框必须在借用 session 之前处理：确认后要**关掉会话**才能替换文件
         self.draw_in_place_dialog(&ctx);
+        self.draw_rebuild_dialog(&ctx);
         self.apply_pending_view_restore(&ctx);
         self.draw_history_window(&ctx);
 
