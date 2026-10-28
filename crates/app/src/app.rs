@@ -3159,8 +3159,18 @@ impl PdfReaderApp {
             self.activate_custom_preview(index, rect);
             return;
         }
-        // 引用失效：保留几何、正文显示占位（绝不因为找不到正文而崩溃/丢弃标注）
-        let body = "（正文已丢失）".to_string();
+        // 正文缺失：保留几何、显示占位（绝不因为找不到正文而崩溃/丢弃标注）。
+        // 区分"本来就没有正文"和"正文引用了但条目丢了"，后者才是真的丢失。
+        let had_body = self
+            .annotations
+            .get(id)
+            .map(|annotation| annotation.body_title.is_some())
+            .unwrap_or(false);
+        let body = if had_body {
+            "（正文已丢失）".to_string()
+        } else {
+            "（没有正文）".to_string()
+        };
         let rect = egui::Rect::from_min_size(at, EVec2::new(280.0, 150.0));
         let title = format!("标注 #{}", id.get());
         // 同一条标注的占位浮窗也只应有一个：已存在就高亮置顶
@@ -3924,29 +3934,28 @@ impl PdfReaderApp {
                                 stroke_width,
                                 color,
                             );
-                            if annotation.body_title.is_some() {
-                                if let Some(pointer) = pointer {
-                                    let content_point = Point::new(
-                                        pointer.x - canvas.min.x + scroll.x,
-                                        pointer.y - canvas.min.y + scroll.y,
-                                    );
-                                    let tolerance =
-                                        ANNOTATION_HIT_TOLERANCE_PX / placement.scale.0.max(0.01);
-                                    if placement.rect.contains(content_point)
-                                        && annotation.contains(
-                                            placement.content_to_page(content_point),
-                                            tolerance,
-                                        )
-                                    {
-                                        self.hovered_annotation = Some(annotation.id);
-                                        if let Some(title) = &annotation.body_title {
-                                            if let Some(window) = self
-                                                .floats
-                                                .iter()
-                                                .find(|window| &window.title == title)
-                                            {
-                                                self.highlight_float = Some(window.id);
-                                            }
+                            if let Some(pointer) = pointer {
+                                let content_point = Point::new(
+                                    pointer.x - canvas.min.x + scroll.x,
+                                    pointer.y - canvas.min.y + scroll.y,
+                                );
+                                let tolerance =
+                                    ANNOTATION_HIT_TOLERANCE_PX / placement.scale.0.max(0.01);
+                                if placement.rect.contains(content_point)
+                                    && annotation.contains(
+                                        placement.content_to_page(content_point),
+                                        tolerance,
+                                    )
+                                {
+                                    // 命中/删除只看几何，与"有没有正文"无关
+                                    self.hovered_annotation = Some(annotation.id);
+                                    if let Some(title) = &annotation.body_title {
+                                        if let Some(window) = self
+                                            .floats
+                                            .iter()
+                                            .find(|window| &window.title == title)
+                                        {
+                                            self.highlight_float = Some(window.id);
                                         }
                                     }
                                 }
@@ -3961,13 +3970,16 @@ impl PdfReaderApp {
                                 EVec2::new(content.width, content.height),
                             );
                             // 悬停：把对应浮窗高亮一帧（离开即熄灭；点击另有时长高亮）
-                            if let (Some(pointer), Some(title)) = (pointer, &annotation.body_title) {
+                            if let Some(pointer) = pointer {
                                 if screen.contains(pointer) {
+                                    // 命中/删除只看几何，与"有没有正文"无关
                                     self.hovered_annotation = Some(annotation.id);
-                                    if let Some(window) =
-                                        self.floats.iter().find(|window| &window.title == title)
-                                    {
-                                        self.highlight_float = Some(window.id);
+                                    if let Some(title) = &annotation.body_title {
+                                        if let Some(window) =
+                                            self.floats.iter().find(|window| &window.title == title)
+                                        {
+                                            self.highlight_float = Some(window.id);
+                                        }
                                     }
                                 }
                             }
