@@ -138,6 +138,48 @@ fn annotations_are_recovered_from_the_pdf_when_the_overlay_is_missing() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// S6b：外部阅读器（Okular 样本）的注释以只读层显示；不写 overlay、不计入可编辑标注。
+#[test]
+fn foreign_annotations_are_shown_read_only() {
+    let _guard = test_lock();
+    if !backend_available() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "pdf-foreign-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("建临时目录");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../backend-pdfium/tests/fixtures/s6b/okular.pdf");
+    std::fs::copy(&fixture, dir.join("rotated_2p.pdf")).expect("复制样本");
+    let script = dir.join("foreign.json");
+    std::fs::write(
+        &script,
+        r#"{"name":"foreign","pdf":"rotated_2p.pdf","actions":[
+             {"id":"settle","op":"wait","frames":6}
+           ]}"#,
+    )
+    .expect("写脚本");
+    let report = replay::run_script_file(&script, None).expect("回放");
+    let action = report.actions.last().expect("动作");
+    assert_eq!(action.annotations, 0, "外部注释不应进入可编辑 overlay");
+    assert_eq!(
+        action.foreign_annotations, 5,
+        "Okular 样本应有 5 条只读注释"
+    );
+    assert!(
+        !dir.join("rotated_2p.pdf.annot.json").exists(),
+        "只读层不应写 overlay"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// S0：`click` / `drag` 动作必须真的驱动 UI，而不是"跑完没报错"。
 #[test]
 fn click_navigates_and_drag_pans() {

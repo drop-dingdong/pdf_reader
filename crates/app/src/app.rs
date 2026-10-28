@@ -535,6 +535,8 @@ pub struct PdfReaderApp {
     show_annotations: bool,
     /// 页面标注（会话内；S2 才落盘）。
     annotations: AnnotationStore,
+    /// 外部阅读器写进 PDF 的注释（S6b）：**只读几何**，不写入 overlay、不参与删除/写回。
+    foreign_annotations: Vec<Annotation>,
     /// 正在画的一笔墨迹（S4b）；**抬笔之前它不是标注**，取消只要丢掉它。
     ink: Option<InkStroke>,
     /// "下一步把当前选区变成标注"（由快捷键/按钮置位，在画布绘制时执行）。
@@ -753,6 +755,7 @@ impl PdfReaderApp {
             show_links: false,
             show_annotations: true,
             annotations: AnnotationStore::new(),
+            foreign_annotations: Vec::new(),
             ink: None,
             pending_annotate: false,
             pending_in_place: false,
@@ -1576,6 +1579,48 @@ impl PdfReaderApp {
         (restored, 0)
     }
 
+    /// S6b：把 PDF 里**没有 `pd-fr:` 标记**的注释放进只读层。
+    ///
+    /// 一条外部墨迹注释可能有多条 `/InkList` path；模型只支持一条折线，
+    /// 这里按 path 拆成多条只读注释显示（不合并、不编辑、不落盘）。
+    fn import_foreign(&mut self, readback: &backend_pdfium::readback::Readback) {
+        self.foreign_annotations.clear();
+        for item in &readback.annotations {
+            if item.id.is_some() {
+                continue; // 我们自己的注释：已在 overlay / merge 里
+            }
+            if let AnnotationKind::Ink { width, .. } = &item.kind {
+                let strokes = if item.ink_strokes.is_empty() {
+                    match &item.kind {
+                        AnnotationKind::Ink { points, .. } => vec![points.clone()],
+                        _ => vec![],
+                    }
+                } else {
+                    item.ink_strokes.clone()
+                };
+                for points in strokes {
+                    if let Some(mut annotation) = Annotation::new(
+                        item.page,
+                        AnnotationKind::Ink {
+                            points,
+                            width: *width,
+                        },
+                    ) {
+                        annotation.color = item.color;
+                        annotation.opacity = item.opacity;
+                        self.foreign_annotations.push(annotation);
+                    }
+                }
+                continue;
+            }
+            if let Some(mut annotation) = Annotation::new(item.page, item.kind.clone()) {
+                annotation.color = item.color;
+                annotation.opacity = item.opacity;
+                self.foreign_annotations.push(annotation);
+            }
+        }
+    }
+
     fn open(&mut self, path: &std::path::Path, password: Option<&str>) {
         let backend = PdfiumBackend::new();
         match backend.open(Source::Path(path), password) {
@@ -1626,6 +1671,7 @@ impl PdfReaderApp {
                         self.document_path = Some(path.to_path_buf());
                         // 标注图层（<pdf>.annot.json）：缺文件 = 空；坏文件只提示，不影响打开文档
                         self.annotations.clear();
+                        self.foreign_annotations.clear();
                         self.overlay_dirty = false;
                         let overlay_file_exists = persist::annot_path(path).exists();
                         // 坏 overlay 当作"不存在"处理：否则 PDF 里明明有注释也恢复不出来
@@ -1770,6 +1816,7 @@ impl PdfReaderApp {
                         }
                         let (restored, recovered_bodies) =
                             self.merge_readback(&readback, overlay_exists);
+                        self.import_foreign(&readback);
                         self.next_float_id = 1;
                         self.capture = None;
                         let title = session.opened().document.info().to_string();
@@ -1802,6 +1849,12 @@ impl PdfReaderApp {
                         if recovered_bodies > 0 {
                             self.message
                                 .push_str(&format!("（已从 PDF 补回 {recovered_bodies} 条正文）"));
+                        }
+                        if !self.foreign_annotations.is_empty() {
+                            self.message.push_str(&format!(
+                                "（另有 {} 条外部注释，只读显示）",
+                                self.foreign_annotations.len()
+                            ));
                         }
                         if let Some(warning) = open_warning {
                             self.message.push_str(&format!("（{warning}）"));
@@ -4175,6 +4228,67 @@ impl PdfReaderApp {
                                 }
                                 // 墨迹在上面按折线画完了，且没有 quads，不会进入本循环。
                                 AnnotationKind::Ink { .. } => {}
+                            }
+                        }
+                    }
+                }
+
+                // 2b-foreign 外部注释（S6b）：只读几何，不参与命中/删除/写回
+                if self.show_annotations && self.capture.is_none() {
+                    for page in self.visible.clone() {
+                        let Some(placement) = session.placement(page).copied() else {
+                            continue;
+                        };
+                        for annotation in self
+                            .foreign_annotations
+                            .iter()
+                            .filter(|annotation| annotation.page == page)
+                        {
+                            let alpha = (annotation.clamped_opacity() * 255.0).round() as u8;
+                            let [r, g, b] = annotation.color;
+                            let color = Color32::from_rgba_unmultiplied(r, g, b, alpha);
+                            if let Some((points, width)) = annotation.kind.ink() {
+                                let stroke_width = (width * placement.scale.0).max(1.0);
+                                paint_ink(
+                                    &painter,
+                                    &placement,
+                                    canvas,
+                                    scroll,
+                                    points,
+                                    stroke_width,
+                                    color,
+                                );
+                                continue;
+                            }
+                            for quad in annotation.kind.quads() {
+                                let content = placement.rect_to_content(*quad);
+                                let screen = egui::Rect::from_min_size(
+                                    canvas.min
+                                        + EVec2::new(content.x - scroll.x, content.y - scroll.y),
+                                    EVec2::new(content.width, content.height),
+                                );
+                                match annotation.kind {
+                                    AnnotationKind::Highlight { .. } => {
+                                        painter.rect_filled(screen, CornerRadius::ZERO, color);
+                                    }
+                                    AnnotationKind::Underline { .. } => {
+                                        painter.line_segment(
+                                            [screen.left_bottom(), screen.right_bottom()],
+                                            Stroke::new(2.0, color),
+                                        );
+                                    }
+                                    AnnotationKind::StrikeOut { .. } => {
+                                        let y = screen.center().y;
+                                        painter.line_segment(
+                                            [
+                                                egui::pos2(screen.left(), y),
+                                                egui::pos2(screen.right(), y),
+                                            ],
+                                            Stroke::new(2.0, color),
+                                        );
+                                    }
+                                    AnnotationKind::Ink { .. } => {}
+                                }
                             }
                         }
                     }

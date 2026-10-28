@@ -371,8 +371,10 @@ pub struct ActionReport {
     pub page_after: u32,
     /// 动作结束时的滚动偏移（内容空间像素）。用于断言拖拽平移。
     pub scroll_after: (f32, f32),
-    /// 动作结束时的标注数量。
+    /// 动作结束时的标注数量（overlay，可编辑）。
     pub annotations: usize,
+    /// 动作结束时读到的外部注释条数（S6b 只读层）。
+    pub foreign_annotations: usize,
     /// 最后一条标注的页面空间包围盒（`x,y,w,h`）—— 用于断言"几何与缩放无关"。
     pub annotation_bounds: Option<(f32, f32, f32, f32)>,
     /// 动作结束时的浮窗数量（断言"重复点击不重复开窗"）。
@@ -1056,6 +1058,7 @@ pub fn run(
             page_after: 0,
             scroll_after: (0.0, 0.0),
             annotations: 0,
+            foreign_annotations: 0,
             annotation_bounds: None,
             floats: 0,
             previews_total: 0,
@@ -1161,6 +1164,7 @@ pub fn run(
             action_report.scroll_after = (session.viewport().scroll.x, session.viewport().scroll.y);
         }
         action_report.annotations = app.annotations.len();
+        action_report.foreign_annotations = app.foreign_annotations.len();
         action_report.floats = app.floats.len();
         action_report.previews_total = app.custom_previews.len();
         action_report.annotation_bounds = app
@@ -1890,6 +1894,7 @@ fn action_json(report: &Report, action: &ActionReport) -> String {
                 .to_string(),
         ),
         ("annotations", action.annotations.to_string()),
+        ("foreign_annotations", action.foreign_annotations.to_string()),
         (
             "annotation_bounds",
             match action.annotation_bounds {
@@ -1984,6 +1989,7 @@ mod tests {
             page_after: 2,
             scroll_after: (10.0, 20.0),
             annotations: 0,
+            foreign_annotations: 0,
             annotation_bounds: None,
             floats: 0,
             previews_total: 0,

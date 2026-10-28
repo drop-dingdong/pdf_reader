@@ -1053,6 +1053,31 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   * 重建流程是 UI 流程，交人工验收（备份文件、正文恢复、未写回标注丢失）。
 - **状态**：S6c 完成；S6b 等外部样本。
 
+### D-140 S6b：外部注释只读层（真实阅读器样本）
+
+- **样本**（用户采集，复制到 `crates/backend-pdfium/tests/fixtures/s6b/`，来源见该目录 README）：
+  Okular / Evince / Firefox / Adobe / Foxit 对同一份 `rotated_2p` 的注释；Adobe 的注释在 **ObjStm** 里。
+  观察：
+  * 四类注释齐全（Evince 没有墨迹，Firefox 只有高亮+墨迹）；
+  * 墨迹都是**单 path**（Okular 56 点、Firefox 128、Adobe 181、Foxit 104）；
+  * `/BS` `/W` 有的写 1.0、有的 2.0、有的没有（回退 2.0 合理）；
+  * `/C` 有的缺（Evince 全黄）、有的带自定义颜色；`/CA` 有的 0.35/0.40；
+  * 所有外部注释都**没有 `pd-fr:` 标记**；`without_content` 版本没有 `/Contents`。
+- **决定**：
+  1. 外部注释放**独立只读层** `foreign_annotations`，不进 `AnnotationStore`、不写 overlay、不进撤销栈；
+  2. 读回时取 `/InkList` 的**全部 path**；模型仍只有一条折线，因此**多条 path 拆成多条只读注释**
+     （样本全是单 path；等"外部注释可编辑/分组"成为需求时再引入 `strokes` 模型）；
+  3. 只读层只绘制几何，不提供删除/正文浮窗；`显示标注` 开关同时控制它；
+  4. 不把它计入 `pdf_marked_annotations`（不影响「写入 PDF/重建」的激活条件）。
+- **影响**：`readback.rs`（`ink_strokes` 全 path、`ReadAnnotation` 扩展）、`app.rs`（只读层/绘制/状态栏）、
+  replay 报告新增 `foreign_annotations`、`docs/current/readback.md`、fixtures + `tests/s6b_samples.rs`。
+- **验证**：6 条样本测试（类型/颜色/线宽/正文/坐标/ObjStm）+ replay
+  `foreign_annotations_are_shown_read_only`（Okular 5 条、overlay 仍为 0、不写 A）；
+  `check.sh` 全绿（340 tests）。
+- **已知限制**：外部注释没有正文浮窗、不能编辑；多 path 会显示成多条只读项；
+  Chromium / Xournal++ 的批注 Okular 也识别不了，本程序读不到（用户允许忽略）。
+- **状态**：S6b（只读几何）完成；跨阅读器兼容性（Okular 改我们注释后保存报错）仍待处理。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

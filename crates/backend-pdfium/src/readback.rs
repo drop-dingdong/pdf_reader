@@ -31,6 +31,8 @@ pub struct ReadAnnotation {
     pub opacity: f32,
     /// `/Contents`（空串视为无正文）。
     pub body: Option<String>,
+    /// 墨迹的**全部** path（S6b：外部注释可能多条 path；`kind` 里只放第一条）。
+    pub ink_strokes: Vec<Vec<Point>>,
 }
 
 /// 一次读回的结果。
@@ -40,12 +42,14 @@ pub struct Readback {
     pub annotations: Vec<ReadAnnotation>,
     /// 无法读取而跳过的注释数（坏 QuadPoints、空 InkList…）。
     pub skipped: usize,
-    /// 外部多笔迹注释里被忽略的额外 path 数（S6b 前只取第一条）。
+    /// 外部多笔迹注释里的额外 path 总数（信息性；S6b 会把所有 path 都读进 `ink_strokes`）。
     pub extra_ink_strokes: usize,
 }
 
 /// 打开 `path`，逐页读回四种注释；`password` 用于加密文档。
 pub fn read(path: &Path, password: Option<&str>) -> Result<Readback, String> {
+    // 独立调用（测试/工具）时也要先初始化 PDFium；主程序打开文档时已经初始化过。
+    crate::library::pdfium().map_err(|error| error.to_string())?;
     let ffi = Ffi::load().map_err(|error| error.to_string())?;
     let c_path =
         CString::new(path.to_string_lossy().as_ref()).map_err(|_| "路径含 NUL 字节".to_string())?;
@@ -116,6 +120,7 @@ unsafe fn read_annotation(
         return None; // 链接、Widget、Popup、Squiggly 等：不读
     }
 
+    let mut ink_strokes: Vec<Vec<Point>> = Vec::new();
     let kind = match subtype {
         ANNOT_HIGHLIGHT | ANNOT_UNDERLINE | ANNOT_STRIKEOUT => {
             let quads = read_quads(ffi, annot);
@@ -130,12 +135,15 @@ unsafe fn read_annotation(
             }
         }
         _ => {
-            let (points, extra) = read_ink(ffi, annot);
-            out.extra_ink_strokes += extra;
-            let Some(points) = points else {
+            let strokes = read_ink(ffi, annot);
+            ink_strokes = strokes.clone();
+            let Some(points) = strokes.first().cloned() else {
                 out.skipped += 1;
                 return None;
             };
+            if strokes.len() > 1 {
+                out.extra_ink_strokes += strokes.len() - 1;
+            }
             let mut horizontal = 0.0;
             let mut vertical = 0.0;
             let mut width = 0.0;
@@ -162,6 +170,7 @@ unsafe fn read_annotation(
         color,
         opacity,
         body: read_string(ffi, annot, "Contents").filter(|text| !text.is_empty()),
+        ink_strokes,
     })
 }
 
@@ -282,11 +291,10 @@ unsafe fn read_quads(ffi: &Ffi, annot: *mut c_void) -> Vec<Rect> {
     quads
 }
 
-/// 返回（第一条 path, 被忽略的额外 path 数）。
-unsafe fn read_ink(ffi: &Ffi, annot: *mut c_void) -> (Option<Vec<Point>>, usize) {
+/// 读出所有 path（S6b：外部墨迹可能一条注释多条 path）。
+unsafe fn read_ink(ffi: &Ffi, annot: *mut c_void) -> Vec<Vec<Point>> {
     let paths = (ffi.ink_list_count)(annot);
-    let mut first: Option<Vec<Point>> = None;
-    let mut extra = 0usize;
+    let mut strokes = Vec::new();
     for path_index in 0..paths {
         let count = (ffi.ink_list_path)(annot, path_index, std::ptr::null_mut(), 0);
         if count < 2 {
@@ -300,16 +308,11 @@ unsafe fn read_ink(ffi: &Ffi, annot: *mut c_void) -> (Option<Vec<Point>>, usize)
             .filter(|point| point.x.is_finite() && point.y.is_finite())
             .map(|point| Point::new(point.x, point.y))
             .collect();
-        if points.len() < 2 {
-            continue;
-        }
-        if first.is_none() {
-            first = Some(points);
-        } else {
-            extra += 1;
+        if points.len() >= 2 {
+            strokes.push(points);
         }
     }
-    (first, extra)
+    strokes
 }
 
 unsafe fn read_string(ffi: &Ffi, annot: *mut c_void, key: &str) -> Option<String> {

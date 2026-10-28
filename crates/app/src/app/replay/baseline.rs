@@ -661,6 +661,7 @@ mod tests {
             page_after: 0,
             scroll_after: (0.0, 0.0),
             annotations: 0,
+            foreign_annotations: 0,
             annotation_bounds: None,
             floats: 0,
             previews_total: 0,

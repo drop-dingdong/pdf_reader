@@ -1,7 +1,8 @@
 # S6 评估：读回 PDF 注释
 
 > 状态：**评估完成**（2026-10-27）；决策见 D-134，S6a 已实现（D-135，见
-> [`../../current/readback.md`](../../current/readback.md)），S6b/S6c 待做。本文只回答"能不能、怎么做、先做什么"，
+> [`../../current/readback.md`](../../current/readback.md)）。
+> **S6b 已实现**（只读几何，真实阅读器样本见 `tests/fixtures/s6b/`，D-140）；S6c 也已完成。本文只回答"能不能、怎么做、先做什么"，
 > 不包含实现。相关：S5 评估（[`s5-writeback.md`](s5-writeback.md)）、`docs/current/writeback.md`。
 
 ## 1. 结论摘要
