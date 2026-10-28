@@ -1296,6 +1296,27 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   `check.sh` 全绿（351 tests）。
 - **状态**：spike 完成；下一步 P2：`Annotation.pdf_ref`、统一读入、正文编辑/删除（含 Popup）与 job 协议。
 
+### D-152 P2 实现：外部注释正文/删除按对象号落盘
+
+- **模型**：`Annotation.pdf_ref: Option<PdfObjectRef>`（运行时；不写 A）；四种注释一视同仁。
+- **读入**：外部注释不再有只读层，直接进入 `annotations`；`external_ids` 标记“不写 A”。
+  `pdf_index::PageAnnot` 增加 subtype/Popup/hidden；按页与 PDFium 读回顺序配对，
+  只取 Highlight/Underline/StrikeOut/Ink 且非隐藏。
+- **编辑/删除**：外部正文浮窗复用 `SetBody`；删除走 `DeleteAnnotation`。
+  外部修改置 `pdf_dirty`，不置 `overlay_dirty`；`保存` 不写外部注释，提示用「写入 PDF」。
+- **写回**：`WritebackSpec` 增加 `updates` / `deletes`；子进程先按 `pdf_index` 把对象号
+  映射到页/下标，再改 `/Contents` 或删除（Popup 子对象一并删）；找不到对象号即拒绝。
+- **导出/原地写入**：`ExportJob` 增加 `updates`/`deletes`；app 由
+  `opened_pdf_refs - 当前 refs` 得删除集合，由外部注释当前 body vs 打开时 body 得更新集合。
+- **内联注释**：仍可读、但无对象号，编辑/删除会提示“暂不支持”；不误写。
+- **验证**：
+  * backend：Okular 按对象号改正文/删除；Foxit 带 Popup 父+子一起删；
+  * app：`pdf_ref_changes`（外部正文→updates、删除→deletes、不写 A）、job parser；
+  * replay：Okular 5 条外部注释进入主集合（`foreign_annotations` 计数保留为外部数）；
+  * `pdf_index` 6 样本精确断言；`check.sh` 全绿（356 tests）。
+- **未做**：P3（去 A）、P4（对象级保存器）；多 path ink 的外部删除仍按对象整体处理。
+- **状态**：P2 核心完成；待真实文件手动验收（改正文/删除→写入 PDF→重开/Okular 看）。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

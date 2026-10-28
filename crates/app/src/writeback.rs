@@ -28,8 +28,9 @@
 
 use std::path::{Path, PathBuf};
 
+use backend_pdfium::pdf_index::PdfObjectRef;
 use backend_pdfium::writeback::{
-    self as backend, WritebackAnnotation, WritebackPage, WritebackSpec,
+    self as backend, WritebackAnnotation, WritebackPage, WritebackSpec, WritebackUpdate,
 };
 use pdfcore::annotation::AnnotationKind;
 use pdfcore::prelude::{PageIndex, Point, Rect};
@@ -101,9 +102,53 @@ fn read_spec_mode(path: &Path) -> Result<(WritebackSpec, bool), String> {
             source,
             output,
             pages,
+            updates: parse_updates(root)?,
+            deletes: parse_deletes(root)?,
         },
         incremental,
     ))
+}
+
+fn parse_ref(value: &Json) -> Result<PdfObjectRef, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "对象号不是对象".to_string())?;
+    Ok(PdfObjectRef {
+        num: number(object, "num")? as u32,
+        gen: number(object, "gen")? as u16,
+    })
+}
+
+fn parse_updates(root: &[(String, Json)]) -> Result<Vec<WritebackUpdate>, String> {
+    let Some(items) = root.field("updates") else {
+        return Ok(Vec::new());
+    };
+    let items = items
+        .as_array()
+        .ok_or_else(|| "updates 不是数组".to_string())?;
+    let mut out = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let object = item
+            .as_object()
+            .ok_or_else(|| format!("updates[{index}] 不是对象"))?;
+        let reference = parse_ref(item)?;
+        let body = object
+            .field("body")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        out.push(WritebackUpdate { reference, body });
+    }
+    Ok(out)
+}
+
+fn parse_deletes(root: &[(String, Json)]) -> Result<Vec<PdfObjectRef>, String> {
+    let Some(items) = root.field("deletes") else {
+        return Ok(Vec::new());
+    };
+    let items = items
+        .as_array()
+        .ok_or_else(|| "deletes 不是数组".to_string())?;
+    items.iter().map(parse_ref).collect()
 }
 
 fn parse_annotation(value: &Json, context: &str) -> Result<WritebackAnnotation, String> {
@@ -226,5 +271,39 @@ fn resolve(base: &Path, value: &str) -> PathBuf {
         path
     } else {
         base.join(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_updates_and_deletes_by_object_ref() {
+        let dir = std::env::temp_dir().join(format!(
+            "pdf-job-refs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let job = dir.join("job.json");
+        std::fs::write(
+            &job,
+            r#"{"pdf":"in.pdf","output":"out.pdf","pages":[],
+                "updates":[{"num":16,"gen":0,"body":"新正文"}],
+                "deletes":[{"num":18,"gen":1}]}"#,
+        )
+        .expect("写 job");
+        let (spec, incremental) = read_spec_mode(&job).expect("解析");
+        assert!(!incremental);
+        assert_eq!(spec.updates.len(), 1);
+        assert_eq!(spec.updates[0].reference.num, 16);
+        assert_eq!(spec.updates[0].body.as_deref(), Some("新正文"));
+        assert_eq!(spec.deletes.len(), 1);
+        assert_eq!((spec.deletes[0].num, spec.deletes[0].gen), (18, 1));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

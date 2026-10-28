@@ -244,7 +244,7 @@ MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
 | 预检 | 父进程看 `DocumentInfo.encrypted`；标注为空直接返回 | 状态栏给出原因，不起子进程 |
 | 目标命名 | `book.pdf` → **同目录 `book.annotated.pdf`**（`export::default_output_path`） | — |
 | 不覆盖 | `ensure_destination_free`：目标已存在直接拒绝 | “已存在同名文件，不覆盖：…” |
-| 组 job | `ExportItem`（几何/颜色/不透明/正文）→ `job_json`（按页分组、绝对路径、正文转义） | 写 job 失败即中止 |
+| 组 job | `ExportItem`（几何/颜色/不透明/正文）+ `updates`/`deletes`（对象号）→ `job_json`（按页分组、绝对路径） | 写 job 失败即中止 |
 | 起子进程 | `<current_exe> --writeback <job>`，捕获 stdout/stderr；子进程把标注写进**目标同目录的临时文件** | 把子进程 stderr 原样放进消息；删除临时文件 |
 | 冒烟校验 | `smoke_check`：后端重开临时文件、页数一致、渲染一页（`Scale(0.5)`） | 删除临时文件，原文件不受影响 |
 | 落盘 | `fs::rename(temp → 目标)`（同目录，原子） | 删除临时文件并报错 |
@@ -255,7 +255,27 @@ MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
 * 父进程**不比较像素**：冒烟校验只保证"文件能打开、页数对、渲染不报错"；
   旋转页的像素位置由 `backend-pdfium` 的回归测试守（INV-12 / L3 已修正），真实阅读器仍需人工抽查；
 * 正文直接从 `Annotation.body` 取；空正文不写 `/Contents`；
+* 外部注释的正文更新/删除按 **xref 对象号** 写：`updates` 走 `FPDFAnnot_SetStringValue`，
+  `deletes` 从 `/Annots` 去掉引用，并删除它的 `/Popup` 子对象；内联字典（无对象号）不支持；
 * 目标文件名**不含** `.pdf` 之外的后缀拼接坑：`a.b.pdf` → `a.b.annotated.pdf`（只替换最后一个扩展名）。
+
+## 10.5 外部注释的按对象号更新/删除（P2）
+
+job 新增两个可选数组：
+
+```json
+{
+  "updates": [ { "num": 16, "gen": 0, "body": "新正文" } ],
+  "deletes": [ { "num": 18, "gen": 1 } ]
+}
+```
+
+* 子进程用 `pdf_index::page_annotations()` 重新解析**当前源文件**，把对象号映射到页/下标；
+  找不到就报错，不做猜测；
+* `updates` 只改 `/Contents`（对象号不变）；`deletes` 删除父注释，并通过 `pdf_index`
+  的 `/Popup` 引用一起删子对象；
+* 与 `/NM` 差分同步并存：自有注释仍走 marker 同步，外部注释走对象号；
+* 删除后再写入不会重复删除（对象已不在当前文件时，重新打开后不再进入待删集合）。
 
 ## 11. 自检（`write()` 内置）
 

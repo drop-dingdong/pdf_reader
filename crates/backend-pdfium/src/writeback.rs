@@ -33,6 +33,8 @@ use std::path::{Path, PathBuf};
 use pdfcore::annotation::{Annotation, AnnotationKind};
 use pdfcore::prelude::{PageIndex, Point, Rect};
 
+use crate::pdf_index::{page_annotations, PdfObjectRef};
+
 // ============================================================ 对外类型
 
 /// 一次写回任务。
@@ -44,6 +46,19 @@ pub struct WritebackSpec {
     pub output: PathBuf,
     /// 逐页要写入的标注。
     pub pages: Vec<WritebackPage>,
+    /// 外部注释正文更新（对象号定位；只改 `/Contents`）。
+    pub updates: Vec<WritebackUpdate>,
+    /// 外部注释删除（对象号定位；Popup 子对象一并删）。
+    pub deletes: Vec<PdfObjectRef>,
+}
+
+/// 一条按对象号定位的正文更新。
+#[derive(Debug, Clone)]
+pub struct WritebackUpdate {
+    /// 注释对象号。
+    pub reference: PdfObjectRef,
+    /// 新正文（空 = 删除 `/Contents`）。
+    pub body: Option<String>,
 }
 
 /// 某一页要写入的标注。
@@ -158,6 +173,48 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
     validate(spec)?;
 
     let ffi = Ffi::load()?;
+    let source_bytes = std::fs::read(&spec.source)
+        .map_err(|error| WritebackError::Io(format!("读取源文件失败：{error}")))?;
+    let page_entries = page_annotations(&source_bytes)
+        .map_err(|error| WritebackError::Invalid(format!("解析注释对象号失败：{error}")))?;
+    let mut locations: HashMap<PdfObjectRef, (usize, usize)> = HashMap::new();
+    let mut popups: HashMap<PdfObjectRef, PdfObjectRef> = HashMap::new();
+    for (page, entries) in page_entries.iter().enumerate() {
+        for (index, entry) in entries.iter().enumerate() {
+            if let Some(reference) = entry.reference {
+                locations.insert(reference, (page, index));
+                if let Some(popup) = entry.popup {
+                    popups.insert(reference, popup);
+                }
+            }
+        }
+    }
+    let mut page_deletes: HashMap<usize, Vec<usize>> = HashMap::new();
+    for reference in &spec.deletes {
+        let Some(&(page, index)) = locations.get(reference) else {
+            return Err(WritebackError::Invalid(format!(
+                "要删除的注释对象 {reference:?} 不在当前 PDF 中（可能已被外部修改）"
+            )));
+        };
+        page_deletes.entry(page).or_default().push(index);
+        if let Some(popup) = popups.get(reference) {
+            if let Some(&(popup_page, popup_index)) = locations.get(popup) {
+                if popup_page == page {
+                    page_deletes.entry(page).or_default().push(popup_index);
+                }
+            }
+        }
+    }
+    let mut page_updates: HashMap<usize, Vec<&WritebackUpdate>> = HashMap::new();
+    for update in &spec.updates {
+        let Some(&(page, _)) = locations.get(&update.reference) else {
+            return Err(WritebackError::Invalid(format!(
+                "要改正文的注释对象 {:?} 不在当前 PDF 中（可能已被外部修改）",
+                update.reference
+            )));
+        };
+        page_updates.entry(page).or_default().push(update);
+    }
     let source = CString::new(spec.source.to_string_lossy().as_ref())
         .map_err(|_| WritebackError::Invalid("源路径含 NUL 字节".to_string()))?;
 
@@ -241,7 +298,34 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
             let count = (ffi.annot_count)(handle).max(0) as usize;
             let wanted = desired.get(&(index as u32));
             let mut present: std::collections::HashSet<u64> = std::collections::HashSet::new();
-            let mut remove_indices: Vec<c_int> = Vec::new();
+            let mut remove_indices: Vec<c_int> = page_deletes
+                .get(&index)
+                .map(|indices| indices.iter().map(|index| *index as c_int).collect())
+                .unwrap_or_default();
+            if let Some(updates) = page_updates.get(&index) {
+                for update in updates {
+                    let (_, annot_index) = locations[&update.reference];
+                    let annot = (ffi.get_annot)(handle, annot_index as c_int);
+                    if annot.is_null() {
+                        (ffi.close_page)(handle);
+                        (ffi.close_document)(document);
+                        return Err(WritebackError::Pdfium {
+                            stage: "FPDFPage_GetAnnot",
+                            message: format!("更新第 {} 页 #{}", index + 1, annot_index),
+                        });
+                    }
+                    let ok = update_contents(&ffi, annot, update.body.as_deref());
+                    (ffi.close_annot)(annot);
+                    if !ok {
+                        (ffi.close_page)(handle);
+                        (ffi.close_document)(document);
+                        return Err(WritebackError::Pdfium {
+                            stage: "FPDFAnnot_SetStringValue",
+                            message: format!("更新第 {} 页 #{} 的正文", index + 1, annot_index),
+                        });
+                    }
+                }
+            }
             for annot_index in 0..count as c_int {
                 let annot = (ffi.get_annot)(handle, annot_index);
                 if annot.is_null() {
@@ -277,6 +361,9 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
                 }
                 (ffi.close_annot)(annot);
             }
+            // 合并 marker 删除与对象号删除，按索引降序删；去重（父/子删除可能重叠）
+            remove_indices.sort_unstable();
+            remove_indices.dedup();
             let mut remaining = count;
             for annot_index in remove_indices.iter().rev() {
                 if (ffi.remove_annot)(handle, *annot_index) == 0 {
@@ -1237,6 +1324,8 @@ mod tests {
     #[test]
     fn source_and_output_must_differ() {
         let spec = WritebackSpec {
+            updates: Vec::new(),
+            deletes: Vec::new(),
             source: PathBuf::from("/tmp/a.pdf"),
             output: PathBuf::from("/tmp/a.pdf"),
             pages: vec![],

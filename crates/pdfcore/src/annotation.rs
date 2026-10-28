@@ -129,6 +129,15 @@ fn distance_to_segment(point: Point, a: Point, b: Point) -> f32 {
     point.distance(closest)
 }
 
+/// PDF 里注释对象的身份（只用于运行时定位；不写进 overlay）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PdfObjectRef {
+    /// 对象号。
+    pub num: u32,
+    /// generation。
+    pub gen: u16,
+}
+
 /// 一个标注。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Annotation {
@@ -144,6 +153,8 @@ pub struct Annotation {
     pub opacity: f32,
     /// 正文（直接属于注释；`None` = 没有正文）。
     pub body: Option<String>,
+    /// 来自 PDF 的对象号；新建未写入 / 内联注释为 `None`。
+    pub pdf_ref: Option<PdfObjectRef>,
 }
 
 impl Annotation {
@@ -163,6 +174,7 @@ impl Annotation {
             color,
             opacity,
             body: None,
+            pdf_ref: None,
         })
     }
 
@@ -279,6 +291,12 @@ impl AnnotationStore {
     }
 
     /// 按 id 取（命中测试用）。
+    /// 按 id 取可变引用（加载时补 PDF 对象号用）。
+    pub fn get_mut(&mut self, id: AnnotationId) -> Option<&mut Annotation> {
+        self.items.iter_mut().find(|annotation| annotation.id == id)
+    }
+
+    /// 按 id 取不可变引用。
     pub fn get(&self, id: AnnotationId) -> Option<&Annotation> {
         self.items.iter().find(|item| item.id == id)
     }

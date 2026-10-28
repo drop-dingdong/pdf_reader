@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use backend_pdfium::PdfiumBackend;
-use pdfcore::annotation::AnnotationKind;
+use pdfcore::annotation::{AnnotationKind, PdfObjectRef};
 use pdfcore::prelude::{PageIndex, PdfBackend, RenderRequest, Rotation, Scale, Source};
 
 /// 一条要导出的标注（已从 overlay 与正文表里取好）。
@@ -30,6 +30,15 @@ pub struct ExportItem {
     /// 不透明度（PDF 侧不表达，仅随 job 传递）。
     pub opacity: f32,
     /// 正文（已按 `#annot:<id>` 从 `custom_texts` 取好）。
+    pub body: Option<String>,
+}
+
+/// 按对象号更新外部注释的正文。
+#[derive(Debug, Clone)]
+pub struct RefUpdate {
+    /// 注释对象号。
+    pub reference: PdfObjectRef,
+    /// 新正文。
     pub body: Option<String>,
 }
 
@@ -68,6 +77,18 @@ pub fn ensure_destination_free(output: &Path) -> Result<(), String> {
 ///
 /// 手写序列化（与 `persist` 一样的极简风格），正文按 JSON 规则转义。
 pub fn job_json(pdf: &Path, output: &Path, items: &[ExportItem], incremental: bool) -> String {
+    job_json_with_refs(pdf, output, items, &[], &[], incremental)
+}
+
+/// 带对象号 updates/deletes 的 job。
+pub fn job_json_with_refs(
+    pdf: &Path,
+    output: &Path,
+    items: &[ExportItem],
+    updates: &[RefUpdate],
+    deletes: &[PdfObjectRef],
+    incremental: bool,
+) -> String {
     let mut pages: Vec<(u32, Vec<&ExportItem>)> = Vec::new();
     for item in items {
         let index = item.page.get();
@@ -103,7 +124,42 @@ pub fn job_json(pdf: &Path, output: &Path, items: &[ExportItem], incremental: bo
         }
         out.push('\n');
     }
-    out.push_str("  ]\n}\n");
+    out.push_str("  ]");
+    if !updates.is_empty() {
+        out.push_str(",\n  \"updates\": [\n");
+        for (index, update) in updates.iter().enumerate() {
+            out.push_str(&format!(
+                "    {{ \"num\": {}, \"gen\": {}, \"body\": {} }}",
+                update.reference.num,
+                update.reference.gen,
+                update
+                    .body
+                    .as_deref()
+                    .map(quote)
+                    .unwrap_or_else(|| "null".to_string())
+            ));
+            if index + 1 < updates.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ]");
+    }
+    if !deletes.is_empty() {
+        out.push_str(",\n  \"deletes\": [\n");
+        for (index, reference) in deletes.iter().enumerate() {
+            out.push_str(&format!(
+                "    {{ \"num\": {}, \"gen\": {} }}",
+                reference.num, reference.gen
+            ));
+            if index + 1 < deletes.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ]");
+    }
+    out.push_str("\n}\n");
     out
 }
 
@@ -188,17 +244,50 @@ pub fn export(
     items: &[ExportItem],
     expected_pages: u32,
 ) -> Result<ExportReport, String> {
+    export_with_refs(pdf, output, items, &[], &[], expected_pages)
+}
+
+/// [`export`] 的带对象号变更版本。
+pub fn export_with_refs(
+    pdf: &Path,
+    output: &Path,
+    items: &[ExportItem],
+    updates: &[RefUpdate],
+    deletes: &[PdfObjectRef],
+    expected_pages: u32,
+) -> Result<ExportReport, String> {
     let executable =
         std::env::current_exe().map_err(|error| format!("找不到自身可执行文件：{error}"))?;
-    export_with(&executable, pdf, output, items, expected_pages)
+    export_with_refs_and_executable(
+        &executable,
+        pdf,
+        output,
+        items,
+        updates,
+        deletes,
+        expected_pages,
+    )
 }
 
 /// [`export`] 的实现：`executable` 是"子进程要跑的程序"（产品是自身 exe，测试可替换）。
+#[cfg(test)]
 fn export_with(
     executable: &Path,
     pdf: &Path,
     output: &Path,
     items: &[ExportItem],
+    expected_pages: u32,
+) -> Result<ExportReport, String> {
+    export_with_refs_and_executable(executable, pdf, output, items, &[], &[], expected_pages)
+}
+
+fn export_with_refs_and_executable(
+    executable: &Path,
+    pdf: &Path,
+    output: &Path,
+    items: &[ExportItem],
+    updates: &[RefUpdate],
+    deletes: &[PdfObjectRef],
     expected_pages: u32,
 ) -> Result<ExportReport, String> {
     // 子进程按"相对 job 文件所在目录"解析路径，而 job 写在系统临时目录里 ——
@@ -217,7 +306,7 @@ fn export_with(
 
     // 导出副本也用增量：保留源文件的对象流/外部注释结构。
     // 用户实测：全量重写 Adobe 的 PDF 后，Okular 另存会报“文件有问题”。
-    if let Err(error) = run_child(executable, pdf, &temporary, items, true) {
+    if let Err(error) = run_child_refs(executable, pdf, &temporary, items, updates, deletes, true) {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
@@ -229,12 +318,13 @@ fn export_with(
     report
 }
 
-/// 起子进程，把 `pdf` 的标注写到 `temporary`（已绝对化的路径）。
-fn run_child(
+fn run_child_refs(
     executable: &Path,
     pdf: &Path,
     temporary: &Path,
     items: &[ExportItem],
+    updates: &[RefUpdate],
+    deletes: &[PdfObjectRef],
     incremental: bool,
 ) -> Result<(), String> {
     let job_path = std::env::temp_dir().join(format!(
@@ -242,8 +332,11 @@ fn run_child(
         std::process::id(),
         unique_suffix()
     ));
-    std::fs::write(&job_path, job_json(pdf, temporary, items, incremental))
-        .map_err(|error| format!("写 job {} 失败：{error}", job_path.display()))?;
+    std::fs::write(
+        &job_path,
+        job_json_with_refs(pdf, temporary, items, updates, deletes, incremental),
+    )
+    .map_err(|error| format!("写 job {} 失败：{error}", job_path.display()))?;
     let child = std::process::Command::new(executable)
         .arg("--writeback")
         .arg(&job_path)
@@ -272,6 +365,17 @@ pub fn stage_in_place(
     items: &[ExportItem],
     expected_pages: u32,
 ) -> Result<PathBuf, String> {
+    stage_in_place_with_refs(pdf, items, &[], &[], expected_pages)
+}
+
+/// [`stage_in_place`] 的带对象号变更版本。
+pub fn stage_in_place_with_refs(
+    pdf: &Path,
+    items: &[ExportItem],
+    updates: &[RefUpdate],
+    deletes: &[PdfObjectRef],
+    expected_pages: u32,
+) -> Result<PathBuf, String> {
     let pdf = absolute_path(pdf)?;
     if !pdf.is_file() {
         return Err(format!("源文件不存在：{}", pdf.display()));
@@ -280,7 +384,8 @@ pub fn stage_in_place(
         std::env::current_exe().map_err(|error| format!("找不到自身可执行文件：{error}"))?;
     let temporary = temporary_path(&pdf);
     let _ = std::fs::remove_file(&temporary);
-    if let Err(error) = run_child(&executable, &pdf, &temporary, items, true) {
+    if let Err(error) = run_child_refs(&executable, &pdf, &temporary, items, updates, deletes, true)
+    {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
@@ -442,6 +547,28 @@ mod tests {
     }
 
     #[test]
+    fn job_json_carries_ref_updates_and_deletes() {
+        let update = RefUpdate {
+            reference: PdfObjectRef { num: 16, gen: 0 },
+            body: Some("新正文".to_string()),
+        };
+        let delete = PdfObjectRef { num: 18, gen: 1 };
+        let job = job_json_with_refs(
+            Path::new("/tmp/in.pdf"),
+            Path::new("/tmp/out.pdf"),
+            &[],
+            &[update],
+            &[delete],
+            true,
+        );
+        assert!(job.contains("\"updates\""), "{job}");
+        assert!(job.contains("\"num\": 16"), "{job}");
+        assert!(job.contains("\"body\": \"新正文\""), "{job}");
+        assert!(job.contains("\"deletes\""), "{job}");
+        assert!(job.contains("\"gen\": 1"), "{job}");
+    }
+
+    #[test]
     fn job_json_groups_multiple_annotations_by_page() {
         let ink = ExportItem {
             id: Some(2),
@@ -515,6 +642,8 @@ mod tests {
         std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
         let temporary = dir.join("book.annotated.pdf.tmp-1");
         let spec = backend_pdfium::writeback::WritebackSpec {
+            updates: Vec::new(),
+            deletes: Vec::new(),
             source,
             output: temporary.clone(),
             pages: vec![backend_pdfium::writeback::WritebackPage {

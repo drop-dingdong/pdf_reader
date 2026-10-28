@@ -96,6 +96,8 @@ fn annotations_are_recovered_from_the_pdf_when_the_overlay_is_missing() {
     // 用写回把一条带标记/正文的高亮写进 PDF（先写 out，再替换成样本路径）
     let staged = dir.join("out.pdf");
     backend_pdfium::writeback::write(&backend_pdfium::writeback::WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source: pdf.clone(),
         output: staged.clone(),
         pages: vec![backend_pdfium::writeback::WritebackPage {
@@ -138,9 +140,9 @@ fn annotations_are_recovered_from_the_pdf_when_the_overlay_is_missing() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// S6b：外部阅读器（Okular 样本）的注释以只读层显示；不写 overlay、不计入可编辑标注。
+/// P2：外部阅读器（Okular 样本）的注释进入主集合（可编辑/删除），但不写 overlay。
 #[test]
-fn foreign_annotations_are_shown_read_only() {
+fn external_annotations_are_loaded_into_main_store() {
     let _guard = test_lock();
     if !backend_available() {
         return;
@@ -167,14 +169,14 @@ fn foreign_annotations_are_shown_read_only() {
     .expect("写脚本");
     let report = replay::run_script_file(&script, None).expect("回放");
     let action = report.actions.last().expect("动作");
-    assert_eq!(action.annotations, 0, "外部注释不应进入可编辑 overlay");
+    assert_eq!(action.annotations, 5, "外部注释进入主集合");
     assert_eq!(
         action.foreign_annotations, 5,
-        "Okular 样本应有 5 条只读注释"
+        "Okular 样本应有 5 条外部注释"
     );
     assert!(
         !dir.join("rotated_2p.pdf.annot.json").exists(),
-        "只读层不应写 overlay"
+        "只打开外部注释不应创建 overlay"
     );
 
     std::fs::remove_dir_all(&dir).ok();

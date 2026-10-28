@@ -65,6 +65,8 @@ fn spec_for_all_kinds(dir: &std::path::Path) -> WritebackSpec {
     let source = dir.join("in.pdf");
     std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
     WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source,
         output: dir.join("out.pdf"),
         pages: vec![
@@ -271,6 +273,8 @@ fn a_thick_right_angle_has_no_gap_at_the_joint() {
     let source = dir.join("in.pdf");
     std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
     let spec = WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source,
         output: dir.join("out.pdf"),
         pages: vec![WritebackPage {
@@ -362,6 +366,8 @@ fn writing_twice_is_idempotent_and_drops_stale_marked_annotations() {
     let write_once =
         |source: &std::path::Path, output: &std::path::Path, pages: Vec<WritebackPage>| {
             let spec = WritebackSpec {
+                updates: Vec::new(),
+                deletes: Vec::new(),
                 source: source.to_path_buf(),
                 output: output.to_path_buf(),
                 pages,
@@ -436,6 +442,8 @@ fn rewriting_updates_contents_of_existing_marked_annotations() {
     let write_with_body =
         |source: &std::path::Path, output: &std::path::Path, body: Option<&str>| {
             let spec = WritebackSpec {
+                updates: Vec::new(),
+                deletes: Vec::new(),
                 source: source.to_path_buf(),
                 output: output.to_path_buf(),
                 pages: vec![WritebackPage {
@@ -487,6 +495,8 @@ fn annotations_are_not_baked_into_the_bitmap_by_default() {
     let source = dir.join("in.pdf");
     std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
     let spec = WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source,
         output: dir.join("out.pdf"),
         pages: vec![WritebackPage {
@@ -544,6 +554,8 @@ fn empty_spec_removes_all_marked_annotations_but_keeps_links() {
     std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
     let annotated = dir.join("annotated.pdf");
     writeback::write(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source,
         output: annotated.clone(),
         pages: vec![WritebackPage {
@@ -568,6 +580,8 @@ fn empty_spec_removes_all_marked_annotations_but_keeps_links() {
 
     let cleared = dir.join("cleared.pdf");
     let report = writeback::write(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source: annotated.clone(),
         output: cleared.clone(),
         pages: vec![],
@@ -583,6 +597,8 @@ fn empty_spec_removes_all_marked_annotations_but_keeps_links() {
     // 再跑一次仍然稳定
     let again = dir.join("again.pdf");
     writeback::write(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source: cleared,
         output: again.clone(),
         pages: vec![],
@@ -612,6 +628,8 @@ fn incremental_save_keeps_external_annotations_and_object_streams() {
 
     let output = dir.join("out.pdf");
     let report = writeback::write_incremental(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source: source.clone(),
         output: output.clone(),
         pages: vec![],
@@ -647,6 +665,8 @@ fn annotations_are_written_as_indirect_objects() {
     let source = dir.join("in.pdf");
     std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
     let spec = WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source,
         output: dir.join("out.pdf"),
         pages: vec![WritebackPage {
@@ -696,6 +716,8 @@ fn full_save_externalizes_external_annotations_too() {
     std::fs::copy(&fixture, &source).expect("复制样本");
     let output = dir.join("out.pdf");
     writeback::write(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source,
         output: output.clone(),
         pages: vec![],
@@ -733,6 +755,8 @@ fn content_only_edit_reuses_the_same_annotation_object() {
     let source = dir.join("in.pdf");
     std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
     let make = |quad: Rect, body: &str| WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source: source.clone(),
         output: dir.join("ignored.pdf"),
         pages: vec![WritebackPage {
@@ -760,6 +784,8 @@ fn content_only_edit_reuses_the_same_annotation_object() {
 
     let first = dir.join("first.pdf");
     let spec = WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         output: first.clone(),
         ..make(Rect::new(50.0, 660.0, 100.0, 14.0), "OLD")
     };
@@ -768,6 +794,8 @@ fn content_only_edit_reuses_the_same_annotation_object() {
 
     let second = dir.join("second.pdf");
     let spec = WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source: first.clone(),
         output: second.clone(),
         pages: vec![WritebackPage {
@@ -795,6 +823,8 @@ fn content_only_edit_reuses_the_same_annotation_object() {
     // 几何变了：必须换成新对象（引用数组不同）
     let third = dir.join("third.pdf");
     let spec = WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source: second.clone(),
         output: third.clone(),
         pages: vec![WritebackPage {
@@ -826,6 +856,8 @@ fn refuses_to_overwrite_the_source_file() {
     let path = dir.join("same.pdf");
     std::fs::write(&path, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
     let spec = WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source: path.clone(),
         output: path,
         pages: vec![WritebackPage {
@@ -859,6 +891,8 @@ fn rejects_geometry_that_the_model_would_reject() {
     let source = dir.join("in.pdf");
     std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
     let spec = WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source,
         output: dir.join("out.pdf"),
         pages: vec![WritebackPage {
@@ -879,4 +913,117 @@ fn rejects_geometry_that_the_model_would_reject() {
     assert!(error.to_string().contains("几何无效"), "实际：{error}");
     assert!(!spec.output.exists(), "失败时不应留下输出文件");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn external_annotation_body_update_and_delete_by_object_ref() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("external-ref");
+    let source = dir.join("in.pdf");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/s6b/okular.pdf"),
+        &source,
+    )
+    .expect("复制 Okular 样本");
+    let bytes = std::fs::read(&source).expect("读源");
+    let pages = backend_pdfium::pdf_index::page_annotations(&bytes).expect("解析对象号");
+    eprintln!(
+        "entries: {:?}",
+        pages
+            .iter()
+            .map(|p| p
+                .iter()
+                .map(|e| (e.reference, e.subtype, e.popup, e.hidden))
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+    let supported: Vec<_> = pages
+        .iter()
+        .flatten()
+        .filter(|entry| !entry.hidden && matches!(entry.subtype, Some(9 | 10 | 12 | 15)))
+        .collect();
+    assert!(supported.len() >= 2, "Okular 样本至少两条四种注释");
+    let update_ref = supported[0].reference.expect("独立对象");
+    let delete = supported[1];
+    let delete_ref = delete.reference.expect("独立对象");
+    let popup_count = usize::from(delete.popup.is_some());
+
+    let before: usize = pages.iter().map(Vec::len).sum();
+    let output = dir.join("out.pdf");
+    let report = writeback::write_incremental(&WritebackSpec {
+        updates: vec![backend_pdfium::writeback::WritebackUpdate {
+            reference: update_ref,
+            body: Some("P2 改正文".to_string()),
+        }],
+        deletes: vec![delete_ref],
+        source: source.clone(),
+        output: output.clone(),
+        pages: Vec::new(),
+    })
+    .expect("按对象号改/删");
+    assert_eq!(report.annotations, 0);
+
+    let bodies: Vec<String> = backend_pdfium::readback::read(&output, None)
+        .expect("读回")
+        .annotations
+        .into_iter()
+        .filter_map(|annotation| annotation.body)
+        .collect();
+    assert!(
+        bodies.iter().any(|body| body == "P2 改正文"),
+        "改正文应写进 PDF：{bodies:?}"
+    );
+    let after_pages =
+        backend_pdfium::pdf_index::page_annotations(&std::fs::read(&output).expect("读输出"))
+            .expect("解析输出对象号");
+    let after: usize = after_pages.iter().map(Vec::len).sum();
+    assert_eq!(after, before - 1 - popup_count, "删除父注释时 Popup 也要删");
+}
+
+#[test]
+fn deleting_an_external_annotation_with_popup_removes_both() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("external-popup");
+    let source = dir.join("in.pdf");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/s6b/foxit.pdf"),
+        &source,
+    )
+    .expect("复制 Foxit 样本");
+    let bytes = std::fs::read(&source).expect("读源");
+    let pages = backend_pdfium::pdf_index::page_annotations(&bytes).expect("解析");
+    let (page, entry) = pages
+        .iter()
+        .enumerate()
+        .find_map(|(page, entries)| {
+            entries
+                .iter()
+                .find(|entry| {
+                    entry.popup.is_some() && matches!(entry.subtype, Some(9 | 10 | 12 | 15))
+                })
+                .map(|entry| (page, *entry))
+        })
+        .expect("Foxit 样本应有带 Popup 的注释");
+    let reference = entry.reference.expect("独立对象");
+    let before: usize = pages.iter().map(Vec::len).sum();
+    let output = dir.join("out.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: vec![reference],
+        source: source.clone(),
+        output: output.clone(),
+        pages: Vec::new(),
+    })
+    .expect("删除父+Popup");
+    let after_pages =
+        backend_pdfium::pdf_index::page_annotations(&std::fs::read(&output).expect("读输出"))
+            .expect("解析输出");
+    let after: usize = after_pages.iter().map(Vec::len).sum();
+    assert_eq!(after, before - 2, "父注释与 Popup（第 {page} 页）都应删除");
 }

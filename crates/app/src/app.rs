@@ -566,8 +566,12 @@ pub struct PdfReaderApp {
     show_annotations: bool,
     /// 页面标注（会话内；S2 才落盘）。
     annotations: AnnotationStore,
-    /// 外部阅读器写进 PDF 的注释（S6b）：**只读几何**，不写入 overlay、不参与删除/写回。
-    foreign_annotations: Vec<Annotation>,
+    /// 本会话里“来自 PDF、但不属于 overlay”的注释 id（不写回 `.annot.json`）。
+    external_ids: std::collections::HashSet<AnnotationId>,
+    /// 打开时 PDF 里所有四种注释的对象号（用于计算待删除集合）。
+    opened_pdf_refs: std::collections::BTreeSet<pdfcore::annotation::PdfObjectRef>,
+    /// 打开时每个对象号的正文（用于外部注释正文差分）。
+    opened_pdf_bodies: std::collections::HashMap<pdfcore::annotation::PdfObjectRef, Option<String>>,
     /// 正在画的一笔墨迹（S4b）；**抬笔之前它不是标注**，取消只要丢掉它。
     ink: Option<InkStroke>,
     /// "下一步把当前选区变成标注"（由快捷键/按钮置位，在画布绘制时执行）。
@@ -585,6 +589,8 @@ pub struct PdfReaderApp {
     pending_view_restore: Option<(PageIndex, f32, Vec2, u8)>,
     /// 标注图层是否有未保存的改动（Ctrl+S 用它决定要不要写）。
     overlay_dirty: bool,
+    /// 外部注释是否有未写入 PDF 的正文/删除。
+    pdf_dirty: bool,
     /// 编辑历史（注释 + 重选截图/引用点，单栈时间序）。
     history: crate::history::History<AppEdit>,
     /// 是否显示"编辑历史"可视列表（首次撤销时自动打开）。
@@ -784,7 +790,9 @@ impl PdfReaderApp {
             show_links: false,
             show_annotations: true,
             annotations: AnnotationStore::new(),
-            foreign_annotations: Vec::new(),
+            external_ids: std::collections::HashSet::new(),
+            opened_pdf_refs: std::collections::BTreeSet::new(),
+            opened_pdf_bodies: std::collections::HashMap::new(),
             ink: None,
             pending_annotate: false,
             pending_in_place: false,
@@ -792,6 +800,7 @@ impl PdfReaderApp {
             pdf_marked_annotations: 0,
             pending_view_restore: None,
             overlay_dirty: false,
+            pdf_dirty: false,
             history: crate::history::History::new(),
             show_history: false,
             hovered_annotation: None,
@@ -920,7 +929,17 @@ impl PdfReaderApp {
                 }
             }
         }
-        self.overlay_dirty = true;
+        let external_edit = match &edit {
+            AppEdit::AddAnnotation { annotation } => self.external_ids.contains(&annotation.id),
+            AppEdit::DeleteAnnotation { annotation } => self.external_ids.contains(&annotation.id),
+            AppEdit::SetBody { id, .. } => self.external_ids.contains(id),
+            _ => false,
+        };
+        if external_edit {
+            self.pdf_dirty = true;
+        } else {
+            self.overlay_dirty = true;
+        }
         self.data_dirty = true;
         if record {
             let weight = edit.weight();
@@ -1208,13 +1227,19 @@ impl PdfReaderApp {
                 return;
             }
         }
-        if self.annotations.is_empty() && self.pdf_marked_annotations == 0 {
+        let (ref_updates, ref_deletes) = self.pdf_ref_changes();
+        if self.annotations.is_empty()
+            && self.pdf_marked_annotations == 0
+            && ref_updates.is_empty()
+            && ref_deletes.is_empty()
+        {
             self.message = "当前文档没有标注".to_string();
             return;
         }
         let items: Vec<crate::export::ExportItem> = self
             .annotations
             .iter()
+            .filter(|annotation| !self.external_ids.contains(&annotation.id))
             .map(|annotation| {
                 let body = annotation.body.clone().filter(|text| !text.is_empty());
                 crate::export::ExportItem {
@@ -1235,7 +1260,13 @@ impl PdfReaderApp {
             return;
         }
 
-        let temporary = match crate::export::stage_in_place(&pdf, &items, pages) {
+        let temporary = match crate::export::stage_in_place_with_refs(
+            &pdf,
+            &items,
+            &ref_updates,
+            &ref_deletes,
+            pages,
+        ) {
             Ok(path) => path,
             Err(error) => {
                 self.message = format!("写入失败（原文件未改动）：{error}");
@@ -1298,13 +1329,19 @@ impl PdfReaderApp {
             self.message = "加密文档暂不支持导出（权限位可能不允许批注）".to_string();
             return;
         }
-        if self.annotations.is_empty() && self.pdf_marked_annotations == 0 {
+        let (ref_updates, ref_deletes) = self.pdf_ref_changes();
+        if self.annotations.is_empty()
+            && self.pdf_marked_annotations == 0
+            && ref_updates.is_empty()
+            && ref_deletes.is_empty()
+        {
             self.message = "当前文档没有标注".to_string();
             return;
         }
         let items: Vec<crate::export::ExportItem> = self
             .annotations
             .iter()
+            .filter(|annotation| !self.external_ids.contains(&annotation.id))
             .map(|annotation| {
                 // 正文按哨兵标题从 custom_texts 里取；空正文不写 /Contents
                 let body = annotation.body.clone().filter(|text| !text.is_empty());
@@ -1320,7 +1357,14 @@ impl PdfReaderApp {
             .collect();
         let output = crate::export::default_output_path(&pdf);
         self.message = "正在导出标注…".to_string();
-        match crate::export::export(&pdf, &output, &items, session.page_count()) {
+        match crate::export::export_with_refs(
+            &pdf,
+            &output,
+            &items,
+            &ref_updates,
+            &ref_deletes,
+            session.page_count(),
+        ) {
             Ok(report) => {
                 self.message = format!(
                     "已导出 {} 条标注：{}（{} 字节）",
@@ -1341,7 +1385,11 @@ impl PdfReaderApp {
             return;
         }
         if !self.data_dirty && !self.overlay_dirty {
-            self.message = "无改动".to_string();
+            if self.pdf_dirty {
+                self.message = "外部注释的修改只写 PDF；请用「写入 PDF」".to_string();
+            } else {
+                self.message = "无改动".to_string();
+            }
             return;
         }
         if self.data_dirty {
@@ -1352,12 +1400,52 @@ impl PdfReaderApp {
         }
     }
 
+    /// 对象号级别的待写变更：外部正文更新 + 已从 PDF 删除的对象。
+    fn pdf_ref_changes(
+        &self,
+    ) -> (
+        Vec<crate::export::RefUpdate>,
+        Vec<pdfcore::annotation::PdfObjectRef>,
+    ) {
+        let current: std::collections::BTreeSet<pdfcore::annotation::PdfObjectRef> = self
+            .annotations
+            .iter()
+            .filter_map(|annotation| annotation.pdf_ref)
+            .collect();
+        let deletes = self.opened_pdf_refs.difference(&current).cloned().collect();
+        let updates = self
+            .annotations
+            .iter()
+            .filter(|annotation| self.external_ids.contains(&annotation.id))
+            .filter_map(|annotation| {
+                let reference = annotation.pdf_ref?;
+                let before = self.opened_pdf_bodies.get(&reference)?;
+                (before != &annotation.body).then(|| crate::export::RefUpdate {
+                    reference,
+                    body: annotation.body.clone(),
+                })
+            })
+            .collect();
+        (updates, deletes)
+    }
+
+    /// 只含“我们的”注释的存储（外部注释来自 PDF，不写 `.annot.json`）。
+    fn overlay_store(&self) -> AnnotationStore {
+        let mut store = AnnotationStore::new();
+        for annotation in self.annotations.iter() {
+            if !self.external_ids.contains(&annotation.id) {
+                store.insert(annotation.clone());
+            }
+        }
+        store
+    }
+
     /// 写 `<pdf>.annot.json`（原子写；失败只提示，不清脏标记）。
     fn save_overlay(&mut self) {
         let Some(path) = self.document_path.clone() else {
             return;
         };
-        let overlay = persist::overlay_from_store(&self.annotations);
+        let overlay = persist::overlay_from_store(&self.overlay_store());
         let target = persist::annot_path(&path);
         match persist::write_atomic(&target, &overlay.to_json()) {
             Ok(()) => {
@@ -1452,100 +1540,86 @@ impl PdfReaderApp {
         &mut self,
         readback: &backend_pdfium::readback::Readback,
         overlay_exists: bool,
+        ref_pages: &[Vec<backend_pdfium::pdf_index::PageAnnot>],
     ) -> (usize, usize) {
-        let by_id: std::collections::HashMap<u64, &backend_pdfium::readback::ReadAnnotation> =
-            readback
-                .annotations
-                .iter()
-                .filter_map(|item| item.id.map(|id| (id, item)))
-                .collect();
-
-        if overlay_exists {
-            // overlay 赢：不导入新注释；但 overlay 的正文为空、PDF 有 /Contents 时补回
-            let mut recovered = 0;
-            let ids: Vec<AnnotationId> = self.annotations.iter().map(|a| a.id).collect();
-            for id in ids {
-                let missing = self
-                    .annotations
-                    .get(id)
-                    .is_some_and(|annotation| annotation.body.is_none());
-                if !missing {
-                    continue;
-                }
-                let Some(body) = by_id.get(&id.get()).and_then(|item| item.body.as_ref()) else {
-                    continue;
-                };
-                if self.annotations.set_body(id, Some(body.clone())) {
-                    recovered += 1;
-                }
-            }
-            if recovered > 0 {
-                self.overlay_dirty = true;
-            }
-            return (0, recovered);
+        self.external_ids.clear();
+        self.opened_pdf_refs.clear();
+        self.opened_pdf_bodies.clear();
+        let mut by_page: std::collections::BTreeMap<
+            u32,
+            Vec<&backend_pdfium::readback::ReadAnnotation>,
+        > = std::collections::BTreeMap::new();
+        for item in &readback.annotations {
+            by_page.entry(item.page.get()).or_default().push(item);
         }
-
         let mut restored = 0;
-        for item in &readback.annotations {
-            let Some(raw_id) = item.id else {
-                continue; // 外部注释：S6b 只读层
-            };
-            let id = AnnotationId(raw_id);
-            if self.annotations.get(id).is_some() {
-                continue;
-            }
-            let Some(mut annotation) = Annotation::new(item.page, item.kind.clone()) else {
-                continue;
-            };
-            annotation.id = id;
-            annotation.color = item.color;
-            annotation.opacity = item.opacity;
-            annotation.body = item.body.clone();
-            self.annotations.insert(annotation);
-            restored += 1;
-        }
-        (restored, 0)
-    }
-
-    /// S6b：把 PDF 里**没有 `pd-fr:` 标记**的注释放进只读层。
-    fn import_foreign(&mut self, readback: &backend_pdfium::readback::Readback) {
-        self.foreign_annotations.clear();
-        for item in &readback.annotations {
-            if item.id.is_some() {
-                continue;
-            }
-            if let AnnotationKind::Ink { width, .. } = &item.kind {
-                let strokes = if item.ink_strokes.is_empty() {
-                    match &item.kind {
-                        AnnotationKind::Ink { points, .. } => vec![points.clone()],
-                        _ => vec![],
+        let mut recovered = 0;
+        for (page, items) in by_page {
+            let entries: Vec<&backend_pdfium::pdf_index::PageAnnot> = ref_pages
+                .get(page as usize)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter(|entry| {
+                            !entry.hidden && matches!(entry.subtype, Some(9 | 10 | 12 | 15))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let refs_ok = entries.len() == items.len();
+            for (item, entry) in items.iter().zip(entries.iter()) {
+                let reference = refs_ok
+                    .then_some(entry.reference)
+                    .flatten()
+                    .map(|reference| pdfcore::annotation::PdfObjectRef {
+                        num: reference.num,
+                        gen: reference.gen,
+                    });
+                if let Some(reference) = reference {
+                    self.opened_pdf_refs.insert(reference);
+                    self.opened_pdf_bodies.insert(reference, item.body.clone());
+                }
+                match item.id {
+                    Some(raw_id) => {
+                        let id = AnnotationId(raw_id);
+                        if let Some(existing) = self.annotations.get_mut(id) {
+                            existing.pdf_ref = reference;
+                            if overlay_exists && existing.body.is_none() && item.body.is_some() {
+                                existing.body = item.body.clone();
+                                recovered += 1;
+                            }
+                        } else if !overlay_exists {
+                            let Some(mut annotation) =
+                                Annotation::new(item.page, item.kind.clone())
+                            else {
+                                continue;
+                            };
+                            annotation.id = id;
+                            annotation.color = item.color;
+                            annotation.opacity = item.opacity;
+                            annotation.body = item.body.clone();
+                            annotation.pdf_ref = reference;
+                            self.annotations.insert(annotation);
+                            restored += 1;
+                        }
                     }
-                } else {
-                    item.ink_strokes.clone()
-                };
-                for points in strokes {
-                    if let Some(mut annotation) = Annotation::new(
-                        item.page,
-                        AnnotationKind::Ink {
-                            points,
-                            width: *width,
-                        },
-                    ) {
-                        annotation.color = item.color;
-                        annotation.opacity = item.opacity;
-                        annotation.body = item.body.clone();
-                        self.foreign_annotations.push(annotation);
+                    None => {
+                        // 外部注释：一视同仁地放进主集合；但不写进 `.annot.json`
+                        let Some(id) = self.annotations.add(item.page, item.kind.clone()) else {
+                            continue;
+                        };
+                        if let Some(annotation) = self.annotations.get_mut(id) {
+                            annotation.color = item.color;
+                            annotation.opacity = item.opacity;
+                            annotation.body = item.body.clone();
+                            annotation.pdf_ref = reference;
+                        }
+                        self.external_ids.insert(id);
                     }
                 }
-                continue;
-            }
-            if let Some(mut annotation) = Annotation::new(item.page, item.kind.clone()) {
-                annotation.color = item.color;
-                annotation.opacity = item.opacity;
-                annotation.body = item.body.clone();
-                self.foreign_annotations.push(annotation);
             }
         }
+        (restored, recovered)
     }
 
     fn open(&mut self, path: &std::path::Path, password: Option<&str>) {
@@ -1598,8 +1672,8 @@ impl PdfReaderApp {
                         self.document_path = Some(path.to_path_buf());
                         // 标注图层（<pdf>.annot.json）：缺文件 = 空；坏文件只提示，不影响打开文档
                         self.annotations.clear();
-                        self.foreign_annotations.clear();
                         self.overlay_dirty = false;
+                        self.pdf_dirty = false;
                         let overlay_file_exists = persist::annot_path(path).exists();
                         // 坏 overlay 当作"不存在"处理：否则 PDF 里明明有注释也恢复不出来
                         let mut overlay_ok = true;
@@ -1754,9 +1828,14 @@ impl PdfReaderApp {
                             }
                         }
                         let overlay_exists = overlay_file_exists && overlay_ok;
+                        let ref_pages = std::fs::read(path)
+                            .ok()
+                            .and_then(|bytes| {
+                                backend_pdfium::pdf_index::page_annotations(&bytes).ok()
+                            })
+                            .unwrap_or_default();
                         let (restored, recovered_bodies) =
-                            self.merge_readback(&readback, overlay_exists);
-                        self.import_foreign(&readback);
+                            self.merge_readback(&readback, overlay_exists, &ref_pages);
                         self.next_float_id = 1;
                         self.capture = None;
                         let title = session.opened().document.info().to_string();
@@ -1789,12 +1868,6 @@ impl PdfReaderApp {
                         if recovered_bodies > 0 {
                             self.message
                                 .push_str(&format!("（已从 PDF 补回 {recovered_bodies} 条正文）"));
-                        }
-                        if !self.foreign_annotations.is_empty() {
-                            self.message.push_str(&format!(
-                                "（另有 {} 条外部注释，只读显示）",
-                                self.foreign_annotations.len()
-                            ));
                         }
                         if let Some(warning) = open_warning {
                             self.message.push_str(&format!("（{warning}）"));
@@ -3280,6 +3353,10 @@ impl PdfReaderApp {
         let Some(annotation) = self.annotations.get(id).cloned() else {
             return false;
         };
+        if self.external_ids.contains(&id) && annotation.pdf_ref.is_none() {
+            self.message = "该外部注释没有对象号（内联/无法定位），暂不支持删除".to_string();
+            return false;
+        }
         self.apply_edit(AppEdit::DeleteAnnotation { annotation }, true);
         self.message = "已删除标注（Ctrl+Z 可撤销）".to_string();
         true
@@ -4158,67 +4235,6 @@ impl PdfReaderApp {
                     }
                 }
 
-                // 2b-foreign 外部注释（S6b）：只读几何，不参与命中/删除/写回
-                if self.show_annotations && self.capture.is_none() {
-                    for page in self.visible.clone() {
-                        let Some(placement) = session.placement(page).copied() else {
-                            continue;
-                        };
-                        for annotation in self
-                            .foreign_annotations
-                            .iter()
-                            .filter(|annotation| annotation.page == page)
-                        {
-                            let alpha = (annotation.clamped_opacity() * 255.0).round() as u8;
-                            let [r, g, b] = annotation.color;
-                            let color = Color32::from_rgba_unmultiplied(r, g, b, alpha);
-                            if let Some((points, width)) = annotation.kind.ink() {
-                                let stroke_width = (width * placement.scale.0).max(1.0);
-                                paint_ink(
-                                    &painter,
-                                    &placement,
-                                    canvas,
-                                    scroll,
-                                    points,
-                                    stroke_width,
-                                    color,
-                                );
-                                continue;
-                            }
-                            for quad in annotation.kind.quads() {
-                                let content = placement.rect_to_content(*quad);
-                                let screen = egui::Rect::from_min_size(
-                                    canvas.min
-                                        + EVec2::new(content.x - scroll.x, content.y - scroll.y),
-                                    EVec2::new(content.width, content.height),
-                                );
-                                match annotation.kind {
-                                    AnnotationKind::Highlight { .. } => {
-                                        painter.rect_filled(screen, CornerRadius::ZERO, color);
-                                    }
-                                    AnnotationKind::Underline { .. } => {
-                                        painter.line_segment(
-                                            [screen.left_bottom(), screen.right_bottom()],
-                                            Stroke::new(2.0, color),
-                                        );
-                                    }
-                                    AnnotationKind::StrikeOut { .. } => {
-                                        let y = screen.center().y;
-                                        painter.line_segment(
-                                            [
-                                                egui::pos2(screen.left(), y),
-                                                egui::pos2(screen.right(), y),
-                                            ],
-                                            Stroke::new(2.0, color),
-                                        );
-                                    }
-                                    AnnotationKind::Ink { .. } => {}
-                                }
-                            }
-                        }
-                    }
-                }
-
                 // 正在画的一笔：还没进标注集合，但必须**跟手显示**（否则用户以为没反应）
                 if let Some(stroke) = &self.ink {
                     if let Some(placement) = session.placement(stroke.page()).copied() {
@@ -4883,6 +4899,17 @@ impl PdfReaderApp {
                     self.data_dirty = true;
                 }
                 FloatOwner::Annotation(id) => {
+                    if self.external_ids.contains(&id)
+                        && self
+                            .annotations
+                            .get(id)
+                            .is_some_and(|annotation| annotation.pdf_ref.is_none())
+                    {
+                        self.message =
+                            "该外部注释没有对象号（内联/无法定位），暂不支持编辑".to_string();
+                        self.editing_body = None;
+                        return;
+                    }
                     let before = self.annotations.get(id).and_then(|a| a.body.clone());
                     let after = if text.is_empty() { None } else { Some(text) };
                     if before != after {
@@ -6395,5 +6422,64 @@ mod annotation_body_tests {
             Some("正文")
         );
         assert!(app.custom_previews.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod external_annotation_tests {
+    use super::*;
+
+    fn app_with_external() -> (
+        PdfReaderApp,
+        AnnotationId,
+        pdfcore::annotation::PdfObjectRef,
+    ) {
+        let mut app = PdfReaderApp::new_headless(
+            crate::clock::Clock::system(),
+            crate::diag::diagnostics_for_tests(),
+            None,
+        );
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        let id = app.annotations.iter().next().expect("一条").id;
+        let reference = pdfcore::annotation::PdfObjectRef { num: 42, gen: 0 };
+        if let Some(annotation) = app.annotations.get_mut(id) {
+            annotation.pdf_ref = Some(reference);
+            annotation.body = Some("旧".to_string());
+        }
+        app.external_ids.insert(id);
+        app.opened_pdf_refs.insert(reference);
+        app.opened_pdf_bodies
+            .insert(reference, Some("旧".to_string()));
+        (app, id, reference)
+    }
+
+    #[test]
+    fn external_body_edit_and_delete_become_ref_changes() {
+        let (mut app, id, reference) = app_with_external();
+        app.apply_edit(
+            AppEdit::SetBody {
+                id,
+                page: PageIndex::FIRST,
+                before: Some("旧".to_string()),
+                after: Some("新".to_string()),
+            },
+            true,
+        );
+        let (updates, deletes) = app.pdf_ref_changes();
+        assert_eq!(updates.len(), 1, "正文变化要按对象号更新");
+        assert_eq!(updates[0].reference, reference);
+        assert_eq!(updates[0].body.as_deref(), Some("新"));
+        assert!(deletes.is_empty());
+
+        let annotation = app.annotations.get(id).cloned().expect("标注");
+        app.apply_edit(AppEdit::DeleteAnnotation { annotation }, true);
+        let (_, deletes) = app.pdf_ref_changes();
+        assert_eq!(deletes, vec![reference], "删除要按对象号删");
+        assert!(app.overlay_store().is_empty(), "外部注释不写进 .annot.json");
     }
 }

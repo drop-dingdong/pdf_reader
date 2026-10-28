@@ -90,6 +90,8 @@ fn four_kinds_round_trip_with_ids_bodies_and_opacity() {
     std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
     let expected = four_kinds();
     let spec = WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source,
         output: dir.join("out.pdf"),
         pages: vec![WritebackPage {
@@ -158,6 +160,8 @@ fn reading_again_after_rewrite_is_stable() {
     let annotations = four_kinds();
     let first = dir.join("out1.pdf");
     writeback::write(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source,
         output: first.clone(),
         pages: vec![WritebackPage {
@@ -168,6 +172,8 @@ fn reading_again_after_rewrite_is_stable() {
     .expect("第一次");
     let second = dir.join("out2.pdf");
     writeback::write(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source: first.clone(),
         output: second.clone(),
         pages: vec![WritebackPage {
@@ -199,6 +205,8 @@ fn rotated_page_keeps_unrotated_page_space() {
     let source = dir.join("rotated.pdf");
     std::fs::write(&source, rotated_page_pdf()).expect("写样本");
     let spec = WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source,
         output: dir.join("out.pdf"),
         pages: vec![WritebackPage {
@@ -236,6 +244,8 @@ fn annotations_without_our_marker_have_no_id() {
     let source = dir.join("in.pdf");
     std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
     let spec = WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
         source,
         output: dir.join("out.pdf"),
         pages: vec![WritebackPage {

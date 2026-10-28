@@ -1164,7 +1164,11 @@ pub fn run(
             action_report.scroll_after = (session.viewport().scroll.x, session.viewport().scroll.y);
         }
         action_report.annotations = app.annotations.len();
-        action_report.foreign_annotations = app.foreign_annotations.len();
+        action_report.foreign_annotations = app
+            .external_ids
+            .iter()
+            .filter(|id| app.annotations.get(**id).is_some())
+            .count();
         action_report.floats = app.floats.len();
         action_report.previews_total = app.custom_previews.len();
         action_report.annotation_bounds = app

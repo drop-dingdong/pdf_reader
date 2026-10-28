@@ -21,6 +21,20 @@ pub struct PdfObjectRef {
     pub gen: u16,
 }
 
+/// 页面 `/Annots` 里的一条（包括 Popup 等不支持的子类型）。
+#[derive(Debug, Clone, Copy)]
+pub struct PageAnnot {
+    /// 独立对象引用；内联字典为 `None`。
+    pub reference: Option<PdfObjectRef>,
+    /// PDF 子类型编号（Highlight=9、Underline=10、StrikeOut=12、Ink=15、Popup=16）；
+    /// 未知/无 `/Subtype` 为 `None`。
+    pub subtype: Option<u32>,
+    /// `/Popup` 子对象引用。
+    pub popup: Option<PdfObjectRef>,
+    /// Hidden/NoView 等不显示标志。
+    pub hidden: bool,
+}
+
 struct RawObject {
     offset: usize,
     dict: Vec<u8>,
@@ -29,6 +43,14 @@ struct RawObject {
 
 /// 每页的 `/Annots` 条目：`Some(ref)` 是独立对象，`None` 是内联字典。
 pub fn page_annotation_refs(pdf: &[u8]) -> Result<Vec<Vec<Option<PdfObjectRef>>>, String> {
+    Ok(page_annotations(pdf)?
+        .into_iter()
+        .map(|page| page.into_iter().map(|entry| entry.reference).collect())
+        .collect())
+}
+
+/// 每页的 `/Annots` 条目（含 subtype/Popup/隐藏标志）。
+pub fn page_annotations(pdf: &[u8]) -> Result<Vec<Vec<PageAnnot>>, String> {
     let mut objects: HashMap<(u32, u16), RawObject> = HashMap::new();
     let mut arrays: HashMap<(u32, u16), Vec<u8>> = HashMap::new();
     scan_objects(pdf, &mut objects, &mut arrays);
@@ -58,7 +80,7 @@ fn walk_pages(
     arrays: &HashMap<(u32, u16), Vec<u8>>,
     reference: PdfObjectRef,
     depth: usize,
-    out: &mut Vec<Vec<Option<PdfObjectRef>>>,
+    out: &mut Vec<Vec<PageAnnot>>,
 ) -> Result<(), String> {
     if depth > 64 {
         return Err("页面树太深".to_string());
@@ -76,11 +98,15 @@ fn walk_pages(
     if !is_name(&object.dict, b"/Type", b"/Page") {
         return Err(format!("对象 {reference:?} 既不是 /Pages 也不是 /Page"));
     }
-    out.push(annots_of(&object.dict, arrays));
+    out.push(annots_of(&object.dict, arrays, objects));
     Ok(())
 }
 
-fn annots_of(dict: &[u8], arrays: &HashMap<(u32, u16), Vec<u8>>) -> Vec<Option<PdfObjectRef>> {
+fn annots_of(
+    dict: &[u8],
+    arrays: &HashMap<(u32, u16), Vec<u8>>,
+    objects: &HashMap<(u32, u16), RawObject>,
+) -> Vec<PageAnnot> {
     let Some(array) = array_value(dict, b"/Annots", arrays) else {
         return Vec::new();
     };
@@ -92,21 +118,81 @@ fn annots_of(dict: &[u8], arrays: &HashMap<(u32, u16), Vec<u8>>) -> Vec<Option<P
         if cursor >= content.len() {
             break;
         }
-        if content[cursor..].starts_with(b"<<") {
-            // 内联注释：跳过整个字典，记 None
-            if let Some(end) = balanced_end(content, cursor) {
-                out.push(None);
-                cursor = end;
-            } else {
+        let (reference, entry_dict) = if content[cursor..].starts_with(b"<<") {
+            let Some(end) = balanced_end(content, cursor) else {
                 break;
-            }
+            };
+            let entry = content[cursor..end].to_vec();
+            cursor = end;
+            (None, entry)
         } else if let Some(reference) = parse_ref_at(content, &mut cursor) {
-            out.push(Some(reference));
+            let Some(object) = get_object(objects, reference) else {
+                out.push(PageAnnot {
+                    reference: Some(reference),
+                    subtype: None,
+                    popup: None,
+                    hidden: false,
+                });
+                continue;
+            };
+            (Some(reference), object.dict.clone())
         } else {
             break;
-        }
+        };
+        let subtype = subtype_of(&entry_dict);
+        let mut popup_cursor = find_from(&entry_dict, 0, b"/Popup").unwrap_or(entry_dict.len());
+        let popup = if popup_cursor < entry_dict.len() {
+            popup_cursor += b"/Popup".len();
+            parse_ref_at(&entry_dict, &mut popup_cursor)
+        } else {
+            None
+        };
+        out.push(PageAnnot {
+            reference,
+            subtype,
+            popup,
+            hidden: is_hidden(&entry_dict),
+        });
     }
     out
+}
+
+fn subtype_of(dict: &[u8]) -> Option<u32> {
+    let index = find_from(dict, 0, b"/Subtype")?;
+    let mut cursor = index + b"/Subtype".len();
+    skip_space(dict, &mut cursor);
+    let start = cursor;
+    if dict.get(cursor) == Some(&b'/') {
+        cursor += 1;
+    }
+    while cursor < dict.len() && !is_delimiter(dict[cursor]) {
+        cursor += 1;
+    }
+    match &dict[start..cursor] {
+        b"/Highlight" => Some(9),
+        b"/Underline" => Some(10),
+        b"/StrikeOut" => Some(12),
+        b"/Ink" => Some(15),
+        b"/Popup" => Some(16),
+        _ => None,
+    }
+}
+
+fn is_hidden(dict: &[u8]) -> bool {
+    let Some(index) = find_from(dict, 0, b"/F") else {
+        return false;
+    };
+    let mut cursor = index + b"/F".len();
+    skip_space(dict, &mut cursor);
+    let start = cursor;
+    while cursor < dict.len() && dict[cursor].is_ascii_digit() {
+        cursor += 1;
+    }
+    let flags: u32 = std::str::from_utf8(&dict[start..cursor])
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(0);
+    flags & (2 | 32) != 0
 }
 
 fn parse_ref_at(bytes: &[u8], cursor: &mut usize) -> Option<PdfObjectRef> {
