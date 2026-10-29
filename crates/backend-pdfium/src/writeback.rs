@@ -160,6 +160,15 @@ pub fn write_incremental(spec: &WritebackSpec) -> WritebackResult<WritebackRepor
     write_with_mode(spec, true)
 }
 
+fn only_highlights(spec: &WritebackSpec) -> bool {
+    !spec.pages.is_empty()
+        && spec.pages.iter().all(|page| {
+            page.annotations
+                .iter()
+                .all(|annotation| matches!(annotation.kind, AnnotationKind::Highlight { .. }))
+        })
+}
+
 fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<WritebackReport> {
     if spec.source == spec.output {
         return Err(WritebackError::Invalid(
@@ -271,8 +280,8 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
         // P4b：只有正文更新的任务不需要 PDFium 保存整个文档；
         // 直接对源字节追加同 (num,gen) 的新版本，文件增长最小。
         if incremental
-            && spec.pages.is_empty()
-            && (!spec.updates.is_empty() || !spec.deletes.is_empty())
+            && ((spec.pages.is_empty() && (!spec.updates.is_empty() || !spec.deletes.is_empty()))
+                || only_highlights(spec))
         {
             let mut source_counts = Vec::with_capacity(page_count);
             for index in 0..page_count {
@@ -286,6 +295,33 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
                 }
                 source_counts.push((ffi.annot_count)(handle).max(0) as usize);
                 (ffi.close_page)(handle);
+            }
+            let mut new_highlights = Vec::new();
+            let mut new_per_page = vec![0usize; page_count];
+            for page in &spec.pages {
+                for annotation in &page.annotations {
+                    let AnnotationKind::Highlight { quads } = &annotation.kind else {
+                        continue;
+                    };
+                    let rect = quads
+                        .iter()
+                        .copied()
+                        .reduce(|a, b| a.union(b))
+                        .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+                    new_highlights.push(crate::pdf_patch::NewHighlight {
+                        page: page.page.get(),
+                        id: annotation.id,
+                        rect,
+                        quads: quads.clone(),
+                        color: annotation.color,
+                        opacity: annotation.opacity,
+                        body: annotation.body.clone(),
+                    });
+                    new_per_page[page.page.get() as usize] += 1;
+                }
+            }
+            for (slot, added) in source_counts.iter_mut().zip(new_per_page) {
+                *slot += added;
             }
             (ffi.close_document)(document);
             let source_bytes = std::fs::read(&spec.source)
@@ -325,6 +361,10 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
                     }
                 }
             }
+            if !new_highlights.is_empty() {
+                bytes = crate::pdf_patch::append_new_highlights(&bytes, &new_highlights)
+                    .map_err(WritebackError::Invalid)?;
+            }
             std::fs::write(&spec.output, &bytes).map_err(|error| {
                 WritebackError::Io(format!(
                     "写输出文件 {} 失败：{error}",
@@ -333,7 +373,7 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
             })?;
             verify_counts(spec, &source_counts, &ffi)?;
             return Ok(WritebackReport {
-                annotations: 0,
+                annotations: new_highlights.len(),
                 bytes: bytes.len() as u64,
             });
         }

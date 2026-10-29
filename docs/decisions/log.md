@@ -1572,6 +1572,21 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **验证**：`check.sh` 全绿（376 tests）；外部-only/混合删除、Popup、间接 Annots。
 - **状态**：P4 对象级正文/删除完成；新增注释仍需 PDFium + 外置。
 
+### D-168 P6a：新高亮走对象级写入
+
+- `pdf_patch::append_new_highlights`：
+  * 分配新对象号，写 Highlight dict（Rect/QuadPoints/C/CA/F/NM/Contents/P）；
+  * 复制页对象，把新 ref 追加到 `/Annots`；
+  * 追加对象 + 经典 xref；高亮不需要 AP。
+- `write_incremental`：当新注释全部是 Highlight 时，跳过 PDFium 保存，
+  直接对源字节 patch；可与 updates/deletes 组合。
+- 效果：新增一条高亮只多“注释对象 + 页对象 + xref”一段，不再有 PDFium
+  16 对象修订；下划线/删除线/墨迹仍走 PDFium（需要 AP）。
+- **验证**：`new_highlight_uses_object_patch_and_one_revision`：
+  链接+新高亮、文件增长 <2KB、只有源+新两段 EOF、正文读回；
+  `check.sh` 全绿（377 tests）。
+- **状态**：P6a 完成；underline/strike/ink 的新增仍待对象化。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

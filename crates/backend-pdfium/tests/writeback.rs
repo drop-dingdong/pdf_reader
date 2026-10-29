@@ -1274,3 +1274,55 @@ fn mixed_new_and_delete_uses_page_patch_after_save() {
         .iter()
         .any(|annotation| annotation.body.as_deref() == Some("old")));
 }
+
+#[test]
+fn new_highlight_uses_object_patch_and_one_revision() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("new-highlight-p6");
+    let source = dir.join("in.pdf");
+    std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+    let output = dir.join("out.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
+        source: source.clone(),
+        output: output.clone(),
+        pages: vec![WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![WritebackAnnotation {
+                id: Some(1),
+                kind: AnnotationKind::Highlight {
+                    quads: vec![Rect::new(50.0, 660.0, 100.0, 14.0)],
+                },
+                color: [255, 255, 0],
+                opacity: 0.35,
+                body: Some("new".to_string()),
+            }],
+        }],
+    })
+    .expect("新高亮");
+    assert_eq!(
+        writeback::count_annotations(&output).expect("数"),
+        vec![2, 0],
+        "链接 + 新高亮"
+    );
+    let bytes = std::fs::read(&output).expect("读");
+    assert!(
+        bytes.len() < std::fs::read(&source).unwrap().len() + 2_000,
+        "新高亮应只追加注释+页对象"
+    );
+    assert_eq!(
+        bytes
+            .windows(5)
+            .filter(|window| *window == b"%%EOF")
+            .count(),
+        2,
+        "源一段 + 新一段"
+    );
+    let read = readback::read(&output, None).expect("读回");
+    assert_eq!(read.annotations.len(), 1);
+    assert_eq!(read.annotations[0].body.as_deref(), Some("new"));
+}
