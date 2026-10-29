@@ -2432,11 +2432,17 @@ impl PdfReaderApp {
                     ui.add_space(6.0);
                     // 原地写入（S5c）：会覆盖原文件，先弹确认 + 自动备份。
                     // 允许"空标注"：把 PDF 里写过的注释删干净（界面上删光之后要能写回）。
-                    let has_write_work =
-                        !self.annotations.is_empty() || self.pdf_marked_annotations > 0;
+                    let has_write_work = self.pdf_dirty
+                        || !self.annotations.is_empty()
+                        || self.pdf_marked_annotations > 0;
                     let can_write = self.document_path.is_some() && has_write_work;
+                    let write_label = if self.pdf_dirty {
+                        "*写入 PDF"
+                    } else {
+                        "写入 PDF"
+                    };
                     let write_back =
-                        ui.add_enabled(can_write, egui::Button::new("写入 PDF"));
+                        ui.add_enabled(can_write, egui::Button::new(write_label));
                     let write_back = if can_write {
                         write_back.on_hover_text(
                             "把标注写进原 PDF（会先备份、再原子替换；重复写入是幂等的）",

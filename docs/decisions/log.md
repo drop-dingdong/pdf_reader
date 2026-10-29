@@ -1387,6 +1387,17 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   `check.sh` 全绿（363 tests）。
 - **状态**：P3 修正完成；P4（对象级保存器）待做。
 
+### D-156 P4 计划：对象级增量保存器
+
+- **问题**：PDFium 增量保存仍追加大量对象；gen>0 需要全量兜底；全量会展开 ObjStm。
+- **方案**：PDFium 只负责新增/AP；`updates`/`deletes` 由新的 `pdf_patch` 在保存后处理：
+  * 正文更新 = 复制注释 dict + 新对象号 + 页 `/Annots` 换引用；
+  * 删除 = 复制页对象 + 去掉 ref（含 Popup）；
+  * 追加经典 xref（`/Prev`）；原对象/ObjStm 不动。
+- **阶段**：P4a 页对象/正文更新 spike；P4b 集成/删除；P4c 去全量兜底与回归。
+- **文档**：[`evaluations/p4-object-saver.md`](evaluations/p4-object-saver.md)。
+- **状态**：计划待实施；先做 P4a。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |
