@@ -182,6 +182,67 @@ fn external_annotations_are_loaded_into_main_store() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// P3：没有 `.annot.json`，未保存的新注释在重开时默认丢弃。
+#[test]
+fn unsaved_new_annotations_are_discarded_on_reopen() {
+    let _guard = test_lock();
+    if !backend_available() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "pdf-p3-discard-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("建目录");
+    let pdf = dir.join("rotated_2p.pdf");
+    Sample::Rotated.write_to(&pdf).expect("写样本");
+    let script = |name: &str, actions: &str| {
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            format!("{{\"name\":\"{name}\",\"pdf\":\"rotated_2p.pdf\",\"actions\":[{actions}]}}"),
+        )
+        .expect("写脚本");
+        path
+    };
+    let first = script(
+        "first.json",
+        r#"{"id":"mark","op":"highlight","page":0,"x":50,"y":690,"width":200,"height":20},
+           {"id":"wait","op":"wait","frames":2}"#,
+    );
+    let report = replay::run_script_file(&first, None).expect("第一次");
+    assert_eq!(
+        report
+            .actions
+            .iter()
+            .find(|a| a.id == "wait")
+            .unwrap()
+            .annotations,
+        1
+    );
+    assert!(
+        !dir.join("rotated_2p.pdf.annot.json").exists(),
+        "新注释不应写 A"
+    );
+    let second = script("second.json", r#"{"id":"reopen","op":"wait","frames":4}"#);
+    let reopened = replay::run_script_file(&second, None).expect("第二次");
+    assert_eq!(
+        reopened
+            .actions
+            .iter()
+            .find(|a| a.id == "reopen")
+            .unwrap()
+            .annotations,
+        0,
+        "未保存的新注释重开即丢弃"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// S0：`click` / `drag` 动作必须真的驱动 UI，而不是"跑完没报错"。
 #[test]
 fn click_navigates_and_drag_pans() {

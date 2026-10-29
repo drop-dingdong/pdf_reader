@@ -380,8 +380,13 @@ pub fn stage_in_place_with_refs(
     if !pdf.is_file() {
         return Err(format!("源文件不存在：{}", pdf.display()));
     }
-    let executable =
-        std::env::current_exe().map_err(|error| format!("找不到自身可执行文件：{error}"))?;
+    // 集成测试可注入真实 app 二进制（回放测试进程本身不处理 `--writeback`）；
+    // 产品路径不设置该变量，仍用当前 exe。
+    let executable = std::env::var_os("PDF_READER_WRITEBACK_EXE")
+        .map(PathBuf::from)
+        .map(Ok)
+        .unwrap_or_else(std::env::current_exe)
+        .map_err(|error| format!("找不到自身可执行文件：{error}"))?;
     let temporary = temporary_path(&pdf);
     let _ = std::fs::remove_file(&temporary);
     if let Err(error) = run_child_refs(&executable, &pdf, &temporary, items, updates, deletes, true)

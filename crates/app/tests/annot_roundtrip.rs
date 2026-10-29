@@ -2,12 +2,15 @@
 //!
 //! 两次回放共用同一个临时目录：第一次"标注 + 保存"，第二次"打开同一份 PDF"。
 
+static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn backend() -> bool {
     backend_pdfium::pdfium().is_ok()
 }
 
 #[test]
 fn annotation_and_body_survive_a_save_and_reopen() {
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     if !backend() {
         return;
     }
@@ -36,6 +39,9 @@ fn annotation_and_body_survive_a_save_and_reopen() {
         path
     };
 
+    // P3 保存会起真实 app 子进程写 PDF；测试进程本身不处理 `--writeback`
+    std::env::set_var("PDF_READER_WRITEBACK_EXE", env!("CARGO_BIN_EXE_app"));
+
     // 第 1 次：标注后保存（`save` 与点"保存"按钮/Ctrl+S 等价）
     let first = script(
         "step1.json",
@@ -58,18 +64,12 @@ fn annotation_and_body_survive_a_save_and_reopen() {
         .expect("标注动作");
     assert_eq!(annotate.annotations, 1, "应当产生一条标注");
 
-    // 两个文件都要真的写出来
+    // P3：保存 = 写 PDF；不再生成/更新 `.annot.json`
     let overlay_path = dir.join("rotated_2p.pdf.annot.json");
-    let sidecar_path = dir.join("rotated_2p.pdf.json");
     assert!(
-        overlay_path.exists(),
-        "标注图层必须落盘：{}",
+        !overlay_path.exists(),
+        "P3 后保存不应创建 .annot.json：{}",
         overlay_path.display()
-    );
-    assert!(
-        sidecar_path.exists(),
-        "主存档（正文所在）必须落盘：{}",
-        sidecar_path.display()
     );
     let ink = report
         .actions
@@ -78,22 +78,15 @@ fn annotation_and_body_survive_a_save_and_reopen() {
         .expect("墨迹动作");
     assert_eq!(ink.annotations, 2, "高亮之后再加一笔墨迹");
 
-    let overlay = std::fs::read_to_string(&overlay_path).expect("读图层");
+    let readback = backend_pdfium::readback::read(&dir.join("rotated_2p.pdf"), None)
+        .expect("读回保存后的 PDF");
+    assert_eq!(readback.annotations.len(), 2, "PDF 里应有两条注释");
     assert!(
-        overlay.contains("highlight"),
-        "图层里应当有 highlight：{overlay}"
-    );
-    assert!(
-        overlay.contains("\"kind\":\"ink\"") && overlay.contains("\"points\""),
-        "图层里应当有墨迹的 points：{overlay}"
-    );
-    assert!(
-        overlay.contains("\"width\":2.00"),
-        "墨迹的线宽必须落盘（页面空间）：{overlay}"
-    );
-    assert!(
-        overlay.contains("\"version\": 3"),
-        "正文归注释后图层应为 v3：{overlay}"
+        readback.annotations.iter().any(|annotation| matches!(
+            annotation.kind,
+            pdfcore::annotation::AnnotationKind::Ink { .. }
+        )),
+        "墨迹应写进 PDF"
     );
 
     // 第 2 次：重新打开同一份 PDF → 标注应当被加载回来
@@ -127,5 +120,69 @@ fn annotation_and_body_survive_a_save_and_reopen() {
         );
     }
 
+    std::env::remove_var("PDF_READER_WRITEBACK_EXE");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn legacy_overlay_is_migrated_into_pdf_and_retired() {
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    if !backend() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "pdf-p3-migrate-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("建目录");
+    app::replay::samples::Sample::Rotated
+        .write(&dir)
+        .expect("写样本");
+    std::fs::write(
+        dir.join("rotated_2p.pdf.annot.json"),
+        r#"{"version":3,"pages":[[{"id":1,"kind":"highlight","color":[255,255,0],"opacity":0.35,"quads":[[50,690,200,20]],"body":"迁移正文"}]]}"#,
+    )
+    .expect("写旧 A");
+    std::env::set_var("PDF_READER_WRITEBACK_EXE", env!("CARGO_BIN_EXE_app"));
+    let script = dir.join("migrate.json");
+    std::fs::write(
+        &script,
+        r#"{"name":"migrate","pdf":"rotated_2p.pdf","actions":[
+             {"id":"settle","op":"wait","frames":4},
+             {"id":"save","op":"save"},
+             {"id":"after","op":"wait","frames":2}
+           ]}"#,
+    )
+    .expect("写脚本");
+    let report = app::replay::run_script_file(&script, None).expect("回放");
+    assert_eq!(
+        report
+            .actions
+            .iter()
+            .find(|a| a.id == "after")
+            .unwrap()
+            .annotations,
+        1,
+        "旧 A 的注释写进 PDF 后仍应可读"
+    );
+    assert!(
+        !dir.join("rotated_2p.pdf.annot.json").exists(),
+        "成功写入后应退休 A"
+    );
+    assert!(
+        std::fs::read_dir(&dir).unwrap().flatten().any(|entry| entry
+            .file_name()
+            .to_string_lossy()
+            .contains(".annot.json.bak-")),
+        "退休 A 必须保留一次备份"
+    );
+    let readback = backend_pdfium::readback::read(&dir.join("rotated_2p.pdf"), None).expect("读回");
+    assert_eq!(readback.annotations.len(), 1);
+    assert_eq!(readback.annotations[0].body.as_deref(), Some("迁移正文"));
+    std::env::remove_var("PDF_READER_WRITEBACK_EXE");
     std::fs::remove_dir_all(&dir).ok();
 }

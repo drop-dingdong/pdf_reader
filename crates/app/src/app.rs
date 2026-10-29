@@ -587,9 +587,7 @@ pub struct PdfReaderApp {
     /// 延迟两帧：**先让新会话收到真实的视口尺寸**，否则 `SetScroll` 会被按旧/默认视口夹紧，
     /// 表现为"缩放对了、滚动偏了一点"（用户实测）。
     pending_view_restore: Option<(PageIndex, f32, Vec2, u8)>,
-    /// 标注图层是否有未保存的改动（Ctrl+S 用它决定要不要写）。
-    overlay_dirty: bool,
-    /// 外部注释是否有未写入 PDF 的正文/删除。
+    /// 注释是否有未写入 PDF 的新增/正文/删除。
     pdf_dirty: bool,
     /// 编辑历史（注释 + 重选截图/引用点，单栈时间序）。
     history: crate::history::History<AppEdit>,
@@ -799,7 +797,6 @@ impl PdfReaderApp {
             pending_rebuild: false,
             pdf_marked_annotations: 0,
             pending_view_restore: None,
-            overlay_dirty: false,
             pdf_dirty: false,
             history: crate::history::History::new(),
             show_history: false,
@@ -929,18 +926,17 @@ impl PdfReaderApp {
                 }
             }
         }
-        let external_edit = match &edit {
-            AppEdit::AddAnnotation { annotation } => self.external_ids.contains(&annotation.id),
-            AppEdit::DeleteAnnotation { annotation } => self.external_ids.contains(&annotation.id),
-            AppEdit::SetBody { id, .. } => self.external_ids.contains(id),
-            _ => false,
-        };
-        if external_edit {
+        let annotation_edit = matches!(
+            &edit,
+            AppEdit::AddAnnotation { .. }
+                | AppEdit::DeleteAnnotation { .. }
+                | AppEdit::SetBody { .. }
+        );
+        if annotation_edit {
             self.pdf_dirty = true;
         } else {
-            self.overlay_dirty = true;
+            self.data_dirty = true;
         }
-        self.data_dirty = true;
         if record {
             let weight = edit.weight();
             self.history.push(description, edit, weight);
@@ -1239,7 +1235,7 @@ impl PdfReaderApp {
         let items: Vec<crate::export::ExportItem> = self
             .annotations
             .iter()
-            .filter(|annotation| !self.external_ids.contains(&annotation.id))
+            .filter(|annotation| annotation.pdf_ref.is_none())
             .map(|annotation| {
                 let body = annotation.body.clone().filter(|text| !text.is_empty());
                 crate::export::ExportItem {
@@ -1253,10 +1249,12 @@ impl PdfReaderApp {
             })
             .collect();
 
-        // 先把 sidecar 落盘：重开会从磁盘重新加载 overlay/正文，未保存的改动会丢
-        self.save_all();
-        if self.data_dirty || self.overlay_dirty {
-            self.message = "有改动未能保存（存档被占用？），已取消写入".to_string();
+        // 先把自定义数据落盘（重开会重新加载 `.json`）；注释本身只写 PDF。
+        if self.data_dirty {
+            self.save_custom_data();
+        }
+        if self.data_dirty {
+            self.message = "自定义数据未能保存（存档被占用？），已取消写入".to_string();
             return;
         }
 
@@ -1295,14 +1293,33 @@ impl PdfReaderApp {
             return;
         }
 
+        // 旧 `.annot.json` 的注释已经写进 PDF：保留一次备份后退休 A。
+        let overlay = persist::annot_path(&pdf);
+        if overlay.exists() {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            let backup = overlay.with_file_name(format!(
+                "{}.bak-{nanos}",
+                overlay
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "overlay".to_string())
+            ));
+            let _ = std::fs::rename(&overlay, &backup);
+        }
+
         // 重开并恢复视图
         self.open(&pdf, None);
         if self.session.is_some() {
             // 两帧后再恢复：先让新会话收到真实视口尺寸（见 `pending_view_restore` 的注释）
             self.pending_view_restore = Some((page, zoom, scroll, 2));
             self.message = format!(
-                "已原地写入 {} 条标注：{}（备份：{}）",
+                "已写入 PDF：新增 {}、更新 {}、删除 {} 条注释：{}（备份：{}）",
                 items.len(),
+                ref_updates.len(),
+                ref_deletes.len(),
                 pdf.display(),
                 backup.display()
             );
@@ -1341,7 +1358,7 @@ impl PdfReaderApp {
         let items: Vec<crate::export::ExportItem> = self
             .annotations
             .iter()
-            .filter(|annotation| !self.external_ids.contains(&annotation.id))
+            .filter(|annotation| annotation.pdf_ref.is_none())
             .map(|annotation| {
                 // 正文按哨兵标题从 custom_texts 里取；空正文不写 /Contents
                 let body = annotation.body.clone().filter(|text| !text.is_empty());
@@ -1384,19 +1401,15 @@ impl PdfReaderApp {
             );
             return;
         }
-        if !self.data_dirty && !self.overlay_dirty {
-            if self.pdf_dirty {
-                self.message = "外部注释的修改只写 PDF；请用「写入 PDF」".to_string();
-            } else {
-                self.message = "无改动".to_string();
-            }
+        if !self.data_dirty && !self.pdf_dirty {
+            self.message = "无改动".to_string();
             return;
         }
         if self.data_dirty {
             self.save_custom_data();
         }
-        if self.overlay_dirty {
-            self.save_overlay();
+        if self.pdf_dirty {
+            self.perform_in_place_writeback();
         }
     }
 
@@ -1416,7 +1429,6 @@ impl PdfReaderApp {
         let updates = self
             .annotations
             .iter()
-            .filter(|annotation| self.external_ids.contains(&annotation.id))
             .filter_map(|annotation| {
                 let reference = annotation.pdf_ref?;
                 let before = self.opened_pdf_bodies.get(&reference)?;
@@ -1427,33 +1439,6 @@ impl PdfReaderApp {
             })
             .collect();
         (updates, deletes)
-    }
-
-    /// 只含“我们的”注释的存储（外部注释来自 PDF，不写 `.annot.json`）。
-    fn overlay_store(&self) -> AnnotationStore {
-        let mut store = AnnotationStore::new();
-        for annotation in self.annotations.iter() {
-            if !self.external_ids.contains(&annotation.id) {
-                store.insert(annotation.clone());
-            }
-        }
-        store
-    }
-
-    /// 写 `<pdf>.annot.json`（原子写；失败只提示，不清脏标记）。
-    fn save_overlay(&mut self) {
-        let Some(path) = self.document_path.clone() else {
-            return;
-        };
-        let overlay = persist::overlay_from_store(&self.overlay_store());
-        let target = persist::annot_path(&path);
-        match persist::write_atomic(&target, &overlay.to_json()) {
-            Ok(()) => {
-                self.overlay_dirty = false;
-                self.message = format!("已保存标注：{}", target.display());
-            }
-            Err(error) => self.message = format!("保存标注失败：{error}"),
-        }
     }
 
     /// 保存自定义数据到 `<pdf>.json`（不含任何图片像素）。
@@ -1672,7 +1657,6 @@ impl PdfReaderApp {
                         self.document_path = Some(path.to_path_buf());
                         // 标注图层（<pdf>.annot.json）：缺文件 = 空；坏文件只提示，不影响打开文档
                         self.annotations.clear();
-                        self.overlay_dirty = false;
                         self.pdf_dirty = false;
                         let overlay_file_exists = persist::annot_path(path).exists();
                         // 坏 overlay 当作"不存在"处理：否则 PDF 里明明有注释也恢复不出来
@@ -1810,7 +1794,13 @@ impl PdfReaderApp {
                         // 先载入主存档（custom_previews），再载入/迁移 A（v2 的正文在 `.json` 里）
                         if overlay_file_exists {
                             match self.load_overlay_file(path) {
-                                Ok(store) => self.annotations = store,
+                                Ok(store) => {
+                                    if !store.is_empty() {
+                                        // 旧 A 里的注释要迁移进 PDF：保存时写出并退休 A
+                                        self.pdf_dirty = true;
+                                    }
+                                    self.annotations = store;
+                                }
                                 Err(message) => {
                                     overlay_ok = false;
                                     open_warning = Some(message);
@@ -1863,7 +1853,6 @@ impl PdfReaderApp {
                         if restored > 0 {
                             self.message
                                 .push_str(&format!("（已从 PDF 恢复 {restored} 条标注）"));
-                            self.overlay_dirty = true; // 恢复出来的应当存进 overlay
                         }
                         if recovered_bodies > 0 {
                             self.message
@@ -2268,7 +2257,7 @@ impl PdfReaderApp {
                 );
                 response.on_hover_text(&path_text);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = save_button_label(self.data_dirty || self.overlay_dirty);
+                    let label = save_button_label(self.data_dirty || self.pdf_dirty);
                     match self.sidecar_locked {
                         // 存档属于更新版本：不读也不写（D-107），按钮直接禁用并说明原因
                         Some((found, supported)) => {
@@ -3133,7 +3122,7 @@ impl PdfReaderApp {
             }
         }
         if added > 0 {
-            self.overlay_dirty = true;
+            self.pdf_dirty = true;
         }
         if added == 0 && session.highlight_selection().is_empty() {
             self.message = "先选中文字，再高亮".to_string();
@@ -6480,6 +6469,6 @@ mod external_annotation_tests {
         app.apply_edit(AppEdit::DeleteAnnotation { annotation }, true);
         let (_, deletes) = app.pdf_ref_changes();
         assert_eq!(deletes, vec![reference], "删除要按对象号删");
-        assert!(app.overlay_store().is_empty(), "外部注释不写进 .annot.json");
+        assert!(app.pdf_dirty, "删除/改正文都要写 PDF");
     }
 }
