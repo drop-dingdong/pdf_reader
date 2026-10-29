@@ -536,7 +536,7 @@ fn append_annots(pdf: &[u8], dict: &[u8], new_refs: &[PdfObjectRef]) -> Result<V
     let Some(index) = find_from(dict, 0, key) else {
         let insert_at = dict.len().saturating_sub(2);
         let mut out = dict.to_vec();
-        let mut array = String::from(" [");
+        let mut array = String::from(" /Annots [");
         for (i, reference) in new_refs.iter().enumerate() {
             if i > 0 {
                 array.push(' ');

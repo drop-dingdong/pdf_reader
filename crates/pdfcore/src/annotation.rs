@@ -22,7 +22,7 @@ pub const TEXT_MARK_OPACITY: f32 = 0.35;
 pub const TEXT_MARK_LINE_WIDTH: f32 = 1.5;
 
 /// 下划线相对文字底部的下移量（页面空间）。
-pub const UNDERLINE_GAP: f32 = 0.6;
+pub const UNDERLINE_GAP: f32 = 2.4;
 
 /// 墨迹的默认颜色（不透明深色，像笔）。
 ///

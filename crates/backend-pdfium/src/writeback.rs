@@ -1375,7 +1375,7 @@ mod tests {
         )
         .expect("下划线必须写 AP");
         assert!(
-            underline.contains("10.00 19.40 m 110.00 19.40 l"),
+            underline.contains("10.00 17.60 m 110.00 17.60 l"),
             "底线应下移 UNDERLINE_GAP：{underline}"
         );
         assert!(

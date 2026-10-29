@@ -1625,6 +1625,19 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   `check.sh` 全绿（380 tests）。
 - **说明**：外部注释仍按自己的 `/CA` 显示；新建下划线/删除线默认不透明。
 
+### D-172 旋转页线条显示 + 无 /Annots 页写回
+
+- **线条方向**：界面原来先 `rect_to_content` 再画水平线，旋转 90° 后会画错；
+  改为把下划线/删除线的两个端点分别 `page_to_content`，线条随页面旋转。
+  外部注释同样走这条路径。
+- **无 /Annots 页**：`append_annots` 在页字典没有 `/Annots` 时只插入了数组、
+  没有插键名，写成 `... /Contents 6 0 R [11 0 R]`，PDF 忽略，verify 第 2 页=0。
+  修复为插入 `/Annots [...]`；旋转页无注释时新增高亮/下划线/删除线现在可保存。
+- **gap**：`UNDERLINE_GAP` 0.6 → 2.4pt（4 倍）；仍同步扩展 AP BBox/PDFium Rect。
+- **测试**：`new_markups_on_rotated_page_without_annots_are_saved`；旋转页 3 条
+  新标记写入并读回；`check.sh` 全绿（381 tests）。
+- **状态**：完成；请实测旋转页线条方向和 gap 观感。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

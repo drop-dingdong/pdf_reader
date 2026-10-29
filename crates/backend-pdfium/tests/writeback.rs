@@ -1455,3 +1455,66 @@ fn new_ink_uses_object_patch_with_form_ap() {
     });
     assert!(dark > 100, "墨迹 AP 应渲染出深色路径，实际 {dark}");
 }
+
+#[test]
+fn new_markups_on_rotated_page_without_annots_are_saved() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("rotated-new-markups");
+    let source = dir.join("in.pdf");
+    std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+    let output = dir.join("out.pdf");
+    let markups = vec![
+        WritebackAnnotation {
+            id: Some(1),
+            kind: AnnotationKind::Highlight {
+                quads: vec![Rect::new(50.0, 100.0, 100.0, 14.0)],
+            },
+            color: [255, 255, 0],
+            opacity: 0.35,
+            body: None,
+        },
+        WritebackAnnotation {
+            id: Some(2),
+            kind: AnnotationKind::Underline {
+                quads: vec![Rect::new(50.0, 80.0, 100.0, 14.0)],
+            },
+            color: [255, 0, 0],
+            opacity: 1.0,
+            body: None,
+        },
+        WritebackAnnotation {
+            id: Some(3),
+            kind: AnnotationKind::StrikeOut {
+                quads: vec![Rect::new(50.0, 60.0, 100.0, 14.0)],
+            },
+            color: [255, 0, 0],
+            opacity: 1.0,
+            body: None,
+        },
+    ];
+    writeback::write_incremental(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
+        source,
+        output: output.clone(),
+        pages: vec![WritebackPage {
+            page: PageIndex::new(1),
+            annotations: markups,
+        }],
+    })
+    .expect("旋转页无 /Annots 时应能写回");
+    assert_eq!(
+        writeback::count_annotations(&output).expect("数"),
+        vec![1, 3],
+        "第 2 页应出现三条新增标记"
+    );
+    let read = readback::read(&output, None).expect("读回");
+    assert_eq!(read.annotations.len(), 3);
+    assert!(read
+        .annotations
+        .iter()
+        .all(|annotation| annotation.page == PageIndex::new(1)));
+}

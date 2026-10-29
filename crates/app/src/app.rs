@@ -4413,6 +4413,13 @@ impl PdfReaderApp {
                                     + EVec2::new(content.x - scroll.x, content.y - scroll.y),
                                 EVec2::new(content.width, content.height),
                             );
+                            let to_screen = |point: Point| {
+                                let content = placement.page_to_content(point);
+                                egui::pos2(
+                                    canvas.min.x + content.x - scroll.x,
+                                    canvas.min.y + content.y - scroll.y,
+                                )
+                            };
                             // 悬停：把对应浮窗高亮一帧（离开即熄灭；点击另有时长高亮）
                             if let Some(pointer) = pointer {
                                 if screen.contains(pointer) {
@@ -4437,12 +4444,12 @@ impl PdfReaderApp {
                                     let width = (pdfcore::annotation::TEXT_MARK_LINE_WIDTH
                                         * placement.scale.0)
                                         .max(1.0);
-                                    let gap = pdfcore::annotation::UNDERLINE_GAP
-                                        * placement.scale.0;
+                                    // 端点逐个换算，旋转页上线条方向才不会错。
+                                    let y = quad.y - pdfcore::annotation::UNDERLINE_GAP;
                                     painter.line_segment(
                                         [
-                                            egui::pos2(screen.left(), screen.bottom() + gap),
-                                            egui::pos2(screen.right(), screen.bottom() + gap),
+                                            to_screen(Point::new(quad.x, y)),
+                                            to_screen(Point::new(quad.x + quad.width, y)),
                                         ],
                                         Stroke::new(width, color),
                                     );
@@ -4451,11 +4458,11 @@ impl PdfReaderApp {
                                     let width = (pdfcore::annotation::TEXT_MARK_LINE_WIDTH
                                         * placement.scale.0)
                                         .max(1.0);
-                                    let y = screen.center().y;
+                                    let y = quad.y + quad.height * 0.5;
                                     painter.line_segment(
                                         [
-                                            egui::pos2(screen.left(), y),
-                                            egui::pos2(screen.right(), y),
+                                            to_screen(Point::new(quad.x, y)),
+                                            to_screen(Point::new(quad.x + quad.width, y)),
                                         ],
                                         Stroke::new(width, color),
                                     );
