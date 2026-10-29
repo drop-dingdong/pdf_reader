@@ -159,7 +159,8 @@ pub fn write_incremental(spec: &WritebackSpec) -> WritebackResult<WritebackRepor
     // 但重新打开时仍解析到旧代（实测：Okular 样本的 highlight `11 1 R`）。
     // 这类对象改用全量保存：PDFium 会把注释统一重写为 gen 0，读回正确。
     // 其它情况仍走增量，保留 Adobe 等对象流/外部结构（D-141）。
-    let full = needs_full_save(spec);
+    let direct = spec.pages.is_empty() && (!spec.updates.is_empty() || !spec.deletes.is_empty());
+    let full = !direct && needs_full_save(spec);
     write_with_mode(spec, !full)
 }
 
@@ -275,8 +276,7 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
         // 直接对源字节追加同 (num,gen) 的新版本，文件增长最小。
         if incremental
             && spec.pages.is_empty()
-            && spec.deletes.is_empty()
-            && !spec.updates.is_empty()
+            && (!spec.updates.is_empty() || !spec.deletes.is_empty())
         {
             let mut source_counts = Vec::with_capacity(page_count);
             for index in 0..page_count {
@@ -299,8 +299,36 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
                 .iter()
                 .map(|update| (update.reference, update.body.clone()))
                 .collect();
-            let bytes = crate::pdf_patch::append_content_updates(&source_bytes, &updates)
+            let mut bytes = crate::pdf_patch::append_content_updates(&source_bytes, &updates)
                 .map_err(WritebackError::Invalid)?;
+            if !spec.deletes.is_empty() {
+                bytes = crate::pdf_patch::append_deletes(&bytes, &spec.deletes)
+                    .map_err(WritebackError::Invalid)?;
+                let pages = crate::pdf_index::page_objects(&source_bytes)
+                    .map_err(WritebackError::Invalid)?;
+                let mut page_of: HashMap<PdfObjectRef, usize> = HashMap::new();
+                let mut popups: HashMap<PdfObjectRef, PdfObjectRef> = HashMap::new();
+                for (page, object) in pages.iter().enumerate() {
+                    for entry in &object.annots {
+                        if let Some(reference) = entry.reference {
+                            page_of.insert(reference, page);
+                            if let Some(popup) = entry.popup {
+                                popups.insert(reference, popup);
+                            }
+                        }
+                    }
+                }
+                for reference in &spec.deletes {
+                    if let Some(&page) = page_of.get(reference) {
+                        source_counts[page] = source_counts[page].saturating_sub(1);
+                    }
+                    if let Some(popup) = popups.get(reference) {
+                        if let Some(&page) = page_of.get(popup) {
+                            source_counts[page] = source_counts[page].saturating_sub(1);
+                        }
+                    }
+                }
+            }
             std::fs::write(&spec.output, &bytes).map_err(|error| {
                 WritebackError::Io(format!(
                     "写输出文件 {} 失败：{error}",

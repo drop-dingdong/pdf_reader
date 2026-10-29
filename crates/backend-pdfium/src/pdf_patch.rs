@@ -225,3 +225,195 @@ fn is_delimiter(byte: u8) -> bool {
             b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
         )
 }
+
+/// 删除若干注释：复制页对象，从 `/Annots` 去掉引用（含 Popup），追加页对象 + xref。
+pub fn append_deletes(pdf: &[u8], deletes: &[PdfObjectRef]) -> Result<Vec<u8>, String> {
+    use std::collections::{HashMap, HashSet};
+
+    if deletes.is_empty() {
+        return Ok(pdf.to_vec());
+    }
+    let pages = crate::pdf_index::page_objects(pdf)?;
+    let mut locations: HashMap<PdfObjectRef, usize> = HashMap::new();
+    let mut deleted: HashSet<PdfObjectRef> = deletes.iter().copied().collect();
+    for (page, object) in pages.iter().enumerate() {
+        for entry in &object.annots {
+            if let Some(reference) = entry.reference {
+                locations.insert(reference, page);
+                if deleted.contains(&reference) {
+                    if let Some(popup) = entry.popup {
+                        deleted.insert(popup);
+                    }
+                }
+            }
+        }
+    }
+    for reference in deletes {
+        if !locations.contains_key(reference) {
+            return Err(format!("要删除的注释对象 {reference:?} 不在当前 PDF 中"));
+        }
+    }
+
+    let trailer = trailer(pdf)?;
+    let mut out = pdf.to_vec();
+    if !out.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    let mut entries: Vec<(PdfObjectRef, usize)> = Vec::new();
+    for object in &pages {
+        if !object
+            .annots
+            .iter()
+            .filter_map(|entry| entry.reference)
+            .any(|reference| deleted.contains(&reference))
+        {
+            continue;
+        }
+        let dict = rewrite_annots(pdf, &object.dict, &deleted)?;
+        let offset = out.len();
+        out.extend_from_slice(
+            format!("{} {} obj\n", object.reference.num, object.reference.gen).as_bytes(),
+        );
+        out.extend_from_slice(&dict);
+        out.extend_from_slice(b"\nendobj\n");
+        entries.push((object.reference, offset));
+    }
+
+    entries.sort_by_key(|(reference, _)| (reference.num, reference.gen));
+    let xref_offset = out.len();
+    out.extend_from_slice(b"xref\n");
+    for (reference, offset) in &entries {
+        out.extend_from_slice(
+            format!(
+                "{} 1\n{:010} {:05} n \n",
+                reference.num, offset, reference.gen
+            )
+            .as_bytes(),
+        );
+    }
+    let max_number = entries
+        .iter()
+        .map(|(reference, _)| reference.num)
+        .max()
+        .unwrap_or(0);
+    let size = trailer.size.max(max_number + 1);
+    out.extend_from_slice(
+        format!(
+            "trailer\n<</Size {size} /Root {} {} R /Prev {}>>\nstartxref\n{xref_offset}\n%%EOF\n",
+            trailer.root.num, trailer.root.gen, trailer.startxref
+        )
+        .as_bytes(),
+    );
+    Ok(out)
+}
+
+fn rewrite_annots(
+    pdf: &[u8],
+    dict: &[u8],
+    deleted: &std::collections::HashSet<PdfObjectRef>,
+) -> Result<Vec<u8>, String> {
+    let key = b"/Annots";
+    let index = find_from(dict, 0, key).ok_or_else(|| "页对象缺 /Annots".to_string())?;
+    let mut cursor = index + key.len();
+    skip_space(dict, &mut cursor);
+    let value_start = cursor;
+    let value_end = value_end(dict, cursor)?;
+    let (array, replace_start, replace_end) = if dict.get(value_start) == Some(&b'[') {
+        let end = balanced(dict, value_start, b'[', b']')?;
+        (dict[value_start + 1..end - 1].to_vec(), value_start, end)
+    } else {
+        let mut ref_cursor = value_start;
+        let reference = parse_ref_at(dict, &mut ref_cursor)
+            .ok_or_else(|| "页 /Annots 不是数组也不是引用".to_string())?;
+        let array = crate::pdf_index::array_object(pdf, reference)?
+            .ok_or_else(|| format!("数组对象 {reference:?} 不存在"))?;
+        (array, value_start, value_end)
+    };
+
+    let mut kept: Vec<Vec<u8>> = Vec::new();
+    for entry in split_entries(&array)? {
+        if let Some(reference) = entry_ref(&entry) {
+            if deleted.contains(&reference) {
+                continue;
+            }
+        }
+        kept.push(entry);
+    }
+    let mut new_array = Vec::with_capacity(array.len());
+    new_array.push(b'[');
+    for (index, entry) in kept.iter().enumerate() {
+        if index > 0 {
+            new_array.push(b' ');
+        }
+        new_array.extend_from_slice(entry);
+    }
+    new_array.push(b']');
+
+    let mut out = Vec::with_capacity(dict.len() + new_array.len());
+    out.extend_from_slice(&dict[..replace_start]);
+    out.extend_from_slice(&new_array);
+    out.extend_from_slice(&dict[replace_end..]);
+    Ok(out)
+}
+
+fn split_entries(array: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let mut entries = Vec::new();
+    let mut index = 0;
+    while index < array.len() {
+        skip_space(array, &mut index);
+        if index >= array.len() {
+            break;
+        }
+        if array[index..].starts_with(b"<<") {
+            let end = balanced(array, index, b'<', b'>')?;
+            entries.push(array[index..end].to_vec());
+            index = end;
+        } else {
+            let start = index;
+            let mut reference_cursor = index;
+            if parse_ref_at(array, &mut reference_cursor).is_none() {
+                return Err("Annots 数组里有非法条目".to_string());
+            }
+            index = reference_cursor;
+            entries.push(array[start..index].to_vec());
+        }
+    }
+    Ok(entries)
+}
+
+fn entry_ref(entry: &[u8]) -> Option<PdfObjectRef> {
+    let mut cursor = 0;
+    parse_ref_at(entry, &mut cursor)
+}
+
+fn parse_ref_at(bytes: &[u8], cursor: &mut usize) -> Option<PdfObjectRef> {
+    let start = *cursor;
+    let mut tokens: [&[u8]; 3] = [&[]; 3];
+    for token in &mut tokens {
+        skip_space(bytes, cursor);
+        let token_start = *cursor;
+        while *cursor < bytes.len() && !is_delimiter(bytes[*cursor]) {
+            *cursor += 1;
+        }
+        if token_start == *cursor {
+            *cursor = start;
+            return None;
+        }
+        *token = &bytes[token_start..*cursor];
+    }
+    if tokens[2] != b"R" {
+        *cursor = start;
+        return None;
+    }
+    Some(PdfObjectRef {
+        num: std::str::from_utf8(tokens[0]).ok()?.parse().ok()?,
+        gen: std::str::from_utf8(tokens[1]).ok()?.parse().ok()?,
+    })
+}
+
+fn find_from(bytes: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    bytes[from..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|offset| from + offset)
+}

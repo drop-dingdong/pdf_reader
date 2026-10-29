@@ -1475,6 +1475,20 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **注意**：1.pdf/2.pdf 是旧 bug 产物，已丢的注释不会自动恢复；请从 0.pdf 用新版本重做。
 - **状态**：P4b-1 修复；P4b-2 删除页对象改写待做。
 
+### D-162 P4b-2：删除走页对象级增量
+
+- `pdf_patch::append_deletes`：复制页对象，从 `/Annots` 去掉目标引用（含 `/Popup`），
+  追加同 `(num,gen)` 页对象 + 经典 xref；支持间接 `/Annots` 数组。
+- `write_incremental`：`pages` 为空且只有 updates/deletes 时直接对源字节 patch，
+  跳过 PDFium 保存；删除不再需要 gen>0 全量兜底。
+- 混合任务（还有新增/自有页面）仍由 PDFium 处理删除；统一模型留到 P5。
+- **验证**：
+  * Okular 高亮删除：只少一条，增长 <1.2KB；
+  * Foxit 带 Popup 父注释删除：父+子一起消失；
+  * Okular 第 2 页间接 `/Annots` 数组删除；
+  * `check.sh` 全绿（373 tests）。
+- **状态**：P4b-2 完成（外部-only 删除）；P5 统一模型待做。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

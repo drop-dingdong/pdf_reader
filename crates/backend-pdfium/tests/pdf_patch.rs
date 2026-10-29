@@ -117,3 +117,68 @@ fn same_annotation_can_be_patched_twice() {
         "连续 patch 后应读到最新正文"
     );
 }
+
+#[test]
+fn appends_page_object_delete_for_okular_annotation() {
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    if backend_pdfium::pdfium().is_err() {
+        return;
+    }
+    let source = std::fs::read(fixture("okular.pdf")).expect("读样本");
+    let before = supported_refs(&source).len();
+    let reference = supported_refs(&source)[0];
+    let output =
+        backend_pdfium::pdf_patch::append_deletes(&source, &[reference]).expect("delete patch");
+    let read = read_bytes(&output);
+    assert_eq!(read.annotations.len(), before - 1, "只删一条");
+    assert!(
+        output.len() < source.len() + 1200,
+        "删除只应追加页对象 + xref"
+    );
+}
+
+#[test]
+fn appends_page_object_delete_with_popup() {
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    if backend_pdfium::pdfium().is_err() {
+        return;
+    }
+    let source = std::fs::read(fixture("foxit.pdf")).expect("读样本");
+    let pages = page_annotations(&source).expect("索引");
+    let before: usize = pages.iter().map(Vec::len).sum();
+    let reference = pages
+        .iter()
+        .flatten()
+        .find(|entry| entry.popup.is_some() && matches!(entry.subtype, Some(9 | 10 | 12 | 15)))
+        .and_then(|entry| entry.reference)
+        .expect("带 Popup 的父注释");
+    let output =
+        backend_pdfium::pdf_patch::append_deletes(&source, &[reference]).expect("delete patch");
+    let after_pages = page_annotations(&output).expect("重索引");
+    let after: usize = after_pages.iter().map(Vec::len).sum();
+    assert_eq!(after, before - 2, "父注释与 Popup 都应删除");
+    assert!(
+        output.len() < source.len() + 2_000,
+        "删除只应追加页对象，不应整份重写"
+    );
+}
+
+#[test]
+fn appends_page_object_delete_for_indirect_annots_array() {
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    if backend_pdfium::pdfium().is_err() {
+        return;
+    }
+    let source = std::fs::read(fixture("okular.pdf")).expect("读样本");
+    let pages = page_annotations(&source).expect("索引");
+    let before = read_bytes(&source).annotations.len();
+    let reference = pages[1]
+        .iter()
+        .find(|entry| matches!(entry.subtype, Some(9 | 10 | 12 | 15)))
+        .and_then(|entry| entry.reference)
+        .expect("第 2 页的注释");
+    let output =
+        backend_pdfium::pdf_patch::append_deletes(&source, &[reference]).expect("delete patch");
+    let read = read_bytes(&output);
+    assert_eq!(read.annotations.len(), before - 1);
+}

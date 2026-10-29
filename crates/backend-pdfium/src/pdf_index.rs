@@ -21,6 +21,14 @@ pub struct PdfObjectRef {
     pub gen: u16,
 }
 
+/// 一个页对象（用于删除时重写 `/Annots`）。
+#[derive(Debug, Clone)]
+pub(crate) struct PageObject {
+    pub reference: PdfObjectRef,
+    pub dict: Vec<u8>,
+    pub annots: Vec<PageAnnot>,
+}
+
 /// 页面 `/Annots` 里的一条（包括 Popup 等不支持的子类型）。
 #[derive(Debug, Clone, Copy)]
 pub struct PageAnnot {
@@ -51,6 +59,14 @@ pub fn page_annotation_refs(pdf: &[u8]) -> Result<Vec<Vec<Option<PdfObjectRef>>>
 
 /// 每页的 `/Annots` 条目（含 subtype/Popup/隐藏标志）。
 pub fn page_annotations(pdf: &[u8]) -> Result<Vec<Vec<PageAnnot>>, String> {
+    Ok(page_objects(pdf)?
+        .into_iter()
+        .map(|page| page.annots)
+        .collect())
+}
+
+/// 页对象（按页序），供删除时复制页 dict。
+pub(crate) fn page_objects(pdf: &[u8]) -> Result<Vec<PageObject>, String> {
     let mut objects: HashMap<(u32, u16), RawObject> = HashMap::new();
     let mut arrays: HashMap<(u32, u16), Vec<u8>> = HashMap::new();
     scan_objects(pdf, &mut objects, &mut arrays);
@@ -58,14 +74,52 @@ pub fn page_annotations(pdf: &[u8]) -> Result<Vec<Vec<PageAnnot>>, String> {
     if objects.is_empty() {
         return Err("没有解析到任何对象".to_string());
     }
-
     let root = last_ref_after(pdf, b"/Root").ok_or_else(|| "找不到 /Root".to_string())?;
     let pages_ref =
         get_ref(&objects, root, b"/Pages").ok_or_else(|| "找不到 /Pages".to_string())?;
-
     let mut out = Vec::new();
-    walk_pages(&objects, &arrays, pages_ref, 0, &mut out)?;
+    walk_page_objects(&objects, &arrays, pages_ref, 0, &mut out)?;
     Ok(out)
+}
+
+fn walk_page_objects(
+    objects: &HashMap<(u32, u16), RawObject>,
+    arrays: &HashMap<(u32, u16), Vec<u8>>,
+    reference: PdfObjectRef,
+    depth: usize,
+    out: &mut Vec<PageObject>,
+) -> Result<(), String> {
+    if depth > 64 {
+        return Err("页面树太深".to_string());
+    }
+    let object =
+        get_object(objects, reference).ok_or_else(|| format!("页面对象 {reference:?} 不存在"))?;
+    if is_name(&object.dict, b"/Type", b"/Pages") {
+        for kid in
+            refs_for(&object.dict, b"/Kids", arrays).ok_or_else(|| "Pages 缺 /Kids".to_string())?
+        {
+            walk_page_objects(objects, arrays, kid, depth + 1, out)?;
+        }
+        return Ok(());
+    }
+    if !is_name(&object.dict, b"/Type", b"/Page") {
+        return Err(format!("对象 {reference:?} 既不是 /Pages 也不是 /Page"));
+    }
+    out.push(PageObject {
+        reference,
+        dict: object.dict.clone(),
+        annots: annots_of(&object.dict, arrays, objects),
+    });
+    Ok(())
+}
+
+/// 读取一个数组对象（间接 `/Annots`）。
+pub(crate) fn array_object(pdf: &[u8], reference: PdfObjectRef) -> Result<Option<Vec<u8>>, String> {
+    let mut objects: HashMap<(u32, u16), RawObject> = HashMap::new();
+    let mut arrays: HashMap<(u32, u16), Vec<u8>> = HashMap::new();
+    scan_objects(pdf, &mut objects, &mut arrays);
+    scan_object_streams(pdf, &mut objects, &mut arrays);
+    Ok(arrays.get(&(reference.num, reference.gen)).cloned())
 }
 
 /// 读取一个对象的字典字节（直接对象或 ObjStm 内的对象）。
@@ -116,33 +170,6 @@ fn get_object(
     reference: PdfObjectRef,
 ) -> Option<&RawObject> {
     objects.get(&(reference.num, reference.gen))
-}
-
-fn walk_pages(
-    objects: &HashMap<(u32, u16), RawObject>,
-    arrays: &HashMap<(u32, u16), Vec<u8>>,
-    reference: PdfObjectRef,
-    depth: usize,
-    out: &mut Vec<Vec<PageAnnot>>,
-) -> Result<(), String> {
-    if depth > 64 {
-        return Err("页面树太深".to_string());
-    }
-    let object =
-        get_object(objects, reference).ok_or_else(|| format!("页面对象 {reference:?} 不存在"))?;
-    if is_name(&object.dict, b"/Type", b"/Pages") {
-        for kid in
-            refs_for(&object.dict, b"/Kids", arrays).ok_or_else(|| "Pages 缺 /Kids".to_string())?
-        {
-            walk_pages(objects, arrays, kid, depth + 1, out)?;
-        }
-        return Ok(());
-    }
-    if !is_name(&object.dict, b"/Type", b"/Page") {
-        return Err(format!("对象 {reference:?} 既不是 /Pages 也不是 /Page"));
-    }
-    out.push(annots_of(&object.dict, arrays, objects));
-    Ok(())
 }
 
 fn annots_of(
