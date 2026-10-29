@@ -1251,10 +1251,13 @@ impl PdfReaderApp {
             self.message = "当前文档没有标注".to_string();
             return;
         }
+        let has_new = self.annotations.iter().any(|annotation| {
+            !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
+        });
         let items: Vec<crate::export::ExportItem> = self
             .annotations
             .iter()
-            .filter(|annotation| !self.external_ids.contains(&annotation.id))
+            .filter(|annotation| has_new && !self.external_ids.contains(&annotation.id))
             .map(|annotation| {
                 let body = annotation.body.clone().filter(|text| !text.is_empty());
                 crate::export::ExportItem {
@@ -1284,19 +1287,7 @@ impl PdfReaderApp {
                 !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
             })
             .count();
-        let own_updates = self
-            .annotations
-            .iter()
-            .filter(|annotation| {
-                !self.external_ids.contains(&annotation.id)
-                    && annotation.pdf_ref.is_some_and(|reference| {
-                        self.opened_pdf_bodies
-                            .get(&reference)
-                            .is_some_and(|before| before != &annotation.body)
-                    })
-            })
-            .count();
-        let updated = ref_updates.len() + own_updates;
+        let updated = ref_updates.len();
         let deleted = ref_deletes.len();
         let temporary = match crate::export::stage_in_place_with_refs(
             &pdf,
@@ -1393,10 +1384,13 @@ impl PdfReaderApp {
             self.message = "当前文档没有标注".to_string();
             return;
         }
+        let has_new = self.annotations.iter().any(|annotation| {
+            !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
+        });
         let items: Vec<crate::export::ExportItem> = self
             .annotations
             .iter()
-            .filter(|annotation| !self.external_ids.contains(&annotation.id))
+            .filter(|annotation| has_new && !self.external_ids.contains(&annotation.id))
             .map(|annotation| {
                 // 正文按哨兵标题从 custom_texts 里取；空正文不写 /Contents
                 let body = annotation.body.clone().filter(|text| !text.is_empty());
@@ -1540,7 +1534,6 @@ impl PdfReaderApp {
         let updates = self
             .annotations
             .iter()
-            .filter(|annotation| self.external_ids.contains(&annotation.id))
             .filter_map(|annotation| {
                 let reference = annotation.pdf_ref?;
                 let before = self.opened_pdf_bodies.get(&reference)?;
@@ -6657,6 +6650,44 @@ mod external_annotation_tests {
             .insert(reference, Some("旧".to_string()));
         app.pdf_clean_hash = Some(app.pdf_fingerprint());
         (app, id, reference)
+    }
+
+    #[test]
+    fn own_pdf_annotation_body_update_is_a_ref_update() {
+        let mut app = PdfReaderApp::new_headless(
+            crate::clock::Clock::system(),
+            crate::diag::diagnostics_for_tests(),
+            None,
+        );
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        let id = app.annotations.iter().next().unwrap().id;
+        let reference = pdfcore::annotation::PdfObjectRef { num: 37, gen: 0 };
+        if let Some(annotation) = app.annotations.get_mut(id) {
+            annotation.pdf_ref = Some(reference);
+            annotation.body = Some("旧".to_string());
+        }
+        app.opened_pdf_refs.insert(reference);
+        app.opened_pdf_bodies
+            .insert(reference, Some("旧".to_string()));
+        app.pdf_clean_hash = Some(app.pdf_fingerprint());
+        app.apply_edit(
+            AppEdit::SetBody {
+                id,
+                page: PageIndex::FIRST,
+                before: Some("旧".to_string()),
+                after: Some("新".to_string()),
+            },
+            true,
+        );
+        let (updates, deletes) = app.pdf_ref_changes();
+        assert_eq!(updates.len(), 1, "自有注释改正文也要走对象级更新");
+        assert_eq!(updates[0].reference, reference);
+        assert!(deletes.is_empty());
     }
 
     #[test]
