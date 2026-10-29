@@ -1324,9 +1324,12 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **根因**：该注释在源文件里是 `11 1 R`（generation 1）。PDFium 增量保存把它写成
   `11 0` 新对象并改页引用，但重新打开时仍解析到旧的 `11 1`；之前增量写坏的文件里
   同名 `(num,gen)` 有多版时也会取到旧版。Foxit 的对象没有这个问题。
-- **修复**：`write_incremental()` 检测目标对象的 `gen > 0`，或源文件里同一
-  `(num,gen)` 出现多版 → 自动改用**全量保存**（PDFium 重写后统一 gen0，读回一致）。
-  其它情况仍走增量，避免破坏 Adobe 对象流（D-141）。
+- **修复**：`write_incremental()` 只在目标对象 `generation > 0` 时自动改用**全量保存**
+  （PDFium 重写后统一 gen0，读回一致）；其它情况仍走增量，保留 Adobe ObjStm 和
+  evince/firefox 的多版历史。
+- **收窄原因**：最初还按“同一 (num,gen) 多版”触发全量，但 evince/firefox 本身就有多版，
+  全量重写会让 Okular 保存时报警；Adobe 的 `adobe_inc_probe`（保留 ObjStm）在 Okular
+  保存正常，证明增量才是正确路径。旧版增量写坏的 gen0 多版文件需从原始样本重新生成。
 - **验证**：
   * Okular `11 1` 改正文，增量入口实际走全量 → 读回新正文；
   * 全量保存后的文件再增量改 gen0 → 读回新正文（`full_save_then_incremental_update_reads_back`）；

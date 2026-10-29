@@ -431,31 +431,16 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
 
 /// 增量保存是否会踩到“旧对象版本”的坑。
 ///
-/// 实测两种：
-/// * 对象 generation > 0（Okular 样本的 `11 1 R`）：PDFium 增量写出 gen0，
-///   重新打开却仍解析旧代；
-/// * 同一 `(num, gen)` 在源文件里出现多次（我们之前增量写坏的文件）：
-///   PDFium 可能取到较早的那一版。
+/// 实测：Okular 样本的 highlight 是 `11 1 R`（generation 1）。PDFium 增量写出
+/// gen0 新对象并改页引用后，重新打开仍解析旧代。这类对象改走全量保存；
+/// PDFium 会把对象统一重写，读回一致。
 ///
-/// 这两种情况改走全量保存；PDFium 会把对象统一重写，读回一致。
-/// 其它情况（Adobe 的 ObjStm、单版对象）仍走增量，避免破坏对象流（D-141）。
+/// **不再按“同一 (num,gen) 出现多版”触发全量**：evince/firefox 等样本本身就有
+/// 多版历史，全量重写会让 Okular 保存时报警；Adobe 的 ObjStm 也必须保留。
+/// 已经被旧版增量写坏的文件（多版 gen0）需要从原始样本重新生成，或用显式修复流程。
 fn needs_full_save(spec: &WritebackSpec) -> bool {
-    if spec.updates.iter().any(|update| update.reference.gen > 0)
+    spec.updates.iter().any(|update| update.reference.gen > 0)
         || spec.deletes.iter().any(|reference| reference.gen > 0)
-    {
-        return true;
-    }
-    let Ok(bytes) = std::fs::read(&spec.source) else {
-        return false;
-    };
-    let text = String::from_utf8_lossy(&bytes);
-    let mut references: Vec<PdfObjectRef> =
-        spec.updates.iter().map(|update| update.reference).collect();
-    references.extend(spec.deletes.iter().copied());
-    references.iter().any(|reference| {
-        let needle = format!("{} {} obj", reference.num, reference.gen);
-        text.matches(&needle).count() > 1
-    })
 }
 
 /// 读回输出文件的逐页注释数（供调用方校验；**不渲染**）。
@@ -1365,37 +1350,5 @@ mod tests {
             pages: vec![],
         };
         assert!(matches!(write(&spec), Err(WritebackError::Invalid(_))));
-    }
-}
-
-#[cfg(test)]
-mod full_save_tests {
-    use super::*;
-
-    #[test]
-    fn duplicate_object_versions_force_full_save() {
-        let dir = std::env::temp_dir().join(format!(
-            "pdf-full-save-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let source = dir.join("in.pdf");
-        std::fs::write(&source, b"11 0 obj\n<<>>\nendobj\n11 0 obj\n<<>>\nendobj\n").unwrap();
-        let spec = WritebackSpec {
-            source,
-            output: dir.join("out.pdf"),
-            pages: Vec::new(),
-            updates: vec![WritebackUpdate {
-                reference: PdfObjectRef { num: 11, gen: 0 },
-                body: Some("x".to_string()),
-            }],
-            deletes: Vec::new(),
-        };
-        assert!(needs_full_save(&spec), "同一对象出现多版时必须全量保存");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
