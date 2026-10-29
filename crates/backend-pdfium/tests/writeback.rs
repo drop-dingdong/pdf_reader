@@ -1027,3 +1027,89 @@ fn deleting_an_external_annotation_with_popup_removes_both() {
     let after: usize = after_pages.iter().map(Vec::len).sum();
     assert_eq!(after, before - 2, "父注释与 Popup（第 {page} 页）都应删除");
 }
+
+#[test]
+fn incremental_update_with_generation_1_falls_back_to_full_save() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("dbg-hl");
+    let source = dir.join("in.pdf");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/s6b/okular.pdf"),
+        &source,
+    )
+    .unwrap();
+    let output = dir.join("out.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: vec![backend_pdfium::writeback::WritebackUpdate {
+            reference: backend_pdfium::pdf_index::PdfObjectRef { num: 11, gen: 1 },
+            body: Some("TESTBODY".to_string()),
+        }],
+        deletes: vec![],
+        source: source.clone(),
+        output: output.clone(),
+        pages: vec![],
+    })
+    .unwrap();
+    let r = backend_pdfium::readback::read(&output, None).unwrap();
+    assert!(r
+        .annotations
+        .iter()
+        .any(|a| a.body.as_deref() == Some("TESTBODY")));
+}
+
+#[test]
+fn full_save_then_incremental_update_reads_back() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("dbg-full-inc");
+    let source = dir.join("in.pdf");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/s6b/okular.pdf"),
+        &source,
+    )
+    .unwrap();
+    let out1 = dir.join("out1.pdf");
+    let spec1 = WritebackSpec {
+        updates: vec![backend_pdfium::writeback::WritebackUpdate {
+            reference: backend_pdfium::pdf_index::PdfObjectRef { num: 11, gen: 1 },
+            body: Some("A".to_string()),
+        }],
+        deletes: vec![],
+        source: source.clone(),
+        output: out1.clone(),
+        pages: vec![],
+    };
+    writeback::write(&spec1).unwrap();
+    let pages =
+        backend_pdfium::pdf_index::page_annotations(&std::fs::read(&out1).unwrap()).unwrap();
+    let ref0 = pages[0]
+        .iter()
+        .find(|e| matches!(e.subtype, Some(9)))
+        .unwrap()
+        .reference
+        .unwrap();
+    let out2 = dir.join("out2.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: vec![backend_pdfium::writeback::WritebackUpdate {
+            reference: ref0,
+            body: Some("B".to_string()),
+        }],
+        deletes: vec![],
+        source: out1,
+        output: out2.clone(),
+        pages: vec![],
+    })
+    .unwrap();
+    let r = backend_pdfium::readback::read(&out2, None).unwrap();
+    assert!(
+        r.annotations
+            .iter()
+            .any(|annotation| annotation.body.as_deref() == Some("B")),
+        "全量保存后的文件应能继续增量更新"
+    );
+}
