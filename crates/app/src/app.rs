@@ -1656,10 +1656,15 @@ impl PdfReaderApp {
         for item in &readback.annotations {
             by_page.entry(item.page.get()).or_default().push(item);
         }
-        let mut restored = 0;
-        let mut recovered = 0;
+
+        // 先把读回结果和对象号配对；**先导入带标记的注释，再给外部注释分配 id**，
+        // 否则外部 id 可能先占用了后面 pd-fr 标记要用的 id，把注释覆盖掉。
+        let mut entries: Vec<(
+            &backend_pdfium::readback::ReadAnnotation,
+            Option<pdfcore::annotation::PdfObjectRef>,
+        )> = Vec::new();
         for (page, items) in by_page {
-            let entries: Vec<&backend_pdfium::pdf_index::PageAnnot> = ref_pages
+            let page_entries: Vec<&backend_pdfium::pdf_index::PageAnnot> = ref_pages
                 .get(page as usize)
                 .map(|entries| {
                     entries
@@ -1670,8 +1675,8 @@ impl PdfReaderApp {
                         .collect()
                 })
                 .unwrap_or_default();
-            let refs_ok = entries.len() == items.len();
-            for (item, entry) in items.iter().zip(entries.iter()) {
+            let refs_ok = page_entries.len() == items.len();
+            for (item, entry) in items.into_iter().zip(page_entries) {
                 let reference = refs_ok
                     .then_some(entry.reference)
                     .flatten()
@@ -1687,67 +1692,70 @@ impl PdfReaderApp {
                             .insert(reference, AnnotationId(raw_id));
                     }
                 }
-                match item.id {
-                    Some(raw_id) => {
-                        let id = AnnotationId(raw_id);
-                        if let Some(existing) = self.annotations.get_mut(id) {
-                            existing.pdf_ref = reference;
-                            if overlay_exists && existing.body.is_none() && item.body.is_some() {
-                                existing.body = item.body.clone();
-                                recovered += 1;
-                            }
-                        } else if !overlay_exists {
-                            let Some(mut annotation) =
-                                Annotation::new(item.page, item.kind.clone())
-                            else {
-                                continue;
-                            };
-                            annotation.id = id;
-                            annotation.color = item.color;
-                            annotation.opacity = item.opacity;
-                            annotation.body = item.body.clone();
-                            annotation.pdf_ref = reference;
-                            self.annotations.insert(annotation);
-                            restored += 1;
-                        }
-                    }
-                    None => {
-                        // 外部注释：优先复用上次会话同一对象号的本地 id，
-                        // 否则写回重开后撤销栈里的 SetBody 会对不上。
-                        let reused = reference
-                            .and_then(|reference| self.pdf_ref_ids.get(&reference).copied())
-                            .filter(|id| self.annotations.get(*id).is_none());
-                        let id = if let Some(id) = reused {
-                            id
-                        } else {
-                            let Some(id) = self.annotations.add(item.page, item.kind.clone())
-                            else {
-                                continue;
-                            };
-                            id
-                        };
-                        if self.annotations.get(id).is_none() {
-                            let Some(mut annotation) =
-                                Annotation::new(item.page, item.kind.clone())
-                            else {
-                                continue;
-                            };
-                            annotation.id = id;
-                            self.annotations.insert(annotation);
-                        }
-                        if let Some(annotation) = self.annotations.get_mut(id) {
-                            annotation.color = item.color;
-                            annotation.opacity = item.opacity;
-                            annotation.body = item.body.clone();
-                            annotation.pdf_ref = reference;
-                        }
-                        if let Some(reference) = reference {
-                            self.pdf_ref_ids.insert(reference, id);
-                        }
-                        self.external_ids.insert(id);
-                    }
-                }
+                entries.push((item, reference));
             }
+        }
+
+        let mut restored = 0;
+        let mut recovered = 0;
+        // 第一遍：带 pd-fr 标记的注释（id 固定，先占住 id 空间）
+        for (item, reference) in &entries {
+            let Some(raw_id) = item.id else {
+                continue;
+            };
+            let id = AnnotationId(raw_id);
+            if let Some(existing) = self.annotations.get_mut(id) {
+                existing.pdf_ref = *reference;
+                if overlay_exists && existing.body.is_none() && item.body.is_some() {
+                    existing.body = item.body.clone();
+                    recovered += 1;
+                }
+            } else if !overlay_exists {
+                let Some(mut annotation) = Annotation::new(item.page, item.kind.clone()) else {
+                    continue;
+                };
+                annotation.id = id;
+                annotation.color = item.color;
+                annotation.opacity = item.opacity;
+                annotation.body = item.body.clone();
+                annotation.pdf_ref = *reference;
+                self.annotations.insert(annotation);
+                restored += 1;
+            }
+        }
+        // 第二遍：无标记的外部注释
+        for (item, reference) in &entries {
+            if item.id.is_some() {
+                continue;
+            }
+            let reused = reference
+                .and_then(|reference| self.pdf_ref_ids.get(&reference).copied())
+                .filter(|id| self.annotations.get(*id).is_none());
+            let id = if let Some(id) = reused {
+                id
+            } else {
+                let Some(id) = self.annotations.add(item.page, item.kind.clone()) else {
+                    continue;
+                };
+                id
+            };
+            if self.annotations.get(id).is_none() {
+                let Some(mut annotation) = Annotation::new(item.page, item.kind.clone()) else {
+                    continue;
+                };
+                annotation.id = id;
+                self.annotations.insert(annotation);
+            }
+            if let Some(annotation) = self.annotations.get_mut(id) {
+                annotation.color = item.color;
+                annotation.opacity = item.opacity;
+                annotation.body = item.body.clone();
+                annotation.pdf_ref = *reference;
+            }
+            if let Some(reference) = reference {
+                self.pdf_ref_ids.insert(*reference, id);
+            }
+            self.external_ids.insert(id);
         }
         (restored, recovered)
     }
@@ -6667,6 +6675,58 @@ mod external_annotation_tests {
             app.annotations.get(id).and_then(|a| a.pdf_ref),
             None,
             "要作为新注释重新写回"
+        );
+    }
+
+    #[test]
+    fn marked_ids_are_reserved_before_external_annotations() {
+        use backend_pdfium::pdf_index::{PageAnnot, PdfObjectRef};
+        use backend_pdfium::readback::{ReadAnnotation, Readback};
+
+        let mut app = PdfReaderApp::new_headless(
+            crate::clock::Clock::system(),
+            crate::diag::diagnostics_for_tests(),
+            None,
+        );
+        let annotation = |id: Option<u64>, body: &str, reference: PdfObjectRef| {
+            (
+                ReadAnnotation {
+                    page: PageIndex::FIRST,
+                    id,
+                    kind: AnnotationKind::Highlight {
+                        quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+                    },
+                    color: [255, 255, 0],
+                    opacity: 0.35,
+                    body: Some(body.to_string()),
+                    ink_strokes: Vec::new(),
+                },
+                PageAnnot {
+                    reference: Some(reference),
+                    subtype: Some(9),
+                    popup: None,
+                    hidden: false,
+                },
+            )
+        };
+        let entries = [
+            annotation(None, "外1", PdfObjectRef { num: 11, gen: 0 }),
+            annotation(None, "外2", PdfObjectRef { num: 12, gen: 0 }),
+            annotation(Some(1), "自有", PdfObjectRef { num: 13, gen: 0 }),
+        ];
+        let readback = Readback {
+            annotations: entries.iter().map(|(item, _)| item.clone()).collect(),
+            ..Readback::default()
+        };
+        let refs = vec![entries.iter().map(|(_, entry)| *entry).collect()];
+        let (_, _) = app.merge_readback(&readback, false, &refs);
+        assert_eq!(app.annotations.len(), 3, "三条都要存在，不能被 id 覆盖");
+        assert_eq!(app.external_ids.len(), 2, "只有无标记的两条是外部");
+        assert_eq!(
+            app.annotations
+                .get(AnnotationId(1))
+                .and_then(|a| a.body.as_deref()),
+            Some("自有")
         );
     }
 

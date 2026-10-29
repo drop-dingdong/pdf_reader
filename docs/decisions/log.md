@@ -1456,6 +1456,25 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   `check.sh` 全绿（369 tests）。
 - **状态**：P4b-1 修正；删除的页对象级改写仍待 P4b-2。
 
+### D-161 修复：外部注释 id 抢占 pd-fr 标记 id，导致打开/删除丢注释
+
+- **样本**：`scripts/replay/error_bug/rotated_2p_okular_0.pdf` 有 4 条 Okular 注释
+  + 1 条 `pd-fr:3`（我们的高亮）。
+- **根因**：merge 先给外部注释 `add` 分配 id（1、2、3），随后导入 `pd-fr:3`
+  时 `insert` 用 id 3 覆盖了外部 ink；app 实际只有 4 条，但 `external_ids`
+  仍以为有 4 条外部。后续删除/撤销基于错误集合，表现为“少两条/撤销只回来一条”。
+- **修复**：merge 改成两遍：
+  1. 先导入所有 `/NM = pd-fr:*` 的带标记注释，占住 id；
+  2. 再给无标记外部注释分配 id（复用 `pdf_ref_ids` 时也跳过已占用 id）。
+- **提示差异**：不是 Adobe/Okular 的差别，而是注释归属：
+  * 外部注释改正文 → 更新；
+  * 自有（带 pd-fr）注释在 `pages` 里 → 旧提示按 `pages.len()` 显示“新增”；
+  现在分别统计新注释/自有正文变化/外部 updates/deletes。
+- **验证**：`marked_ids_are_reserved_before_external_annotations`；
+  重新打开 0.pdf 得到 **5 条（4 外部 + 1 自有）**；`check.sh` 全绿（370 tests）。
+- **注意**：1.pdf/2.pdf 是旧 bug 产物，已丢的注释不会自动恢复；请从 0.pdf 用新版本重做。
+- **状态**：P4b-1 修复；P4b-2 删除页对象改写待做。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |
