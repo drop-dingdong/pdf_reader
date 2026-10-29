@@ -344,7 +344,7 @@ fn a_thick_right_angle_has_no_gap_at_the_joint() {
 /// 原地重复写回必须**幂等**：靠 `/NM` 标记跳过已写入的，删掉 overlay 里已不存在的标记注释，
 /// 其它注释（链接等）不动。
 #[test]
-fn writing_twice_is_idempotent_and_drops_stale_marked_annotations() {
+fn writing_again_without_new_pages_keeps_existing_marked_annotations() {
     if !backend_available() {
         return;
     }
@@ -395,12 +395,12 @@ fn writing_twice_is_idempotent_and_drops_stale_marked_annotations() {
         vec![3, 1]
     );
 
-    // 同一份 overlay 再写一次：一条都不应该重复添加
+    // P5：pages 只放新注释；没有新注释时再次写回不应删除/重复已有注释
     let second = dir.join("out2.pdf");
     assert_eq!(
-        write_once(&first, &second, pages.clone()).expect("第二次"),
-        3,
-        "标记注释会被删掉后按 overlay 重建（不是叠加）"
+        write_once(&first, &second, Vec::new()).expect("第二次"),
+        0,
+        "没有新注释"
     );
     assert_eq!(
         writeback::count_annotations(&second).expect("数注释"),
@@ -408,76 +408,102 @@ fn writing_twice_is_idempotent_and_drops_stale_marked_annotations() {
         "重复写回不能把注释叠两遍"
     );
 
-    // overlay 里删掉 id=2 与第 2 页的 id=3：再写应当把它们从 PDF 里删掉，链接保留
+    // P5：删除必须显式给 deletes；pages 为空不会隐式删 marker。
     let third = dir.join("out3.pdf");
-    let reduced = vec![WritebackPage {
-        page: PageIndex::FIRST,
-        annotations: vec![highlight(1, 50.0)],
-    }];
-    assert_eq!(
-        write_once(&second, &third, reduced).expect("第三次"),
-        1,
-        "只重建留下的一条"
-    );
+    let pages = backend_pdfium::pdf_index::page_annotations(&std::fs::read(&second).expect("读"))
+        .expect("索引");
+    let deletes: Vec<_> = pages
+        .iter()
+        .flatten()
+        .filter(|entry| matches!(entry.subtype, Some(9 | 10 | 12 | 15)))
+        .skip(1) // 保留第 1 页第一条高亮，删其余
+        .filter_map(|entry| entry.reference)
+        .collect();
+    writeback::write_incremental(&WritebackSpec {
+        updates: Vec::new(),
+        deletes,
+        source: second,
+        output: third.clone(),
+        pages: Vec::new(),
+    })
+    .expect("显式删除");
     assert_eq!(
         writeback::count_annotations(&third).expect("数注释"),
         vec![2, 0],
-        "第 1 页 = 链接 + 1 条；第 2 页的标记注释应被删掉"
+        "第 1 页 = 链接 + 1 条；第 2 页的标记注释应被显式删掉"
     );
 
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 已存在的标记注释要**同步正文与颜色**：删/改 overlay 里的正文后，下次写回不能还是旧文本。
 #[test]
-fn rewriting_updates_contents_of_existing_marked_annotations() {
+fn rewriting_updates_contents_of_existing_annotations() {
     if !backend_available() {
         return;
     }
     let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-    let dir = temp_dir("contents");
+    let dir = temp_dir("contents-p5");
     let source = dir.join("in.pdf");
     std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+    let first = dir.join("first.pdf");
+    writeback::write(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
+        source: source.clone(),
+        output: first.clone(),
+        pages: vec![WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![WritebackAnnotation {
+                id: Some(7),
+                kind: AnnotationKind::Highlight {
+                    quads: vec![Rect::new(50.0, 660.0, 200.0, 14.0)],
+                },
+                color: [255, 255, 0],
+                opacity: 0.35,
+                body: Some("OLD".to_string()),
+            }],
+        }],
+    })
+    .expect("写一条");
+    let reference =
+        backend_pdfium::pdf_index::page_annotations(&std::fs::read(&first).expect("读"))
+            .expect("索引")
+            .iter()
+            .flatten()
+            .find(|entry| matches!(entry.subtype, Some(9 | 10 | 12 | 15)))
+            .and_then(|entry| entry.reference)
+            .expect("ref");
+    let second = dir.join("second.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: vec![backend_pdfium::writeback::WritebackUpdate {
+            reference,
+            body: Some("NEW".to_string()),
+        }],
+        deletes: Vec::new(),
+        source: first,
+        output: second.clone(),
+        pages: Vec::new(),
+    })
+    .expect("改正文");
+    let read = readback::read(&second, None).expect("读回");
+    assert_eq!(read.annotations[0].body.as_deref(), Some("NEW"));
 
-    let write_with_body =
-        |source: &std::path::Path, output: &std::path::Path, body: Option<&str>| {
-            let spec = WritebackSpec {
-                updates: Vec::new(),
-                deletes: Vec::new(),
-                source: source.to_path_buf(),
-                output: output.to_path_buf(),
-                pages: vec![WritebackPage {
-                    page: PageIndex::FIRST,
-                    annotations: vec![WritebackAnnotation {
-                        id: Some(7),
-                        kind: AnnotationKind::Highlight {
-                            quads: vec![Rect::new(50.0, 660.0, 200.0, 14.0)],
-                        },
-                        color: [255, 255, 0],
-                        opacity: 0.35,
-                        body: body.map(str::to_string),
-                    }],
-                }],
-            };
-            writeback::write(&spec).expect("写回")
-        };
-
-    let first = dir.join("out1.pdf");
-    write_with_body(&source, &first, Some("OLD"));
-    let second = dir.join("out2.pdf");
-    write_with_body(&first, &second, Some("NEW"));
-    let second_bytes = std::fs::read(&second).expect("读输出");
-    let text = String::from_utf8_lossy(&second_bytes);
-    assert!(text.contains("(NEW)"), "正文必须更新成 NEW：{text}");
-    assert!(!text.contains("(OLD)"), "旧正文不能残留：{text}");
-
-    // overlay 里正文被删掉（None）→ 写回应当清空 /Contents
-    let third = dir.join("out3.pdf");
-    write_with_body(&second, &third, None);
-    let third_bytes = std::fs::read(&third).expect("读输出");
-    let text = String::from_utf8_lossy(&third_bytes);
-    assert!(!text.contains("(NEW)"), "正文删除后不能残留：{text}");
-
+    let third = dir.join("third.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: vec![backend_pdfium::writeback::WritebackUpdate {
+            reference,
+            body: None,
+        }],
+        deletes: Vec::new(),
+        source: second,
+        output: third.clone(),
+        pages: Vec::new(),
+    })
+    .expect("清空正文");
+    assert_eq!(
+        readback::read(&third, None).expect("读回").annotations[0].body,
+        None
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -544,7 +570,7 @@ fn annotations_are_not_baked_into_the_bitmap_by_default() {
 
 /// 空 `pages` = **把写过的注释全部删掉**（叠层删光后仍要能写回 PDF）。
 #[test]
-fn empty_spec_removes_all_marked_annotations_but_keeps_links() {
+fn empty_pages_keep_marked_annotations_until_explicit_deletes() {
     if !backend_available() {
         return;
     }
@@ -578,41 +604,49 @@ fn empty_spec_removes_all_marked_annotations_but_keeps_links() {
         "链接 + 1 条"
     );
 
-    let cleared = dir.join("cleared.pdf");
+    // 空 pages 不再隐式删除 marker 注释
+    let kept = dir.join("kept.pdf");
     let report = writeback::write(&WritebackSpec {
         updates: Vec::new(),
         deletes: Vec::new(),
         source: annotated.clone(),
+        output: kept.clone(),
+        pages: vec![],
+    })
+    .expect("空 pages");
+    assert_eq!(report.annotations, 0);
+    assert_eq!(
+        writeback::count_annotations(&kept).expect("数"),
+        vec![2, 0],
+        "P5：没有 deletes 就保留"
+    );
+
+    // 显式对象号删除
+    let pages = backend_pdfium::pdf_index::page_annotations(&std::fs::read(&annotated).unwrap())
+        .expect("索引");
+    let reference = pages
+        .iter()
+        .flatten()
+        .find(|entry| matches!(entry.subtype, Some(9 | 10 | 12 | 15)))
+        .and_then(|entry| entry.reference)
+        .expect("高亮对象");
+    let cleared = dir.join("cleared.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: vec![reference],
+        source: annotated,
         output: cleared.clone(),
         pages: vec![],
     })
-    .expect("空集合写回");
-    assert_eq!(report.annotations, 0, "没有新增");
+    .expect("显式删除");
     assert_eq!(
         writeback::count_annotations(&cleared).expect("数"),
         vec![1, 0],
-        "标记注释应被删掉；链接保留"
+        "显式 deletes 才删除；链接保留"
     );
-
-    // 再跑一次仍然稳定
-    let again = dir.join("again.pdf");
-    writeback::write(&WritebackSpec {
-        updates: Vec::new(),
-        deletes: Vec::new(),
-        source: cleared,
-        output: again.clone(),
-        pages: vec![],
-    })
-    .expect("再删一次");
-    assert_eq!(
-        writeback::count_annotations(&again).expect("数"),
-        vec![1, 0]
-    );
-
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 增量保存要保住外部阅读器的注释与对象流结构（原地写入用它，见 D-141）。
 #[test]
 fn incremental_save_keeps_external_annotations_and_object_streams() {
     if !backend_available() {
@@ -746,7 +780,7 @@ fn full_save_externalizes_external_annotations_too() {
 
 /// 只改正文时应当**原地更新同一个注释对象**（对象号不变），不删旧建新。
 #[test]
-fn content_only_edit_reuses_the_same_annotation_object() {
+fn content_only_edit_keeps_the_annots_ref() {
     if !backend_available() {
         return;
     }
@@ -754,22 +788,6 @@ fn content_only_edit_reuses_the_same_annotation_object() {
     let dir = temp_dir("diff");
     let source = dir.join("in.pdf");
     std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
-    let make = |quad: Rect, body: &str| WritebackSpec {
-        updates: Vec::new(),
-        deletes: Vec::new(),
-        source: source.clone(),
-        output: dir.join("ignored.pdf"),
-        pages: vec![WritebackPage {
-            page: PageIndex::FIRST,
-            annotations: vec![WritebackAnnotation {
-                id: Some(7),
-                kind: AnnotationKind::Highlight { quads: vec![quad] },
-                color: [255, 255, 0],
-                opacity: 0.35,
-                body: Some(body.to_string()),
-            }],
-        }],
-    };
     let annots = |path: &std::path::Path| -> String {
         let text = String::from_utf8_lossy(&std::fs::read(path).expect("读")).to_string();
         let start = text.rfind("/Annots").expect("/Annots");
@@ -781,23 +799,12 @@ fn content_only_edit_reuses_the_same_annotation_object() {
             .collect::<Vec<_>>()
             .join(" ")
     };
-
     let first = dir.join("first.pdf");
-    let spec = WritebackSpec {
+    writeback::write(&WritebackSpec {
         updates: Vec::new(),
         deletes: Vec::new(),
+        source: source.clone(),
         output: first.clone(),
-        ..make(Rect::new(50.0, 660.0, 100.0, 14.0), "OLD")
-    };
-    writeback::write(&spec).expect("第一次");
-    let refs1 = annots(&first);
-
-    let second = dir.join("second.pdf");
-    let spec = WritebackSpec {
-        updates: Vec::new(),
-        deletes: Vec::new(),
-        source: first.clone(),
-        output: second.clone(),
         pages: vec![WritebackPage {
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
@@ -807,42 +814,35 @@ fn content_only_edit_reuses_the_same_annotation_object() {
                 },
                 color: [255, 255, 0],
                 opacity: 0.35,
-                body: Some("NEW".to_string()),
+                body: Some("OLD".to_string()),
             }],
         }],
-    };
-    writeback::write_incremental(&spec).expect("改正文");
-    assert_eq!(
-        refs1,
-        annots(&second),
-        "只改正文不应改变注释对象号（对象复用）"
-    );
+    })
+    .expect("第一次");
+    let refs1 = annots(&first);
+    let reference =
+        backend_pdfium::pdf_index::page_annotations(&std::fs::read(&first).expect("读"))
+            .expect("索引")
+            .iter()
+            .flatten()
+            .find(|entry| matches!(entry.subtype, Some(9 | 10 | 12 | 15)))
+            .and_then(|entry| entry.reference)
+            .expect("ref");
+    let second = dir.join("second.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: vec![backend_pdfium::writeback::WritebackUpdate {
+            reference,
+            body: Some("NEW".to_string()),
+        }],
+        deletes: Vec::new(),
+        source: first,
+        output: second.clone(),
+        pages: Vec::new(),
+    })
+    .expect("改正文");
+    assert_eq!(refs1, annots(&second), "只改正文不应改变页 /Annots 引用");
     let read = readback::read(&second, None).expect("读回");
     assert_eq!(read.annotations[0].body.as_deref(), Some("NEW"));
-
-    // 几何变了：必须换成新对象（引用数组不同）
-    let third = dir.join("third.pdf");
-    let spec = WritebackSpec {
-        updates: Vec::new(),
-        deletes: Vec::new(),
-        source: second.clone(),
-        output: third.clone(),
-        pages: vec![WritebackPage {
-            page: PageIndex::FIRST,
-            annotations: vec![WritebackAnnotation {
-                id: Some(7),
-                kind: AnnotationKind::Highlight {
-                    quads: vec![Rect::new(60.0, 660.0, 100.0, 14.0)],
-                },
-                color: [255, 255, 0],
-                opacity: 0.35,
-                body: Some("NEW".to_string()),
-            }],
-        }],
-    };
-    writeback::write_incremental(&spec).expect("改几何");
-    assert_ne!(refs1, annots(&third), "几何变化必须替换对象");
-
     std::fs::remove_dir_all(&dir).ok();
 }
 

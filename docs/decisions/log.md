@@ -1526,6 +1526,25 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   * `check.sh` 全绿（374 tests）。
 - **状态**：P4b 性能修正；新增注释仍需要 PDFium 保存 + 外置，P5 统一模型继续。
 
+### D-165 P5：统一注释写回模型（新注释 / 已有注释）
+
+- **模型**：
+  * `pdf_ref=None` 且非外部内联 → 新注释，进 `pages`，由 PDFium 生成 AP；
+  * `pdf_ref=Some` → 已有注释，正文变化进 `updates`（pdf_patch 同 gen 追加）；
+  * 当前集合里不存在的 ref → `deletes`（页对象 patch）。
+- **writeback**：
+  * 不再按 `/NM` marker 删除“未列出的注释”；marker 只用于防止同一个新注释重试时重复添加；
+  * 空 `pages` 不会隐式删 marker；
+  * 删除只由显式 `deletes` 负责。
+- **app**：
+  * `pages` 只放新注释（排除外部内联），不再把所有自有注解塞进去；
+  * `pdf_ref_changes` 对自有/外部一视同仁，正文变化都进 `updates`；
+  * `external_ids` 只在“外部内联无对象号”与报告/撤销恢复时保留，不再决定写回路径。
+- **效果**：自有高亮改正文只追加一个对象；连续保存/撤销重做保持；新注释仍走 PDFium+外置。
+- **测试**：更新 writeback 契约测试；恢复被误删的 incremental/indirect/full 测试；
+  `check.sh` 全绿（374 tests）。
+- **状态**：P5 完成；P4b-2 删除已覆盖外部-only，混合任务仍由 PDFium（后续可继续对象化）。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

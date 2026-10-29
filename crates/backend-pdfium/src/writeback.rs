@@ -342,17 +342,6 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
             });
         }
 
-        // 读回当前 PDF 里的标记注释，用来做**差分**：
-        // * 内容只改 /Contents → 原地更新同一个注释对象（对象号不变，像 Okular 那样）；
-        // * 几何/颜色/透明度变了 → 删旧引用 + 新建对象；
-        // * 没变 → 完全不碰；
-        // * 新增/删除 → 只改页面 /Annots 的引用。
-        let existing = crate::readback::read(&spec.source, None).unwrap_or_default();
-        let existing_by_id: HashMap<u64, &crate::readback::ReadAnnotation> = existing
-            .annotations
-            .iter()
-            .filter_map(|annotation| annotation.id.map(|id| (id, annotation)))
-            .collect();
         let mut desired: HashMap<u32, HashMap<u64, &WritebackAnnotation>> = HashMap::new();
         for page in &spec.pages {
             let entry = desired.entry(page.page.get()).or_default();
@@ -411,31 +400,10 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
                     continue;
                 }
                 if let Some(id) = read_marker(&ffi, annot) {
-                    let target = wanted.and_then(|map| map.get(&id));
-                    if let Some(target) = target {
-                        if let Some(current) = existing_by_id.get(&id) {
-                            let same_geometry = same_kind(&current.kind, &target.kind);
-                            let same_style = current.color == target.color
-                                && (current.opacity - target.opacity).abs() <= 0.01;
-                            if same_geometry && same_style {
-                                if current.body == target.body {
-                                    // 完全没变：不碰
-                                    present.insert(id);
-                                } else if update_contents(&ffi, annot, target.body.as_deref()) {
-                                    // 只改正文：原地更新同一个对象（不重建）
-                                    present.insert(id);
-                                } else {
-                                    remove_indices.push(annot_index);
-                                }
-                            } else {
-                                // 几何/颜色/透明度变了：旧对象无法可靠就地改（SetColor 对墨迹失败）
-                                remove_indices.push(annot_index);
-                            }
-                        } else {
-                            remove_indices.push(annot_index);
-                        }
-                    } else {
-                        remove_indices.push(annot_index);
+                    if wanted.is_some_and(|map| map.contains_key(&id)) {
+                        // 已有注释不在 pages 里（pages 只放新注释）；这里只避免
+                        // 同一个新注释因重试被加两遍。是否删除由显式 deletes 决定。
+                        present.insert(id);
                     }
                 }
                 (ffi.close_annot)(annot);
@@ -978,51 +946,6 @@ pub(crate) unsafe fn read_marker(ffi: &Ffi, annot: *mut c_void) -> Option<u64> {
     let units = (length as usize / 2).min(buffer.len());
     let text = String::from_utf16_lossy(&buffer[..units]);
     marker_id(text.trim_end_matches('\0'))
-}
-
-/// 内容（`/Contents`）只是正文；几何/颜色/透明度相同才允许原地更新。
-fn same_kind(left: &AnnotationKind, right: &AnnotationKind) -> bool {
-    const EPS: f32 = 0.01;
-    match (left, right) {
-        (
-            AnnotationKind::Ink {
-                points: a,
-                width: wa,
-            },
-            AnnotationKind::Ink {
-                points: b,
-                width: wb,
-            },
-        ) => {
-            (wa - wb).abs() <= EPS
-                && a.len() == b.len()
-                && a.iter()
-                    .zip(b.iter())
-                    .all(|(x, y)| (x.x - y.x).abs() <= EPS && (x.y - y.y).abs() <= EPS)
-        }
-        _ => {
-            let (AnnotationKind::Highlight { quads: a }
-            | AnnotationKind::Underline { quads: a }
-            | AnnotationKind::StrikeOut { quads: a }) = left
-            else {
-                return false;
-            };
-            let (AnnotationKind::Highlight { quads: b }
-            | AnnotationKind::Underline { quads: b }
-            | AnnotationKind::StrikeOut { quads: b }) = right
-            else {
-                return false;
-            };
-            std::mem::discriminant(left) == std::mem::discriminant(right)
-                && a.len() == b.len()
-                && a.iter().zip(b.iter()).all(|(x, y)| {
-                    (x.x - y.x).abs() <= EPS
-                        && (x.y - y.y).abs() <= EPS
-                        && (x.width - y.width).abs() <= EPS
-                        && (x.height - y.height).abs() <= EPS
-                })
-        }
-    }
 }
 
 /// 只改 `/Contents`：原地更新已有注释对象（对象号不变）。

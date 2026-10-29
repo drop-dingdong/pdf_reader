@@ -254,7 +254,8 @@ MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
 * 导出是**同步**调用：等待子进程与冒烟渲染期间 UI 会短暂停顿（通常几十毫秒；超大文件另说）；
 * 父进程**不比较像素**：冒烟校验只保证"文件能打开、页数对、渲染不报错"；
   旋转页的像素位置由 `backend-pdfium` 的回归测试守（INV-12 / L3 已修正），真实阅读器仍需人工抽查；
-* P3 起保存路径只写 PDF：新建注释进 `pages`，PDF 已有注释走 `updates`/`deletes`；
+* P5 起保存路径统一：**只有新注释**（`pdf_ref=None`）进 `pages`；所有已有注释
+  （自有/外部）正文变化走 `updates`，删除走 `deletes`；marker 不再用来隐式删除。
   正文直接从 `Annotation.body` 取；空正文不写 `/Contents`；
 * 外部注释的正文更新/删除按 **xref 对象号** 写：`updates` 走 `FPDFAnnot_SetStringValue`，
   `deletes` 从 `/Annots` 去掉引用，并删除它的 `/Popup` 子对象；内联字典（无对象号）不支持；

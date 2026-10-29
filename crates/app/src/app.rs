@@ -1251,13 +1251,14 @@ impl PdfReaderApp {
             self.message = "当前文档没有标注".to_string();
             return;
         }
-        let has_new = self.annotations.iter().any(|annotation| {
-            !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
-        });
+        // P5：pages 只放“新注释”（没有 PDF 对象号的注释）；已有注释的正文
+        // 全部走 updates，不再靠 marker 差分删除/保留。
         let items: Vec<crate::export::ExportItem> = self
             .annotations
             .iter()
-            .filter(|annotation| has_new && !self.external_ids.contains(&annotation.id))
+            .filter(|annotation| {
+                !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
+            })
             .map(|annotation| {
                 let body = annotation.body.clone().filter(|text| !text.is_empty());
                 crate::export::ExportItem {
@@ -1384,13 +1385,14 @@ impl PdfReaderApp {
             self.message = "当前文档没有标注".to_string();
             return;
         }
-        let has_new = self.annotations.iter().any(|annotation| {
-            !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
-        });
+        // P5：pages 只放“新注释”（没有 PDF 对象号的注释）；已有注释的正文
+        // 全部走 updates，不再靠 marker 差分删除/保留。
         let items: Vec<crate::export::ExportItem> = self
             .annotations
             .iter()
-            .filter(|annotation| has_new && !self.external_ids.contains(&annotation.id))
+            .filter(|annotation| {
+                !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
+            })
             .map(|annotation| {
                 // 正文按哨兵标题从 custom_texts 里取；空正文不写 /Contents
                 let body = annotation.body.clone().filter(|text| !text.is_empty());
