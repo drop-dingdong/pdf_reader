@@ -140,6 +140,15 @@ impl<T> History<T> {
     }
 
     /// 清空（换文档时）。
+    /// 遍历/修改所有命令（撤销栈 + 重做栈），用于写回后把注释快照重新绑定到 PDF 对象号。
+    pub fn commands_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.undo
+            .iter_mut()
+            .chain(self.redo.iter_mut())
+            .map(|entry| &mut entry.command)
+    }
+
+    /// 清空撤销/重做栈（新开文档时用）。
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();

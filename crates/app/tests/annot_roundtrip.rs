@@ -244,3 +244,55 @@ fn consecutive_saves_keep_earlier_annotations() {
     std::env::remove_var("PDF_READER_WRITEBACK_EXE");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn undoing_and_redoing_after_save_then_new_annotation_keeps_both() {
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    if !backend() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "pdf-p3-undoredo-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("建目录");
+    app::replay::samples::Sample::Rotated
+        .write(&dir)
+        .expect("写样本");
+    std::env::set_var("PDF_READER_WRITEBACK_EXE", env!("CARGO_BIN_EXE_app"));
+    let script = dir.join("undo_redo_save.json");
+    std::fs::write(
+        &script,
+        r#"{"name":"undo_redo_save","pdf":"rotated_2p.pdf","actions":[
+             {"id":"resize","op":"resize","width":700,"height":800},
+             {"id":"a","op":"highlight","page":0,"x":50,"y":690,"width":200,"height":20},
+             {"id":"save1","op":"save"},
+             {"id":"settle","op":"wait","frames":8},
+             {"id":"undo","op":"undo"},
+             {"id":"redo","op":"redo"},
+             {"id":"b","op":"highlight","page":0,"x":50,"y":690,"width":200,"height":20},
+             {"id":"save2","op":"save"},
+             {"id":"after","op":"wait","frames":3}
+           ]}"#,
+    )
+    .expect("写脚本");
+    let report = app::replay::run_script_file(&script, None).expect("回放");
+    assert_eq!(
+        report
+            .actions
+            .iter()
+            .find(|a| a.id == "after")
+            .unwrap()
+            .annotations,
+        2,
+        "撤销/重做后新增，二次保存后应有两条"
+    );
+    let readback = backend_pdfium::readback::read(&dir.join("rotated_2p.pdf"), None).expect("读回");
+    assert_eq!(readback.annotations.len(), 2, "撤销重做的那条不能被误删");
+    std::env::remove_var("PDF_READER_WRITEBACK_EXE");
+    std::fs::remove_dir_all(&dir).ok();
+}

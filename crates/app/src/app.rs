@@ -572,6 +572,12 @@ pub struct PdfReaderApp {
     opened_pdf_refs: std::collections::BTreeSet<pdfcore::annotation::PdfObjectRef>,
     /// 打开时每个对象号的正文（用于外部注释正文差分）。
     opened_pdf_bodies: std::collections::HashMap<pdfcore::annotation::PdfObjectRef, Option<String>>,
+    /// 打开时对象号 → 标记 id（撤销/重做后快照可能暂时没有 pdf_ref）。
+    opened_id_by_ref: std::collections::HashMap<pdfcore::annotation::PdfObjectRef, AnnotationId>,
+    /// 外部注释的对象号 → 稳定本地 id（写回重开时复用，撤销栈才能对上）。
+    pdf_ref_ids: std::collections::HashMap<pdfcore::annotation::PdfObjectRef, AnnotationId>,
+    /// 下一次 `open` 是写回后的重开：保留撤销栈与对象号映射。
+    reopening_after_write: bool,
     /// 正在画的一笔墨迹（S4b）；**抬笔之前它不是标注**，取消只要丢掉它。
     ink: Option<InkStroke>,
     /// "下一步把当前选区变成标注"（由快捷键/按钮置位，在画布绘制时执行）。
@@ -589,6 +595,10 @@ pub struct PdfReaderApp {
     pending_view_restore: Option<(PageIndex, f32, Vec2, u8)>,
     /// 注释是否有未写入 PDF 的新增/正文/删除。
     pdf_dirty: bool,
+    /// 上次成功写 PDF / 打开时注释状态的指纹（`None` = 迁移中，保持脏）。
+    pdf_clean_hash: Option<u64>,
+    /// 上次成功保存自定义数据 / 打开时自定义数据的指纹。
+    data_clean_hash: Option<u64>,
     /// 编辑历史（注释 + 重选截图/引用点，单栈时间序）。
     history: crate::history::History<AppEdit>,
     /// 是否显示"编辑历史"可视列表（首次撤销时自动打开）。
@@ -791,6 +801,9 @@ impl PdfReaderApp {
             external_ids: std::collections::HashSet::new(),
             opened_pdf_refs: std::collections::BTreeSet::new(),
             opened_pdf_bodies: std::collections::HashMap::new(),
+            opened_id_by_ref: std::collections::HashMap::new(),
+            pdf_ref_ids: std::collections::HashMap::new(),
+            reopening_after_write: false,
             ink: None,
             pending_annotate: false,
             pending_in_place: false,
@@ -798,6 +811,8 @@ impl PdfReaderApp {
             pdf_marked_annotations: 0,
             pending_view_restore: None,
             pdf_dirty: false,
+            pdf_clean_hash: None,
+            data_clean_hash: None,
             history: crate::history::History::new(),
             show_history: false,
             hovered_annotation: None,
@@ -859,6 +874,8 @@ impl PdfReaderApp {
             last_pan_at: None,
             last_visible: Vec::new(),
         };
+        app.pdf_clean_hash = Some(app.pdf_fingerprint());
+        app.data_clean_hash = Some(app.data_fingerprint());
         if let Some(path) = initial {
             app.open(&path, None);
         }
@@ -926,21 +943,11 @@ impl PdfReaderApp {
                 }
             }
         }
-        let annotation_edit = matches!(
-            &edit,
-            AppEdit::AddAnnotation { .. }
-                | AppEdit::DeleteAnnotation { .. }
-                | AppEdit::SetBody { .. }
-        );
-        if annotation_edit {
-            self.pdf_dirty = true;
-        } else {
-            self.data_dirty = true;
-        }
         if record {
             let weight = edit.weight();
             self.history.push(description, edit, weight);
         }
+        self.refresh_dirty();
     }
 
     /// 撤销一步（反向应用栈顶命令）。
@@ -1310,7 +1317,8 @@ impl PdfReaderApp {
             let _ = std::fs::rename(&overlay, &backup);
         }
 
-        // 重开并恢复视图
+        // 重开并恢复视图；保留撤销栈，并把快照重新绑到新 PDF 对象号
+        self.reopening_after_write = true;
         self.open(&pdf, None);
         if self.session.is_some() {
             // 两帧后再恢复：先让新会话收到真实视口尺寸（见 `pending_view_restore` 的注释）
@@ -1413,6 +1421,64 @@ impl PdfReaderApp {
         }
     }
 
+    /// 注释状态指纹（不含 `pdf_ref`：写回重开时对象号会变）。
+    fn pdf_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut annotations: Vec<_> = self.annotations.iter().collect();
+        annotations.sort_by_key(|annotation| annotation.id);
+        for annotation in annotations {
+            annotation.id.get().hash(&mut hasher);
+            annotation.page.get().hash(&mut hasher);
+            annotation.color.hash(&mut hasher);
+            annotation.opacity.to_bits().hash(&mut hasher);
+            annotation.body.hash(&mut hasher);
+            format!("{:?}", annotation.kind).hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// 自定义数据指纹（preview 的文本/题目/几何 + 被引用点）。
+    fn data_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for preview in &self.custom_previews {
+            preview.page.get().hash(&mut hasher);
+            preview.title.hash(&mut hasher);
+            preview.text.hash(&mut hasher);
+            preview.body_size.x.to_bits().hash(&mut hasher);
+            preview.body_size.y.to_bits().hash(&mut hasher);
+            preview.scale.to_bits().hash(&mut hasher);
+            format!("{:?}", preview.kind).hash(&mut hasher);
+        }
+        for page in &self.dest_marks {
+            for mark in page {
+                mark.point.x.to_bits().hash(&mut hasher);
+                mark.point.y.to_bits().hash(&mut hasher);
+                mark.rect.x.to_bits().hash(&mut hasher);
+                mark.rect.y.to_bits().hash(&mut hasher);
+                mark.rect.width.to_bits().hash(&mut hasher);
+                mark.rect.height.to_bits().hash(&mut hasher);
+                mark.scale.to_bits().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    /// 按“当前状态 vs 上次保存状态”重算两个脏位；撤销回到保存点会自然清零。
+    fn refresh_dirty(&mut self) {
+        if let Some(clean) = self.pdf_clean_hash {
+            self.pdf_dirty = self.pdf_fingerprint() != clean;
+        } else if self.document_path.is_some() || !self.history.is_empty() {
+            self.pdf_dirty = true;
+        }
+        if let Some(clean) = self.data_clean_hash {
+            self.data_dirty = self.data_fingerprint() != clean;
+        } else if self.document_path.is_some() || !self.history.is_empty() {
+            self.data_dirty = true;
+        }
+    }
+
     /// 对象号级别的待写变更：外部正文更新 + 已从 PDF 删除的对象。
     fn pdf_ref_changes(
         &self,
@@ -1425,7 +1491,22 @@ impl PdfReaderApp {
             .iter()
             .filter_map(|annotation| annotation.pdf_ref)
             .collect();
-        let deletes = self.opened_pdf_refs.difference(&current).cloned().collect();
+        let current_ids: std::collections::HashSet<AnnotationId> = self
+            .annotations
+            .iter()
+            .map(|annotation| annotation.id)
+            .collect();
+        let deletes = self
+            .opened_pdf_refs
+            .iter()
+            .filter(|reference| match self.opened_id_by_ref.get(reference) {
+                // 标记注释按 id 判断：撤销/重做后的快照可能暂时没有 pdf_ref，
+                // 但它仍在当前集合里，不能当“已删除”。
+                Some(id) => !current_ids.contains(id),
+                None => !current.contains(reference),
+            })
+            .cloned()
+            .collect();
         let updates = self
             .annotations
             .iter()
@@ -1443,6 +1524,10 @@ impl PdfReaderApp {
 
     /// 保存自定义数据到 `<pdf>.json`（不含任何图片像素）。
     fn save_custom_data(&mut self) {
+        if !self.data_dirty {
+            self.message = "无自定义数据改动".to_string();
+            return;
+        }
         if let Some((found, supported)) = self.sidecar_locked {
             // 见 D-107：更新版本的存档不读也不写，否则就是用残缺数据覆盖完整数据
             self.message = format!(
@@ -1502,6 +1587,8 @@ impl PdfReaderApp {
         match persist::write_atomic(&target, &data.to_json()) {
             Ok(()) => {
                 self.data_dirty = false;
+                let clean = self.data_fingerprint();
+                self.data_clean_hash = Some(clean);
                 self.message = format!("已保存自定义数据：{}", target.display());
             }
             Err(error) => self.message = format!("保存失败：{error}"),
@@ -1530,6 +1617,7 @@ impl PdfReaderApp {
         self.external_ids.clear();
         self.opened_pdf_refs.clear();
         self.opened_pdf_bodies.clear();
+        self.opened_id_by_ref.clear();
         let mut by_page: std::collections::BTreeMap<
             u32,
             Vec<&backend_pdfium::readback::ReadAnnotation>,
@@ -1563,6 +1651,10 @@ impl PdfReaderApp {
                 if let Some(reference) = reference {
                     self.opened_pdf_refs.insert(reference);
                     self.opened_pdf_bodies.insert(reference, item.body.clone());
+                    if let Some(raw_id) = item.id {
+                        self.opened_id_by_ref
+                            .insert(reference, AnnotationId(raw_id));
+                    }
                 }
                 match item.id {
                     Some(raw_id) => {
@@ -1589,15 +1681,37 @@ impl PdfReaderApp {
                         }
                     }
                     None => {
-                        // 外部注释：一视同仁地放进主集合；但不写进 `.annot.json`
-                        let Some(id) = self.annotations.add(item.page, item.kind.clone()) else {
-                            continue;
+                        // 外部注释：优先复用上次会话同一对象号的本地 id，
+                        // 否则写回重开后撤销栈里的 SetBody 会对不上。
+                        let reused = reference
+                            .and_then(|reference| self.pdf_ref_ids.get(&reference).copied())
+                            .filter(|id| self.annotations.get(*id).is_none());
+                        let id = if let Some(id) = reused {
+                            id
+                        } else {
+                            let Some(id) = self.annotations.add(item.page, item.kind.clone())
+                            else {
+                                continue;
+                            };
+                            id
                         };
+                        if self.annotations.get(id).is_none() {
+                            let Some(mut annotation) =
+                                Annotation::new(item.page, item.kind.clone())
+                            else {
+                                continue;
+                            };
+                            annotation.id = id;
+                            self.annotations.insert(annotation);
+                        }
                         if let Some(annotation) = self.annotations.get_mut(id) {
                             annotation.color = item.color;
                             annotation.opacity = item.opacity;
                             annotation.body = item.body.clone();
                             annotation.pdf_ref = reference;
+                        }
+                        if let Some(reference) = reference {
+                            self.pdf_ref_ids.insert(reference, id);
                         }
                         self.external_ids.insert(id);
                     }
@@ -1607,7 +1721,31 @@ impl PdfReaderApp {
         (restored, recovered)
     }
 
+    /// 写回重开后，把撤销栈里注释快照的 `pdf_ref` 重新绑到新 PDF 对象号。
+    fn reconcile_history_refs(&mut self) {
+        let refs: std::collections::HashMap<AnnotationId, pdfcore::annotation::PdfObjectRef> = self
+            .opened_id_by_ref
+            .iter()
+            .map(|(reference, id)| (*id, *reference))
+            .collect();
+        for command in self.history.commands_mut() {
+            if let AppEdit::AddAnnotation { annotation }
+            | AppEdit::DeleteAnnotation { annotation } = command
+            {
+                if let Some(reference) = refs.get(&annotation.id) {
+                    annotation.pdf_ref = Some(*reference);
+                }
+            }
+        }
+    }
+
     fn open(&mut self, path: &std::path::Path, password: Option<&str>) {
+        let preserve_history = self.reopening_after_write;
+        self.reopening_after_write = false;
+        if !preserve_history {
+            self.history.clear();
+            self.pdf_ref_ids.clear();
+        }
         let backend = PdfiumBackend::new();
         match backend.open(Source::Path(path), password) {
             Ok(opened) => {
@@ -1826,6 +1964,9 @@ impl PdfReaderApp {
                             .unwrap_or_default();
                         let (restored, recovered_bodies) =
                             self.merge_readback(&readback, overlay_exists, &ref_pages);
+                        if preserve_history {
+                            self.reconcile_history_refs();
+                        }
                         self.next_float_id = 1;
                         self.capture = None;
                         let title = session.opened().document.info().to_string();
@@ -1861,6 +2002,16 @@ impl PdfReaderApp {
                         if let Some(warning) = open_warning {
                             self.message.push_str(&format!("（{warning}）"));
                         }
+                        self.pdf_clean_hash = if self.pdf_dirty {
+                            None
+                        } else {
+                            Some(self.pdf_fingerprint())
+                        };
+                        self.data_clean_hash = if self.data_dirty {
+                            None
+                        } else {
+                            Some(self.data_fingerprint())
+                        };
                         self.sidecar_migrated = false;
                         self.password_for = None;
                         self.password_input.clear();
@@ -2257,7 +2408,7 @@ impl PdfReaderApp {
                 );
                 response.on_hover_text(&path_text);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = save_button_label(self.data_dirty || self.pdf_dirty);
+                    let label = save_button_label(self.data_dirty);
                     match self.sidecar_locked {
                         // 存档属于更新版本：不读也不写（D-107），按钮直接禁用并说明原因
                         Some((found, supported)) => {
@@ -2273,9 +2424,8 @@ impl PdfReaderApp {
                                 .on_hover_text("保存所有有改动的文件（Ctrl+S）")
                                 .clicked()
                             {
-                                // 按钮与 Ctrl+S 必须**走同一条路径**：上一版按钮只存主存档，
-                                // 于是"点了保存、标注却没落盘"（用户实测踩到）
-                                self.save_all();
+                                // 这个按钮只负责自定义数据；注释用「写入 PDF」/Ctrl+S。
+                                self.save_custom_data();
                             }
                         }
                     }
@@ -6384,6 +6534,22 @@ mod annotation_body_tests {
     }
 
     #[test]
+    fn undo_back_to_saved_state_clears_the_right_dirty_flag() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        assert!(app.pdf_dirty, "新增注释是 PDF 脏");
+        assert!(!app.data_dirty, "新增注释不是自定义数据脏");
+        app.undo_edit();
+        assert!(!app.pdf_dirty, "撤销回到干净点应清 PDF 脏");
+        assert!(!app.data_dirty);
+    }
+
+    #[test]
     fn deleting_and_undoing_annotation_keeps_its_body() {
         let mut app = app();
         assert!(app.add_annotation(
@@ -6444,6 +6610,7 @@ mod external_annotation_tests {
         app.opened_pdf_refs.insert(reference);
         app.opened_pdf_bodies
             .insert(reference, Some("旧".to_string()));
+        app.pdf_clean_hash = Some(app.pdf_fingerprint());
         (app, id, reference)
     }
 

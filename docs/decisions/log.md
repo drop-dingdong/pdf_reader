@@ -1360,6 +1360,33 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **验证**：`check.sh` 全绿（约 360 tests；以实际输出为准）。
 - **状态**：P3 核心完成；P4（对象级保存器）与脏位 UI 待做。
 
+### D-155 P3 修正：撤销/重做跨写回、稳定对象 id、分离脏位
+
+- **问题 1**：写回重开后，撤销栈里的注释快照仍带旧 `pdf_ref`（或 `None`）。再次写回时
+  同一个注释既出现在 `pages`（marker 差分）又被算进 `deletes`，于是被删掉。
+- **修复**：
+  * `opened_id_by_ref`：打开时记录 PDF 对象号 → 标记 id；删除集合按 id 判断
+    “对象是否仍在当前集合”，不再只看当前 `pdf_ref`；
+  * 写回重开保留撤销栈，`reconcile_history_refs()` 把 Add/Delete 快照重新绑到新对象号；
+  * 外部注释用 `pdf_ref_ids` 复用同一对象号对应的本地 id（SetBody 历史跨重开仍有效）；
+  * 新开文档（非写回重开）清空撤销栈与对象号映射（符合用户模型）。
+- **问题 2**：注释编辑让“保存自定义数据”星号亮起，且点击走 `save_all`。
+  * 注释编辑只置 `pdf_dirty`；自定义数据只置 `data_dirty`；
+  * 顶部按钮只显示/保存自定义数据；`写入 PDF`/Ctrl+S 负责注释；
+  * `save_custom_data` 无脏位时直接提示“无自定义数据改动”，不再报“没有打开的文档”。
+- **脏位模型**：用**状态指纹**代替简单布尔：
+  * `pdf_fingerprint`（注释 id/页/几何/颜色/正文，按 id 排序，不含 pdf_ref）；
+  * `data_fingerprint`（preview 文本/题目/几何 + 被引用点）；
+  * 打开/保存记录 clean 指纹；每次编辑、撤销、重做后重算；
+    撤销回到保存点会自然清零；两个脏位完全分离。
+  * 这样与用户提出的“栈位置 + 操作类别”等价，但不受撤销分支/重排影响；
+    `SetBody` 已是单条历史命令。
+- **测试**：`consecutive_saves_keep_earlier_annotations`、
+  `undoing_and_redoing_after_save_then_new_annotation_keeps_both`、
+  `undo_back_to_saved_state_clears_the_right_dirty_flag`；
+  `check.sh` 全绿（363 tests）。
+- **状态**：P3 修正完成；P4（对象级保存器）待做。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |
