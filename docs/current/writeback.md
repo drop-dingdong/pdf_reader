@@ -257,8 +257,9 @@ MSRV 1.75 下不能用 `std::path::absolute`，它 1.79 才稳定）；
 * P5 起保存路径统一：**只有新注释**（`pdf_ref=None`）进 `pages`；所有已有注释
   （自有/外部）正文变化走 `updates`，删除走 `deletes`；marker 不再用来隐式删除。
   正文直接从 `Annotation.body` 取；空正文不写 `/Contents`；
-* 外部注释的正文更新/删除按 **xref 对象号** 写：`updates` 走 `FPDFAnnot_SetStringValue`，
-  `deletes` 从 `/Annots` 去掉引用，并删除它的 `/Popup` 子对象；内联字典（无对象号）不支持；
+* 正文更新/删除按 **xref 对象号** 写：`updates` 用 `pdf_patch` 追加同 `(num,gen)` 版本；
+  `deletes` 用页对象 patch 从 `/Annots` 去掉引用（含 `/Popup`）；内联字典无对象号，不支持；
+  PDFium 不再负责删除或正文原地更新；
 * 目标文件名**不含** `.pdf` 之外的后缀拼接坑：`a.b.pdf` → `a.b.annotated.pdf`（只替换最后一个扩展名）。
 
 ## 10.5 外部注释的按对象号更新/删除（P2）

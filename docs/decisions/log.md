@@ -1558,6 +1558,20 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **验证**：`check.sh` 全绿（375 tests）。
 - **状态**：P5 修正完成。
 
+### D-167 P4c：删除统一改为保存后的页对象 patch
+
+- 增量写回不再让 PDFium 删除注释；保存后统一：
+  * `updates` → `pdf_patch` 同 gen 追加；
+  * `deletes` → `pdf_patch::append_deletes` 复制页对象、去掉 `/Annots` 引用（含 Popup）。
+- `needs_full_save` 移除，`write_incremental` 不再按 gen>0 全量；
+- 期望注释数按 deletes 修正，然后 verify；
+- `page_objects` 接受省略 `/Type /Page` 的页对象（PDFium 增量页对象会这样写），
+  否则混合“新增+删除”会误判；
+- 新增 `mixed_new_and_delete_uses_page_patch_after_save`；
+- 全量 `write()` 仍可用，但产品增量路径完全对象级。
+- **验证**：`check.sh` 全绿（376 tests）；外部-only/混合删除、Popup、间接 Annots。
+- **状态**：P4 对象级正文/删除完成；新增注释仍需 PDFium + 外置。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

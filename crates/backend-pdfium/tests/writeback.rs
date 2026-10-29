@@ -1206,3 +1206,71 @@ fn external_body_can_be_rewritten_twice() {
         "连续两次写回后应读到最新正文"
     );
 }
+
+#[test]
+fn mixed_new_and_delete_uses_page_patch_after_save() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("mixed-p5");
+    let source = dir.join("in.pdf");
+    std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+    let old = dir.join("old.pdf");
+    writeback::write(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
+        source: source.clone(),
+        output: old.clone(),
+        pages: vec![WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![WritebackAnnotation {
+                id: Some(7),
+                kind: AnnotationKind::Highlight {
+                    quads: vec![Rect::new(50.0, 660.0, 100.0, 14.0)],
+                },
+                color: [255, 255, 0],
+                opacity: 0.35,
+                body: Some("old".to_string()),
+            }],
+        }],
+    })
+    .expect("旧注释");
+    let reference = backend_pdfium::pdf_index::page_annotations(&std::fs::read(&old).unwrap())
+        .unwrap()
+        .iter()
+        .flatten()
+        .find(|entry| matches!(entry.subtype, Some(9 | 10 | 12 | 15)))
+        .and_then(|entry| entry.reference)
+        .unwrap();
+    let output = dir.join("out.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: vec![reference],
+        source: old,
+        output: output.clone(),
+        pages: vec![WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![WritebackAnnotation {
+                id: Some(8),
+                kind: AnnotationKind::Highlight {
+                    quads: vec![Rect::new(200.0, 660.0, 100.0, 14.0)],
+                },
+                color: [255, 255, 0],
+                opacity: 0.35,
+                body: Some("new".to_string()),
+            }],
+        }],
+    })
+    .expect("新+删");
+    let read = readback::read(&output, None).expect("读回");
+    assert_eq!(read.annotations.len(), 1, "链接不计入 readback；只剩新注释");
+    assert!(read
+        .annotations
+        .iter()
+        .any(|annotation| annotation.body.as_deref() == Some("new")));
+    assert!(!read
+        .annotations
+        .iter()
+        .any(|annotation| annotation.body.as_deref() == Some("old")));
+}

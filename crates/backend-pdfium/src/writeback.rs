@@ -155,13 +155,9 @@ pub fn write(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
 /// 原地写入用它 —— PDFium 全量重写会把 Adobe 等阅读器的对象流展开，
 /// 有用户实测 Okular 保存时报“文件有问题”；增量保存不动原有对象（D-141）。
 pub fn write_incremental(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
-    // PDFium 的增量保存对 generation > 0 的注释会写出新对象（gen 0），
-    // 但重新打开时仍解析到旧代（实测：Okular 样本的 highlight `11 1 R`）。
-    // 这类对象改用全量保存：PDFium 会把注释统一重写为 gen 0，读回正确。
-    // 其它情况仍走增量，保留 Adobe 等对象流/外部结构（D-141）。
-    let direct = spec.pages.is_empty() && (!spec.updates.is_empty() || !spec.deletes.is_empty());
-    let full = !direct && needs_full_save(spec);
-    write_with_mode(spec, !full)
+    // P4c：正文/删除都由 pdf_patch 以对象级增量处理；新注释才需要 PDFium。
+    // 不再按 gen>0 做全量兜底。
+    write_with_mode(spec, true)
 }
 
 fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<WritebackReport> {
@@ -191,22 +187,6 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
                 locations.insert(reference, (page, index));
                 if let Some(popup) = entry.popup {
                     popups.insert(reference, popup);
-                }
-            }
-        }
-    }
-    let mut page_deletes: HashMap<usize, Vec<usize>> = HashMap::new();
-    for reference in &spec.deletes {
-        let Some(&(page, index)) = locations.get(reference) else {
-            return Err(WritebackError::Invalid(format!(
-                "要删除的注释对象 {reference:?} 不在当前 PDF 中（可能已被外部修改）"
-            )));
-        };
-        page_deletes.entry(page).or_default().push(index);
-        if let Some(popup) = popups.get(reference) {
-            if let Some(&(popup_page, popup_index)) = locations.get(popup) {
-                if popup_page == page {
-                    page_deletes.entry(page).or_default().push(popup_index);
                 }
             }
         }
@@ -260,6 +240,22 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
         let page_count = (ffi.page_count)(document).max(0) as usize;
 
         expected = vec![0usize; page_count];
+        // 删除统一在保存后用 pdf_patch 改页对象；这里只校验对象存在。
+        let mut deleted_counts = vec![0usize; page_count];
+        for reference in &spec.deletes {
+            let Some(&(page, _)) = locations.get(reference) else {
+                return Err(WritebackError::Invalid(format!(
+                    "要删除的注释对象 {reference:?} 不在当前 PDF 中（可能已被外部修改）"
+                )));
+            };
+            deleted_counts[page] += 1;
+            if let Some(popup) = popups.get(reference) {
+                if let Some(&(popup_page, _)) = locations.get(popup) {
+                    deleted_counts[popup_page] += 1;
+                }
+            }
+        }
+
         // 写之前先确认页号合法，避免写了一半才失败
         for page in &spec.pages {
             let index = page.page.get() as usize;
@@ -366,10 +362,6 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
             let count = (ffi.annot_count)(handle).max(0) as usize;
             let wanted = desired.get(&(index as u32));
             let mut present: std::collections::HashSet<u64> = std::collections::HashSet::new();
-            let mut remove_indices: Vec<c_int> = page_deletes
-                .get(&index)
-                .map(|indices| indices.iter().map(|index| *index as c_int).collect())
-                .unwrap_or_default();
             if let Some(updates) = page_updates.get(&index) {
                 for update in updates {
                     let (_, annot_index) = locations[&update.reference];
@@ -408,22 +400,6 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
                 }
                 (ffi.close_annot)(annot);
             }
-            // 合并 marker 删除与对象号删除，按索引降序删；去重（父/子删除可能重叠）
-            remove_indices.sort_unstable();
-            remove_indices.dedup();
-            let mut remaining = count;
-            for annot_index in remove_indices.iter().rev() {
-                if (ffi.remove_annot)(handle, *annot_index) == 0 {
-                    (ffi.close_page)(handle);
-                    (ffi.close_document)(document);
-                    return Err(WritebackError::Pdfium {
-                        stage: "FPDFPage_RemoveAnnot",
-                        message: format!("第 {} 页 #{}", index + 1, annot_index),
-                    });
-                }
-                remaining -= 1;
-            }
-
             let mut added = 0usize;
             if let Some(page) = spec
                 .pages
@@ -440,7 +416,7 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
                     added += 1;
                 }
             }
-            *expected_slot = remaining + added;
+            *expected_slot = count + added;
             (ffi.close_page)(handle);
         }
 
@@ -456,12 +432,19 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
             bytes = crate::pdf_patch::append_content_updates(&bytes, &updates)
                 .map_err(WritebackError::Invalid)?;
         }
+        if !spec.deletes.is_empty() {
+            bytes = crate::pdf_patch::append_deletes(&bytes, &spec.deletes)
+                .map_err(WritebackError::Invalid)?;
+        }
         // PDFium 新建的注释是内联字典；Okular 保存这类注释会丢修改（D-142）。
         // 追加一段增量更新，把它们外置成独立对象。
         if let Some(fixed) = crate::pdf_repair::externalize_annotations(&bytes) {
             bytes = fixed;
         }
         (ffi.close_document)(document);
+        for (slot, deleted) in expected.iter_mut().zip(deleted_counts) {
+            *slot = slot.saturating_sub(deleted);
+        }
 
         std::fs::write(&spec.output, &bytes).map_err(|error| {
             WritebackError::Io(format!(
@@ -480,21 +463,6 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
             .map(|metadata| metadata.len())
             .unwrap_or(0),
     })
-}
-
-/// 增量保存是否会踩到“旧对象版本”的坑。
-///
-/// 实测：Okular 样本的 highlight 是 `11 1 R`（generation 1）。PDFium 增量写出
-/// gen0 新对象并改页引用后，重新打开仍解析旧代。这类对象改走全量保存；
-/// PDFium 会把对象统一重写，读回一致。
-///
-/// **不再按“同一 (num,gen) 出现多版”触发全量**：evince/firefox 等样本本身就有
-/// 多版历史，全量重写会让 Okular 保存时报警；Adobe 的 ObjStm 也必须保留。
-/// 已经被旧版增量写坏的文件（多版 gen0）需要从原始样本重新生成，或用显式修复流程。
-fn needs_full_save(spec: &WritebackSpec) -> bool {
-    // 正文更新已改走 pdf_patch（同 generation 追加），不再触发全量；
-    // 删除仍暂由 PDFium 处理，gen>0 时维持全量兜底（P4c 再改）。
-    spec.deletes.iter().any(|reference| reference.gen > 0)
 }
 
 /// 读回输出文件的逐页注释数（供调用方校验；**不渲染**）。
@@ -1032,7 +1000,6 @@ pub(crate) struct Ffi {
     pub(crate) close_page: unsafe extern "C" fn(*mut c_void),
     pub(crate) annot_count: unsafe extern "C" fn(*mut c_void) -> c_int,
     pub(crate) get_annot: unsafe extern "C" fn(*mut c_void, c_int) -> *mut c_void,
-    pub(crate) remove_annot: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
     pub(crate) create_annot: unsafe extern "C" fn(*mut c_void, c_uint) -> *mut c_void,
     pub(crate) close_annot: unsafe extern "C" fn(*mut c_void),
     pub(crate) set_rect: unsafe extern "C" fn(*mut c_void, *const FsRectF) -> c_int,
@@ -1123,10 +1090,6 @@ impl Ffi {
             get_annot: sym!(
                 "FPDFPage_GetAnnot",
                 unsafe extern "C" fn(*mut c_void, c_int) -> *mut c_void
-            ),
-            remove_annot: sym!(
-                "FPDFPage_RemoveAnnot",
-                unsafe extern "C" fn(*mut c_void, c_int) -> c_int
             ),
             create_annot: sym!(
                 "FPDFPage_CreateAnnot",

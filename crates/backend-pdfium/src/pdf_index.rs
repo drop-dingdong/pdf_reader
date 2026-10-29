@@ -102,9 +102,8 @@ fn walk_page_objects(
         }
         return Ok(());
     }
-    if !is_name(&object.dict, b"/Type", b"/Page") {
-        return Err(format!("对象 {reference:?} 既不是 /Pages 也不是 /Page"));
-    }
+    // PDFium 增量写出的页对象可能省略 `/Type /Page`；页树 `/Kids` 下
+    // 非 `/Pages` 的节点按页处理。
     out.push(PageObject {
         reference,
         dict: object.dict.clone(),
