@@ -624,3 +624,377 @@ fn number_f32(value: f32) -> f32 {
         0.0
     }
 }
+
+/// 文本类标记的种类（新注释对象化）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkupKind {
+    /// 高亮。
+    Highlight,
+    /// 下划线。
+    Underline,
+    /// 删除线。
+    StrikeOut,
+}
+
+/// 一条待写入的新文本标记（高亮/下划线/删除线）。
+pub struct NewMarkup {
+    /// 页号（0 起）。
+    pub page: u32,
+    /// 我们的注释 id。
+    pub id: Option<u64>,
+    /// 包围盒。
+    pub rect: pdfcore::prelude::Rect,
+    /// 逐行矩形。
+    pub quads: Vec<pdfcore::prelude::Rect>,
+    /// 种类。
+    pub kind: MarkupKind,
+    /// RGB。
+    pub color: [u8; 3],
+    /// 不透明度。
+    pub opacity: f32,
+    /// 正文。
+    pub body: Option<String>,
+}
+
+/// 追加新高亮/下划线/删除线：注释对象 + 可选 AP Form + 页 /Annots + xref。
+pub fn append_new_markups(pdf: &[u8], markups: &[NewMarkup]) -> Result<Vec<u8>, String> {
+    if markups.is_empty() {
+        return Ok(pdf.to_vec());
+    }
+    let pages = crate::pdf_index::page_objects(pdf)?;
+    let trailer = trailer(pdf)?;
+    let mut next_object = trailer.size.max(
+        pages
+            .iter()
+            .map(|page| page.reference.num)
+            .max()
+            .unwrap_or(0)
+            + 1,
+    );
+    let mut out = pdf.to_vec();
+    if !out.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    let mut entries: Vec<(PdfObjectRef, usize)> = Vec::new();
+    let mut by_page: std::collections::BTreeMap<usize, Vec<PdfObjectRef>> =
+        std::collections::BTreeMap::new();
+
+    for markup in markups {
+        let page = pages
+            .get(markup.page as usize)
+            .ok_or_else(|| format!("页号 {} 越界", markup.page))?;
+        let annotation_number = next_object;
+        next_object += 1;
+        let ap_number = if matches!(markup.kind, MarkupKind::Highlight) {
+            None
+        } else {
+            let number = next_object;
+            next_object += 1;
+            Some(number)
+        };
+
+        if let Some(ap_number) = ap_number {
+            let content = if markup.kind == MarkupKind::Underline {
+                lines_content(&markup.quads, false, markup.color, markup.opacity)
+            } else {
+                lines_content(&markup.quads, true, markup.color, markup.opacity)
+            };
+            let ap = format!(
+                "<</Type/XObject/Subtype/Form/FormType 1/BBox[{:.2} {:.2} {:.2} {:.2}]/Matrix[1 0 0 1 0 0]/Resources<<>>/Length {}>>\nstream\n{}\nendstream\nendobj\n",
+                number_f32(markup.rect.x),
+                number_f32(markup.rect.y),
+                number_f32(markup.rect.x + markup.rect.width),
+                number_f32(markup.rect.y + markup.rect.height),
+                content.len(),
+                content
+            );
+            let offset = out.len();
+            out.extend_from_slice(format!("{ap_number} 0 obj\n").as_bytes());
+            out.extend_from_slice(ap.as_bytes());
+            entries.push((
+                PdfObjectRef {
+                    num: ap_number,
+                    gen: 0,
+                },
+                offset,
+            ));
+        }
+
+        let subtype = match markup.kind {
+            MarkupKind::Highlight => "Highlight",
+            MarkupKind::Underline => "Underline",
+            MarkupKind::StrikeOut => "StrikeOut",
+        };
+        let mut dict = format!(
+            "<</Type/Annot/Subtype/{subtype}/Rect[{:.2} {:.2} {:.2} {:.2}]/QuadPoints[",
+            number_f32(markup.rect.x),
+            number_f32(markup.rect.y),
+            number_f32(markup.rect.x + markup.rect.width),
+            number_f32(markup.rect.y + markup.rect.height),
+        );
+        for quad in &markup.quads {
+            dict.push_str(&format!(
+                "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2}",
+                number_f32(quad.x),
+                number_f32(quad.y + quad.height),
+                number_f32(quad.x + quad.width),
+                number_f32(quad.y + quad.height),
+                number_f32(quad.x),
+                number_f32(quad.y),
+                number_f32(quad.x + quad.width),
+                number_f32(quad.y),
+            ));
+        }
+        dict.push_str(&format!(
+            "]/C[{:.3} {:.3} {:.3}]/CA {:.3}/F 4",
+            markup.color[0] as f32 / 255.0,
+            markup.color[1] as f32 / 255.0,
+            markup.color[2] as f32 / 255.0,
+            markup.opacity.clamp(0.0, 1.0),
+        ));
+        if let Some(id) = markup.id {
+            dict.push_str(&format!("/NM(pd-fr:{id})"));
+        }
+        if let Some(body) = &markup.body {
+            dict.push_str(&format!("/Contents <{}>", utf16_hex(body)));
+        }
+        if let Some(ap_number) = ap_number {
+            dict.push_str(&format!("/AP<</N {ap_number} 0 R>>"));
+        }
+        dict.push_str(&format!(
+            "/P {} {} R>>",
+            page.reference.num, page.reference.gen
+        ));
+        let offset = out.len();
+        out.extend_from_slice(format!("{annotation_number} 0 obj\n").as_bytes());
+        out.extend_from_slice(dict.as_bytes());
+        out.extend_from_slice(b"\nendobj\n");
+        let reference = PdfObjectRef {
+            num: annotation_number,
+            gen: 0,
+        };
+        entries.push((reference, offset));
+        by_page
+            .entry(markup.page as usize)
+            .or_default()
+            .push(reference);
+    }
+
+    for (page_index, refs) in by_page {
+        let page = &pages[page_index];
+        let new_dict = append_annots(pdf, &page.dict, &refs)?;
+        let offset = out.len();
+        out.extend_from_slice(
+            format!("{} {} obj\n", page.reference.num, page.reference.gen).as_bytes(),
+        );
+        out.extend_from_slice(&new_dict);
+        out.extend_from_slice(b"\nendobj\n");
+        entries.push((page.reference, offset));
+    }
+
+    append_xref(pdf, trailer, &mut out, entries)
+}
+
+fn lines_content(
+    quads: &[pdfcore::prelude::Rect],
+    middle: bool,
+    color: [u8; 3],
+    opacity: f32,
+) -> String {
+    let alpha = opacity.clamp(0.0, 1.0);
+    let mut content = format!(
+        "q {:.3} {:.3} {:.3} RG 1 w {:.3} CA {:.3} ca",
+        color[0] as f32 / 255.0,
+        color[1] as f32 / 255.0,
+        color[2] as f32 / 255.0,
+        alpha,
+        alpha
+    );
+    for quad in quads {
+        let y = if middle {
+            quad.y + quad.height * 0.5
+        } else {
+            quad.y
+        };
+        content.push_str(&format!(
+            " {:.2} {:.2} m {:.2} {:.2} l",
+            number_f32(quad.x),
+            number_f32(y),
+            number_f32(quad.x + quad.width),
+            number_f32(y)
+        ));
+    }
+    content.push_str(" S Q");
+    content
+}
+
+/// 一条待写入的新墨迹。
+pub struct NewInk {
+    /// 页号。
+    pub page: u32,
+    /// 我们的注释 id。
+    pub id: Option<u64>,
+    /// 包围盒。
+    pub rect: pdfcore::prelude::Rect,
+    /// 折线点。
+    pub points: Vec<pdfcore::prelude::Point>,
+    /// 线宽。
+    pub width: f32,
+    /// RGB。
+    pub color: [u8; 3],
+    /// 不透明度。
+    pub opacity: f32,
+    /// 正文。
+    pub body: Option<String>,
+}
+
+/// 追加新墨迹：注释对象 + Form AP（路径描边）+ 页 /Annots + xref。
+pub fn append_new_inks(pdf: &[u8], inks: &[NewInk]) -> Result<Vec<u8>, String> {
+    if inks.is_empty() {
+        return Ok(pdf.to_vec());
+    }
+    let pages = crate::pdf_index::page_objects(pdf)?;
+    let trailer = trailer(pdf)?;
+    let mut next_object = trailer.size.max(
+        pages
+            .iter()
+            .map(|page| page.reference.num)
+            .max()
+            .unwrap_or(0)
+            + 1,
+    );
+    let mut out = pdf.to_vec();
+    if !out.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    let mut entries: Vec<(PdfObjectRef, usize)> = Vec::new();
+    let mut by_page: std::collections::BTreeMap<usize, Vec<PdfObjectRef>> =
+        std::collections::BTreeMap::new();
+
+    for ink in inks {
+        let page = pages
+            .get(ink.page as usize)
+            .ok_or_else(|| format!("页号 {} 越界", ink.page))?;
+        let annotation_number = next_object;
+        next_object += 1;
+        let ap_number = next_object;
+        next_object += 1;
+        let half = ink.width.max(0.0) * 0.5;
+        let bbox = pdfcore::prelude::Rect::new(
+            ink.rect.x - half,
+            ink.rect.y - half,
+            ink.rect.width + ink.width,
+            ink.rect.height + ink.width,
+        );
+        let alpha = ink.opacity.clamp(0.0, 1.0);
+        let mut content = format!(
+            "q {:.3} {:.3} {:.3} RG {:.2} w 1 J 1 j {:.3} CA {:.3} ca",
+            ink.color[0] as f32 / 255.0,
+            ink.color[1] as f32 / 255.0,
+            ink.color[2] as f32 / 255.0,
+            ink.width.max(0.1),
+            alpha,
+            alpha
+        );
+        if let Some(first) = ink.points.first() {
+            content.push_str(&format!(
+                " {:.2} {:.2} m",
+                number_f32(first.x),
+                number_f32(first.y)
+            ));
+            for point in &ink.points[1..] {
+                content.push_str(&format!(
+                    " {:.2} {:.2} l",
+                    number_f32(point.x),
+                    number_f32(point.y)
+                ));
+            }
+            content.push_str(" S Q");
+        } else {
+            content = "q Q".to_string();
+        }
+        let ap = format!(
+            "<</Type/XObject/Subtype/Form/FormType 1/BBox[{:.2} {:.2} {:.2} {:.2}]/Matrix[1 0 0 1 0 0]/Resources<</ExtGState<</GS<</Type/ExtGState/CA {:.3}/ca {:.3}>>>>>>/Length {}>>\nstream\n{}\nendstream\nendobj\n",
+            number_f32(bbox.x),
+            number_f32(bbox.y),
+            number_f32(bbox.x + bbox.width),
+            number_f32(bbox.y + bbox.height),
+            alpha,
+            alpha,
+            content.len(),
+            content
+        );
+        let offset = out.len();
+        out.extend_from_slice(format!("{ap_number} 0 obj\n").as_bytes());
+        out.extend_from_slice(ap.as_bytes());
+        entries.push((
+            PdfObjectRef {
+                num: ap_number,
+                gen: 0,
+            },
+            offset,
+        ));
+
+        let mut ink_list = String::from("[");
+        for (i, point) in ink.points.iter().enumerate() {
+            if i > 0 {
+                ink_list.push(' ');
+            }
+            ink_list.push_str(&format!(
+                "{:.2} {:.2}",
+                number_f32(point.x),
+                number_f32(point.y)
+            ));
+        }
+        ink_list.push(']');
+        let mut dict = format!(
+            "<</Type/Annot/Subtype/Ink/Rect[{:.2} {:.2} {:.2} {:.2}]/InkList[{}]/C[{:.3} {:.3} {:.3}]/CA {:.3}/Border[0 0 {:.2}]/F 4/AP<</N {ap_number} 0 R>>",
+            number_f32(ink.rect.x),
+            number_f32(ink.rect.y),
+            number_f32(ink.rect.x + ink.rect.width),
+            number_f32(ink.rect.y + ink.rect.height),
+            ink_list,
+            ink.color[0] as f32 / 255.0,
+            ink.color[1] as f32 / 255.0,
+            ink.color[2] as f32 / 255.0,
+            alpha,
+            ink.width.max(0.1)
+        );
+        if let Some(id) = ink.id {
+            dict.push_str(&format!("/NM(pd-fr:{id})"));
+        }
+        if let Some(body) = &ink.body {
+            dict.push_str(&format!("/Contents <{}>", utf16_hex(body)));
+        }
+        dict.push_str(&format!(
+            "/P {} {} R>>",
+            page.reference.num, page.reference.gen
+        ));
+        let offset = out.len();
+        out.extend_from_slice(format!("{annotation_number} 0 obj\n").as_bytes());
+        out.extend_from_slice(dict.as_bytes());
+        out.extend_from_slice(b"\nendobj\n");
+        let reference = PdfObjectRef {
+            num: annotation_number,
+            gen: 0,
+        };
+        entries.push((reference, offset));
+        by_page
+            .entry(ink.page as usize)
+            .or_default()
+            .push(reference);
+    }
+
+    for (page_index, refs) in by_page {
+        let page = &pages[page_index];
+        let new_dict = append_annots(pdf, &page.dict, &refs)?;
+        let offset = out.len();
+        out.extend_from_slice(
+            format!("{} {} obj\n", page.reference.num, page.reference.gen).as_bytes(),
+        );
+        out.extend_from_slice(&new_dict);
+        out.extend_from_slice(b"\nendobj\n");
+        entries.push((page.reference, offset));
+    }
+    append_xref(pdf, trailer, &mut out, entries)
+}

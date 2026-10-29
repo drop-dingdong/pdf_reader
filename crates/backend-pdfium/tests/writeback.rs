@@ -1326,3 +1326,132 @@ fn new_highlight_uses_object_patch_and_one_revision() {
     assert_eq!(read.annotations.len(), 1);
     assert_eq!(read.annotations[0].body.as_deref(), Some("new"));
 }
+
+#[test]
+fn new_underline_and_strike_use_object_patch() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("new-underlines-p6");
+    let source = dir.join("in.pdf");
+    std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+    let output = dir.join("out.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
+        source: source.clone(),
+        output: output.clone(),
+        pages: vec![WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![
+                WritebackAnnotation {
+                    id: Some(1),
+                    kind: AnnotationKind::Underline {
+                        quads: vec![Rect::new(50.0, 660.0, 100.0, 14.0)],
+                    },
+                    color: [255, 0, 0],
+                    opacity: 1.0,
+                    body: Some("under".to_string()),
+                },
+                WritebackAnnotation {
+                    id: Some(2),
+                    kind: AnnotationKind::StrikeOut {
+                        quads: vec![Rect::new(50.0, 630.0, 100.0, 14.0)],
+                    },
+                    color: [255, 0, 0],
+                    opacity: 1.0,
+                    body: Some("strike".to_string()),
+                },
+            ],
+        }],
+    })
+    .expect("新下划线/删除线");
+    assert_eq!(
+        writeback::count_annotations(&output).expect("数"),
+        vec![3, 0],
+        "链接 + 两条标记"
+    );
+    assert!(
+        std::fs::metadata(&output).unwrap().len()
+            < std::fs::metadata(&source).unwrap().len() + 3_000,
+        "应只追加对象级内容"
+    );
+    let read = readback::read(&output, None).expect("读回");
+    assert_eq!(read.annotations.len(), 2);
+    assert!(read
+        .annotations
+        .iter()
+        .any(|annotation| matches!(annotation.kind, AnnotationKind::Underline { .. })));
+    assert!(read
+        .annotations
+        .iter()
+        .any(|annotation| matches!(annotation.kind, AnnotationKind::StrikeOut { .. })));
+}
+
+#[test]
+fn new_ink_uses_object_patch_with_form_ap() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("new-ink-p6");
+    let source = dir.join("in.pdf");
+    std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+    let output = dir.join("out.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
+        source: source.clone(),
+        output: output.clone(),
+        pages: vec![WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![WritebackAnnotation {
+                id: Some(9),
+                kind: AnnotationKind::Ink {
+                    points: vec![
+                        Point::new(50.0, 700.0),
+                        Point::new(150.0, 720.0),
+                        Point::new(250.0, 700.0),
+                    ],
+                    width: 4.0,
+                },
+                color: [25, 25, 25],
+                opacity: 1.0,
+                body: Some("ink".to_string()),
+            }],
+        }],
+    })
+    .expect("新墨迹");
+    assert_eq!(
+        writeback::count_annotations(&output).expect("数"),
+        vec![2, 0],
+        "链接 + 墨迹"
+    );
+    let read = readback::read(&output, None).expect("读回");
+    assert_eq!(read.annotations.len(), 1);
+    assert!(matches!(
+        read.annotations[0].kind,
+        AnnotationKind::Ink { .. }
+    ));
+    assert_eq!(read.annotations[0].body.as_deref(), Some("ink"));
+    assert!(
+        std::fs::metadata(&output).unwrap().len()
+            < std::fs::metadata(&source).unwrap().len() + 3_000,
+        "墨迹应只追加 AP + 注释 + 页对象"
+    );
+    let backend = PdfiumBackend::new().with_annotations(true);
+    let opened = backend.open(Source::Path(&output), None).expect("重开");
+    let image = opened
+        .raster
+        .render(&RenderRequest::new(
+            PageIndex::FIRST,
+            Scale::IDENTITY,
+            Rotation::None,
+        ))
+        .expect("渲染");
+    let dark = count_in_band(&image, 62, 100, |pixel| {
+        pixel[0] < 80 && pixel[1] < 80 && pixel[2] < 80
+    });
+    assert!(dark > 100, "墨迹 AP 应渲染出深色路径，实际 {dark}");
+}

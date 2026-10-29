@@ -1587,6 +1587,25 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   `check.sh` 全绿（377 tests）。
 - **状态**：P6a 完成；underline/strike/ink 的新增仍待对象化。
 
+### D-169 P6b：下划线、删除线、墨迹新增也对象化
+
+- `pdf_patch::NewMarkup`/`append_new_markups`：
+  * Highlight 无 AP；
+  * Underline/StrikeOut 写 Form XObject AP（BBox=Rect、Matrix 单位阵、页面坐标线条）；
+- `pdf_patch::NewInk`/`append_new_inks`：
+  * 写 Form XObject AP：BBox 扩半线宽、Matrix 单位阵、`1 J 1 j`、
+    路径 `m/l`、颜色/线宽/CA/ca、ExtGState；
+  * 注释 dict 同时写 `/InkList`。
+- `write_incremental` 的新注释快路径现在覆盖全部四种：Highlight/Underline/StrikeOut/Ink
+  都直接对象级追加，不再需要 PDFium 保存/外置；新注释通常只增加一段小修订。
+- **验证**：
+  * 新高亮/下划线/删除线读回种类/正文；
+  * 新墨迹读回 + 打开注释层渲染，深色路径像素 >100；
+  * 增长 <3KB；`check.sh` 全绿（379 tests）。
+- **风险**：手写 AP 的 Okular/Poppler 保存兼容性还需真实 Okular 验证；
+  若某类异常，可按种类退回 PDFium 路径。
+- **状态**：P6b 完成；待用户用 Okular 打开/另存新增三类注释验证。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |
