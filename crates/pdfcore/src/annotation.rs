@@ -15,8 +15,14 @@ use crate::ids::PageIndex;
 /// 文本类标注的默认颜色（半透明黄，像荧光笔）。
 pub const TEXT_MARK_COLOR: [u8; 3] = [255, 214, 0];
 
-/// 文本类标注的默认不透明度。
+/// 高亮的默认不透明度（下划线/删除线默认不透明）。
 pub const TEXT_MARK_OPACITY: f32 = 0.35;
+
+/// 下划线/删除线的页面空间线宽。
+pub const TEXT_MARK_LINE_WIDTH: f32 = 1.5;
+
+/// 下划线相对文字底部的下移量（页面空间）。
+pub const UNDERLINE_GAP: f32 = 0.6;
 
 /// 墨迹的默认颜色（不透明深色，像笔）。
 ///
@@ -165,7 +171,10 @@ impl Annotation {
         }
         let (color, opacity) = match &kind {
             AnnotationKind::Ink { .. } => (INK_COLOR, INK_OPACITY),
-            _ => (TEXT_MARK_COLOR, TEXT_MARK_OPACITY),
+            AnnotationKind::Highlight { .. } => (TEXT_MARK_COLOR, TEXT_MARK_OPACITY),
+            AnnotationKind::Underline { .. } | AnnotationKind::StrikeOut { .. } => {
+                (TEXT_MARK_COLOR, 1.0)
+            }
         };
         Some(Self {
             id: AnnotationId(0),
@@ -554,8 +563,16 @@ mod tests {
         assert_eq!(
             (highlight.color, highlight.opacity),
             (TEXT_MARK_COLOR, TEXT_MARK_OPACITY),
-            "文本类仍是半透明黄"
+            "高亮仍是半透明黄"
         );
+        let underline = Annotation::new(
+            page,
+            AnnotationKind::Underline {
+                quads: vec![quad(0.0, 0.0, 5.0, 5.0)],
+            },
+        )
+        .expect("有效下划线");
+        assert_eq!(underline.opacity, 1.0, "下划线/删除线默认不透明");
     }
 
     #[test]

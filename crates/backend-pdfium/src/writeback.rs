@@ -30,7 +30,7 @@ use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void, CString};
 use std::os::raw::c_float;
 use std::path::{Path, PathBuf};
 
-use pdfcore::annotation::{Annotation, AnnotationKind};
+use pdfcore::annotation::{Annotation, AnnotationKind, TEXT_MARK_LINE_WIDTH, UNDERLINE_GAP};
 use pdfcore::prelude::{PageIndex, Point, Rect};
 
 use crate::pdf_index::{page_annotations, PdfObjectRef};
@@ -644,11 +644,21 @@ unsafe fn add_annotation(
         .bounds()
         .ok_or_else(|| WritebackError::Invalid("几何没有包围盒".to_string()))?;
 
+    // 下划线在文字下方留 gap；PDFium 的 AP 会被注释 Rect 裁剪，
+    // 所以 Rect 也要向下扩，不能只改内容流。
+    let (bottom, height) = if matches!(annotation.kind, AnnotationKind::Underline { .. }) {
+        (
+            bounds.y - UNDERLINE_GAP - TEXT_MARK_LINE_WIDTH * 0.5,
+            bounds.height + UNDERLINE_GAP + TEXT_MARK_LINE_WIDTH * 0.5,
+        )
+    } else {
+        (bounds.y, bounds.height)
+    };
     let rect = FsRectF {
         left: bounds.x,
         right: bounds.x + bounds.width,
-        bottom: bounds.y,
-        top: bounds.y + bounds.height,
+        bottom,
+        top: bottom + height,
     };
     if (ffi.set_rect)(handle, &rect) == 0 {
         (ffi.close_annot)(handle);
@@ -856,7 +866,7 @@ fn lines_at(quads: &[Rect], middle: bool, stroke: &str, opacity: f32) -> String 
         let y = if middle {
             quad.y + quad.height * 0.5
         } else {
-            quad.y
+            quad.y - UNDERLINE_GAP
         };
         content.push_str(&format!(
             " {} {} m {} {} l",
@@ -1030,12 +1040,6 @@ pub(crate) const ANNOT_INK: c_uint = 15;
 const ANNOT_FLAG_PRINT: c_int = 4;
 const FPDF_NO_INCREMENTAL: c_uint = 2;
 const FPDF_INCREMENTAL: c_uint = 1;
-/// 文本类标注的导出线宽（**页面空间** pt）。
-///
-/// 界面里的下划线/删除线画的是 2 **屏幕**像素（与缩放无关），导出到 PDF 只能选一个
-/// 页面空间值；这里取 2pt（100% 下与界面一致）。差异记录在 `docs/current/writeback.md`。
-const TEXT_MARK_LINE_WIDTH: f32 = 2.0;
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct FsPointF {
@@ -1371,8 +1375,8 @@ mod tests {
         )
         .expect("下划线必须写 AP");
         assert!(
-            underline.contains("10.00 20.00 m 110.00 20.00 l"),
-            "底线在 y=20：{underline}"
+            underline.contains("10.00 19.40 m 110.00 19.40 l"),
+            "底线应下移 UNDERLINE_GAP：{underline}"
         );
         assert!(
             underline.contains("0.80 CA 0.80 ca"),

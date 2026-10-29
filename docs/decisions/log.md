@@ -1614,6 +1614,17 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - 测试 `three_markup_buttons_map_to_three_annotation_kinds`；`check.sh` 全绿（380 tests）。
 - **状态**：按钮完成；三种标记写回已由 P6b 对象化。
 
+### D-171 下划线/删除线样式：随缩放线宽、不透明、下划线留 gap
+
+- **线宽**：界面原来固定 2 屏幕像素，缩放不变；改为
+  `TEXT_MARK_LINE_WIDTH(1.5pt) * placement.scale`，随缩放变化；AP 也写 1.5pt。
+- **不透明**：`Annotation::new` 对 Underline/StrikeOut 默认 opacity=1.0；高亮仍 0.35。
+- **下划线 gap**：`UNDERLINE_GAP=0.6pt`；界面画在文字底部下方，PDF AP 内容也下移；
+  AP 的 BBox 和 PDFium 路径的注释 Rect 同时向下扩，避免被裁剪。
+- **测试**：四类像素位置仍通过（下划线带更新为 gap 后位置）；
+  `check.sh` 全绿（380 tests）。
+- **说明**：外部注释仍按自己的 `/CA` 显示；新建下划线/删除线默认不透明。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

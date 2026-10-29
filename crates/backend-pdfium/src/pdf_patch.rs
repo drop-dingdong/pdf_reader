@@ -693,6 +693,18 @@ pub fn append_new_markups(pdf: &[u8], markups: &[NewMarkup]) -> Result<Vec<u8>, 
             Some(number)
         };
 
+        let display_rect = if markup.kind == MarkupKind::Underline {
+            let gap = pdfcore::annotation::UNDERLINE_GAP
+                + pdfcore::annotation::TEXT_MARK_LINE_WIDTH * 0.5;
+            pdfcore::prelude::Rect::new(
+                markup.rect.x,
+                markup.rect.y - gap,
+                markup.rect.width,
+                markup.rect.height + gap,
+            )
+        } else {
+            markup.rect
+        };
         if let Some(ap_number) = ap_number {
             let content = if markup.kind == MarkupKind::Underline {
                 lines_content(&markup.quads, false, markup.color, markup.opacity)
@@ -701,10 +713,10 @@ pub fn append_new_markups(pdf: &[u8], markups: &[NewMarkup]) -> Result<Vec<u8>, 
             };
             let ap = format!(
                 "<</Type/XObject/Subtype/Form/FormType 1/BBox[{:.2} {:.2} {:.2} {:.2}]/Matrix[1 0 0 1 0 0]/Resources<<>>/Length {}>>\nstream\n{}\nendstream\nendobj\n",
-                number_f32(markup.rect.x),
-                number_f32(markup.rect.y),
-                number_f32(markup.rect.x + markup.rect.width),
-                number_f32(markup.rect.y + markup.rect.height),
+                number_f32(display_rect.x),
+                number_f32(display_rect.y),
+                number_f32(display_rect.x + display_rect.width),
+                number_f32(display_rect.y + display_rect.height),
                 content.len(),
                 content
             );
@@ -727,10 +739,10 @@ pub fn append_new_markups(pdf: &[u8], markups: &[NewMarkup]) -> Result<Vec<u8>, 
         };
         let mut dict = format!(
             "<</Type/Annot/Subtype/{subtype}/Rect[{:.2} {:.2} {:.2} {:.2}]/QuadPoints[",
-            number_f32(markup.rect.x),
-            number_f32(markup.rect.y),
-            number_f32(markup.rect.x + markup.rect.width),
-            number_f32(markup.rect.y + markup.rect.height),
+            number_f32(display_rect.x),
+            number_f32(display_rect.y),
+            number_f32(display_rect.x + display_rect.width),
+            number_f32(display_rect.y + display_rect.height),
         );
         for quad in &markup.quads {
             dict.push_str(&format!(
@@ -814,7 +826,7 @@ fn lines_content(
         let y = if middle {
             quad.y + quad.height * 0.5
         } else {
-            quad.y
+            quad.y - pdfcore::annotation::UNDERLINE_GAP
         };
         content.push_str(&format!(
             " {:.2} {:.2} m {:.2} {:.2} l",

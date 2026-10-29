@@ -4434,19 +4434,30 @@ impl PdfReaderApp {
                                     painter.rect_filled(screen, CornerRadius::ZERO, color);
                                 }
                                 AnnotationKind::Underline { .. } => {
+                                    let width = (pdfcore::annotation::TEXT_MARK_LINE_WIDTH
+                                        * placement.scale.0)
+                                        .max(1.0);
+                                    let gap = pdfcore::annotation::UNDERLINE_GAP
+                                        * placement.scale.0;
                                     painter.line_segment(
-                                        [screen.left_bottom(), screen.right_bottom()],
-                                        Stroke::new(2.0, color),
+                                        [
+                                            egui::pos2(screen.left(), screen.bottom() + gap),
+                                            egui::pos2(screen.right(), screen.bottom() + gap),
+                                        ],
+                                        Stroke::new(width, color),
                                     );
                                 }
                                 AnnotationKind::StrikeOut { .. } => {
+                                    let width = (pdfcore::annotation::TEXT_MARK_LINE_WIDTH
+                                        * placement.scale.0)
+                                        .max(1.0);
                                     let y = screen.center().y;
                                     painter.line_segment(
                                         [
                                             egui::pos2(screen.left(), y),
                                             egui::pos2(screen.right(), y),
                                         ],
-                                        Stroke::new(2.0, color),
+                                        Stroke::new(width, color),
                                     );
                                 }
                                 // 墨迹在上面按折线画完了，且没有 quads，不会进入本循环。
