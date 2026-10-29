@@ -93,3 +93,27 @@ fn appends_same_generation_update_for_adobe_object_stream_ref() {
         "ObjStm 对象也要能读回"
     );
 }
+
+#[test]
+fn same_annotation_can_be_patched_twice() {
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    if backend_pdfium::pdfium().is_err() {
+        return;
+    }
+    let source = std::fs::read(fixture("okular.pdf")).expect("读样本");
+    let reference = *supported_refs(&source)
+        .iter()
+        .find(|reference| reference.num == 11 && reference.gen == 1)
+        .expect("11 1");
+    let once = append_content_updates(&source, &[(reference, Some("第一次".to_string()))])
+        .expect("第一次 patch");
+    let twice = append_content_updates(&once, &[(reference, Some("第二次".to_string()))])
+        .expect("第二次 patch");
+    let read = read_bytes(&twice);
+    assert!(
+        read.annotations
+            .iter()
+            .any(|annotation| annotation.body.as_deref() == Some("第二次")),
+        "连续 patch 后应读到最新正文"
+    );
+}

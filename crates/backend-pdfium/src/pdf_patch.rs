@@ -157,27 +157,34 @@ fn value_end(bytes: &[u8], mut index: usize) -> Result<usize, String> {
             Ok(index)
         }
         Some(_) => {
-            let mut tokens = 0;
-            while index < bytes.len() && !is_delimiter(bytes[index]) {
-                while index < bytes.len() && !is_delimiter(bytes[index]) {
-                    index += 1;
-                }
-                tokens += 1;
-                if tokens == 3 {
-                    break;
-                }
-                let mut next = index;
-                skip_space(bytes, &mut next);
-                if bytes.get(next).is_some_and(|byte| byte.is_ascii_digit()) {
-                    index = next;
-                } else {
-                    break;
+            // 先吃掉第一个 token；若后面是 `<num> <num> R`，整个引用一起吃掉。
+            let first_end = token_end(bytes, index);
+            let mut second = first_end;
+            skip_space(bytes, &mut second);
+            if bytes.get(second).is_some_and(|byte| byte.is_ascii_digit()) {
+                let second_end = token_end(bytes, second);
+                let mut third = second_end;
+                skip_space(bytes, &mut third);
+                if bytes.get(third) == Some(&b'R')
+                    && bytes
+                        .get(third + 1)
+                        .map_or(true, |byte| is_delimiter(*byte))
+                {
+                    return Ok(third + 1);
                 }
             }
-            Ok(index)
+            Ok(first_end)
         }
         None => Err("缺少值".to_string()),
     }
+}
+
+fn token_end(bytes: &[u8], start: usize) -> usize {
+    let mut index = start;
+    while index < bytes.len() && !is_delimiter(bytes[index]) {
+        index += 1;
+    }
+    index
 }
 
 fn balanced(bytes: &[u8], start: usize, open: u8, close: u8) -> Result<usize, String> {

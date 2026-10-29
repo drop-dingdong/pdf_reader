@@ -1160,3 +1160,49 @@ fn incremental_body_update_on_adobe_object_stream_uses_pdf_patch() {
         "更新后的正文应读回"
     );
 }
+
+#[test]
+fn external_body_can_be_rewritten_twice() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("rewrite-twice");
+    let source = dir.join("in.pdf");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/s6b/okular.pdf"),
+        &source,
+    )
+    .expect("复制 Okular");
+    let first = dir.join("first.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: vec![backend_pdfium::writeback::WritebackUpdate {
+            reference: backend_pdfium::pdf_index::PdfObjectRef { num: 11, gen: 1 },
+            body: Some("第一次".to_string()),
+        }],
+        deletes: Vec::new(),
+        source: source.clone(),
+        output: first.clone(),
+        pages: Vec::new(),
+    })
+    .expect("第一次");
+    let second = dir.join("second.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: vec![backend_pdfium::writeback::WritebackUpdate {
+            reference: backend_pdfium::pdf_index::PdfObjectRef { num: 11, gen: 1 },
+            body: Some("第二次".to_string()),
+        }],
+        deletes: Vec::new(),
+        source: first,
+        output: second.clone(),
+        pages: Vec::new(),
+    })
+    .expect("第二次");
+    let read = backend_pdfium::readback::read(&second, None).expect("读回");
+    assert!(
+        read.annotations
+            .iter()
+            .any(|annotation| annotation.body.as_deref() == Some("第二次")),
+        "连续两次写回后应读到最新正文"
+    );
+}
