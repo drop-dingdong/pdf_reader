@@ -911,6 +911,18 @@ impl PdfReaderApp {
         match &edit {
             AppEdit::AddAnnotation { annotation } => {
                 self.annotations.insert(annotation.clone());
+                // 外部注释被删除并写回后，对象已不在 PDF 里；撤销恢复时必须
+                // 当作新注释重新写回，而不是继续按旧对象号做“外部更新”。
+                if self.external_ids.contains(&annotation.id) {
+                    if let Some(reference) = annotation.pdf_ref {
+                        if !self.opened_pdf_refs.contains(&reference) {
+                            self.external_ids.remove(&annotation.id);
+                            if let Some(restored) = self.annotations.get_mut(annotation.id) {
+                                restored.pdf_ref = None;
+                            }
+                        }
+                    }
+                }
             }
             AppEdit::DeleteAnnotation { annotation } => {
                 self.annotations.remove(annotation.id);
@@ -1265,6 +1277,27 @@ impl PdfReaderApp {
             return;
         }
 
+        let new_count = self
+            .annotations
+            .iter()
+            .filter(|annotation| {
+                !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
+            })
+            .count();
+        let own_updates = self
+            .annotations
+            .iter()
+            .filter(|annotation| {
+                !self.external_ids.contains(&annotation.id)
+                    && annotation.pdf_ref.is_some_and(|reference| {
+                        self.opened_pdf_bodies
+                            .get(&reference)
+                            .is_some_and(|before| before != &annotation.body)
+                    })
+            })
+            .count();
+        let updated = ref_updates.len() + own_updates;
+        let deleted = ref_deletes.len();
         let temporary = match crate::export::stage_in_place_with_refs(
             &pdf,
             &items,
@@ -1324,10 +1357,7 @@ impl PdfReaderApp {
             // 两帧后再恢复：先让新会话收到真实视口尺寸（见 `pending_view_restore` 的注释）
             self.pending_view_restore = Some((page, zoom, scroll, 2));
             self.message = format!(
-                "已写入 PDF：新增 {}、更新 {}、删除 {} 条注释：{}（备份：{}）",
-                items.len(),
-                ref_updates.len(),
-                ref_deletes.len(),
+                "已写入 PDF：新增 {new_count}、更新 {updated}、删除 {deleted} 条注释：{}（备份：{}）",
                 pdf.display(),
                 backup.display()
             );
@@ -6619,6 +6649,25 @@ mod external_annotation_tests {
             .insert(reference, Some("旧".to_string()));
         app.pdf_clean_hash = Some(app.pdf_fingerprint());
         (app, id, reference)
+    }
+
+    #[test]
+    fn undoing_external_delete_after_save_requeues_it_as_new() {
+        let (mut app, id, _reference) = app_with_external();
+        // 模拟“删除已经写入 PDF”：当前 PDF 里已经没有这个对象
+        app.opened_pdf_refs.clear();
+        let annotation = app.annotations.get(id).cloned().expect("标注");
+        app.apply_edit(AppEdit::DeleteAnnotation { annotation }, true);
+        app.undo_edit();
+        assert!(
+            !app.external_ids.contains(&id),
+            "恢复的注释不能继续当外部对象"
+        );
+        assert_eq!(
+            app.annotations.get(id).and_then(|a| a.pdf_ref),
+            None,
+            "要作为新注释重新写回"
+        );
     }
 
     #[test]
