@@ -1606,6 +1606,14 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   若某类异常，可按种类退回 PDFium 路径。
 - **状态**：P6b 完成；待用户用 Okular 打开/另存新增三类注释验证。
 
+### D-170 UI：新增下划线/删除线按钮
+
+- 工具栏在「高亮」旁增加「下划线」「删除线」，均把当前选区变成对应文本标记；
+- `pending_annotate` 从 bool 改为 `Option<MarkupTool>`，三种标记共用 `annotate_selection`；
+- 历史描述区分高亮/下划线/删除线，不再统一显示“高亮”；
+- 测试 `three_markup_buttons_map_to_three_annotation_kinds`；`check.sh` 全绿（380 tests）。
+- **状态**：按钮完成；三种标记写回已由 P6b 对象化。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

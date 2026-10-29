@@ -390,6 +390,32 @@ struct CaptureState {
     target: CaptureTarget,
 }
 
+/// 当前“下一步把选区变成哪种文本标记”。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkupTool {
+    Highlight,
+    Underline,
+    StrikeOut,
+}
+
+impl MarkupTool {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Highlight => "高亮",
+            Self::Underline => "下划线",
+            Self::StrikeOut => "删除线",
+        }
+    }
+
+    fn kind(self, quads: Vec<Rect>) -> AnnotationKind {
+        match self {
+            Self::Highlight => AnnotationKind::Highlight { quads },
+            Self::Underline => AnnotationKind::Underline { quads },
+            Self::StrikeOut => AnnotationKind::StrikeOut { quads },
+        }
+    }
+}
+
 /// 一条可撤销的编辑（S3）。
 ///
 /// 命令里**持有旧值**（`Arc` 共享，不做深拷贝）：撤销时把它移回应用即可。
@@ -455,7 +481,15 @@ impl AppEdit {
                 match &annotation.kind {
                     // 墨迹没有行矩形：按 quads 数描述会写成"高亮（第 N 页，0 行）"
                     AnnotationKind::Ink { .. } => format!("墨迹（第 {page} 页）"),
-                    _ => match annotation.kind.quads().len() {
+                    AnnotationKind::Underline { .. } => match annotation.kind.quads().len() {
+                        1 => format!("下划线（第 {page} 页）"),
+                        rows => format!("下划线（第 {page} 页，{rows} 行）"),
+                    },
+                    AnnotationKind::StrikeOut { .. } => match annotation.kind.quads().len() {
+                        1 => format!("删除线（第 {page} 页）"),
+                        rows => format!("删除线（第 {page} 页，{rows} 行）"),
+                    },
+                    AnnotationKind::Highlight { .. } => match annotation.kind.quads().len() {
                         1 => format!("高亮（第 {page} 页）"),
                         rows => format!("高亮（第 {page} 页，{rows} 行）"),
                     },
@@ -581,7 +615,7 @@ pub struct PdfReaderApp {
     /// 正在画的一笔墨迹（S4b）；**抬笔之前它不是标注**，取消只要丢掉它。
     ink: Option<InkStroke>,
     /// "下一步把当前选区变成标注"（由快捷键/按钮置位，在画布绘制时执行）。
-    pending_annotate: bool,
+    pending_annotate: Option<MarkupTool>,
     /// 是否正在等"原地写入 PDF"的确认（S5c）。
     pending_in_place: bool,
     /// 是否正在等"从 PDF 重建标注"的确认（S6c）。
@@ -805,7 +839,7 @@ impl PdfReaderApp {
             pdf_ref_ids: std::collections::HashMap::new(),
             reopening_after_write: false,
             ink: None,
-            pending_annotate: false,
+            pending_annotate: None,
             pending_in_place: false,
             pending_rebuild: false,
             pdf_marked_annotations: 0,
@@ -2137,7 +2171,7 @@ impl PdfReaderApp {
                 continue;
             }
             if key == Key::H && !modifiers.any() {
-                self.pending_annotate = true;
+                self.pending_annotate = Some(MarkupTool::Highlight);
                 continue;
             }
             if key == Key::Escape && self.ink.is_some() {
@@ -2747,7 +2781,21 @@ impl PdfReaderApp {
                     .on_hover_text("把当前选中文字变成高亮标注（H）；点击标注可打开正文")
                     .clicked()
                 {
-                    self.pending_annotate = true;
+                    self.pending_annotate = Some(MarkupTool::Highlight);
+                }
+                if ui
+                    .button("下划线")
+                    .on_hover_text("把当前选中文字变成下划线标注；点击标注可打开正文")
+                    .clicked()
+                {
+                    self.pending_annotate = Some(MarkupTool::Underline);
+                }
+                if ui
+                    .button("删除线")
+                    .on_hover_text("把当前选中文字变成删除线标注；点击标注可打开正文")
+                    .clicked()
+                {
+                    self.pending_annotate = Some(MarkupTool::StrikeOut);
                 }
 
                 // 引用显示样式（链接框 + 引用点 合并为一个菜单）
@@ -3293,21 +3341,16 @@ impl PdfReaderApp {
     }
 
     /// 按某个自定义 preview 的数据生成它的**正式浮窗**（正文尺寸取 `body_size`）。
-    /// 把当前选区变成高亮标注，返回新增数量（D-118 S1）。
+    /// 把当前选区变成指定文本标记，返回新增数量（D-118 S1）。
     ///
-    /// 几何来自文本层的 `rects_for_range`（已按行合并），因此与选字高亮用的是同一套算法；
+    /// 几何来自文本层的 `rects_for_range`（已按行合并），因此三种标记共用同一套算法；
     /// 标注**只存页面空间**，缩放/旋转时由布局换算，不会漂移。
-    fn annotate_selection(&mut self, session: &mut DocumentSession) -> usize {
+    fn annotate_selection(&mut self, session: &mut DocumentSession, tool: MarkupTool) -> usize {
         let highlights = session.highlight_selection();
         let mut added = 0;
         for highlight in highlights {
-            let bounds = highlight
-                .rects
-                .iter()
-                .copied()
-                .reduce(|a, b| a.union(b))
-                .unwrap_or(highlight.rects[0]);
-            if self.add_highlight(highlight.page, highlight.rects.clone(), bounds) {
+            let kind = tool.kind(highlight.rects.clone());
+            if self.add_annotation(highlight.page, kind) {
                 added += 1;
             }
         }
@@ -3315,9 +3358,9 @@ impl PdfReaderApp {
             self.pdf_dirty = true;
         }
         if added == 0 && session.highlight_selection().is_empty() {
-            self.message = "先选中文字，再高亮".to_string();
+            self.message = format!("先选中文字，再{}", tool.label());
         } else if added > 0 {
-            self.message = format!("已高亮 {added} 处");
+            self.message = format!("已{} {added} 处", tool.label());
         }
         added
     }
@@ -3753,9 +3796,8 @@ impl PdfReaderApp {
 
     /// 画布：页面（纹理或白底页框）+ 高亮 + 鼠标交互。
     fn draw_canvas(&mut self, ui: &mut egui::Ui, session: &mut DocumentSession) {
-        if self.pending_annotate {
-            self.pending_annotate = false;
-            self.annotate_selection(session);
+        if let Some(tool) = self.pending_annotate.take() {
+            self.annotate_selection(session, tool);
         }
         // 搜索栏放在**中央区域**的底部：只占画布宽度（不会跑到侧栏下方），
         // 且位于状态栏之上（用户建议）。
@@ -6571,6 +6613,24 @@ mod annotation_body_tests {
             Some("第一版")
         );
         assert!(app.custom_previews.is_empty());
+    }
+
+    #[test]
+    fn three_markup_buttons_map_to_three_annotation_kinds() {
+        let quads = vec![Rect::new(10.0, 20.0, 30.0, 8.0)];
+        for (tool, label) in [
+            (MarkupTool::Highlight, "高亮"),
+            (MarkupTool::Underline, "下划线"),
+            (MarkupTool::StrikeOut, "删除线"),
+        ] {
+            assert_eq!(tool.label(), label);
+            match tool.kind(quads.clone()) {
+                AnnotationKind::Highlight { .. } => assert_eq!(label, "高亮"),
+                AnnotationKind::Underline { .. } => assert_eq!(label, "下划线"),
+                AnnotationKind::StrikeOut { .. } => assert_eq!(label, "删除线"),
+                _ => panic!("不应生成墨迹"),
+            }
+        }
     }
 
     #[test]
