@@ -186,3 +186,61 @@ fn legacy_overlay_is_migrated_into_pdf_and_retired() {
     std::env::remove_var("PDF_READER_WRITEBACK_EXE");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn consecutive_saves_keep_earlier_annotations() {
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    if !backend() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "pdf-p3-consecutive-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("建目录");
+    app::replay::samples::Sample::Rotated
+        .write(&dir)
+        .expect("写样本");
+    std::env::set_var("PDF_READER_WRITEBACK_EXE", env!("CARGO_BIN_EXE_app"));
+    let script = dir.join("twice.json");
+    std::fs::write(
+        &script,
+        r#"{"name":"twice","pdf":"rotated_2p.pdf","actions":[
+             {"id":"resize","op":"resize","width":700,"height":800},
+             {"id":"a","op":"highlight","page":0,"x":50,"y":690,"width":200,"height":20},
+             {"id":"save1","op":"save"},
+             {"id":"settle","op":"wait","frames":8},
+             {"id":"b","op":"highlight","page":0,"x":50,"y":690,"width":200,"height":20},
+             {"id":"save2","op":"save"},
+             {"id":"after","op":"wait","frames":3}
+           ]}"#,
+    )
+    .expect("写脚本");
+    let report = app::replay::run_script_file(&script, None).expect("回放");
+    assert_eq!(
+        report
+            .actions
+            .iter()
+            .find(|a| a.id == "after")
+            .unwrap()
+            .annotations,
+        2,
+        "两次保存后内存里应看到两条"
+    );
+    let readback = backend_pdfium::readback::read(&dir.join("rotated_2p.pdf"), None).expect("读回");
+    assert_eq!(
+        readback.annotations.len(),
+        2,
+        "第二次写回不能把第一次的注释删掉"
+    );
+    assert!(
+        !dir.join("rotated_2p.pdf.annot.json").exists(),
+        "连续保存也不应生成 A"
+    );
+    std::env::remove_var("PDF_READER_WRITEBACK_EXE");
+    std::fs::remove_dir_all(&dir).ok();
+}

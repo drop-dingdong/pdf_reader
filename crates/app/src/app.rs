@@ -1235,7 +1235,7 @@ impl PdfReaderApp {
         let items: Vec<crate::export::ExportItem> = self
             .annotations
             .iter()
-            .filter(|annotation| annotation.pdf_ref.is_none())
+            .filter(|annotation| !self.external_ids.contains(&annotation.id))
             .map(|annotation| {
                 let body = annotation.body.clone().filter(|text| !text.is_empty());
                 crate::export::ExportItem {
@@ -1358,7 +1358,7 @@ impl PdfReaderApp {
         let items: Vec<crate::export::ExportItem> = self
             .annotations
             .iter()
-            .filter(|annotation| annotation.pdf_ref.is_none())
+            .filter(|annotation| !self.external_ids.contains(&annotation.id))
             .map(|annotation| {
                 // 正文按哨兵标题从 custom_texts 里取；空正文不写 /Contents
                 let body = annotation.body.clone().filter(|text| !text.is_empty());
