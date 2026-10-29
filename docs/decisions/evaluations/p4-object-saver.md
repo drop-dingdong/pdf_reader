@@ -1,6 +1,7 @@
 # P4 对象级保存器：评估与计划
 
-> 状态：**P4a spike 已通过**（2026-10-29，D-157）；P4b 集成待做。
+> 状态：**P4a spike 通过**（D-157）；**P4b-1 正文更新已接入**（D-158）；
+> 删除/Popup 的对象级改写待 P4b-2。
 
 ## 1. 现状
 
@@ -67,7 +68,8 @@ P4 的目标是像 Okular 一样**只追加变化的对象**，并去掉 gen>0 �
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
 | **P4a** | `pdf_index` 暴露对象 dict；`pdf_patch` 只做正文更新；Okular/Adobe 样本 | ✅ 已通过：同 `(num,gen)` 追加版本，PDFium 读回新正文；ObjStm 保留；增长 <1.2 KB |
-| **P4b** | 集成写回：PDFium 不再处理 updates；删除 + Popup | Okular/Foxit 删除一致；无全量兜底 |
+| **P4b-1** | 集成 updates：外部正文走 pdf_patch；外部-only 直接 patch 源字节 | ✅ 已通过：Okular 11 1 / Adobe ObjStm 读回；增长 <1 KB |
+| **P4b-2** | 删除 + Popup 的页对象改写；去掉删除的全量兜底 | 待做 |
 | **P4c** | 文件增长/对象数对比；去掉 `needs_full_save`；回归 | 连续保存/撤销重做/P2/P3 全绿；Okular 另存正常 |
 
 ## 5. 风险

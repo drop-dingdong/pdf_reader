@@ -218,7 +218,10 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
                 update.reference
             )));
         };
-        page_updates.entry(page).or_default().push(update);
+        if !incremental {
+            // 全量保存时 PDFium 会统一重写对象，仍由它更新；增量保存才走 pdf_patch。
+            page_updates.entry(page).or_default().push(update);
+        }
     }
     let source = CString::new(spec.source.to_string_lossy().as_ref())
         .map_err(|_| WritebackError::Invalid("源路径含 NUL 字节".to_string()))?;
@@ -266,6 +269,49 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
                     page.page.display_number()
                 )));
             }
+        }
+
+        // P4b：只有正文更新的任务不需要 PDFium 保存整个文档；
+        // 直接对源字节追加同 (num,gen) 的新版本，文件增长最小。
+        if incremental
+            && spec.pages.is_empty()
+            && spec.deletes.is_empty()
+            && !spec.updates.is_empty()
+        {
+            let mut source_counts = Vec::with_capacity(page_count);
+            for index in 0..page_count {
+                let handle = (ffi.load_page)(document, index as c_int);
+                if handle.is_null() {
+                    (ffi.close_document)(document);
+                    return Err(WritebackError::Pdfium {
+                        stage: "FPDF_LoadPage",
+                        message: format!("第 {} 页加载失败", index + 1),
+                    });
+                }
+                source_counts.push((ffi.annot_count)(handle).max(0) as usize);
+                (ffi.close_page)(handle);
+            }
+            (ffi.close_document)(document);
+            let source_bytes = std::fs::read(&spec.source)
+                .map_err(|error| WritebackError::Io(format!("读取源文件失败：{error}")))?;
+            let updates: Vec<(PdfObjectRef, Option<String>)> = spec
+                .updates
+                .iter()
+                .map(|update| (update.reference, update.body.clone()))
+                .collect();
+            let bytes = crate::pdf_patch::append_content_updates(&source_bytes, &updates)
+                .map_err(WritebackError::Invalid)?;
+            std::fs::write(&spec.output, &bytes).map_err(|error| {
+                WritebackError::Io(format!(
+                    "写输出文件 {} 失败：{error}",
+                    spec.output.display()
+                ))
+            })?;
+            verify_counts(spec, &source_counts, &ffi)?;
+            return Ok(WritebackReport {
+                annotations: 0,
+                bytes: bytes.len() as u64,
+            });
         }
 
         // 读回当前 PDF 里的标记注释，用来做**差分**：
@@ -403,6 +449,17 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
         }
 
         let mut bytes = save(&ffi, document, incremental)?;
+        // P4b：外部注释正文用同 (num,gen) 追加版本，不再交给 PDFium 的
+        // SetStringValue（它会写 gen0，重开解析旧代）。
+        if incremental && !spec.updates.is_empty() {
+            let updates: Vec<(PdfObjectRef, Option<String>)> = spec
+                .updates
+                .iter()
+                .map(|update| (update.reference, update.body.clone()))
+                .collect();
+            bytes = crate::pdf_patch::append_content_updates(&bytes, &updates)
+                .map_err(WritebackError::Invalid)?;
+        }
         // PDFium 新建的注释是内联字典；Okular 保存这类注释会丢修改（D-142）。
         // 追加一段增量更新，把它们外置成独立对象。
         if let Some(fixed) = crate::pdf_repair::externalize_annotations(&bytes) {
@@ -439,8 +496,9 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
 /// 多版历史，全量重写会让 Okular 保存时报警；Adobe 的 ObjStm 也必须保留。
 /// 已经被旧版增量写坏的文件（多版 gen0）需要从原始样本重新生成，或用显式修复流程。
 fn needs_full_save(spec: &WritebackSpec) -> bool {
-    spec.updates.iter().any(|update| update.reference.gen > 0)
-        || spec.deletes.iter().any(|reference| reference.gen > 0)
+    // 正文更新已改走 pdf_patch（同 generation 追加），不再触发全量；
+    // 删除仍暂由 PDFium 处理，gen>0 时维持全量兜底（P4c 再改）。
+    spec.deletes.iter().any(|reference| reference.gen > 0)
 }
 
 /// 读回输出文件的逐页注释数（供调用方校验；**不渲染**）。

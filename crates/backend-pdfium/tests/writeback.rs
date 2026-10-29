@@ -1029,7 +1029,7 @@ fn deleting_an_external_annotation_with_popup_removes_both() {
 }
 
 #[test]
-fn incremental_update_with_generation_1_falls_back_to_full_save() {
+fn incremental_update_with_generation_1_uses_pdf_patch() {
     if !backend_available() {
         return;
     }
@@ -1058,6 +1058,10 @@ fn incremental_update_with_generation_1_falls_back_to_full_save() {
         .annotations
         .iter()
         .any(|a| a.body.as_deref() == Some("TESTBODY")));
+    assert!(
+        std::fs::metadata(&output).unwrap().len() < 9_500,
+        "同 generation 追加应只增加少量字节，而不是全量重写"
+    );
 }
 
 #[test]
@@ -1111,5 +1115,48 @@ fn full_save_then_incremental_update_reads_back() {
             .iter()
             .any(|annotation| annotation.body.as_deref() == Some("B")),
         "全量保存后的文件应能继续增量更新"
+    );
+}
+
+#[test]
+fn incremental_body_update_on_adobe_object_stream_uses_pdf_patch() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("adobe-patch-update");
+    let source = dir.join("in.pdf");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/s6b/adobe.pdf"),
+        &source,
+    )
+    .expect("复制 Adobe");
+    let output = dir.join("out.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: vec![backend_pdfium::writeback::WritebackUpdate {
+            reference: backend_pdfium::pdf_index::PdfObjectRef { num: 36, gen: 0 },
+            body: Some("P4B Adobe".to_string()),
+        }],
+        deletes: Vec::new(),
+        source: source.clone(),
+        output: output.clone(),
+        pages: Vec::new(),
+    })
+    .expect("增量更新");
+    let bytes = std::fs::read(&output).expect("读输出");
+    assert!(
+        bytes.len() < 14_000,
+        "外部更新应走源字节 patch，而不是 PDFium 整份追加"
+    );
+    assert!(
+        bytes.windows(7).any(|window| window == b"/ObjStm"),
+        "ObjStm 必须保留"
+    );
+    let read = backend_pdfium::readback::read(&output, None).expect("读回");
+    assert!(
+        read.annotations
+            .iter()
+            .any(|annotation| annotation.body.as_deref() == Some("P4B Adobe")),
+        "更新后的正文应读回"
     );
 }

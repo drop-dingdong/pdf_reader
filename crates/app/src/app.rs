@@ -1510,6 +1510,7 @@ impl PdfReaderApp {
         let updates = self
             .annotations
             .iter()
+            .filter(|annotation| self.external_ids.contains(&annotation.id))
             .filter_map(|annotation| {
                 let reference = annotation.pdf_ref?;
                 let before = self.opened_pdf_bodies.get(&reference)?;

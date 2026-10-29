@@ -1413,6 +1413,21 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   P4b 再把 updates 从 PDFium 移出，并处理删除。
 - **状态**：P4a 完成；下一步 P4b。
 
+### D-158 P4b-1：正文更新接入对象级 patch
+
+- `writeback` 不再把 `updates` 交给 PDFium（增量模式）：
+  * 只有正文更新且没有 pages/deletes → 直接 `pdf_patch` 源字节，完全跳过 PDFium 保存；
+  * 混合 pages/deletes → PDFium 保存后再 `pdf_patch` 补 updates；
+  * 全量保存时仍由 PDFium 更新（避免旧 gen 引用）。
+- `needs_full_save` 只保留 `deletes` 的 gen>0；正文更新不再触发全量。
+- app 的 `pdf_ref_changes` 恢复为只产生**外部注释** updates；自有注释由 marker 差分处理。
+- **验证**：
+  * Okular `11 1` 更新：输出 < 9.5 KB（原 8.2 KB），读回新正文；
+  * Adobe ObjStm 更新：输出 < 14 KB（原 12 KB），ObjStm 保留、读回新正文；
+  * 原 P2/P3 测试通过；`check.sh` 全绿（366 tests）。
+- **未做**：删除仍由 PDFium 处理，gen>0 删除仍全量兜底；P4b-2 再做页对象改写。
+- **状态**：P4b-1 完成。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |
