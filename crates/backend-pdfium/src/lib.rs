@@ -36,6 +36,7 @@ pub mod error;
 pub mod fixtures;
 pub mod library;
 pub mod pdf_index;
+pub mod pdf_patch;
 pub mod pdf_repair;
 pub mod raster;
 pub mod readback;

@@ -68,6 +68,49 @@ pub fn page_annotations(pdf: &[u8]) -> Result<Vec<Vec<PageAnnot>>, String> {
     Ok(out)
 }
 
+/// 读取一个对象的字典字节（直接对象或 ObjStm 内的对象）。
+pub(crate) fn object_dict(pdf: &[u8], reference: PdfObjectRef) -> Result<Option<Vec<u8>>, String> {
+    let mut objects: HashMap<(u32, u16), RawObject> = HashMap::new();
+    let mut arrays: HashMap<(u32, u16), Vec<u8>> = HashMap::new();
+    scan_objects(pdf, &mut objects, &mut arrays);
+    scan_object_streams(pdf, &mut objects, &mut arrays);
+    Ok(objects
+        .get(&(reference.num, reference.gen))
+        .map(|object| object.dict.clone()))
+}
+
+/// PDF trailer 的关键字段（用于追加增量更新）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Trailer {
+    pub root: PdfObjectRef,
+    pub size: u32,
+    pub startxref: usize,
+}
+
+/// 解析最后一个 trailer 的 `/Root`、`/Size`、`startxref`。
+pub(crate) fn trailer(pdf: &[u8]) -> Result<Trailer, String> {
+    let text = String::from_utf8_lossy(pdf);
+    let root = last_ref_after(pdf, b"/Root").ok_or_else(|| "找不到 /Root".to_string())?;
+    let size = last_number_after(&text, "/Size").unwrap_or(0) as u32;
+    let startxref =
+        last_number_after(&text, "startxref").ok_or_else(|| "找不到 startxref".to_string())?;
+    Ok(Trailer {
+        root,
+        size,
+        startxref,
+    })
+}
+
+fn last_number_after(text: &str, key: &str) -> Option<usize> {
+    let index = text.rfind(key)? + key.len();
+    let digits: String = text[index..]
+        .trim_start()
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
 fn get_object(
     objects: &HashMap<(u32, u16), RawObject>,
     reference: PdfObjectRef,

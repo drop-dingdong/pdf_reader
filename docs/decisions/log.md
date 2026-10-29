@@ -1398,6 +1398,21 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - **文档**：[`evaluations/p4-object-saver.md`](evaluations/p4-object-saver.md)。
 - **状态**：计划待实施；先做 P4a。
 
+### D-157 P4a：同 generation 追加正文版本 spike 通过
+
+- 新增 `pdf_patch::append_content_updates`：
+  * 复制目标注释 dict，替换 `/Contents`（UTF-16BE hex）；
+  * 以**同一对象号 + 同一 generation**追加 `N G obj … endobj`；
+  * 追加经典 xref + trailer `/Prev`；页引用/ObjStm/原对象不动。
+- `pdf_index` 暴露 `object_dict` / `trailer`（读取直接对象与 ObjStm）。
+- **验证**：
+  * Okular `11 1` highlight 改正文 → PDFium 读回新正文，注释数不变，增长 <1.2 KB；
+  * Adobe ObjStm 内对象 → 同样读回，ObjStm 保留；
+  * `tests/pdf_patch.rs` 两条测试通过。
+- **未做**：尚未接入 writeback（当前产品仍走 PDFium updates/全量兜底）；
+  P4b 再把 updates 从 PDFium 移出，并处理删除。
+- **状态**：P4a 完成；下一步 P4b。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |
