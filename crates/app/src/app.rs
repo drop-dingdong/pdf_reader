@@ -23,6 +23,7 @@ use egui::{
 };
 use pdfcore::annotation::{
     Annotation, AnnotationId, AnnotationKind, AnnotationStore, INK_COLOR, INK_OPACITY,
+    TEXT_MARK_COLOR, TEXT_MARK_OPACITY,
 };
 use pdfcore::prelude::*;
 
@@ -614,8 +615,16 @@ pub struct PdfReaderApp {
     reopening_after_write: bool,
     /// 正在画的一笔墨迹（S4b）；**抬笔之前它不是标注**，取消只要丢掉它。
     ink: Option<InkStroke>,
-    /// "下一步把当前选区变成标注"（由快捷键/按钮置位，在画布绘制时执行）。
+    /// "下一步把当前选区变成标注"（快捷键一次性动作）。
     pending_annotate: Option<MarkupTool>,
+    /// 当前持有哪种标记工具：点按钮进入，拖选文字后自动施加，Esc/再点退出。
+    annotation_tool: Option<MarkupTool>,
+    /// 本次拖选是否从文字上开始（避免在空白处拖拽时误用旧选区）。
+    selection_started_on_text: bool,
+    /// 新文本标记的颜色（样式栏）。
+    markup_color: [u8; 3],
+    /// 新高亮的透明度（下划线/删除线固定不透明）。
+    markup_opacity: f32,
     /// 是否正在等"原地写入 PDF"的确认（S5c）。
     pending_in_place: bool,
     /// 是否正在等"从 PDF 重建标注"的确认（S6c）。
@@ -840,6 +849,10 @@ impl PdfReaderApp {
             reopening_after_write: false,
             ink: None,
             pending_annotate: None,
+            annotation_tool: None,
+            selection_started_on_text: false,
+            markup_color: TEXT_MARK_COLOR,
+            markup_opacity: TEXT_MARK_OPACITY,
             pending_in_place: false,
             pending_rebuild: false,
             pdf_marked_annotations: 0,
@@ -2174,6 +2187,11 @@ impl PdfReaderApp {
                 self.pending_annotate = Some(MarkupTool::Highlight);
                 continue;
             }
+            if key == Key::Escape && self.annotation_tool.take().is_some() {
+                self.message = "已退出标记模式".to_string();
+                self.drag = None;
+                continue;
+            }
             if key == Key::Escape && self.ink.is_some() {
                 // 整笔丢弃：不进标注集合、不产生命令，所以撤销栈里不会留下半条
                 self.ink = None;
@@ -2776,27 +2794,53 @@ impl PdfReaderApp {
                 }
 
                 ui.separator();
-                if ui
-                    .button("高亮")
-                    .on_hover_text("把当前选中文字变成高亮标注（H）；点击标注可打开正文")
-                    .clicked()
-                {
-                    self.pending_annotate = Some(MarkupTool::Highlight);
+                for tool in [
+                    MarkupTool::Highlight,
+                    MarkupTool::Underline,
+                    MarkupTool::StrikeOut,
+                ] {
+                    let active = self.annotation_tool == Some(tool);
+                    let response = ui
+                        .add(egui::Button::new(tool.label()).selected(active))
+                        .on_hover_text(format!(
+                            "进入{}模式：拖选文字后施加；再点一次/Esc 退出",
+                            tool.label()
+                        ));
+                    if response.clicked() {
+                        self.toggle_markup_tool(tool);
+                    }
                 }
-                if ui
-                    .button("下划线")
-                    .on_hover_text("把当前选中文字变成下划线标注；点击标注可打开正文")
-                    .clicked()
-                {
-                    self.pending_annotate = Some(MarkupTool::Underline);
-                }
-                if ui
-                    .button("删除线")
-                    .on_hover_text("把当前选中文字变成删除线标注；点击标注可打开正文")
-                    .clicked()
-                {
-                    self.pending_annotate = Some(MarkupTool::StrikeOut);
-                }
+                ui.menu_button("样式", |ui| {
+                    ui.label("标记颜色");
+                    ui.horizontal(|ui| {
+                        for (name, rgb) in [
+                            ("黄", [255u8, 214, 0]),
+                            ("红", [235u8, 70, 70]),
+                            ("绿", [70u8, 180, 90]),
+                            ("蓝", [70u8, 130, 220]),
+                        ] {
+                            let selected = self.markup_color == rgb;
+                            let color = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                            let response = ui
+                                .add(
+                                    egui::Button::new(RichText::new(name).color(Color32::BLACK))
+                                        .fill(color)
+                                        .selected(selected)
+                                        .min_size(EVec2::new(26.0, 20.0)),
+                                )
+                                .on_hover_text(format!("新标记使用{name}色"));
+                            if response.clicked() {
+                                self.markup_color = rgb;
+                            }
+                        }
+                    });
+                    ui.add(
+                        egui::Slider::new(&mut self.markup_opacity, 0.1..=1.0)
+                            .text("高亮透明度")
+                            .fixed_decimals(2),
+                    );
+                    ui.label("下划线/删除线固定不透明；线宽随缩放。");
+                });
 
                 // 引用显示样式（链接框 + 引用点 合并为一个菜单）
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3350,7 +3394,11 @@ impl PdfReaderApp {
         let mut added = 0;
         for highlight in highlights {
             let kind = tool.kind(highlight.rects.clone());
-            if self.add_annotation(highlight.page, kind) {
+            let (color, opacity) = match tool {
+                MarkupTool::Highlight => (self.markup_color, self.markup_opacity),
+                MarkupTool::Underline | MarkupTool::StrikeOut => (self.markup_color, 1.0),
+            };
+            if self.add_annotation_styled(highlight.page, kind, color, opacity) {
                 added += 1;
             }
         }
@@ -3388,6 +3436,18 @@ impl PdfReaderApp {
         usize::from(self.add_highlight(page, quads, bounds))
     }
 
+    /// 进入/退出文本标记模式；进入时自动切到选字工具。
+    fn toggle_markup_tool(&mut self, tool: MarkupTool) {
+        if self.annotation_tool == Some(tool) {
+            self.annotation_tool = None;
+            self.message = format!("已退出{}模式", tool.label());
+            return;
+        }
+        self.switch_tool(Tool::Select);
+        self.annotation_tool = Some(tool);
+        self.message = format!("{}模式：拖选文字即可添加，Esc 退出", tool.label());
+    }
+
     /// 切换工具（工具栏与回放共用）：**切走墨迹时丢弃正在画的一笔**。
     fn switch_tool(&mut self, tool: Tool) {
         if self.tool == Tool::Ink && tool != Tool::Ink {
@@ -3397,6 +3457,7 @@ impl PdfReaderApp {
             self.drag = None;
         }
         self.tool = tool;
+        self.annotation_tool = None;
         if pin_exits_on_mode_change(tool == Tool::Select, false) {
             self.custom_pin = None;
         }
@@ -3541,9 +3602,34 @@ impl PdfReaderApp {
     /// 建一条标注并**记入历史**（所有"新建标注"的唯一入口）。
     /// 正文直接属于注释（初始为空；首次编辑时再写）。
     fn add_annotation(&mut self, page: PageIndex, kind: AnnotationKind) -> bool {
+        self.add_annotation_with_style(page, kind, None)
+    }
+
+    fn add_annotation_styled(
+        &mut self,
+        page: PageIndex,
+        kind: AnnotationKind,
+        color: [u8; 3],
+        opacity: f32,
+    ) -> bool {
+        self.add_annotation_with_style(page, kind, Some((color, opacity)))
+    }
+
+    fn add_annotation_with_style(
+        &mut self,
+        page: PageIndex,
+        kind: AnnotationKind,
+        style: Option<([u8; 3], f32)>,
+    ) -> bool {
         let Some(id) = self.annotations.add(page, kind) else {
             return false;
         };
+        if let Some((color, opacity)) = style {
+            if let Some(annotation) = self.annotations.get_mut(id) {
+                annotation.color = color;
+                annotation.opacity = opacity.clamp(0.0, 1.0);
+            }
+        }
         let Some(annotation) = self.annotations.get(id).cloned() else {
             return false;
         };
@@ -3907,15 +3993,17 @@ impl PdfReaderApp {
             // 快速拖动时就是上百像素的偏差（用户反馈"落后鼠标移动过多"）。
             // 这里在读取 scroll / 绘制**之前**先处理拖动，内容与指针同帧同步。
             let inverted_now = ui.input(|input| input.modifiers.shift);
-            let select_now = match self.tool {
-                Tool::Select => !inverted_now,
-                Tool::Pan => inverted_now,
-                Tool::Ink => false,
-            };
+            let select_now = self.annotation_tool.is_some()
+                || match self.tool {
+                    Tool::Select => !inverted_now,
+                    Tool::Pan => inverted_now,
+                    Tool::Ink => false,
+                };
             // 墨迹工具独占指针：拖拽既不滚页也不选字（S4b）
             if self.tool == Tool::Ink {
                 self.handle_ink_pointer(ui, canvas, &response, session, session.viewport().scroll);
             } else if self.capture.is_none() && response.drag_started() {
+                self.selection_started_on_text = false;
                 self.drag_started_at = Some(self.clock.now());
                 self.last_pan_at = None;
                 if self.diag.enabled() {
@@ -3931,6 +4019,7 @@ impl PdfReaderApp {
                     match (select_now, hit) {
                         (true, Some(text_position)) => {
                             self.drag = Some(DragMode::Select);
+                            self.selection_started_on_text = true;
                             session.handle(
                                 ViewerCommand::SetSelectionGranularity(SelectionGranularity::Char),
                                 &mut self.events,
@@ -4458,7 +4547,9 @@ impl PdfReaderApp {
                                     let width = (pdfcore::annotation::TEXT_MARK_LINE_WIDTH
                                         * placement.scale.0)
                                         .max(1.0);
-                                    let y = quad.y + quad.height * 0.5;
+                                    let y = quad.y
+                                        + quad.height
+                                            * pdfcore::annotation::STRIKE_FRACTION;
                                     painter.line_segment(
                                         [
                                             to_screen(Point::new(quad.x, y)),
@@ -4630,6 +4721,10 @@ impl PdfReaderApp {
                 ));
             }
             if response.drag_stopped() {
+                let apply_markup = self.drag == Some(DragMode::Select)
+                    && self.selection_started_on_text
+                    && self.annotation_tool.is_some();
+                self.selection_started_on_text = false;
                 if self.diag.enabled() {
                     let total = self
                         .drag_started_at
@@ -4644,6 +4739,9 @@ impl PdfReaderApp {
                 self.drag = None;
                 self.drag_started_at = None;
                 self.last_pan_at = None;
+                if apply_markup {
+                    self.pending_annotate = self.annotation_tool;
+                }
             }
             if self.capture.is_none() && response.double_clicked() {
                 if let Some(position) = response.interact_pointer_pos() {
@@ -6631,6 +6729,39 @@ mod annotation_body_tests {
             Some("第一版")
         );
         assert!(app.custom_previews.is_empty());
+    }
+
+    #[test]
+    fn markup_tool_mode_enters_select_and_toggles_off() {
+        let mut app = app();
+        app.toggle_markup_tool(MarkupTool::StrikeOut);
+        assert_eq!(app.annotation_tool, Some(MarkupTool::StrikeOut));
+        assert_eq!(app.tool, Tool::Select, "标记模式应自动切到选字");
+        app.toggle_markup_tool(MarkupTool::StrikeOut);
+        assert_eq!(app.annotation_tool, None);
+    }
+
+    #[test]
+    fn styled_annotation_keeps_style_through_undo_redo() {
+        let mut app = app();
+        assert!(app.add_annotation_styled(
+            PageIndex::FIRST,
+            AnnotationKind::Underline {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+            [235, 70, 70],
+            1.0,
+        ));
+        let id = app.annotations.iter().next().unwrap().id;
+        assert_eq!(app.annotations.get(id).unwrap().color, [235, 70, 70]);
+        app.undo_edit();
+        app.undo_edit();
+        app.redo_edit();
+        assert_eq!(
+            app.annotations.get(id).unwrap().color,
+            [235, 70, 70],
+            "撤销/重做必须保留样式"
+        );
     }
 
     #[test]

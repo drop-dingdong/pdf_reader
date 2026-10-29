@@ -864,7 +864,7 @@ fn lines_at(quads: &[Rect], middle: bool, stroke: &str, opacity: f32) -> String 
     );
     for quad in quads {
         let y = if middle {
-            quad.y + quad.height * 0.5
+            quad.y + quad.height * pdfcore::annotation::STRIKE_FRACTION
         } else {
             quad.y - UNDERLINE_GAP
         };
@@ -1389,8 +1389,8 @@ mod tests {
         )
         .expect("删除线必须写 AP");
         assert!(
-            strike.contains("10.00 26.00 m 110.00 26.00 l"),
-            "中线在 y=26：{strike}"
+            strike.contains("10.00 24.80 m 110.00 24.80 l"),
+            "中线按 STRIKE_FRACTION 在 y=24.8：{strike}"
         );
     }
 

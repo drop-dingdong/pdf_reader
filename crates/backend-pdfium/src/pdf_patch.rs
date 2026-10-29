@@ -824,7 +824,7 @@ fn lines_content(
     );
     for quad in quads {
         let y = if middle {
-            quad.y + quad.height * 0.5
+            quad.y + quad.height * pdfcore::annotation::STRIKE_FRACTION
         } else {
             quad.y - pdfcore::annotation::UNDERLINE_GAP
         };
