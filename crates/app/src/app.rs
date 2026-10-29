@@ -913,13 +913,13 @@ impl PdfReaderApp {
                 self.annotations.insert(annotation.clone());
                 // 外部注释被删除并写回后，对象已不在 PDF 里；撤销恢复时必须
                 // 当作新注释重新写回，而不是继续按旧对象号做“外部更新”。
-                if self.external_ids.contains(&annotation.id) {
-                    if let Some(reference) = annotation.pdf_ref {
-                        if !self.opened_pdf_refs.contains(&reference) {
-                            self.external_ids.remove(&annotation.id);
-                            if let Some(restored) = self.annotations.get_mut(annotation.id) {
-                                restored.pdf_ref = None;
-                            }
+                // 删除并写回后，旧对象已不在 PDF；撤销恢复时必须按新注释写回。
+                // 这不只对外部注释成立：自有注释的旧 pdf_ref 同样会失效。
+                if let Some(reference) = annotation.pdf_ref {
+                    if !self.opened_pdf_refs.contains(&reference) {
+                        self.external_ids.remove(&annotation.id);
+                        if let Some(restored) = self.annotations.get_mut(annotation.id) {
+                            restored.pdf_ref = None;
                         }
                     }
                 }
@@ -6652,6 +6652,37 @@ mod external_annotation_tests {
             .insert(reference, Some("旧".to_string()));
         app.pdf_clean_hash = Some(app.pdf_fingerprint());
         (app, id, reference)
+    }
+
+    #[test]
+    fn undoing_own_delete_after_save_requeues_it_as_new() {
+        let mut app = PdfReaderApp::new_headless(
+            crate::clock::Clock::system(),
+            crate::diag::diagnostics_for_tests(),
+            None,
+        );
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        let id = app.annotations.iter().next().unwrap().id;
+        let reference = pdfcore::annotation::PdfObjectRef { num: 37, gen: 0 };
+        if let Some(annotation) = app.annotations.get_mut(id) {
+            annotation.pdf_ref = Some(reference);
+        }
+        app.opened_pdf_refs.insert(reference);
+        let annotation = app.annotations.get(id).cloned().expect("标注");
+        app.apply_edit(AppEdit::DeleteAnnotation { annotation }, true);
+        // 模拟删除已经写入 PDF：当前文件里没有这个对象
+        app.opened_pdf_refs.clear();
+        app.undo_edit();
+        assert_eq!(
+            app.annotations.get(id).and_then(|a| a.pdf_ref),
+            None,
+            "自有注释的旧 ref 失效后也要按新注释写回"
+        );
     }
 
     #[test]

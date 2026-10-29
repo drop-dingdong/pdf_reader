@@ -1545,6 +1545,19 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   `check.sh` 全绿（374 tests）。
 - **状态**：P5 完成；P4b-2 删除已覆盖外部-only，混合任务仍由 PDFium（后续可继续对象化）。
 
+### D-166 P5 修正：撤销已写回的删除（自有/外部统一）
+
+- **问题**：删除写入后撤销再写入，注释没有回来。P5 后 `pages` 只收新注释，
+  而撤销恢复只在 `external_ids` 里检查旧 ref；自有注释没有该标记，保留了失效 ref，
+  于是既不在 pages 也不在 updates，被跳过。
+- **修复**：撤销恢复 AddAnnotation 时，无论自有/外部，只要 `pdf_ref` 不在
+  `opened_pdf_refs`（说明对象已被写回删除），就清空 ref、移出 external_ids，
+  按新注释重新写回。
+- **新增测试**：`undoing_own_delete_after_save_requeues_it_as_new`；
+  原外部测试继续通过。
+- **验证**：`check.sh` 全绿（375 tests）。
+- **状态**：P5 修正完成。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |
