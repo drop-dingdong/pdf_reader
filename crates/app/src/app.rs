@@ -3252,14 +3252,33 @@ impl PdfReaderApp {
                     if readonly {
                         text.push_str("  [只读]");
                     }
+                    let hint = if readonly {
+                        "\n\n只读：无对象号，不能删除".to_string()
+                    } else {
+                        "\n\n右键可删除".to_string()
+                    };
                     let response = ui
-                        .add(egui::Label::new(text).truncate().sense(Sense::click()))
+                        .add(
+                            egui::Label::new(text)
+                                .truncate()
+                                // 关闭 Label 的“截断时自动 tooltip”，只保留我们自己的。
+                                .show_tooltip_when_elided(false)
+                                .sense(Sense::click()),
+                        )
                         .on_hover_text(format!(
-                            "{preview}\n\n{label} · 第 {} 页{}{}",
+                            "{preview}\n\n{label} · 第 {} 页{}{}{hint}",
                             page.display_number(),
                             if external { " · 外部" } else { " · 自有" },
                             if readonly { " · 只读" } else { "" }
                         ));
+                    response.context_menu(|ui| {
+                        if readonly {
+                            ui.label("该外部注释无对象号，暂不支持删除");
+                        } else if ui.button("删除注释（可撤销）").clicked() {
+                            self.delete_annotation(id);
+                            ui.close();
+                        }
+                    });
                     if response.clicked() {
                         self.focus_annotation(id, session);
                     }
@@ -3908,11 +3927,8 @@ impl PdfReaderApp {
             .retain(|window| window.owner != FloatOwner::Custom(index));
     }
 
-    /// 删除指针下的标注（`Delete` 键；Ctrl+Z 可撤销）。
-    fn delete_hovered_annotation(&mut self) -> bool {
-        let Some(id) = self.hovered_annotation else {
-            return false;
-        };
+    /// 删除指定标注（列表右键与 `Delete` 键共用；Ctrl+Z 可撤销）。
+    fn delete_annotation(&mut self, id: AnnotationId) -> bool {
         let Some(annotation) = self.annotations.get(id).cloned() else {
             return false;
         };
@@ -3923,6 +3939,14 @@ impl PdfReaderApp {
         self.apply_edit(AppEdit::DeleteAnnotation { annotation }, true);
         self.message = "已删除标注（Ctrl+Z 可撤销）".to_string();
         true
+    }
+
+    /// 删除指针下的标注（`Delete` 键；Ctrl+Z 可撤销）。
+    fn delete_hovered_annotation(&mut self) -> bool {
+        let Some(id) = self.hovered_annotation else {
+            return false;
+        };
+        self.delete_annotation(id)
     }
 
     /// 命中标注（`content` 是内容空间点，容差按**屏幕像素**换算到页面单位）。
@@ -7052,6 +7076,30 @@ mod annotation_body_tests {
             Some("第一版")
         );
         assert!(app.custom_previews.is_empty());
+    }
+
+    #[test]
+    fn annotation_list_delete_is_undoable_and_refuses_inline_external() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        let id = app.annotations.iter().next().unwrap().id;
+        assert!(app.delete_annotation(id));
+        assert!(app.annotations.get(id).is_none());
+        app.undo_edit();
+        assert!(app.annotations.get(id).is_some());
+
+        let id = app.annotations.iter().next().unwrap().id;
+        app.external_ids.insert(id);
+        if let Some(annotation) = app.annotations.get_mut(id) {
+            annotation.pdf_ref = None;
+        }
+        assert!(!app.delete_annotation(id), "内联外部注释只能读");
+        assert!(app.annotations.get(id).is_some());
     }
 
     #[test]

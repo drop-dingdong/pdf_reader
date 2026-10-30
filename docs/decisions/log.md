@@ -1673,6 +1673,15 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - 新增 `AnnotationRow` 收集/排序，按页、y 降序、x、id 稳定排序。
 - **验证**：摘要/tooltip 单测；`check.sh` 全绿（386 tests）。
 
+### D-176 注释列表：单一 tooltip + 右键删除
+
+- 双重 tooltip 根因：`Label::truncate()` 默认在截断时自动加完整文本 tooltip，
+  与自定义 tooltip 叠加；关闭 `show_tooltip_when_elided(false)`。
+- 行右键菜单「删除注释（可撤销）」；复用 `delete_annotation(id)`，
+  无对象号的外部内联注释仍拒绝并提示只读。
+- `delete_hovered_annotation` 也改为调用同一入口，避免两条删除逻辑。
+- 测试：删除可撤销、内联外部拒绝；`check.sh` 全绿（387 tests）。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |
