@@ -502,6 +502,13 @@ enum AppEdit {
         /// 被删掉的标注（含删除那一刻的正文）。
         annotation: pdfcore::annotation::Annotation,
     },
+    /// 修改已有标注的颜色（重新创建对象，旧对象由写回 deletes 删除）。
+    RecolorAnnotation {
+        /// 改色前快照。
+        before: pdfcore::annotation::Annotation,
+        /// 改色后快照（id 可能不同）。
+        after: pdfcore::annotation::Annotation,
+    },
     /// 修改注释正文（一条命令一次提交，不按字符记历史）。
     SetBody {
         /// 注释 id。
@@ -568,6 +575,9 @@ impl AppEdit {
             }
             Self::DeleteAnnotation { annotation } => {
                 format!("删除标注（第 {} 页）", annotation.page.display_number())
+            }
+            Self::RecolorAnnotation { after, .. } => {
+                format!("修改标注颜色（第 {} 页）", after.page.display_number())
             }
             Self::SetBody { page, .. } => {
                 format!("修改注释正文（第 {} 页）", page.display_number())
@@ -1070,6 +1080,22 @@ impl PdfReaderApp {
                 self.floats
                     .retain(|window| window.owner != FloatOwner::Annotation(annotation.id));
             }
+            AppEdit::RecolorAnnotation { before, after } => {
+                self.annotations.remove(before.id);
+                self.annotations.insert(after.clone());
+                for window in &mut self.floats {
+                    if window.owner == FloatOwner::Annotation(before.id) {
+                        window.owner = FloatOwner::Annotation(after.id);
+                    }
+                }
+                if let Some(reference) = after.pdf_ref {
+                    if !self.opened_pdf_refs.contains(&reference) {
+                        if let Some(restored) = self.annotations.get_mut(after.id) {
+                            restored.pdf_ref = None;
+                        }
+                    }
+                }
+            }
             AppEdit::SetBody { id, after, .. } => {
                 self.annotations.set_body(*id, after.clone());
             }
@@ -1111,6 +1137,10 @@ impl PdfReaderApp {
         let inverse = match entry.command {
             AppEdit::AddAnnotation { annotation } => AppEdit::DeleteAnnotation { annotation },
             AppEdit::DeleteAnnotation { annotation } => AppEdit::AddAnnotation { annotation },
+            AppEdit::RecolorAnnotation { before, after } => AppEdit::RecolorAnnotation {
+                before: after,
+                after: before,
+            },
             AppEdit::SetBody {
                 id,
                 page,
@@ -1903,12 +1933,20 @@ impl PdfReaderApp {
             .map(|(reference, id)| (*id, *reference))
             .collect();
         for command in self.history.commands_mut() {
-            if let AppEdit::AddAnnotation { annotation }
-            | AppEdit::DeleteAnnotation { annotation } = command
-            {
-                if let Some(reference) = refs.get(&annotation.id) {
-                    annotation.pdf_ref = Some(*reference);
+            match command {
+                AppEdit::AddAnnotation { annotation }
+                | AppEdit::DeleteAnnotation { annotation } => {
+                    if let Some(reference) = refs.get(&annotation.id) {
+                        annotation.pdf_ref = Some(*reference);
+                    }
                 }
+                AppEdit::RecolorAnnotation { before, after } => {
+                    if let Some(reference) = refs.get(&after.id) {
+                        after.pdf_ref = Some(*reference);
+                    }
+                    before.pdf_ref = None;
+                }
+                _ => {}
             }
         }
     }
@@ -3252,36 +3290,39 @@ impl PdfReaderApp {
                     if readonly {
                         text.push_str("  [只读]");
                     }
-                    let hint = if readonly {
-                        "\n\n只读：无对象号，不能删除".to_string()
-                    } else {
-                        "\n\n右键可删除".to_string()
-                    };
-                    let response = ui
-                        .add(
-                            egui::Label::new(text)
-                                .truncate()
-                                // 关闭 Label 的“截断时自动 tooltip”，只保留我们自己的。
-                                .show_tooltip_when_elided(false)
-                                .sense(Sense::click()),
-                        )
-                        .on_hover_text(format!(
-                            "{preview}\n\n{label} · 第 {} 页{}{}{hint}",
-                            page.display_number(),
-                            if external { " · 外部" } else { " · 自有" },
-                            if readonly { " · 只读" } else { "" }
-                        ));
-                    response.context_menu(|ui| {
-                        if readonly {
-                            ui.label("该外部注释无对象号，暂不支持删除");
-                        } else if ui.button("删除注释（可撤销）").clicked() {
+                    ui.horizontal(|ui| {
+                        let width = (ui.available_width() - 34.0).max(80.0);
+                        let response = ui
+                            .add_sized(
+                                [width, 18.0],
+                                egui::Label::new(text)
+                                    .truncate()
+                                    // 关闭 Label 的“截断时自动 tooltip”，只保留我们自己的。
+                                    .show_tooltip_when_elided(false)
+                                    .sense(Sense::click()),
+                            )
+                            .on_hover_text(format!(
+                                "{preview}\n\n{label} · 第 {} 页{}{}",
+                                page.display_number(),
+                                if external { " · 外部" } else { " · 自有" },
+                                if readonly { " · 只读" } else { "" }
+                            ));
+                        let delete = ui.add_enabled(!readonly, egui::Button::new("删").small());
+                        let delete = if readonly {
+                            delete.on_hover_text("只读：无对象号，不能删除")
+                        } else {
+                            delete.on_hover_text("删除这条注释（可撤销）")
+                        };
+                        if delete.clicked() {
                             self.delete_annotation(id);
-                            ui.close();
+                        }
+                        response.context_menu(|ui| {
+                            self.annotation_context_menu(ui, id);
+                        });
+                        if response.clicked() {
+                            self.focus_annotation(id, session);
                         }
                     });
-                    if response.clicked() {
-                        self.focus_annotation(id, session);
-                    }
                 }
             });
     }
@@ -3939,6 +3980,80 @@ impl PdfReaderApp {
         self.apply_edit(AppEdit::DeleteAnnotation { annotation }, true);
         self.message = "已删除标注（Ctrl+Z 可撤销）".to_string();
         true
+    }
+
+    /// 修改自有标注的颜色。
+    ///
+    /// 已写入 PDF 的注释通过“旧对象 deletes + 新对象 pages”重建，避免依赖
+    /// 各阅读器不同的 AP 颜色字段；外部注释暂不改色，避免把别人的注释变成自有对象。
+    fn recolor_annotation(&mut self, id: AnnotationId, color: [u8; 3]) -> bool {
+        let Some(before) = self.annotations.get(id).cloned() else {
+            return false;
+        };
+        if self.external_ids.contains(&id) {
+            self.message = "外部注释暂不支持改色".to_string();
+            return false;
+        }
+        if before.color == color {
+            return false;
+        }
+        let page = before.page;
+        let kind = before.kind.clone();
+        let body = before.body.clone();
+        let opacity = before.opacity;
+        let new_id = match self.annotations.add(page, kind) {
+            Some(id) => id,
+            None => return false,
+        };
+        if let Some(after) = self.annotations.get_mut(new_id) {
+            after.color = color;
+            after.opacity = opacity;
+            after.body = body;
+        }
+        let Some(after) = self.annotations.get(new_id).cloned() else {
+            self.annotations.remove(new_id);
+            return false;
+        };
+        self.annotations.remove(new_id);
+        self.apply_edit(AppEdit::RecolorAnnotation { before, after }, true);
+        self.message = "已修改标注颜色（Ctrl+Z 可撤销；外部注释暂不支持）".to_string();
+        true
+    }
+
+    /// 注释右键菜单（画布与注释列表共用）：颜色、删除。
+    fn annotation_context_menu(&mut self, ui: &mut egui::Ui, id: AnnotationId) {
+        let Some(annotation) = self.annotations.get(id) else {
+            return;
+        };
+        let external = self.external_ids.contains(&id);
+        let readonly = external && annotation.pdf_ref.is_none();
+        let current = annotation.color;
+        if readonly {
+            ui.label("只读：无对象号，不能修改");
+        } else if external {
+            ui.label("外部注释暂不支持改色");
+        } else {
+            ui.menu_button("颜色", |ui| {
+                for (name, rgb) in [
+                    ("黄", [255u8, 214, 0]),
+                    ("红", [235u8, 70, 70]),
+                    ("绿", [70u8, 180, 90]),
+                    ("蓝", [70u8, 130, 220]),
+                ] {
+                    if color_swatch(ui, name, rgb, current == rgb).clicked()
+                        && self.recolor_annotation(id, rgb)
+                    {
+                        ui.close();
+                    }
+                }
+            });
+        }
+        if readonly {
+            ui.label("该外部注释无对象号，暂不支持删除");
+        } else if ui.button("删除注释（可撤销）").clicked() {
+            self.delete_annotation(id);
+            ui.close();
+        }
     }
 
     /// 删除指针下的标注（`Delete` 键；Ctrl+Z 可撤销）。
@@ -4746,17 +4861,13 @@ impl PdfReaderApp {
                 }
             }
 
-            // 2a'') 右键菜单：指针在标注上时提供"删除标注"（可撤销）——比
-            // "悬停 + Delete" 更好发现，也让删除不再依赖键盘焦点。
-            if self.capture.is_none() && self.hovered_annotation.is_some() {
-                let hovered = self.hovered_annotation;
-                response.context_menu(|ui| {
-                    if ui.button("删除标注（可撤销）").clicked() {
-                        self.hovered_annotation = hovered;
-                        self.delete_hovered_annotation();
-                        ui.close();
-                    }
-                });
+            // 2a'') 右键菜单：颜色 + 删除；与注释列表共用同一套菜单。
+            if let Some(hovered) = self.hovered_annotation {
+                if self.capture.is_none() {
+                    response.context_menu(|ui| {
+                        self.annotation_context_menu(ui, hovered);
+                    });
+                }
             }
 
             // 2b') 标注叠加层（D-118）：几何在页面空间，这里换算到屏幕
@@ -7076,6 +7187,69 @@ mod annotation_body_tests {
             Some("第一版")
         );
         assert!(app.custom_previews.is_empty());
+    }
+
+    #[test]
+    fn recoloring_new_annotation_is_undoable() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        let id = app.annotations.iter().next().unwrap().id;
+        assert!(app.recolor_annotation(id, [235, 70, 70]));
+        let recolor_id = app.annotations.iter().next().unwrap().id;
+        assert_eq!(
+            app.annotations.get(recolor_id).unwrap().color,
+            [235, 70, 70]
+        );
+        app.undo_edit();
+        assert_eq!(app.annotations.get(id).unwrap().color, [255, 214, 0]);
+        app.redo_edit();
+        assert_eq!(
+            app.annotations.get(recolor_id).unwrap().color,
+            [235, 70, 70]
+        );
+    }
+
+    #[test]
+    fn recoloring_saved_annotation_replaces_the_old_object() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Underline {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        let old_id = app.annotations.iter().next().unwrap().id;
+        let reference = pdfcore::annotation::PdfObjectRef { num: 42, gen: 0 };
+        if let Some(annotation) = app.annotations.get_mut(old_id) {
+            annotation.pdf_ref = Some(reference);
+        }
+        app.opened_pdf_refs.insert(reference);
+        assert!(app.recolor_annotation(old_id, [70, 180, 90]));
+        let current = app.annotations.iter().next().expect("新注释");
+        assert_eq!(current.color, [70, 180, 90]);
+        assert_eq!(current.pdf_ref, None, "改色必须重新生成对象");
+        let (_, deletes) = app.pdf_ref_changes();
+        assert!(deletes.contains(&reference), "旧对象应进入 deletes");
+    }
+
+    #[test]
+    fn external_annotation_cannot_be_recolored() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        let id = app.annotations.iter().next().unwrap().id;
+        app.external_ids.insert(id);
+        assert!(!app.recolor_annotation(id, [235, 70, 70]));
+        assert_eq!(app.annotations.get(id).unwrap().color, [255, 214, 0]);
     }
 
     #[test]
