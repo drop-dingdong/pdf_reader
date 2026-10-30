@@ -185,6 +185,9 @@ const CLICK_HIGHLIGHT: std::time::Duration = std::time::Duration::from_millis(70
 
 /// 注释列表点击后，中性定位轮廓的持续时间。
 const ANNOTATION_FOCUS: std::time::Duration = std::time::Duration::from_millis(1200);
+
+/// 写回前发现 PDF 被外部修改时的统一提示。
+const PDF_CONFLICT_MESSAGE: &str = "PDF 已被其他程序修改，已取消写入（原文件未改动）；当前修改仍在编辑器中。请丢弃修改后重新打开，或使用“另存为”（尚未实现）保存到新文件。";
 /// 滚动/缩放之后多久内不显示悬停预览（避免滚动时预览不断闪现）。
 const HOVER_SCROLL_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
 /// 大纲每行的固定高度（虚拟化行渲染要求等行高）。
@@ -1439,8 +1442,7 @@ impl PdfReaderApp {
         if let Some(opened) = self.pdf_file_stamp {
             match pdf_file_stamp(&pdf) {
                 Ok(current) if current != opened => {
-                    self.message =
-                        "PDF 已被其他程序修改，已取消写入；请重新打开后再保存".to_string();
+                    self.message = PDF_CONFLICT_MESSAGE.to_string();
                     return;
                 }
                 Ok(_) => {}
@@ -1516,8 +1518,7 @@ impl PdfReaderApp {
             match pdf_file_stamp(&pdf) {
                 Ok(current) if current != opened => {
                     let _ = std::fs::remove_file(&temporary);
-                    self.message =
-                        "PDF 在写入过程中被其他程序修改，已取消（原文件未改动）；当前修改仍在编辑器中，请丢弃修改后重新打开，或使用“另存为”（尚未实现）保存到新文件。".to_string();
+                    self.message = PDF_CONFLICT_MESSAGE.to_string();
                     return;
                 }
                 Ok(_) => {}
@@ -7399,6 +7400,12 @@ mod annotation_body_tests {
         }
         assert!(!app.delete_annotation(id), "内联外部注释只能读");
         assert!(app.annotations.get(id).is_some());
+    }
+
+    #[test]
+    fn conflict_message_mentions_unsaved_edits_and_save_as() {
+        assert!(PDF_CONFLICT_MESSAGE.contains("当前修改仍在编辑器中"));
+        assert!(PDF_CONFLICT_MESSAGE.contains("另存为"));
     }
 
     #[test]

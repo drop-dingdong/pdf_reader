@@ -1737,6 +1737,7 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 
 - 外部修改导致拒绝时，提示不再建议“重新打开后再保存”（会丢当前修改），改为：
   当前修改仍在编辑器中；可丢弃修改后重新打开，或使用“另存为”（尚未实现）保存到新文件。
+  两处检查共用 `PDF_CONFLICT_MESSAGE`，避免初始/复查分支措辞再次分叉。
 - `replace_contents` 在改正文后调用 `stamp_modified`：替换/插入 `/M (D:...Z)`。
   `/M` = 注释的 ModificationDate，`/CreationDate` 只在新建时写。
 - 测试：正文 patch 输出含 `/M (`；`check.sh` 全绿（392 tests）。
