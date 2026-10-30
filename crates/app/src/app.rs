@@ -3955,7 +3955,14 @@ impl PdfReaderApp {
         };
         let page = annotation.page;
         let bounds = annotation.bounds();
-        self.commands.push(ViewerCommand::GoToPage(page));
+        if let Some(bounds) = bounds {
+            self.commands.push(ViewerCommand::CenterOnPagePoint {
+                page,
+                point: bounds.center(),
+            });
+        } else {
+            self.commands.push(ViewerCommand::GoToPage(page));
+        }
         let mut at = egui::pos2(360.0, 160.0);
         if self.canvas_rect.width() > 1.0 {
             if let Some(placement) = session.placement(page) {
