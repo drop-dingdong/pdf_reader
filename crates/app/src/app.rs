@@ -830,6 +830,8 @@ pub struct PdfReaderApp {
     annotation_focus: Option<(AnnotationId, std::time::Instant)>,
     /// 画布右键菜单锚定的注释（菜单/子菜单打开期间保持）。
     context_annotation: Option<AnnotationId>,
+    /// 自定义右键菜单的屏幕位置；`None` = 关闭。
+    context_menu_pos: Option<egui::Pos2>,
     /// Pin 条目悬浮响应开关（勾选 = 悬浮时显示临时预览/高亮旧浮窗）。
     pin_hover_enabled: bool,
     /// 侧栏 Pin 列表里正在被悬浮的条目（下标 + 该行的屏幕矩形，用于定位临时浮窗）。
@@ -1010,6 +1012,7 @@ impl PdfReaderApp {
             annotation_only_readonly: false,
             annotation_focus: None,
             context_annotation: None,
+            context_menu_pos: None,
             pin_hover_enabled: true,
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
@@ -2321,6 +2324,11 @@ impl PdfReaderApp {
                 self.pending_annotate = Some(MarkupTool::Highlight);
                 continue;
             }
+            if key == Key::Escape && self.context_menu_pos.is_some() {
+                self.context_annotation = None;
+                self.context_menu_pos = None;
+                continue;
+            }
             if key == Key::Escape && self.annotation_tool.is_some() {
                 self.exit_markup_tool();
                 self.message = "已退出标记模式".to_string();
@@ -3323,19 +3331,20 @@ impl PdfReaderApp {
                                 if external { " · 外部" } else { " · 自有" },
                                 if readonly { " · 只读" } else { "" }
                             ));
-                        ui.add_space(4.0);
-                        let delete = ui.add_enabled(
-                            !readonly,
-                            egui::Button::new("\u{274e}").small().frame(false),
-                        );
-                        let delete = if readonly {
-                            delete.on_hover_text("只读：无对象号，不能删除")
-                        } else {
-                            delete.on_hover_text("删除这条注释（可撤销）")
-                        };
-                        if delete.clicked() {
-                            self.delete_annotation(id);
-                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let delete = ui.add_enabled(
+                                !readonly,
+                                egui::Button::new("\u{274e}").small().frame(false),
+                            );
+                            let delete = if readonly {
+                                delete.on_hover_text("只读：无对象号，不能删除")
+                            } else {
+                                delete.on_hover_text("删除这条注释（可撤销）")
+                            };
+                            if delete.clicked() {
+                                self.delete_annotation(id);
+                            }
+                        });
                         response.context_menu(|ui| {
                             self.annotation_context_menu(ui, id);
                         });
@@ -4063,6 +4072,8 @@ impl PdfReaderApp {
                     if color_swatch(ui, name, rgb, current == rgb).clicked()
                         && self.recolor_annotation(id, rgb)
                     {
+                        self.context_annotation = None;
+                        self.context_menu_pos = None;
                         ui.close();
                     }
                 }
@@ -4072,6 +4083,8 @@ impl PdfReaderApp {
             ui.label("该外部注释无对象号，暂不支持删除");
         } else if ui.button("删除注释（可撤销）").clicked() {
             self.delete_annotation(id);
+            self.context_annotation = None;
+            self.context_menu_pos = None;
             ui.close();
         }
     }
@@ -4881,21 +4894,16 @@ impl PdfReaderApp {
                 }
             }
 
-            // 2a'') 右键菜单：颜色 + 删除；与注释列表共用同一套菜单。
-            // 菜单打开后指针会离开标注，不能再用 hovered_annotation 判断；
-            // 用 context_annotation 在菜单/子菜单打开期间保持锚点。
-            if self.capture.is_none() {
-                if response.secondary_clicked() {
-                    self.context_annotation = response
-                        .interact_pointer_pos()
-                        .map(|position| canvas_to_content(canvas, position, scroll))
-                        .and_then(|content| self.annotation_at(session, content));
-                }
-                if let Some(id) = self.context_annotation.or(self.hovered_annotation) {
-                    response.context_menu(|ui| {
-                        self.context_annotation = Some(id);
-                        self.annotation_context_menu(ui, id);
-                    });
+            // 2a'') 右键：记录指针下的注释；菜单由 draw_annotation_context_menu 绘制。
+            // 用原始指针事件，不受 popup 捕获影响；在另一条注释上右键可直接切换。
+            if self.capture.is_none() && ui.input(|i| i.pointer.secondary_clicked()) {
+                if let Some(position) = ui.input(|i| i.pointer.interact_pos()) {
+                    if canvas.contains(position) {
+                        let content = canvas_to_content(canvas, position, scroll);
+                        let id = self.annotation_at(session, content);
+                        self.context_annotation = id;
+                        self.context_menu_pos = id.map(|_| position);
+                    }
                 }
             }
 
@@ -5320,6 +5328,45 @@ impl PdfReaderApp {
                 self.draw_capture(ui, canvas, session, scroll);
             }
         });
+        self.draw_annotation_context_menu(ui.ctx());
+    }
+
+    /// 绘制自定义注释右键菜单。
+    ///
+    /// 不用 `Response::context_menu`：它的 popup 绑定在画布 response 上，
+    /// 指针移到菜单/子菜单时菜单会丢；自定义 Area 可以按 state 保持，
+    /// 并且能在另一条注释上右键时直接替换锚点。
+    fn draw_annotation_context_menu(&mut self, ctx: &egui::Context) {
+        let (Some(id), Some(pos)) = (self.context_annotation, self.context_menu_pos) else {
+            return;
+        };
+        let screen = ctx.viewport_rect();
+        let pos = egui::pos2(
+            pos.x.min((screen.right() - 170.0).max(screen.left())),
+            pos.y.min((screen.bottom() - 24.0).max(screen.top())),
+        );
+        let inner = egui::Area::new(egui::Id::unique("annotation-context-menu"))
+            .fixed_pos(pos)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::menu(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(150.0);
+                    self.annotation_context_menu(ui, id);
+                });
+            });
+        let pointer = ctx.input(|i| i.pointer.interact_pos());
+        let clicked = ctx.input(|i| i.pointer.any_click());
+        let opening = ctx.input(|i| i.pointer.secondary_clicked());
+        if clicked
+            && !opening
+            && pointer.is_some_and(|pointer| !inner.response.rect.contains(pointer))
+            && !ctx.any_popup_open()
+        {
+            self.context_annotation = None;
+            self.context_menu_pos = None;
+        } else {
+            ctx.request_repaint();
+        }
     }
 
     /// 添加一个"测试浮窗"（带任意文字），位置按已有浮窗数量级联偏移。

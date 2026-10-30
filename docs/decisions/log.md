@@ -1701,12 +1701,13 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 
 - 列表行左对齐：固定 8px 左内边距，用 `allocate_ui_with_layout(LeftToRight)`
   （`add_sized` 会居中，不能只改 Label halign）；删除按钮用 U+274E、无填充背景，
-  固定宽度把按钮推到行尾；tooltip 不再提示右键。
-- 画布右键菜单打开后指针会离开注释，改用 `context_annotation` 锚点：
-  * 右键时用 `annotation_at` 取当前指针下注释；
-  * 菜单/子菜单打开期间保持锚点，不在每帧按 `hovered_annotation` 清除；
-    下一次在空白处右键时重置。
-  这样移到颜色子菜单不会导致菜单消失。
+  放在剩余宽度的 right-to-left 布局里，真正贴行尾；tooltip 不再提示右键。
+- 画布右键菜单改为自定义 `Area`（不再用 `Response::context_menu`）：
+  * 原始 `pointer.secondary_clicked()` 取指针下注释，记录 `context_annotation + context_menu_pos`；
+  * 菜单/子菜单打开期间状态保持；在另一条注释上右键直接替换锚点；
+  * 左键在菜单外关闭；右键打开的当帧不执行 outside-close，避免新菜单闪现后消失；
+  * Esc 关闭菜单。
+  这样移到颜色子菜单、或切换到另一条注释的菜单都不会消失。
 - `check.sh` 全绿（391 tests）。
 
 ### D-179 墨迹平滑与抽稀
