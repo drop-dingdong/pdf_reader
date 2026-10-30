@@ -59,6 +59,61 @@ use crate::view::{
 /// 可用 `PDF_READER_TEXTURE_BUDGET_MB` 覆盖（0 = 不限制）。
 pub const TEXTURE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 
+/// 注释列表的一行（渲染前先收集、排序，避免边遍历边改 UI）。
+struct AnnotationRow {
+    page: PageIndex,
+    id: AnnotationId,
+    label: &'static str,
+    readonly: bool,
+    external: bool,
+    summary: String,
+    preview: String,
+    bounds: Option<Rect>,
+}
+
+/// 注释列表里的类型名；`visible` 恒为 true，预留给将来不可列类型。
+fn annotation_kind_label(kind: &AnnotationKind) -> (&'static str, bool) {
+    match kind {
+        AnnotationKind::Highlight { .. } => ("高亮", true),
+        AnnotationKind::Underline { .. } => ("下划线", true),
+        AnnotationKind::StrikeOut { .. } => ("删除线", true),
+        AnnotationKind::Ink { .. } => ("墨迹", true),
+    }
+}
+
+/// 悬停预览：压平全部空白，最多 280 字。
+fn body_tooltip(body: Option<&str>) -> String {
+    let Some(body) = body else {
+        return "无正文".to_string();
+    };
+    let text = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return "无正文".to_string();
+    }
+    let mut out: String = text.chars().take(280).collect();
+    if text.chars().count() > 280 {
+        out.push('…');
+    }
+    out
+}
+
+/// 正文摘要：压平空白、只取首行；没有正文时给明确占位。
+fn body_summary(body: Option<&str>) -> String {
+    let Some(body) = body else {
+        return "无正文".to_string();
+    };
+    let line = body
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        "无正文".to_string()
+    } else {
+        collapsed
+    }
+}
+
 /// 样式菜单里的颜色块。
 fn color_swatch(ui: &mut egui::Ui, name: &str, rgb: [u8; 3], selected: bool) -> egui::Response {
     ui.add(
@@ -127,6 +182,9 @@ const DEFAULT_CUSTOM_TEXT_BODY: egui::Vec2 = egui::Vec2::new(300.0, 170.0);
 
 /// 侧栏条目被点击后，浮窗高亮的持续时间（一次性动作需要一个有限时长）。
 const CLICK_HIGHLIGHT: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// 注释列表点击后，中性定位轮廓的持续时间。
+const ANNOTATION_FOCUS: std::time::Duration = std::time::Duration::from_millis(1200);
 /// 滚动/缩放之后多久内不显示悬停预览（避免滚动时预览不断闪现）。
 const HOVER_SCROLL_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
 /// 大纲每行的固定高度（虚拟化行渲染要求等行高）。
@@ -294,6 +352,8 @@ enum SidebarTab {
     Outline,
     /// 自定义 preview 列表（Pin）
     Pins,
+    /// 注释列表（P7）
+    Annotations,
 }
 
 /// 自定义 preview 的两种类型。
@@ -748,6 +808,16 @@ pub struct PdfReaderApp {
     show_outline: bool,
     /// 侧栏当前标签页。
     sidebar_tab: SidebarTab,
+    /// 注释列表：按类型过滤。
+    annotation_show_highlight: bool,
+    annotation_show_underline: bool,
+    annotation_show_strike: bool,
+    annotation_show_ink: bool,
+    /// 注释列表：只看外部/只读注释。
+    annotation_only_external: bool,
+    annotation_only_readonly: bool,
+    /// 注释列表点击后的中性定位轮廓（id + 截止时刻）。
+    annotation_focus: Option<(AnnotationId, std::time::Instant)>,
     /// Pin 条目悬浮响应开关（勾选 = 悬浮时显示临时预览/高亮旧浮窗）。
     pin_hover_enabled: bool,
     /// 侧栏 Pin 列表里正在被悬浮的条目（下标 + 该行的屏幕矩形，用于定位临时浮窗）。
@@ -920,6 +990,13 @@ impl PdfReaderApp {
             active_hit: None,
             show_outline: true,
             sidebar_tab: SidebarTab::Outline,
+            annotation_show_highlight: true,
+            annotation_show_underline: true,
+            annotation_show_strike: true,
+            annotation_show_ink: true,
+            annotation_only_external: false,
+            annotation_only_readonly: false,
+            annotation_focus: None,
             pin_hover_enabled: true,
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
@@ -3010,10 +3087,20 @@ impl PdfReaderApp {
                     {
                         self.sidebar_tab = SidebarTab::Pins;
                     }
+                    if ui
+                        .selectable_label(self.sidebar_tab == SidebarTab::Annotations, "注释")
+                        .clicked()
+                    {
+                        self.sidebar_tab = SidebarTab::Annotations;
+                    }
                 });
                 ui.separator();
                 if self.sidebar_tab == SidebarTab::Pins {
                     self.draw_pin_list(ui, session);
+                    return;
+                }
+                if self.sidebar_tab == SidebarTab::Annotations {
+                    self.draw_annotation_list(ui, session);
                     return;
                 }
                 let Some(navigation) = navigation else {
@@ -3054,6 +3141,129 @@ impl PdfReaderApp {
                         });
                     }
                 });
+            });
+    }
+
+    /// 侧栏「注释」标签页：按页分组、类型/正文摘要、筛选与定位。
+    fn draw_annotation_list(&mut self, ui: &mut egui::Ui, session: &mut DocumentSession) {
+        ui.horizontal(|ui| {
+            ui.label("筛选");
+            ui.menu_button("类型", |ui| {
+                ui.checkbox(&mut self.annotation_show_highlight, "高亮");
+                ui.checkbox(&mut self.annotation_show_underline, "下划线");
+                ui.checkbox(&mut self.annotation_show_strike, "删除线");
+                ui.checkbox(&mut self.annotation_show_ink, "墨迹");
+            });
+            ui.checkbox(&mut self.annotation_only_external, "仅外部");
+            ui.checkbox(&mut self.annotation_only_readonly, "仅只读");
+        });
+        ui.separator();
+
+        let mut rows: Vec<AnnotationRow> = Vec::new();
+        for annotation in self.annotations.iter() {
+            let (label, visible) = annotation_kind_label(&annotation.kind);
+            if !visible {
+                continue;
+            }
+            let enabled = match &annotation.kind {
+                AnnotationKind::Highlight { .. } => self.annotation_show_highlight,
+                AnnotationKind::Underline { .. } => self.annotation_show_underline,
+                AnnotationKind::StrikeOut { .. } => self.annotation_show_strike,
+                AnnotationKind::Ink { .. } => self.annotation_show_ink,
+            };
+            if !enabled {
+                continue;
+            }
+            let external = self.external_ids.contains(&annotation.id);
+            if self.annotation_only_external && !external {
+                continue;
+            }
+            let readonly = external && annotation.pdf_ref.is_none();
+            if self.annotation_only_readonly && !readonly {
+                continue;
+            }
+            let summary = body_summary(annotation.body.as_deref());
+            let preview = body_tooltip(annotation.body.as_deref());
+            rows.push(AnnotationRow {
+                page: annotation.page,
+                id: annotation.id,
+                label,
+                readonly,
+                external,
+                summary,
+                preview,
+                bounds: annotation.bounds(),
+            });
+        }
+        if rows.is_empty() {
+            ui.label(if self.annotations.is_empty() {
+                "（本文档还没有注释）"
+            } else {
+                "（筛选后没有注释）"
+            });
+            return;
+        }
+        rows.sort_by(|a, b| {
+            a.page
+                .get()
+                .cmp(&b.page.get())
+                .then_with(|| match (a.bounds, b.bounds) {
+                    (Some(left), Some(right)) => right
+                        .y
+                        .partial_cmp(&left.y)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| {
+                            left.x
+                                .partial_cmp(&right.x)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        }),
+                    _ => std::cmp::Ordering::Equal,
+                })
+                .then_with(|| a.id.get().cmp(&b.id.get()))
+        });
+        ui.label(format!("{} 条", rows.len()));
+        let mut last_page: Option<PageIndex> = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for row in rows {
+                    let AnnotationRow {
+                        page,
+                        id,
+                        label,
+                        readonly,
+                        external,
+                        summary,
+                        preview,
+                        ..
+                    } = row;
+                    if last_page != Some(page) {
+                        if last_page.is_some() {
+                            ui.add_space(6.0);
+                        }
+                        ui.label(
+                            RichText::new(format!("第 {} 页", page.display_number()))
+                                .strong()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                        last_page = Some(page);
+                    }
+                    let mut text = format!("[{label}] {summary}");
+                    if readonly {
+                        text.push_str("  [只读]");
+                    }
+                    let response = ui
+                        .add(egui::Label::new(text).truncate().sense(Sense::click()))
+                        .on_hover_text(format!(
+                            "{preview}\n\n{label} · 第 {} 页{}{}",
+                            page.display_number(),
+                            if external { " · 外部" } else { " · 自有" },
+                            if readonly { " · 只读" } else { "" }
+                        ));
+                    if response.clicked() {
+                        self.focus_annotation(id, session);
+                    }
+                }
             });
     }
 
@@ -3736,6 +3946,35 @@ impl PdfReaderApp {
             }
         }
         None
+    }
+
+    /// 从注释列表定位：跳页、给中性轮廓、打开正文浮窗。
+    fn focus_annotation(&mut self, id: AnnotationId, session: &DocumentSession) {
+        let Some(annotation) = self.annotations.get(id) else {
+            return;
+        };
+        let page = annotation.page;
+        let bounds = annotation.bounds();
+        self.commands.push(ViewerCommand::GoToPage(page));
+        let mut at = egui::pos2(360.0, 160.0);
+        if self.canvas_rect.width() > 1.0 {
+            if let Some(placement) = session.placement(page) {
+                if let Some(bounds) = bounds {
+                    let content = placement.page_to_content(bounds.min());
+                    let scroll = session.viewport().scroll;
+                    at = egui::pos2(
+                        self.canvas_rect.min.x + content.x - scroll.x,
+                        self.canvas_rect.min.y + content.y - scroll.y,
+                    );
+                }
+            }
+            let max_x = (self.canvas_rect.right() - 300.0).max(self.canvas_rect.left());
+            let max_y = (self.canvas_rect.bottom() - 160.0).max(self.canvas_rect.top());
+            at.x = at.x.clamp(self.canvas_rect.left(), max_x);
+            at.y = at.y.clamp(self.canvas_rect.top(), max_y);
+        }
+        self.annotation_focus = Some((id, self.clock.now() + ANNOTATION_FOCUS));
+        self.open_annotation_note(id, at);
     }
 
     /// 点击标注：打开/置顶它的正文浮窗（正文直接属于注释，不再经过 preview）。
@@ -4606,6 +4845,38 @@ impl PdfReaderApp {
                                 // 墨迹在上面按折线画完了，且没有 quads，不会进入本循环。
                                 AnnotationKind::Ink { .. } => {}
                             }
+                        }
+                    }
+                }
+
+                // 列表定位后的中性轮廓：不改注释颜色，只做短时定位反馈。
+                if let Some((id, until)) = self.annotation_focus {
+                    if self.clock.now() >= until {
+                        self.annotation_focus = None;
+                    } else if let Some(annotation) = self.annotations.get(id) {
+                        if let (Some(bounds), Some(placement)) =
+                            (annotation.bounds(), session.placement(annotation.page))
+                        {
+                            let content = placement.rect_to_content(bounds);
+                            let screen = egui::Rect::from_min_size(
+                                canvas.min
+                                    + EVec2::new(content.x - scroll.x, content.y - scroll.y),
+                                EVec2::new(content.width, content.height),
+                            )
+                            .expand(3.0);
+                            painter.rect_stroke(
+                                screen,
+                                CornerRadius::same(2),
+                                Stroke::new(2.0, Color32::WHITE),
+                                StrokeKind::Outside,
+                            );
+                            painter.rect_stroke(
+                                screen.shrink(1.0),
+                                CornerRadius::same(2),
+                                Stroke::new(1.0, Color32::from_rgb(30, 30, 30)),
+                                StrokeKind::Inside,
+                            );
+                            ui.ctx().request_repaint();
                         }
                     }
                 }
@@ -6774,6 +7045,20 @@ mod annotation_body_tests {
             Some("第一版")
         );
         assert!(app.custom_previews.is_empty());
+    }
+
+    #[test]
+    fn annotation_list_summary_and_tooltip_are_compact() {
+        assert_eq!(body_summary(None), "无正文");
+        assert_eq!(
+            body_summary(Some("  \n  first   line \nsecond")),
+            "first line"
+        );
+        assert_eq!(body_tooltip(Some("a\nb")), "a b");
+        let long = "字".repeat(300);
+        let tooltip = body_tooltip(Some(&long));
+        assert_eq!(tooltip.chars().count(), 281);
+        assert!(tooltip.ends_with('…'));
     }
 
     #[test]
