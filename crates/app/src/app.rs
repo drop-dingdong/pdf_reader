@@ -1908,7 +1908,7 @@ impl PdfReaderApp {
             if warnings.unsaved_new {
                 ui.colored_label(
                     Color32::from_rgb(200, 60, 60),
-                    "未保存的自定义数据切换后仍保留在内存中，但尚未归档。",
+                    "未保存的自定义数据已写入原数据文件，但新文件不会写入；切换后内存中仍保留未保存副本。",
                 );
             }
             if warnings.no_data_file {
