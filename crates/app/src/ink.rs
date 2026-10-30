@@ -12,6 +12,15 @@ use pdfcore::prelude::{PageIndex, Point};
 /// "几何只与页面空间有关"的约定就破了。
 pub(crate) const MIN_SAMPLE_DISTANCE: f32 = 0.5;
 
+/// 收笔时的抽稀容差（页面空间）。只去掉近似共线的中间点，保留形状。
+const SIMPLIFY_TOLERANCE: f32 = 0.35;
+
+/// 平滑权重：当前点 0.5、前后点各 0.25；端点不动。
+const SMOOTH_NEIGHBOR_WEIGHT: f32 = 0.25;
+
+/// 只有当前点离前后点中点足够近（近似直线）才平滑；尖角保留原样。
+const SMOOTH_MAX_DEVIATION: f32 = 1.0;
+
 /// 一笔最多保留的顶点数（防止一次长拖拽把撤销栈与存档撑爆）。
 pub(crate) const MAX_POINTS: usize = 2000;
 
@@ -77,8 +86,88 @@ impl InkStroke {
         if self.points.len() < 2 {
             return None;
         }
-        Some((self.page, self.points, self.width))
+        let smoothed = smooth_points(&self.points);
+        let simplified = simplify_points(smoothed, SIMPLIFY_TOLERANCE);
+        Some((self.page, simplified, self.width))
     }
+}
+
+/// 轻量平滑：端点不动，中间点取当前 0.5 + 前后各 0.25。
+fn smooth_points(points: &[Point]) -> Vec<Point> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+    let mut out = Vec::with_capacity(points.len());
+    out.push(points[0]);
+    for window in points.windows(3) {
+        let [previous, current, next] = [window[0], window[1], window[2]];
+        let midpoint = Point::new((previous.x + next.x) * 0.5, (previous.y + next.y) * 0.5);
+        if current.distance(midpoint) > SMOOTH_MAX_DEVIATION {
+            // 尖角/转折不抹平，否则手写折线会变形。
+            out.push(current);
+            continue;
+        }
+        out.push(Point::new(
+            current.x * (1.0 - 2.0 * SMOOTH_NEIGHBOR_WEIGHT)
+                + (previous.x + next.x) * SMOOTH_NEIGHBOR_WEIGHT,
+            current.y * (1.0 - 2.0 * SMOOTH_NEIGHBOR_WEIGHT)
+                + (previous.y + next.y) * SMOOTH_NEIGHBOR_WEIGHT,
+        ));
+    }
+    out.push(points[points.len() - 1]);
+    out
+}
+
+/// Ramer–Douglas–Peucker 抽稀；距离用点到线段，容差在页面空间。
+fn simplify_points(points: Vec<Point>, tolerance: f32) -> Vec<Point> {
+    if points.len() <= 2 {
+        return points;
+    }
+    let mut keep = vec![false; points.len()];
+    keep[0] = true;
+    keep[points.len() - 1] = true;
+    simplify_range(&points, 0, points.len() - 1, tolerance, &mut keep);
+    points
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, point)| keep[index].then_some(point))
+        .collect()
+}
+
+fn simplify_range(points: &[Point], first: usize, last: usize, tolerance: f32, keep: &mut [bool]) {
+    if last <= first + 1 {
+        return;
+    }
+    let start = points[first];
+    let end = points[last];
+    let mut farthest = 0.0f32;
+    let mut index = first;
+    for (offset, point) in points[first + 1..last].iter().enumerate() {
+        let distance = distance_to_segment(*point, start, end);
+        if distance > farthest {
+            farthest = distance;
+            index = first + 1 + offset;
+        }
+    }
+    if farthest > tolerance {
+        keep[index] = true;
+        simplify_range(points, first, index, tolerance, keep);
+        simplify_range(points, index, last, tolerance, keep);
+    }
+}
+
+fn distance_to_segment(point: Point, start: Point, end: Point) -> f32 {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let length_squared = dx * dx + dy * dy;
+    if length_squared <= f32::EPSILON {
+        return (point.x - start.x).hypot(point.y - start.y);
+    }
+    let t =
+        (((point.x - start.x) * dx + (point.y - start.y) * dy) / length_squared).clamp(0.0, 1.0);
+    let x = start.x + t * dx;
+    let y = start.y + t * dy;
+    (point.x - x).hypot(point.y - y)
 }
 
 #[cfg(test)]
@@ -116,6 +205,23 @@ mod tests {
             stroke.push(Point::new(index as f32, 0.0));
         }
         assert_eq!(stroke.points().len(), MAX_POINTS, "必须在上限处停住");
+    }
+
+    #[test]
+    fn finish_smooths_and_drops_collinear_points() {
+        let mut stroke = InkStroke::start(page(), 2.0, Point::new(0.0, 0.0));
+        for point in [
+            Point::new(10.0, 0.05),
+            Point::new(20.0, -0.05),
+            Point::new(30.0, 0.02),
+            Point::new(100.0, 0.0),
+        ] {
+            stroke.push(point);
+        }
+        let (_, points, _) = stroke.finish().expect("有效");
+        assert!(points.len() < 5, "近共线点应被抽稀，实际 {points:?}");
+        assert_eq!(points.first().copied(), Some(Point::new(0.0, 0.0)));
+        assert_eq!(points.last().copied(), Some(Point::new(100.0, 0.0)));
     }
 
     #[test]

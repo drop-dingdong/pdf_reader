@@ -828,6 +828,8 @@ pub struct PdfReaderApp {
     annotation_only_readonly: bool,
     /// 注释列表点击后的中性定位轮廓（id + 截止时刻）。
     annotation_focus: Option<(AnnotationId, std::time::Instant)>,
+    /// 画布右键菜单锚定的注释（菜单/子菜单打开期间保持）。
+    context_annotation: Option<AnnotationId>,
     /// Pin 条目悬浮响应开关（勾选 = 悬浮时显示临时预览/高亮旧浮窗）。
     pin_hover_enabled: bool,
     /// 侧栏 Pin 列表里正在被悬浮的条目（下标 + 该行的屏幕矩形，用于定位临时浮窗）。
@@ -1007,6 +1009,7 @@ impl PdfReaderApp {
             annotation_only_external: false,
             annotation_only_readonly: false,
             annotation_focus: None,
+            context_annotation: None,
             pin_hover_enabled: true,
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
@@ -3291,7 +3294,8 @@ impl PdfReaderApp {
                         text.push_str("  [只读]");
                     }
                     ui.horizontal(|ui| {
-                        let width = (ui.available_width() - 34.0).max(80.0);
+                        ui.add_space(8.0);
+                        let width = (ui.available_width() - 42.0).max(80.0);
                         let response = ui
                             .add_sized(
                                 [width, 18.0],
@@ -3299,6 +3303,7 @@ impl PdfReaderApp {
                                     .truncate()
                                     // 关闭 Label 的“截断时自动 tooltip”，只保留我们自己的。
                                     .show_tooltip_when_elided(false)
+                                    .halign(egui::Align::Min)
                                     .sense(Sense::click()),
                             )
                             .on_hover_text(format!(
@@ -3307,7 +3312,9 @@ impl PdfReaderApp {
                                 if external { " · 外部" } else { " · 自有" },
                                 if readonly { " · 只读" } else { "" }
                             ));
-                        let delete = ui.add_enabled(!readonly, egui::Button::new("删").small());
+                        ui.add_space(4.0);
+                        let delete =
+                            ui.add_enabled(!readonly, egui::Button::new("\u{274e}").small());
                         let delete = if readonly {
                             delete.on_hover_text("只读：无对象号，不能删除")
                         } else {
@@ -4862,10 +4869,24 @@ impl PdfReaderApp {
             }
 
             // 2a'') 右键菜单：颜色 + 删除；与注释列表共用同一套菜单。
-            if let Some(hovered) = self.hovered_annotation {
-                if self.capture.is_none() {
+            // 菜单打开后指针会离开标注，不能再用 hovered_annotation 判断；
+            // 用 context_annotation 在菜单/子菜单打开期间保持锚点。
+            if self.capture.is_none() {
+                if !ui.ctx().any_popup_open() {
+                    self.context_annotation = None;
+                }
+                if response.secondary_clicked() {
+                    if let Some(position) = response.interact_pointer_pos() {
+                        let content = canvas_to_content(canvas, position, scroll);
+                        if let Some(id) = self.annotation_at(session, content) {
+                            self.context_annotation = Some(id);
+                        }
+                    }
+                }
+                if let Some(id) = self.context_annotation.or(self.hovered_annotation) {
                     response.context_menu(|ui| {
-                        self.annotation_context_menu(ui, hovered);
+                        self.context_annotation = Some(id);
+                        self.annotation_context_menu(ui, id);
                     });
                 }
             }
