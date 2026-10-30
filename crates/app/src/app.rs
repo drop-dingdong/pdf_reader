@@ -778,6 +778,10 @@ pub struct PdfReaderApp {
     save_as: Option<String>,
     /// 另存为对话框的错误提示。
     save_as_error: Option<String>,
+    /// 另存为：同时写原 PDF 的数据文件。
+    save_as_write_original: bool,
+    /// 另存为：写新 PDF 的数据文件。
+    save_as_write_target: bool,
     /// 自定义 preview 的 Pin 状态（`Some` = 正在选点；此时不显示浮窗、不响应链接点击）。
     custom_pin: Option<CustomKind>,
     /// 自定义 preview 的输入对话框。
@@ -1001,6 +1005,8 @@ impl PdfReaderApp {
             pdf_file_stamp: None,
             save_as: None,
             save_as_error: None,
+            save_as_write_original: true,
+            save_as_write_target: true,
             custom_pin: None,
             custom_dialog: None,
             custom_previews: Vec::new(),
@@ -1683,10 +1689,17 @@ impl PdfReaderApp {
             index += 1;
         }
         self.save_as_error = None;
+        self.save_as_write_original = true;
+        self.save_as_write_target = true;
     }
 
-    /// 把当前 PDF + 当前注释写到新文件；不切换当前文档、不覆盖目标。
-    fn save_as_to(&mut self, target: PathBuf) -> std::result::Result<(), String> {
+    /// 把当前 PDF + 当前注释写到新文件；成功后切换文档。
+    fn save_as_to(
+        &mut self,
+        target: PathBuf,
+        write_original: bool,
+        write_target: bool,
+    ) -> std::result::Result<(), String> {
         let Some(source) = self.document_path.clone() else {
             return Err("没有打开的文档".to_string());
         };
@@ -1695,8 +1708,15 @@ impl PdfReaderApp {
         }
         if target.exists() {
             return Err(format!(
-                "目标已存在，不覆盖：{}（请换一个文件名）",
+                "目标 PDF 已存在，不覆盖：{}（请换一个文件名）",
                 target.display()
+            ));
+        }
+        let target_sidecar = persist::sidecar_path(&target);
+        if target_sidecar.exists() {
+            return Err(format!(
+                "目标数据文件已存在，不覆盖：{}（请换一个文件名）",
+                target_sidecar.display()
             ));
         }
         if let Some(parent) = target.parent() {
@@ -1704,24 +1724,37 @@ impl PdfReaderApp {
                 return Err(format!("目标目录不存在：{}", parent.display()));
             }
         }
-        let Some(session) = self.session.as_ref() else {
+        if write_original {
+            if let Some((found, supported)) = self.sidecar_locked {
+                return Err(format!(
+                    "原 PDF 的数据文件版本是 v{found}（支持到 v{supported}），不能覆盖"
+                ));
+            }
+        }
+        let Some((page, zoom, scroll, pages)) = self.session.as_ref().map(|session| {
+            (
+                session.state().current_page,
+                session.state().zoom,
+                session.viewport().scroll,
+                session.page_count(),
+            )
+        }) else {
             return Err("没有打开的文档".to_string());
         };
-        if session.opened().document.info().encrypted {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.opened().document.info().encrypted)
+        {
             return Err("加密文档暂不支持另存为".to_string());
         }
-        let pages = session.page_count();
+
+        // 导出/复制 PDF 之前先记录数据快照和视图；任何一步失败都不切换文档。
+        let data = self.custom_data();
+        let saved_previews = self.custom_previews.clone();
+        let saved_dest_marks = self.dest_marks.clone();
+        let had_custom_data = self.data_dirty || !saved_previews.is_empty();
         let (ref_updates, ref_deletes) = self.pdf_ref_changes();
-        let has_work = self.pdf_dirty
-            || !self.annotations.is_empty()
-            || self.pdf_marked_annotations > 0
-            || !ref_updates.is_empty()
-            || !ref_deletes.is_empty();
-        if !has_work {
-            std::fs::copy(&source, &target).map_err(|error| format!("复制 PDF 失败：{error}"))?;
-            self.message = format!("已另存为：{}（当前文档未切换）", target.display());
-            return Ok(());
-        }
         let items: Vec<crate::export::ExportItem> = self
             .annotations
             .iter()
@@ -1737,27 +1770,48 @@ impl PdfReaderApp {
                 body: annotation.body.clone().filter(|text| !text.is_empty()),
             })
             .collect();
-        if items.is_empty() && ref_updates.is_empty() && ref_deletes.is_empty() {
+        let needs_export = !items.is_empty() || !ref_updates.is_empty() || !ref_deletes.is_empty();
+        if needs_export {
+            crate::export::export_with_refs(
+                &source,
+                &target,
+                &items,
+                &ref_updates,
+                &ref_deletes,
+                pages,
+            )?;
+        } else {
             std::fs::copy(&source, &target).map_err(|error| format!("复制 PDF 失败：{error}"))?;
-            self.message = format!(
-                "已另存为：{}（当前文档未切换，原文件未改动）",
-                target.display()
-            );
-            return Ok(());
         }
-        let report = crate::export::export_with_refs(
-            &source,
-            &target,
-            &items,
-            &ref_updates,
-            &ref_deletes,
-            pages,
-        )?;
-        self.message = format!(
-            "已另存为：{}（{} 字节；当前文档未切换，原文件未改动）",
-            report.output.display(),
-            report.bytes
-        );
+
+        // 数据文件：全部成功后才切换；目标已存在在上面已拒绝。
+        if write_original {
+            let source_sidecar = persist::sidecar_path(&source);
+            self.write_custom_data_to(&source_sidecar, &data)?;
+        }
+        if write_target {
+            self.write_custom_data_to(&target_sidecar, &data)?;
+        }
+
+        self.reopening_after_write = true;
+        self.open(&target, None);
+        if self.session.is_none() {
+            return Err(format!(
+                "新 PDF 已生成，但重新打开失败：{}",
+                target.display()
+            ));
+        }
+        // 未写新数据文件：切换后把数据留在内存，并标记未保存。
+        if !write_target {
+            self.custom_previews = saved_previews;
+            self.dest_marks = saved_dest_marks;
+            if had_custom_data {
+                self.data_dirty = true;
+                self.data_clean_hash = None;
+            }
+        }
+        self.pending_view_restore = Some((page, zoom, scroll, 2));
+        self.message = format!("已另存为并切换到：{}（原文件未改动）", target.display());
         Ok(())
     }
 
@@ -1770,7 +1824,7 @@ impl PdfReaderApp {
         egui::Modal::new(Id::unique("save-as")).show(ctx, |ui| {
             ui.set_width(520.0);
             ui.heading("另存为");
-            ui.label("把当前 PDF 与注释写到新文件；当前文件保持不变。");
+            ui.label("把当前 PDF 与注释写到新文件；成功后切换到新文件，原文件保持不变。");
             ui.add_space(6.0);
             let response = ui.add(
                 egui::TextEdit::singleline(&mut draft)
@@ -1780,6 +1834,82 @@ impl PdfReaderApp {
             if response.gained_focus() {
                 self.save_as_error = None;
             }
+            let mut target_preview = PathBuf::from(draft.trim());
+            if target_preview.extension().is_none() {
+                target_preview.set_extension("pdf");
+            }
+            let has_data = self.data_dirty || !self.custom_previews.is_empty();
+            let source_sidecar = self
+                .document_path
+                .as_ref()
+                .map(|path| persist::sidecar_path(path))
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "（原 PDF 数据文件）".to_string());
+            let target_sidecar = persist::sidecar_path(&target_preview).display().to_string();
+            ui.add_space(4.0);
+            ui.checkbox(
+                &mut self.save_as_write_original,
+                "写入原 PDF 的数据文件（归档/同步原路径）",
+            );
+            ui.label(
+                RichText::new(source_sidecar)
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
+            ui.checkbox(
+                &mut self.save_as_write_target,
+                "写入新 PDF 的数据文件（切换后新文档使用）",
+            );
+            ui.label(
+                RichText::new(&target_sidecar)
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
+            if !self.save_as_write_target && has_data {
+                ui.colored_label(
+                    Color32::from_rgb(200, 60, 60),
+                    "新文件不会写入自定义 preview / 被引用点尺寸等数据；链接会从 PDF 重新解析。",
+                );
+                if self.data_dirty {
+                    ui.colored_label(
+                        Color32::from_rgb(200, 60, 60),
+                        "未保存的自定义数据切换后仍保留在内存中，但尚未归档。",
+                    );
+                }
+            }
+            if !self.save_as_write_original && !self.save_as_write_target && has_data {
+                ui.colored_label(
+                    Color32::from_rgb(200, 60, 60),
+                    "当前自定义数据不会写入任何数据文件；切换后仍保留在内存中，并标记为未保存。",
+                );
+            }
+            if !self.save_as_write_original && self.save_as_write_target {
+                ui.label(
+                    RichText::new("原 PDF 的数据文件不会更新。")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+            }
+            if let Some(source) = &self.document_path {
+                if target_preview == *source {
+                    ui.colored_label(Color32::from_rgb(200, 60, 60), "目标路径与原文件相同。");
+                }
+            }
+            if target_preview.exists() {
+                ui.colored_label(
+                    Color32::from_rgb(200, 60, 60),
+                    format!("目标 PDF 已存在：{}", target_preview.display()),
+                );
+            }
+            if persist::sidecar_path(&target_preview).exists() {
+                ui.colored_label(
+                    Color32::from_rgb(200, 60, 60),
+                    format!(
+                        "目标数据文件已存在：{}",
+                        persist::sidecar_path(&target_preview).display()
+                    ),
+                );
+            }
             if let Some(error) = &self.save_as_error {
                 ui.colored_label(Color32::from_rgb(200, 60, 60), error);
             }
@@ -1788,7 +1918,7 @@ impl PdfReaderApp {
                 if ui.button("取消").clicked() {
                     decision = Some(false);
                 }
-                if ui.button("保存副本").clicked() {
+                if ui.button("保存副本并切换").clicked() {
                     decision = Some(true);
                 }
             });
@@ -1803,7 +1933,11 @@ impl PdfReaderApp {
                 if target.extension().is_none() {
                     target.set_extension("pdf");
                 }
-                match self.save_as_to(target) {
+                match self.save_as_to(
+                    target,
+                    self.save_as_write_original,
+                    self.save_as_write_target,
+                ) {
                     Ok(()) => {
                         self.save_as = None;
                         self.save_as_error = None;
@@ -1940,22 +2074,8 @@ impl PdfReaderApp {
     }
 
     /// 保存自定义数据到 `<pdf>.json`（不含任何图片像素）。
-    fn save_custom_data(&mut self) {
-        if !self.data_dirty {
-            self.message = "无自定义数据改动".to_string();
-            return;
-        }
-        if let Some((found, supported)) = self.sidecar_locked {
-            // 见 D-107：更新版本的存档不读也不写，否则就是用残缺数据覆盖完整数据
-            self.message = format!(
-                "同目录存档是 v{found}（本程序支持到 v{supported}）：为了不覆盖它，保存被拒绝"
-            );
-            return;
-        }
-        let Some(path) = self.document_path.clone() else {
-            self.message = "没有打开的文档".to_string();
-            return;
-        };
+    /// 当前自定义数据的快照（不含截图像素）。
+    fn custom_data(&self) -> persist::SavedData {
         let links = self
             .navigation
             .as_ref()
@@ -1993,22 +2113,49 @@ impl PdfReaderApp {
                 CustomKind::Text => custom_texts.push(saved),
             }
         }
-        let data = persist::SavedData {
+        persist::SavedData {
             version: persist::CURRENT_VERSION,
             links,
             dest_marks,
             custom_images,
             custom_texts,
+        }
+    }
+
+    fn write_custom_data_to(
+        &self,
+        target: &std::path::Path,
+        data: &persist::SavedData,
+    ) -> std::result::Result<(), String> {
+        persist::write_atomic(target, &data.to_json())
+            .map_err(|error| format!("写入数据文件 {} 失败：{error}", target.display()))
+    }
+
+    fn save_custom_data(&mut self) {
+        if !self.data_dirty {
+            self.message = "无自定义数据改动".to_string();
+            return;
+        }
+        if let Some((found, supported)) = self.sidecar_locked {
+            self.message = format!(
+                "同目录存档是 v{found}（本程序支持到 v{supported}）：为了不覆盖它，保存被拒绝"
+            );
+            return;
+        }
+        let Some(path) = self.document_path.clone() else {
+            self.message = "没有打开的文档".to_string();
+            return;
         };
+        let data = self.custom_data();
         let target = persist::sidecar_path(&path);
-        match persist::write_atomic(&target, &data.to_json()) {
+        match self.write_custom_data_to(&target, &data) {
             Ok(()) => {
                 self.data_dirty = false;
                 let clean = self.data_fingerprint();
                 self.data_clean_hash = Some(clean);
                 self.message = format!("已保存自定义数据：{}", target.display());
             }
-            Err(error) => self.message = format!("保存失败：{error}"),
+            Err(error) => self.message = error,
         }
     }
 
