@@ -187,7 +187,7 @@ const CLICK_HIGHLIGHT: std::time::Duration = std::time::Duration::from_millis(70
 const ANNOTATION_FOCUS: std::time::Duration = std::time::Duration::from_millis(1200);
 
 /// 写回前发现 PDF 被外部修改时的统一提示。
-const PDF_CONFLICT_MESSAGE: &str = "PDF 已被其他程序修改，已取消写入（原文件未改动）；当前修改仍在编辑器中。请丢弃修改后重新打开，或使用“另存为”（尚未实现）保存到新文件。";
+const PDF_CONFLICT_MESSAGE: &str = "PDF 已被其他程序修改，已取消写入（原文件未改动）；当前修改仍在编辑器中。请丢弃修改后重新打开，或使用“另存为”保存到新文件。";
 /// 滚动/缩放之后多久内不显示悬停预览（避免滚动时预览不断闪现）。
 const HOVER_SCROLL_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
 /// 大纲每行的固定高度（虚拟化行渲染要求等行高）。
@@ -774,6 +774,10 @@ pub struct PdfReaderApp {
     document_path: Option<std::path::PathBuf>,
     /// 打开时记录的文件身份；写回前若变化则拒绝覆盖。
     pdf_file_stamp: Option<PdfFileStamp>,
+    /// 另存为对话框中的目标路径；`None` = 未打开。
+    save_as: Option<String>,
+    /// 另存为对话框的错误提示。
+    save_as_error: Option<String>,
     /// 自定义 preview 的 Pin 状态（`Some` = 正在选点；此时不显示浮窗、不响应链接点击）。
     custom_pin: Option<CustomKind>,
     /// 自定义 preview 的输入对话框。
@@ -995,6 +999,8 @@ impl PdfReaderApp {
             highlight_float: None,
             document_path: None,
             pdf_file_stamp: None,
+            save_as: None,
+            save_as_error: None,
             custom_pin: None,
             custom_dialog: None,
             custom_previews: Vec::new(),
@@ -1650,6 +1656,166 @@ impl PdfReaderApp {
                 );
             }
             Err(error) => self.message = format!("导出失败：{error}"),
+        }
+    }
+
+    /// 打开「另存为」对话框，默认同目录 `<stem>-另存为.pdf`。
+    fn open_save_as_dialog(&mut self) {
+        let Some(pdf) = self.document_path.as_ref() else {
+            return;
+        };
+        let stem = pdf
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_else(|| "document".to_string());
+        let mut index = 1u32;
+        loop {
+            let suffix = if index == 1 {
+                "另存为".to_string()
+            } else {
+                format!("另存为-{index}")
+            };
+            let candidate = pdf.with_file_name(format!("{stem}-{suffix}.pdf"));
+            if !candidate.exists() {
+                self.save_as = Some(candidate.to_string_lossy().to_string());
+                break;
+            }
+            index += 1;
+        }
+        self.save_as_error = None;
+    }
+
+    /// 把当前 PDF + 当前注释写到新文件；不切换当前文档、不覆盖目标。
+    fn save_as_to(&mut self, target: PathBuf) -> std::result::Result<(), String> {
+        let Some(source) = self.document_path.clone() else {
+            return Err("没有打开的文档".to_string());
+        };
+        if target == source {
+            return Err("目标路径与原文件相同；另存为必须使用新文件".to_string());
+        }
+        if target.exists() {
+            return Err(format!(
+                "目标已存在，不覆盖：{}（请换一个文件名）",
+                target.display()
+            ));
+        }
+        if let Some(parent) = target.parent() {
+            if !parent.as_os_str().is_empty() && !parent.is_dir() {
+                return Err(format!("目标目录不存在：{}", parent.display()));
+            }
+        }
+        let Some(session) = self.session.as_ref() else {
+            return Err("没有打开的文档".to_string());
+        };
+        if session.opened().document.info().encrypted {
+            return Err("加密文档暂不支持另存为".to_string());
+        }
+        let pages = session.page_count();
+        let (ref_updates, ref_deletes) = self.pdf_ref_changes();
+        let has_work = self.pdf_dirty
+            || !self.annotations.is_empty()
+            || self.pdf_marked_annotations > 0
+            || !ref_updates.is_empty()
+            || !ref_deletes.is_empty();
+        if !has_work {
+            std::fs::copy(&source, &target).map_err(|error| format!("复制 PDF 失败：{error}"))?;
+            self.message = format!("已另存为：{}（当前文档未切换）", target.display());
+            return Ok(());
+        }
+        let items: Vec<crate::export::ExportItem> = self
+            .annotations
+            .iter()
+            .filter(|annotation| {
+                !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
+            })
+            .map(|annotation| crate::export::ExportItem {
+                id: Some(annotation.id.get()),
+                page: annotation.page,
+                kind: annotation.kind.clone(),
+                color: annotation.color,
+                opacity: annotation.opacity,
+                body: annotation.body.clone().filter(|text| !text.is_empty()),
+            })
+            .collect();
+        if items.is_empty() && ref_updates.is_empty() && ref_deletes.is_empty() {
+            std::fs::copy(&source, &target).map_err(|error| format!("复制 PDF 失败：{error}"))?;
+            self.message = format!(
+                "已另存为：{}（当前文档未切换，原文件未改动）",
+                target.display()
+            );
+            return Ok(());
+        }
+        let report = crate::export::export_with_refs(
+            &source,
+            &target,
+            &items,
+            &ref_updates,
+            &ref_deletes,
+            pages,
+        )?;
+        self.message = format!(
+            "已另存为：{}（{} 字节；当前文档未切换，原文件未改动）",
+            report.output.display(),
+            report.bytes
+        );
+        Ok(())
+    }
+
+    /// 「另存为」路径输入与确认框。
+    fn draw_save_as_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.save_as.clone() else {
+            return;
+        };
+        let mut decision: Option<bool> = None;
+        egui::Modal::new(Id::unique("save-as")).show(ctx, |ui| {
+            ui.set_width(520.0);
+            ui.heading("另存为");
+            ui.label("把当前 PDF 与注释写到新文件；当前文件保持不变。");
+            ui.add_space(6.0);
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut draft)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("目标 .pdf 路径"),
+            );
+            if response.gained_focus() {
+                self.save_as_error = None;
+            }
+            if let Some(error) = &self.save_as_error {
+                ui.colored_label(Color32::from_rgb(200, 60, 60), error);
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("取消").clicked() {
+                    decision = Some(false);
+                }
+                if ui.button("保存副本").clicked() {
+                    decision = Some(true);
+                }
+            });
+        });
+        match decision {
+            Some(true) => {
+                if draft.trim().is_empty() {
+                    self.save_as_error = Some("目标路径不能为空".to_string());
+                    return;
+                }
+                let mut target = PathBuf::from(draft.trim());
+                if target.extension().is_none() {
+                    target.set_extension("pdf");
+                }
+                match self.save_as_to(target) {
+                    Ok(()) => {
+                        self.save_as = None;
+                        self.save_as_error = None;
+                    }
+                    Err(error) => self.save_as_error = Some(error),
+                }
+            }
+            Some(false) => {
+                self.save_as = None;
+                self.save_as_error = None;
+            }
+            None => self.save_as = Some(draft),
         }
     }
 
@@ -2692,6 +2858,17 @@ impl PdfReaderApp {
                 );
                 response.on_hover_text(&path_text);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let can_save_as = self.document_path.is_some();
+                    let save_as = ui.add_enabled(can_save_as, egui::Button::new("另存为…"));
+                    let save_as = if can_save_as {
+                        save_as.on_hover_text("把当前 PDF + 注释另存为新文件；当前文件保持不变")
+                    } else {
+                        save_as.on_disabled_hover_text("需要先打开一个 PDF")
+                    };
+                    if save_as.clicked() {
+                        self.open_save_as_dialog();
+                    }
+                    ui.add_space(6.0);
                     let label = save_button_label(self.data_dirty);
                     match self.sidecar_locked {
                         // 存档属于更新版本：不读也不写（D-107），按钮直接禁用并说明原因
@@ -6834,6 +7011,7 @@ impl eframe::App for PdfReaderApp {
         self.handle_dropped_files(&ctx);
         // 原地写入的确认框必须在借用 session 之前处理：确认后要**关掉会话**才能替换文件
         self.draw_in_place_dialog(&ctx);
+        self.draw_save_as_dialog(&ctx);
         self.draw_rebuild_dialog(&ctx);
         self.apply_pending_view_restore(&ctx);
         self.draw_history_window(&ctx);
