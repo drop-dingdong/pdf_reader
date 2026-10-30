@@ -265,6 +265,21 @@ impl Tool {
     }
 }
 
+/// 打开时记录的 PDF 文件身份（修改时间 + 长度），用于写回前的外部修改检测。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PdfFileStamp {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+fn pdf_file_stamp(path: &std::path::Path) -> std::io::Result<PdfFileStamp> {
+    let metadata = std::fs::metadata(path)?;
+    Ok(PdfFileStamp {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+    })
+}
+
 /// 同目录存档的读取结果。
 enum Sidecar {
     /// 没有存档 / 解析失败（都当作"没有"）。
@@ -754,6 +769,8 @@ pub struct PdfReaderApp {
     highlight_float: Option<u64>,
     /// 当前文档的路径（用于保存/查找同目录的存档文件）。
     document_path: Option<std::path::PathBuf>,
+    /// 打开时记录的文件身份；写回前若变化则拒绝覆盖。
+    pdf_file_stamp: Option<PdfFileStamp>,
     /// 自定义 preview 的 Pin 状态（`Some` = 正在选点；此时不显示浮窗、不响应链接点击）。
     custom_pin: Option<CustomKind>,
     /// 自定义 preview 的输入对话框。
@@ -974,6 +991,7 @@ impl PdfReaderApp {
             scroll_quiet_until: None,
             highlight_float: None,
             document_path: None,
+            pdf_file_stamp: None,
             custom_pin: None,
             custom_dialog: None,
             custom_previews: Vec::new(),
@@ -1418,6 +1436,20 @@ impl PdfReaderApp {
                 return;
             }
         }
+        if let Some(opened) = self.pdf_file_stamp {
+            match pdf_file_stamp(&pdf) {
+                Ok(current) if current != opened => {
+                    self.message =
+                        "PDF 已被其他程序修改，已取消写入；请重新打开后再保存".to_string();
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    self.message = format!("无法检查 PDF 文件状态，已取消写入：{error}");
+                    return;
+                }
+            }
+        }
         let (ref_updates, ref_deletes) = self.pdf_ref_changes();
         if self.annotations.is_empty()
             && self.pdf_marked_annotations == 0
@@ -1480,6 +1512,22 @@ impl PdfReaderApp {
             }
         };
 
+        if let Some(opened) = self.pdf_file_stamp {
+            match pdf_file_stamp(&pdf) {
+                Ok(current) if current != opened => {
+                    let _ = std::fs::remove_file(&temporary);
+                    self.message =
+                        "PDF 在写入过程中被其他程序修改，已取消（原文件未改动）".to_string();
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    let _ = std::fs::remove_file(&temporary);
+                    self.message = format!("无法复查 PDF 文件状态，已取消写入：{error}");
+                    return;
+                }
+            }
+        }
         // 关闭会话：释放 PDFium 的文件句柄（Windows 上不放开就无法替换原文件）
         self.session = None;
         self.textures.clear();
@@ -2011,6 +2059,7 @@ impl PdfReaderApp {
                         self.sidecar_migrated = false;
                         self.sidecar_locked = None;
                         self.document_path = Some(path.to_path_buf());
+                        self.pdf_file_stamp = pdf_file_stamp(path).ok();
                         // 标注图层（<pdf>.annot.json）：缺文件 = 空；坏文件只提示，不影响打开文档
                         self.annotations.clear();
                         self.pdf_dirty = false;
@@ -7350,6 +7399,24 @@ mod annotation_body_tests {
         }
         assert!(!app.delete_annotation(id), "内联外部注释只能读");
         assert!(app.annotations.get(id).is_some());
+    }
+
+    #[test]
+    fn pdf_file_stamp_detects_external_size_change() {
+        let path = std::env::temp_dir().join(format!(
+            "pdf-reader-stamp-{}-{}.pdf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&path, b"pdf").expect("写");
+        let before = pdf_file_stamp(&path).expect("stamp");
+        std::fs::write(&path, b"pdf changed").expect("改");
+        let after = pdf_file_stamp(&path).expect("stamp2");
+        assert_ne!(before, after);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -1322,6 +1322,11 @@ fn new_highlight_uses_object_patch_and_one_revision() {
         2,
         "源一段 + 新一段"
     );
+    assert!(bytes.windows(3).any(|window| window == b"/M "), "应写 /M");
+    assert!(
+        bytes.windows(13).any(|window| window == b"/CreationDate"),
+        "应写 /CreationDate"
+    );
     let read = readback::read(&output, None).expect("读回");
     assert_eq!(read.annotations.len(), 1);
     assert_eq!(read.annotations[0].body.as_deref(), Some("new"));

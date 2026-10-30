@@ -703,6 +703,13 @@ unsafe fn add_annotation(
             });
         }
     }
+    // /M + /CreationDate：其它阅读器用它排序/显示修改时间。
+    let date = crate::pdf_patch::pdf_date_now();
+    let wide_date = wide_string(&date);
+    for key_name in ["M", "CreationDate"] {
+        let key = CString::new(key_name).expect("字面量");
+        let _ = (ffi.set_string)(handle, key.as_ptr(), wide_date.as_ptr());
+    }
 
     // 线宽写进 /BS（编辑器要知道笔宽；PDFium 不会替我们补）
     if let AnnotationKind::Ink { width, .. } = &annotation.kind {
