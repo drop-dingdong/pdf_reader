@@ -2327,6 +2327,11 @@ impl PdfReaderApp {
                 self.drag = None;
                 continue;
             }
+            if key == Key::Escape && self.tool == Tool::Ink && self.ink.is_none() {
+                self.switch_tool(Tool::Pan);
+                self.message = "已退出墨迹模式".to_string();
+                continue;
+            }
             if key == Key::Escape && self.ink.is_some() {
                 // 整笔丢弃：不进标注集合、不产生命令，所以撤销栈里不会留下半条
                 self.ink = None;
@@ -3297,15 +3302,21 @@ impl PdfReaderApp {
                         ui.add_space(8.0);
                         let width = (ui.available_width() - 42.0).max(80.0);
                         let response = ui
-                            .add_sized(
-                                [width, 18.0],
-                                egui::Label::new(text)
-                                    .truncate()
-                                    // 关闭 Label 的“截断时自动 tooltip”，只保留我们自己的。
-                                    .show_tooltip_when_elided(false)
-                                    .halign(egui::Align::Min)
-                                    .sense(Sense::click()),
+                            .allocate_ui_with_layout(
+                                EVec2::new(width, 18.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.add(
+                                        egui::Label::new(text)
+                                            .truncate()
+                                            // 关闭 Label 的“截断时自动 tooltip”，只保留我们自己的。
+                                            .show_tooltip_when_elided(false)
+                                            .halign(egui::Align::Min)
+                                            .sense(Sense::click()),
+                                    )
+                                },
                             )
+                            .inner
                             .on_hover_text(format!(
                                 "{preview}\n\n{label} · 第 {} 页{}{}",
                                 page.display_number(),
@@ -3313,8 +3324,10 @@ impl PdfReaderApp {
                                 if readonly { " · 只读" } else { "" }
                             ));
                         ui.add_space(4.0);
-                        let delete =
-                            ui.add_enabled(!readonly, egui::Button::new("\u{274e}").small());
+                        let delete = ui.add_enabled(
+                            !readonly,
+                            egui::Button::new("\u{274e}").small().frame(false),
+                        );
                         let delete = if readonly {
                             delete.on_hover_text("只读：无对象号，不能删除")
                         } else {
@@ -4872,16 +4885,11 @@ impl PdfReaderApp {
             // 菜单打开后指针会离开标注，不能再用 hovered_annotation 判断；
             // 用 context_annotation 在菜单/子菜单打开期间保持锚点。
             if self.capture.is_none() {
-                if !ui.ctx().any_popup_open() {
-                    self.context_annotation = None;
-                }
                 if response.secondary_clicked() {
-                    if let Some(position) = response.interact_pointer_pos() {
-                        let content = canvas_to_content(canvas, position, scroll);
-                        if let Some(id) = self.annotation_at(session, content) {
-                            self.context_annotation = Some(id);
-                        }
-                    }
+                    self.context_annotation = response
+                        .interact_pointer_pos()
+                        .map(|position| canvas_to_content(canvas, position, scroll))
+                        .and_then(|content| self.annotation_at(session, content));
                 }
                 if let Some(id) = self.context_annotation.or(self.hovered_annotation) {
                     response.context_menu(|ui| {
