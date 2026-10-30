@@ -107,6 +107,46 @@ fn replace_contents(dict: &[u8], body: Option<&str>) -> Result<Vec<u8>, String> 
             format!(" /Contents <{hex}>").into_bytes(),
         );
     }
+    stamp_modified(&out)
+}
+
+/// 更新注释字典的 `/M`（修改时间）；没有就插入。
+fn stamp_modified(dict: &[u8]) -> Result<Vec<u8>, String> {
+    if !dict.starts_with(b"<<") || !dict.ends_with(b">>") {
+        return Err("注释对象不是字典".to_string());
+    }
+    let date = pdf_date_now();
+    let value = format!("/M ({date})");
+    let mut index = 2;
+    let close = dict.len() - 2;
+    while index < close {
+        skip_space(dict, &mut index);
+        if index >= close {
+            break;
+        }
+        if dict[index] != b'/' {
+            break;
+        }
+        let start = index;
+        index += 1;
+        while index < close && !is_delimiter(dict[index]) {
+            index += 1;
+        }
+        let key = &dict[start..index];
+        skip_space(dict, &mut index);
+        let end = value_end(dict, index)?;
+        if key == b"/M" {
+            let mut out = Vec::with_capacity(dict.len() + value.len());
+            out.extend_from_slice(&dict[..start]);
+            out.extend_from_slice(value.as_bytes());
+            out.extend_from_slice(&dict[end..]);
+            return Ok(out);
+        }
+        index = end;
+    }
+    let mut out = dict.to_vec();
+    let insert_at = out.len() - 2;
+    out.splice(insert_at..insert_at, format!(" {value}").into_bytes());
     Ok(out)
 }
 

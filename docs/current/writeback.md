@@ -1,7 +1,9 @@
 # 写回
 
 写回前会检查源 PDF 的 mtime/长度是否变化；变化时拒绝覆盖，避免抹掉其它阅读器的修改。
-新增注释写 `/M` 与 `/CreationDate`（UTC）。 PDF（S5b）：FFI 说明与排查手册
+新增注释写 `/M`（ModificationDate）与 `/CreationDate`（UTC PDF 日期）；
+已有注释改正文时刷新 `/M`，`/CreationDate` 不变。
+外部修改导致拒绝时，当前编辑仍在内存中；可丢弃修改后重开，或等待“另存为”。 PDF（S5b）：FFI 说明与排查手册
 
 > 现状文档：描述**现在是什么样**。改 `crates/backend-pdfium/src/writeback.rs` 或
 > `crates/app/src/writeback.rs` 时**必须同步本文**。

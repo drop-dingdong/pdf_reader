@@ -1517,7 +1517,7 @@ impl PdfReaderApp {
                 Ok(current) if current != opened => {
                     let _ = std::fs::remove_file(&temporary);
                     self.message =
-                        "PDF 在写入过程中被其他程序修改，已取消（原文件未改动）".to_string();
+                        "PDF 在写入过程中被其他程序修改，已取消（原文件未改动）；当前修改仍在编辑器中，请丢弃修改后重新打开，或使用“另存为”（尚未实现）保存到新文件。".to_string();
                     return;
                 }
                 Ok(_) => {}

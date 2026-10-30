@@ -52,6 +52,10 @@ fn appends_same_generation_update_for_okular_highlight() {
     let output = append_content_updates(&source, &[(reference, Some("P4A 正文".to_string()))])
         .expect("patch");
     assert!(output.len() < source.len() + 1200, "只应追加少量字节");
+    assert!(
+        output.windows(4).any(|window| window == b"/M ("),
+        "正文更新应刷新 /M"
+    );
     assert_eq!(
         page_annotations(&output)
             .expect("重索引")
