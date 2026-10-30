@@ -114,6 +114,33 @@ fn body_summary(body: Option<&str>) -> String {
     }
 }
 
+/// 「另存为」的提示位；条件集中在这里，便于按真值表测试。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct SaveAsWarnings {
+    /// 新文件不会写入数据文件。
+    new_missing_data: bool,
+    /// 未保存数据未归档到新文件（但原文件已写）。
+    unsaved_new: bool,
+    /// 两个数据文件都不写。
+    no_data_file: bool,
+    /// 新文件写了，但原数据文件不更新。
+    original_stale: bool,
+}
+
+fn save_as_warnings(
+    write_original: bool,
+    write_target: bool,
+    data_dirty: bool,
+    has_custom_data: bool,
+) -> SaveAsWarnings {
+    SaveAsWarnings {
+        new_missing_data: !write_target && has_custom_data,
+        unsaved_new: data_dirty && !write_target && write_original,
+        no_data_file: data_dirty && !write_original && !write_target,
+        original_stale: data_dirty && !write_original && write_target,
+    }
+}
+
 /// 样式菜单里的颜色块。
 fn color_swatch(ui: &mut egui::Ui, name: &str, rgb: [u8; 3], selected: bool) -> egui::Response {
     ui.add(
@@ -1838,7 +1865,8 @@ impl PdfReaderApp {
             if target_preview.extension().is_none() {
                 target_preview.set_extension("pdf");
             }
-            let has_data = self.data_dirty || !self.custom_previews.is_empty();
+            let has_custom_data =
+                self.data_dirty || !self.custom_previews.is_empty() || self.sidecar_migrated;
             let source_sidecar = self
                 .document_path
                 .as_ref()
@@ -1865,25 +1893,31 @@ impl PdfReaderApp {
                     .small()
                     .color(ui.visuals().weak_text_color()),
             );
-            if !self.save_as_write_target && has_data {
+            let warnings = save_as_warnings(
+                self.save_as_write_original,
+                self.save_as_write_target,
+                self.data_dirty,
+                has_custom_data,
+            );
+            if warnings.new_missing_data {
                 ui.colored_label(
                     Color32::from_rgb(200, 60, 60),
                     "新文件不会写入自定义 preview / 被引用点尺寸等数据；链接会从 PDF 重新解析。",
                 );
-                if self.data_dirty {
-                    ui.colored_label(
-                        Color32::from_rgb(200, 60, 60),
-                        "未保存的自定义数据切换后仍保留在内存中，但尚未归档。",
-                    );
-                }
             }
-            if !self.save_as_write_original && !self.save_as_write_target && has_data {
+            if warnings.unsaved_new {
+                ui.colored_label(
+                    Color32::from_rgb(200, 60, 60),
+                    "未保存的自定义数据切换后仍保留在内存中，但尚未归档。",
+                );
+            }
+            if warnings.no_data_file {
                 ui.colored_label(
                     Color32::from_rgb(200, 60, 60),
                     "当前自定义数据不会写入任何数据文件；切换后仍保留在内存中，并标记为未保存。",
                 );
             }
-            if !self.save_as_write_original && self.save_as_write_target {
+            if warnings.original_stale {
                 ui.label(
                     RichText::new("原 PDF 的数据文件不会更新。")
                         .small()
@@ -7749,6 +7783,51 @@ mod annotation_body_tests {
         let after = pdf_file_stamp(&path).expect("stamp2");
         assert_ne!(before, after);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_as_warning_truth_table() {
+        let table = |original, target, dirty| save_as_warnings(original, target, dirty, true);
+        assert_eq!(
+            table(false, false, false),
+            SaveAsWarnings {
+                new_missing_data: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(table(false, true, false), SaveAsWarnings::default());
+        assert_eq!(
+            table(true, false, false),
+            SaveAsWarnings {
+                new_missing_data: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(table(true, true, false), SaveAsWarnings::default());
+        assert_eq!(
+            table(false, false, true),
+            SaveAsWarnings {
+                new_missing_data: true,
+                no_data_file: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            table(false, true, true),
+            SaveAsWarnings {
+                original_stale: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            table(true, false, true),
+            SaveAsWarnings {
+                new_missing_data: true,
+                unsaved_new: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(table(true, true, true), SaveAsWarnings::default());
     }
 
     #[test]
