@@ -59,6 +59,16 @@ use crate::view::{
 /// 可用 `PDF_READER_TEXTURE_BUDGET_MB` 覆盖（0 = 不限制）。
 pub const TEXTURE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 
+/// 样式菜单里的颜色块。
+fn color_swatch(ui: &mut egui::Ui, name: &str, rgb: [u8; 3], selected: bool) -> egui::Response {
+    ui.add(
+        egui::Button::new(RichText::new(name).color(Color32::BLACK))
+            .fill(Color32::from_rgb(rgb[0], rgb[1], rgb[2]))
+            .selected(selected)
+            .min_size(EVec2::new(26.0, 20.0)),
+    )
+}
+
 /// 一个纹理键"应当占多少字节"（**按几何算**，不看位图是否存在）。
 ///
 /// 整页 = 渲染像素 × 4；块 = 该渲染比例下网格里的块像素 × 4。
@@ -625,6 +635,10 @@ pub struct PdfReaderApp {
     markup_color: [u8; 3],
     /// 新高亮的透明度（下划线/删除线固定不透明）。
     markup_opacity: f32,
+    /// 新墨迹的颜色。
+    ink_color: [u8; 3],
+    /// 进入标记模式前的工具，退出时恢复。
+    tool_before_annotation: Option<Tool>,
     /// 是否正在等"原地写入 PDF"的确认（S5c）。
     pending_in_place: bool,
     /// 是否正在等"从 PDF 重建标注"的确认（S6c）。
@@ -853,6 +867,8 @@ impl PdfReaderApp {
             selection_started_on_text: false,
             markup_color: TEXT_MARK_COLOR,
             markup_opacity: TEXT_MARK_OPACITY,
+            ink_color: INK_COLOR,
+            tool_before_annotation: None,
             pending_in_place: false,
             pending_rebuild: false,
             pdf_marked_annotations: 0,
@@ -2187,7 +2203,8 @@ impl PdfReaderApp {
                 self.pending_annotate = Some(MarkupTool::Highlight);
                 continue;
             }
-            if key == Key::Escape && self.annotation_tool.take().is_some() {
+            if key == Key::Escape && self.annotation_tool.is_some() {
+                self.exit_markup_tool();
                 self.message = "已退出标记模式".to_string();
                 self.drag = None;
                 continue;
@@ -2757,8 +2774,8 @@ impl PdfReaderApp {
 
                 ui.separator();
 
-                // 工具：平移 / 选字 / 墨迹（D-118 S4b）
-                for tool in [Tool::Pan, Tool::Select, Tool::Ink] {
+                // 基础工具：平移 / 选字；墨迹按钮和文本标记放在一起
+                for tool in [Tool::Pan, Tool::Select] {
                     if ui
                         .selectable_label(self.tool == tool, tool.label())
                         .clicked()
@@ -2810,6 +2827,14 @@ impl PdfReaderApp {
                         self.toggle_markup_tool(tool);
                     }
                 }
+                let ink_active = self.tool == Tool::Ink && self.annotation_tool.is_none();
+                if ui
+                    .add(egui::Button::new("墨迹").selected(ink_active))
+                    .on_hover_text("墨迹模式：拖拽画一笔；Esc/切换工具退出")
+                    .clicked()
+                {
+                    self.switch_tool(Tool::Ink);
+                }
                 ui.menu_button("样式", |ui| {
                     ui.label("标记颜色");
                     ui.horizontal(|ui| {
@@ -2819,17 +2844,7 @@ impl PdfReaderApp {
                             ("绿", [70u8, 180, 90]),
                             ("蓝", [70u8, 130, 220]),
                         ] {
-                            let selected = self.markup_color == rgb;
-                            let color = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-                            let response = ui
-                                .add(
-                                    egui::Button::new(RichText::new(name).color(Color32::BLACK))
-                                        .fill(color)
-                                        .selected(selected)
-                                        .min_size(EVec2::new(26.0, 20.0)),
-                                )
-                                .on_hover_text(format!("新标记使用{name}色"));
-                            if response.clicked() {
+                            if color_swatch(ui, name, rgb, self.markup_color == rgb).clicked() {
                                 self.markup_color = rgb;
                             }
                         }
@@ -2839,6 +2854,20 @@ impl PdfReaderApp {
                             .text("高亮透明度")
                             .fixed_decimals(2),
                     );
+                    ui.separator();
+                    ui.label("墨迹颜色");
+                    ui.horizontal(|ui| {
+                        for (name, rgb) in [
+                            ("黑", [25u8, 25, 25]),
+                            ("红", [200u8, 30, 30]),
+                            ("绿", [30u8, 150, 70]),
+                            ("蓝", [30u8, 90, 210]),
+                        ] {
+                            if color_swatch(ui, name, rgb, self.ink_color == rgb).clicked() {
+                                self.ink_color = rgb;
+                            }
+                        }
+                    });
                     ui.label("下划线/删除线固定不透明；线宽随缩放。");
                 });
 
@@ -3438,14 +3467,27 @@ impl PdfReaderApp {
 
     /// 进入/退出文本标记模式；进入时自动切到选字工具。
     fn toggle_markup_tool(&mut self, tool: MarkupTool) {
-        if self.annotation_tool == Some(tool) {
-            self.annotation_tool = None;
-            self.message = format!("已退出{}模式", tool.label());
+        if self.annotation_tool.is_some() {
+            if self.annotation_tool == Some(tool) {
+                self.exit_markup_tool();
+            } else {
+                self.annotation_tool = Some(tool);
+                self.message = format!("{}模式：拖选文字即可添加，Esc 退出", tool.label());
+            }
             return;
         }
+        let previous = self.tool;
         self.switch_tool(Tool::Select);
+        self.tool_before_annotation = Some(previous);
         self.annotation_tool = Some(tool);
         self.message = format!("{}模式：拖选文字即可添加，Esc 退出", tool.label());
+    }
+
+    /// 退出标记模式，恢复进入前的工具。
+    fn exit_markup_tool(&mut self) {
+        let previous = self.tool_before_annotation.take().unwrap_or(Tool::Select);
+        self.annotation_tool = None;
+        self.switch_tool(previous);
     }
 
     /// 切换工具（工具栏与回放共用）：**切走墨迹时丢弃正在画的一笔**。
@@ -3458,6 +3500,7 @@ impl PdfReaderApp {
         }
         self.tool = tool;
         self.annotation_tool = None;
+        self.tool_before_annotation = None;
         if pin_exits_on_mode_change(tool == Tool::Select, false) {
             self.custom_pin = None;
         }
@@ -3581,12 +3624,14 @@ impl PdfReaderApp {
     /// 回放动作 `ink` 与（S4c 的）墨迹工具都调用它：**抬笔时调用一次**，
     /// 因此"一笔 = 一条标注 = 一次撤销"只有这一处实现。
     fn annotate_ink(&mut self, page: PageIndex, points: &[Point], width: f32) -> bool {
-        if self.add_annotation(
+        if self.add_annotation_styled(
             page,
             AnnotationKind::Ink {
                 points: points.to_vec(),
                 width,
             },
+            self.ink_color,
+            INK_OPACITY,
         ) {
             self.message = "已添加墨迹（Ctrl+Z 可撤销）".to_string();
             true
@@ -6739,6 +6784,32 @@ mod annotation_body_tests {
         assert_eq!(app.tool, Tool::Select, "标记模式应自动切到选字");
         app.toggle_markup_tool(MarkupTool::StrikeOut);
         assert_eq!(app.annotation_tool, None);
+        assert_eq!(app.tool, Tool::Pan, "退出后应恢复进入前的工具");
+    }
+
+    #[test]
+    fn markup_mode_remembers_ink_as_previous_tool() {
+        let mut app = app();
+        app.switch_tool(Tool::Ink);
+        app.toggle_markup_tool(MarkupTool::Highlight);
+        assert_eq!(app.tool, Tool::Select);
+        app.exit_markup_tool();
+        assert_eq!(app.annotation_tool, None);
+        assert_eq!(app.tool, Tool::Ink, "Esc/退出应回到墨迹工具");
+    }
+
+    #[test]
+    fn ink_uses_the_style_color() {
+        let mut app = app();
+        app.ink_color = [200, 30, 30];
+        assert!(app.annotate_ink(
+            PageIndex::FIRST,
+            &[Point::new(10.0, 10.0), Point::new(30.0, 20.0)],
+            2.0,
+        ));
+        let annotation = app.annotations.iter().next().expect("墨迹");
+        assert_eq!(annotation.color, [200, 30, 30]);
+        assert_eq!(annotation.opacity, INK_OPACITY);
     }
 
     #[test]
