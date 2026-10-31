@@ -1789,8 +1789,7 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 
 - `CustomPreview` 增加**会话内** `id`：不写 sidecar；每页加载时按顺序分配 0..n-1，
   新建取 `next_id`（删除不回收）。`(page, id)` 只在当前会话有效，正常重开重新编号。
-- sidecar 保留跨类型顺序：`SavedCustom.order`，旧文件没有 order 时沿用“先图片后文字”；
-  app 读取按 order 排序后再分配 id。
+- ~~sidecar 保留跨类型顺序：`SavedCustom.order`~~（已被 D-187 的 v3 统一列表取代）。
 - 自定义数据历史改为稳定键：
   * `AddPreview` / `DeletePreview` 记录 key + position；
   * `SetPreviewTitle` / `SetPreviewBody` / `ResizePreview`；
@@ -1809,9 +1808,17 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - 其它编辑/撤销/重做会打断合并；
 - `History::last_mut` 提供栈顶命令访问。
 - 图片 preview 仍分“创建占位 + 截图替换”两步，符合后续重选截图的需求。
-- 待决策：sidecar 的 `order` 字段目前写在 v2 中，严格来说应升版本或改成
-  有序统一列表；这会影响旧版本程序是否拒绝新 sidecar，需确认。
+- sidecar 的 `order` 已由 D-187 的 v3 统一有序列表取代。
 - 测试：连续 resize 合并；`check.sh` 全绿。
+
+### D-187 Sidecar v3：preview 统一有序列表
+
+- `CURRENT_VERSION=3`；主存档只写 `custom_previews[]`：
+  `{ "kind": "image"|"text", ... }`，按当前显示/创建顺序保存；
+- 不再写 `custom_images` / `custom_texts`，也不再使用 `order` 字段；
+- v1/v2 仍可读：旧的两个数组按“先图片后文字”迁移为统一列表，置脏后下次保存写 v3；
+- v3 的旧程序读取会被拒绝（D-107：不加载、不覆盖），这是有意的向前兼容；
+- 更新 `docs/current/persistence.md`；`check.sh` 全绿（397 tests）。
 
 ## 五、开放项（尚未决策，等实测/评审）
 

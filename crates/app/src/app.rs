@@ -2315,30 +2315,32 @@ impl PdfReaderApp {
                     .collect()
             })
             .collect();
-        let mut custom_images = Vec::new();
-        let mut custom_texts = Vec::new();
-        for (order, preview) in self.custom_previews.iter().enumerate() {
-            let saved = persist::SavedCustom {
-                order: Some(order as u32),
-                page: preview.page,
-                point: preview.point,
-                rect: preview.rect,
-                body: [preview.body_size.x, preview.body_size.y],
-                title: preview.title.clone(),
-                text: preview.text.clone(),
-                scale: preview.scale,
-            };
-            match preview.kind {
-                CustomKind::Image => custom_images.push(saved),
-                CustomKind::Text => custom_texts.push(saved),
-            }
-        }
+        let custom_previews = self
+            .custom_previews
+            .iter()
+            .map(|preview| persist::SavedPreview {
+                kind: match preview.kind {
+                    CustomKind::Image => persist::SavedCustomKind::Image,
+                    CustomKind::Text => persist::SavedCustomKind::Text,
+                },
+                item: persist::SavedCustom {
+                    page: preview.page,
+                    point: preview.point,
+                    rect: preview.rect,
+                    body: [preview.body_size.x, preview.body_size.y],
+                    title: preview.title.clone(),
+                    text: preview.text.clone(),
+                    scale: preview.scale,
+                },
+            })
+            .collect();
         persist::SavedData {
             version: persist::CURRENT_VERSION,
             links,
             dest_marks,
-            custom_images,
-            custom_texts,
+            custom_images: Vec::new(),
+            custom_texts: Vec::new(),
+            custom_previews,
         }
     }
 
@@ -2711,28 +2713,33 @@ impl PdfReaderApp {
                                 }
                             }
                             self.custom_previews.clear();
-                            // 新格式用 `order` 保留跨类型的全局顺序；旧格式没有 order，
-                            // 沿用“先图片后文字”的加载顺序。
-                            let mut ordered = Vec::new();
-                            for (kind, items) in [
-                                (CustomKind::Image, &saved.custom_images),
-                                (CustomKind::Text, &saved.custom_texts),
-                            ] {
-                                let priority = if kind == CustomKind::Image { 0 } else { 1 };
-                                for (index, item) in items.iter().enumerate() {
-                                    ordered.push((
-                                        item.order.unwrap_or(u32::MAX / 2),
-                                        priority,
-                                        index,
-                                        kind,
-                                        item,
-                                    ));
+                            // v3 是单一有序列表；v2 及更早拆成 images/texts。
+                            let ordered: Vec<(CustomKind, &persist::SavedCustom)> = if !saved
+                                .custom_previews
+                                .is_empty()
+                            {
+                                saved
+                                    .custom_previews
+                                    .iter()
+                                    .map(|preview| {
+                                        let kind = match preview.kind {
+                                            persist::SavedCustomKind::Image => CustomKind::Image,
+                                            persist::SavedCustomKind::Text => CustomKind::Text,
+                                        };
+                                        (kind, &preview.item)
+                                    })
+                                    .collect()
+                            } else {
+                                let mut old = Vec::new();
+                                for item in &saved.custom_images {
+                                    old.push((CustomKind::Image, item));
                                 }
-                            }
-                            ordered.sort_by_key(|(order, priority, index, _, _)| {
-                                (*order, *priority, *index)
-                            });
-                            for (_, _, _, kind, item) in ordered {
+                                for item in &saved.custom_texts {
+                                    old.push((CustomKind::Text, item));
+                                }
+                                old
+                            };
+                            for (kind, item) in ordered {
                                 self.custom_previews.push(CustomPreview {
                                     id: 0,
                                     page: item.page,

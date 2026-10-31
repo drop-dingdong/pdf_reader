@@ -24,7 +24,9 @@ use crate::json::{Json, JsonLookup, Parsed};
 /// * **v2**：被引用点与自定义**图片** preview 增加 `scale`（截图时的**显示比例**，`1.0` = 100%）。
 ///   预览图不再"按当前缩放合成"，而是按这个记录值请求渲染 —— 否则缩放到别处后
 ///   缓存里没有那块像素，初次生成会只剩白的/干脆没有图。
-pub const CURRENT_VERSION: u32 = 2;
+/// * **v3**：preview 改为单一有序数组 `custom_previews`（每项带 `kind`），
+///   不再拆成 `custom_images` / `custom_texts`，也不再需要 `order` 字段。
+pub const CURRENT_VERSION: u32 = 3;
 
 /// 旧存档缺 `scale` 时的默认分辨率（用户要求：按 100% 处理）。
 pub const DEFAULT_SCALE: f32 = 1.0;
@@ -69,8 +71,6 @@ pub struct SavedMark {
 /// 一条自定义 preview 的可持久化数据（不含截图）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SavedCustom {
-    /// 同一数据文件内的全局顺序；旧文件没有该字段。
-    pub order: Option<u32>,
     /// 所在页
     pub page: PageIndex,
     /// 页内坐标
@@ -87,6 +87,24 @@ pub struct SavedCustom {
     pub scale: f32,
 }
 
+/// preview 的类型；v3 统一列表里显式保存。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SavedCustomKind {
+    /// 图片预览
+    Image,
+    /// 文字预览
+    Text,
+}
+
+/// v3 统一列表里的一条 preview。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedPreview {
+    /// 类型
+    pub kind: SavedCustomKind,
+    /// 数据
+    pub item: SavedCustom,
+}
+
 /// 整个存档。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SavedData {
@@ -100,6 +118,8 @@ pub struct SavedData {
     pub custom_images: Vec<SavedCustom>,
     /// 自定义文字 preview
     pub custom_texts: Vec<SavedCustom>,
+    /// v3：按显示/创建顺序保存的 preview 统一列表。
+    pub custom_previews: Vec<SavedPreview>,
 }
 
 impl Default for SavedData {
@@ -110,6 +130,7 @@ impl Default for SavedData {
             dest_marks: Vec::new(),
             custom_images: Vec::new(),
             custom_texts: Vec::new(),
+            custom_previews: Vec::new(),
         }
     }
 }
@@ -169,10 +190,21 @@ impl SavedData {
         }
         out.push_str("\n  ],\n");
 
-        write_customs(&mut out, "custom_images", &self.custom_images);
-        out.push_str(",\n");
-        write_customs(&mut out, "custom_texts", &self.custom_texts);
-        out.push_str("\n}\n");
+        out.push_str("  \"custom_previews\": [");
+        for (index, preview) in self.custom_previews.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str("\n    {\"kind\": ");
+            out.push_str(match preview.kind {
+                SavedCustomKind::Image => "\"image\"",
+                SavedCustomKind::Text => "\"text\"",
+            });
+            out.push_str(", ");
+            write_custom_fields(&mut out, &preview.item);
+            out.push('}');
+        }
+        out.push_str("\n  ]\n}\n");
         out
     }
 
@@ -207,14 +239,37 @@ impl SavedData {
                 data.dest_marks.push(page_marks);
             }
         }
+        if let Some(items) = root.field("custom_previews") {
+            for item in items.as_array().ok_or("custom_previews 不是数组")? {
+                data.custom_previews.push(parse_preview(item)?);
+            }
+        }
         if let Some(items) = root.field("custom_images") {
             for item in items.as_array().ok_or("custom_images 不是数组")? {
-                data.custom_images.push(parse_custom(item)?);
+                let item = parse_custom(item)?;
+                data.custom_previews.push(SavedPreview {
+                    kind: SavedCustomKind::Image,
+                    item: item.clone(),
+                });
+                data.custom_images.push(item);
             }
         }
         if let Some(items) = root.field("custom_texts") {
             for item in items.as_array().ok_or("custom_texts 不是数组")? {
-                data.custom_texts.push(parse_custom(item)?);
+                let item = parse_custom(item)?;
+                data.custom_previews.push(SavedPreview {
+                    kind: SavedCustomKind::Text,
+                    item: item.clone(),
+                });
+                data.custom_texts.push(item);
+            }
+        }
+        if data.custom_images.is_empty() && data.custom_texts.is_empty() {
+            for preview in &data.custom_previews {
+                match preview.kind {
+                    SavedCustomKind::Image => data.custom_images.push(preview.item.clone()),
+                    SavedCustomKind::Text => data.custom_texts.push(preview.item.clone()),
+                }
             }
         }
         Ok(data)
@@ -284,6 +339,22 @@ pub fn migrate(data: &mut SavedData) -> Migration {
     let from = data.version;
     let mut notes = Vec::new();
 
+    // v3 之前 preview 拆成 images/texts；统一列表为空时先按旧顺序补齐。
+    if data.custom_previews.is_empty() {
+        for item in &data.custom_images {
+            data.custom_previews.push(SavedPreview {
+                kind: SavedCustomKind::Image,
+                item: item.clone(),
+            });
+        }
+        for item in &data.custom_texts {
+            data.custom_previews.push(SavedPreview {
+                kind: SavedCustomKind::Text,
+                item: item.clone(),
+            });
+        }
+    }
+
     if data.version < 2 {
         let mut patched = 0usize;
         for mark in data.dest_marks.iter_mut().flatten() {
@@ -292,16 +363,31 @@ pub fn migrate(data: &mut SavedData) -> Migration {
                 patched += 1;
             }
         }
+        for preview in data.custom_previews.iter_mut() {
+            if !(preview.item.scale > 0.0 && preview.item.scale.is_finite()) {
+                preview.item.scale = DEFAULT_SCALE;
+                patched += 1;
+            }
+        }
         for item in data.custom_images.iter_mut() {
             if !(item.scale > 0.0 && item.scale.is_finite()) {
                 item.scale = DEFAULT_SCALE;
-                patched += 1;
+            }
+        }
+        for item in data.custom_texts.iter_mut() {
+            if !(item.scale > 0.0 && item.scale.is_finite()) {
+                item.scale = DEFAULT_SCALE;
             }
         }
         notes.push(format!(
             "v1 → v2：{patched} 处截图没有记录分辨率，按 100% 处理（保存后写回 v{CURRENT_VERSION}）"
         ));
         data.version = 2;
+    }
+
+    if data.version < 3 {
+        data.version = 3;
+        notes.push("v2 → v3：preview 改为单一有序列表（保存后写回 v3）".to_string());
     }
 
     Migration {
@@ -365,36 +451,24 @@ fn write_destination(out: &mut String, destination: &Destination) {
     }
 }
 
-fn write_customs(out: &mut String, key: &str, items: &[SavedCustom]) {
-    let _ = write!(out, "  \"{key}\": [");
-    for (index, item) in items.iter().enumerate() {
-        if index > 0 {
-            out.push(',');
-        }
-        out.push_str("\n    {");
-        if let Some(order) = item.order {
-            let _ = write!(out, "\"order\": {order}, ");
-        }
-        out.push_str("\"page\": ");
-        let _ = write!(out, "{}", item.page.get());
-        out.push_str(", ");
-        write_point(out, "point", item.point);
-        out.push_str(", ");
-        write_rect(out, "rect", item.rect);
-        let _ = write!(
-            out,
-            ", \"body\": [{}, {}], \"scale\": {}, \"title\": {}",
-            num(item.body[0]),
-            num(item.body[1]),
-            num(item.scale),
-            json_string(&item.title)
-        );
-        if let Some(text) = &item.text {
-            let _ = write!(out, ", \"text\": {}", json_string(text));
-        }
-        out.push('}');
+fn write_custom_fields(out: &mut String, item: &SavedCustom) {
+    out.push_str("\"page\": ");
+    let _ = write!(out, "{}", item.page.get());
+    out.push_str(", ");
+    write_point(out, "point", item.point);
+    out.push_str(", ");
+    write_rect(out, "rect", item.rect);
+    let _ = write!(
+        out,
+        ", \"body\": [{}, {}], \"scale\": {}, \"title\": {}",
+        num(item.body[0]),
+        num(item.body[1]),
+        num(item.scale),
+        json_string(&item.title)
+    );
+    if let Some(text) = &item.text {
+        let _ = write!(out, ", \"text\": {}", json_string(text));
     }
-    out.push(']');
 }
 
 fn json_string(value: &str) -> String {
@@ -471,6 +545,23 @@ fn parse_scale(object: &[(String, Json)]) -> f32 {
         .unwrap_or(DEFAULT_SCALE)
 }
 
+fn parse_preview(value: &Json) -> Parsed<SavedPreview> {
+    let object = value.as_object().ok_or("preview 不是对象")?;
+    let kind = object
+        .field("kind")
+        .and_then(|value| value.as_str())
+        .ok_or("preview 缺 kind")?;
+    let kind = match kind {
+        "image" => SavedCustomKind::Image,
+        "text" => SavedCustomKind::Text,
+        other => return Err(format!("未知 preview kind: {other}")),
+    };
+    Ok(SavedPreview {
+        kind,
+        item: parse_custom(value)?,
+    })
+}
+
 fn parse_custom(value: &Json) -> Parsed<SavedCustom> {
     let object = value.as_object().ok_or("custom 不是对象")?;
     let page = object
@@ -478,10 +569,6 @@ fn parse_custom(value: &Json) -> Parsed<SavedCustom> {
         .and_then(|v| v.as_number())
         .ok_or("custom 缺 page")? as u32;
     Ok(SavedCustom {
-        order: object
-            .field("order")
-            .and_then(|value| value.as_number())
-            .map(|value| value.round().max(0.0) as u32),
         page: PageIndex::new(page),
         point: parse_point(object.field("point").ok_or("custom 缺 point")?)?,
         rect: parse_rect(object.field("rect").ok_or("custom 缺 rect")?)?,
@@ -560,7 +647,6 @@ mod tests {
                 Vec::new(),
             ],
             custom_images: vec![SavedCustom {
-                order: None,
                 page: PageIndex::new(1),
                 point: Point::new(50.0, 60.0),
                 rect: Rect::new(10.0, 20.0, 30.0, 40.0),
@@ -570,7 +656,6 @@ mod tests {
                 scale: 2.5,
             }],
             custom_texts: vec![SavedCustom {
-                order: None,
                 page: PageIndex::new(2),
                 point: Point::new(5.0, 6.0),
                 rect: Rect::new(5.0, 6.0, 0.0, 0.0),
@@ -579,6 +664,32 @@ mod tests {
                 text: Some("内容\\带转义".into()),
                 scale: DEFAULT_SCALE,
             }],
+            custom_previews: vec![
+                SavedPreview {
+                    kind: SavedCustomKind::Image,
+                    item: SavedCustom {
+                        page: PageIndex::new(1),
+                        point: Point::new(50.0, 60.0),
+                        rect: Rect::new(10.0, 20.0, 30.0, 40.0),
+                        body: [30.0, 40.0],
+                        title: "图 \"一\"".into(),
+                        text: None,
+                        scale: 2.5,
+                    },
+                },
+                SavedPreview {
+                    kind: SavedCustomKind::Text,
+                    item: SavedCustom {
+                        page: PageIndex::new(2),
+                        point: Point::new(5.0, 6.0),
+                        rect: Rect::new(5.0, 6.0, 0.0, 0.0),
+                        body: [300.0, 170.0],
+                        title: "题\n目".into(),
+                        text: Some("内容\\带转义".into()),
+                        scale: DEFAULT_SCALE,
+                    },
+                },
+            ],
         }
     }
 
