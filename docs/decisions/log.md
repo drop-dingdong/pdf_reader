@@ -1850,6 +1850,19 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - 限制：内联注释写回后按位置重新读回，跨写回的自定义历史仍不能保证可撤销；
   撤销已写回的删除会按新注释恢复。
 
+### D-191 无改动不再重写 PDF + 内联样本脚本
+
+- 根因：无对象级改动时，`perform_in_place_writeback` 仍进入 PDFium 保存路径，
+  会追加整份修订；Okular 对这类无意义重写会提示文件问题。另存为在无改动时
+  直接复制源文件，所以两者结果不同。
+- 现在：
+  * `perform_in_place_writeback` 在 `pdf_dirty == false` 时直接提示“无改动”，
+    不写文件；「写入 PDF」按钮也只在 `pdf_dirty` 时可用；
+  * 「导出标注 PDF」无改动时直接复制源 PDF，不进入 PDFium 写回。
+- 新增 `scripts/make_inline_sample.py`：纯 Python 生成含直接
+  `/Annots [<< ... >>]` 高亮注释的 PDF，用于测试外部内联注释。
+- `check.sh` 全绿（398 tests）。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

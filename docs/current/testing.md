@@ -336,3 +336,9 @@ timing 模式下循环是全速转的：等 160ms 预览窗口时会空转上千
 - [ ] 改动涉及的现状文档已同步（`rendering.md` 的判据表、`architecture.md` 的不变量清单）
 - [ ] 本次改动的决策已追加到 [`../decisions/log.md`](../decisions/log.md)
 - [ ] 需要真机的项已在回复里列清"看什么、怎么看"
+
+
+## 内联注释样本
+
+`python3 scripts/make_inline_sample.py [out.pdf]` 生成含直接 `/Annots` 字典的
+高亮注释，用于验证外部内联注释的正文编辑/删除。

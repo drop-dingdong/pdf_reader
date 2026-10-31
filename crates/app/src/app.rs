@@ -1677,6 +1677,10 @@ impl PdfReaderApp {
             self.message = "先打开一个 PDF 再写入".to_string();
             return;
         };
+        if !self.pdf_dirty {
+            self.message = "无改动：PDF 没有需要写入的修改".to_string();
+            return;
+        }
         // 一次性取出快照，随后要释放会话的借用
         let Some((page, zoom, scroll, pages)) = self.session.as_ref().map(|session| {
             (
@@ -1874,6 +1878,20 @@ impl PdfReaderApp {
         // 加密文档在子进程里也会被拒绝；这里先给一个即时、可读的原因
         if session.opened().document.info().encrypted {
             self.message = "加密文档暂不支持导出（权限位可能不允许批注）".to_string();
+            return;
+        }
+        if !self.pdf_dirty {
+            let output = crate::export::default_output_path(&pdf);
+            if let Err(error) = crate::export::ensure_destination_free(&output) {
+                self.message = format!("导出失败：{error}");
+                return;
+            }
+            match std::fs::copy(&pdf, &output) {
+                Ok(_) => {
+                    self.message = format!("无改动：已复制原 PDF 到 {}", output.display());
+                }
+                Err(error) => self.message = format!("导出失败：{error}"),
+            }
             return;
         }
         let (ref_updates, ref_deletes) = self.pdf_ref_changes();
@@ -3414,7 +3432,7 @@ impl PdfReaderApp {
                     let has_write_work = self.pdf_dirty
                         || !self.annotations.is_empty()
                         || self.pdf_marked_annotations > 0;
-                    let can_write = self.document_path.is_some() && has_write_work;
+                    let can_write = self.document_path.is_some() && self.pdf_dirty;
                     let write_label = if self.pdf_dirty {
                         "*写入 PDF"
                     } else {
