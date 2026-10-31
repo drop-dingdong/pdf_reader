@@ -494,12 +494,8 @@ fn write_with_mode(
                     }
                 }
             }
-            if !new_markups.is_empty() {
-                bytes = crate::pdf_patch::append_new_markups(&bytes, &new_markups)
-                    .map_err(WritebackError::Invalid)?;
-            }
-            if !new_inks.is_empty() {
-                bytes = crate::pdf_patch::append_new_inks(&bytes, &new_inks)
+            if !new_markups.is_empty() || !new_inks.is_empty() {
+                bytes = crate::pdf_patch::append_new_annotations(&bytes, &new_markups, &new_inks)
                     .map_err(WritebackError::Invalid)?;
             }
             if !inline.is_empty() {

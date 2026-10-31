@@ -1866,6 +1866,14 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   `/Annots [<< ... >>]` 高亮注释的 PDF，用于测试外部内联注释。
 - `check.sh` 全绿（398 tests）。
 
+### D-192 新高亮/墨迹合并为一段增量
+
+- 新增 `pdf_patch::append_new_annotations(pdf, markups, inks)`：同一批对象号、
+  每页只追加一个页对象、最后只写一个 xref；替代之前 markups 与 inks 各自追加一段。
+- 新注释快路径改为一次调用；新高亮+墨迹现在只产生“源 + 新”两段 EOF。
+- 测试：`new_markup_and_ink_share_one_incremental_revision`（EOF=2、计数正确、
+  体积增长有限）；`check.sh` 全绿（399 tests）。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

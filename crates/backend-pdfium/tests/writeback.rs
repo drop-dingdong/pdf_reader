@@ -1519,3 +1519,63 @@ fn new_markups_on_rotated_page_without_annots_are_saved() {
         .iter()
         .all(|annotation| annotation.page == PageIndex::new(1)));
 }
+
+#[test]
+fn new_markup_and_ink_share_one_incremental_revision() {
+    if !backend_available() {
+        return;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let dir = temp_dir("one-revision");
+    let source = dir.join("in.pdf");
+    std::fs::write(&source, backend_pdfium::fixtures::two_page_pdf()).expect("写样本");
+    let output = dir.join("out.pdf");
+    writeback::write_incremental(&WritebackSpec {
+        updates: Vec::new(),
+        deletes: Vec::new(),
+        source: source.clone(),
+        output: output.clone(),
+        pages: vec![WritebackPage {
+            page: PageIndex::FIRST,
+            annotations: vec![
+                WritebackAnnotation {
+                    id: Some(1),
+                    kind: AnnotationKind::Highlight {
+                        quads: vec![Rect::new(50.0, 660.0, 100.0, 14.0)],
+                    },
+                    color: [255, 255, 0],
+                    opacity: 0.35,
+                    body: None,
+                },
+                WritebackAnnotation {
+                    id: Some(2),
+                    kind: AnnotationKind::Ink {
+                        points: vec![Point::new(200.0, 700.0), Point::new(260.0, 700.0)],
+                        width: 2.0,
+                    },
+                    color: [25, 25, 25],
+                    opacity: 1.0,
+                    body: None,
+                },
+            ],
+        }],
+    })
+    .expect("写入");
+    let bytes = std::fs::read(&output).expect("读");
+    assert_eq!(
+        bytes
+            .windows(5)
+            .filter(|window| *window == b"%%EOF")
+            .count(),
+        2,
+        "源一段 + 新高亮/墨迹合并一段"
+    );
+    assert_eq!(
+        writeback::count_annotations(&output).expect("数"),
+        vec![3, 0]
+    );
+    assert!(
+        bytes.len() < std::fs::read(&source).unwrap().len() + 4_000,
+        "合并后仍应只增长少量字节"
+    );
+}
