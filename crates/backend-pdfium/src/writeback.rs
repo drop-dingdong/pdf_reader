@@ -147,7 +147,15 @@ pub type WritebackResult<T> = std::result::Result<T, WritebackError>;
 /// * `FPDF_SaveAsCopy(..., FPDF_NO_INCREMENTAL)` 全量重写；
 /// * 保存后重开输出、逐页核对"原有注释 + 新增"的数量与页数；不一致即报错。
 pub fn write(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
-    write_with_mode(spec, false)
+    write_with_inline(spec, &crate::pdf_patch::InlineChanges::default())
+}
+
+/// 全量写回 + 内联注释改动。
+pub fn write_with_inline(
+    spec: &WritebackSpec,
+    inline: &crate::pdf_patch::InlineChanges,
+) -> WritebackResult<WritebackReport> {
+    write_with_mode(spec, false, inline)
 }
 
 /// 增量保存：把改动追加到原文件之后（保留原有对象/外部注释的原始结构）。
@@ -157,7 +165,47 @@ pub fn write(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
 pub fn write_incremental(spec: &WritebackSpec) -> WritebackResult<WritebackReport> {
     // P4c：正文/删除都由 pdf_patch 以对象级增量处理；新注释才需要 PDFium。
     // 不再按 gen>0 做全量兜底。
-    write_with_mode(spec, true)
+    write_incremental_with_inline(spec, &crate::pdf_patch::InlineChanges::default())
+}
+
+/// 增量写回 + 内联注释改动。
+pub fn write_incremental_with_inline(
+    spec: &WritebackSpec,
+    inline: &crate::pdf_patch::InlineChanges,
+) -> WritebackResult<WritebackReport> {
+    write_with_mode(spec, true, inline)
+}
+
+fn inline_deleted_counts(
+    source: &std::path::Path,
+    inline: &crate::pdf_patch::InlineChanges,
+    page_count: usize,
+) -> WritebackResult<Vec<usize>> {
+    if inline.deletes.is_empty() {
+        return Ok(vec![0; page_count]);
+    }
+    let bytes = std::fs::read(source)
+        .map_err(|error| WritebackError::Io(format!("读取源文件失败：{error}")))?;
+    let pages = crate::pdf_index::page_annotations(&bytes).map_err(WritebackError::Invalid)?;
+    let mut counts = vec![0usize; page_count];
+    for delete in &inline.deletes {
+        let page = pages
+            .get(delete.page as usize)
+            .ok_or_else(|| WritebackError::Invalid(format!("页号 {} 越界", delete.page)))?;
+        let supported = page
+            .iter()
+            .filter(|entry| !entry.hidden && matches!(entry.subtype, Some(9 | 10 | 12 | 15)))
+            .count();
+        if delete.position >= supported {
+            return Err(WritebackError::Invalid(format!(
+                "第 {} 页内联注释位置 {} 越界",
+                delete.page + 1,
+                delete.position
+            )));
+        }
+        counts[delete.page as usize] += 1;
+    }
+    Ok(counts)
 }
 
 fn only_objectified(spec: &WritebackSpec) -> bool {
@@ -175,7 +223,11 @@ fn only_objectified(spec: &WritebackSpec) -> bool {
         })
 }
 
-fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<WritebackReport> {
+fn write_with_mode(
+    spec: &WritebackSpec,
+    incremental: bool,
+    inline: &crate::pdf_patch::InlineChanges,
+) -> WritebackResult<WritebackReport> {
     if spec.source == spec.output {
         return Err(WritebackError::Invalid(
             "输出路径与源文件相同；写回必须写到新文件（替换由调用方原子完成）".to_string(),
@@ -256,7 +308,7 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
 
         expected = vec![0usize; page_count];
         // 删除统一在保存后用 pdf_patch 改页对象；这里只校验对象存在。
-        let mut deleted_counts = vec![0usize; page_count];
+        let mut deleted_counts = inline_deleted_counts(&spec.source, inline, page_count)?;
         for reference in &spec.deletes {
             let Some(&(page, _)) = locations.get(reference) else {
                 return Err(WritebackError::Invalid(format!(
@@ -286,7 +338,8 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
         // P4b：只有正文更新的任务不需要 PDFium 保存整个文档；
         // 直接对源字节追加同 (num,gen) 的新版本，文件增长最小。
         if incremental
-            && ((spec.pages.is_empty() && (!spec.updates.is_empty() || !spec.deletes.is_empty()))
+            && ((spec.pages.is_empty()
+                && (!spec.updates.is_empty() || !spec.deletes.is_empty() || !inline.is_empty()))
                 || only_objectified(spec))
         {
             let mut source_counts = Vec::with_capacity(page_count);
@@ -301,6 +354,10 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
                 }
                 source_counts.push((ffi.annot_count)(handle).max(0) as usize);
                 (ffi.close_page)(handle);
+            }
+            let inline_deletes = inline_deleted_counts(&spec.source, inline, page_count)?;
+            for (slot, deleted) in source_counts.iter_mut().zip(inline_deletes) {
+                *slot = slot.saturating_sub(deleted);
             }
             let mut new_markups = Vec::new();
             let mut new_inks = Vec::new();
@@ -425,6 +482,10 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
                 bytes = crate::pdf_patch::append_new_inks(&bytes, &new_inks)
                     .map_err(WritebackError::Invalid)?;
             }
+            if !inline.is_empty() {
+                bytes = crate::pdf_patch::append_inline_changes(&bytes, inline)
+                    .map_err(WritebackError::Invalid)?;
+            }
             std::fs::write(&spec.output, &bytes).map_err(|error| {
                 WritebackError::Io(format!(
                     "写输出文件 {} 失败：{error}",
@@ -534,6 +595,10 @@ fn write_with_mode(spec: &WritebackSpec, incremental: bool) -> WritebackResult<W
         }
         if !spec.deletes.is_empty() {
             bytes = crate::pdf_patch::append_deletes(&bytes, &spec.deletes)
+                .map_err(WritebackError::Invalid)?;
+        }
+        if !inline.is_empty() {
+            bytes = crate::pdf_patch::append_inline_changes(&bytes, inline)
                 .map_err(WritebackError::Invalid)?;
         }
         // PDFium 新建的注释是内联字典；Okular 保存这类注释会丢修改（D-142）。

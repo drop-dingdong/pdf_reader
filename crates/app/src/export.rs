@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
+use backend_pdfium::pdf_patch::InlineChanges;
 use backend_pdfium::PdfiumBackend;
 use pdfcore::annotation::{AnnotationKind, PdfObjectRef};
 use pdfcore::prelude::{PageIndex, PdfBackend, RenderRequest, Rotation, Scale, Source};
@@ -89,6 +90,27 @@ pub fn job_json_with_refs(
     deletes: &[PdfObjectRef],
     incremental: bool,
 ) -> String {
+    job_json_with_refs_and_inline(
+        pdf,
+        output,
+        items,
+        updates,
+        deletes,
+        &InlineChanges::default(),
+        incremental,
+    )
+}
+
+/// 带内联注释改动的 job。
+pub fn job_json_with_refs_and_inline(
+    pdf: &Path,
+    output: &Path,
+    items: &[ExportItem],
+    updates: &[RefUpdate],
+    deletes: &[PdfObjectRef],
+    inline: &InlineChanges,
+    incremental: bool,
+) -> String {
     let mut pages: Vec<(u32, Vec<&ExportItem>)> = Vec::new();
     for item in items {
         let index = item.page.get();
@@ -153,6 +175,40 @@ pub fn job_json_with_refs(
                 reference.num, reference.gen
             ));
             if index + 1 < deletes.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ]");
+    }
+    if !inline.updates.is_empty() {
+        out.push_str(",\n  \"inline_updates\": [\n");
+        for (index, update) in inline.updates.iter().enumerate() {
+            out.push_str(&format!(
+                "    {{ \"page\": {}, \"position\": {}, \"body\": {} }}",
+                update.page,
+                update.position,
+                update
+                    .body
+                    .as_deref()
+                    .map(quote)
+                    .unwrap_or_else(|| "null".to_string())
+            ));
+            if index + 1 < inline.updates.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ]");
+    }
+    if !inline.deletes.is_empty() {
+        out.push_str(",\n  \"inline_deletes\": [\n");
+        for (index, delete) in inline.deletes.iter().enumerate() {
+            out.push_str(&format!(
+                "    {{ \"page\": {}, \"position\": {} }}",
+                delete.page, delete.position
+            ));
+            if index + 1 < inline.deletes.len() {
                 out.push(',');
             }
             out.push('\n');
@@ -256,6 +312,27 @@ pub fn export_with_refs(
     deletes: &[PdfObjectRef],
     expected_pages: u32,
 ) -> Result<ExportReport, String> {
+    export_with_refs_and_inline(
+        pdf,
+        output,
+        items,
+        updates,
+        deletes,
+        &InlineChanges::default(),
+        expected_pages,
+    )
+}
+
+/// 带内联注释改动的导出。
+pub fn export_with_refs_and_inline(
+    pdf: &Path,
+    output: &Path,
+    items: &[ExportItem],
+    updates: &[RefUpdate],
+    deletes: &[PdfObjectRef],
+    inline: &InlineChanges,
+    expected_pages: u32,
+) -> Result<ExportReport, String> {
     let executable =
         std::env::current_exe().map_err(|error| format!("找不到自身可执行文件：{error}"))?;
     export_with_refs_and_executable(
@@ -265,6 +342,7 @@ pub fn export_with_refs(
         items,
         updates,
         deletes,
+        inline,
         expected_pages,
     )
 }
@@ -278,9 +356,19 @@ fn export_with(
     items: &[ExportItem],
     expected_pages: u32,
 ) -> Result<ExportReport, String> {
-    export_with_refs_and_executable(executable, pdf, output, items, &[], &[], expected_pages)
+    export_with_refs_and_executable(
+        executable,
+        pdf,
+        output,
+        items,
+        &[],
+        &[],
+        &InlineChanges::default(),
+        expected_pages,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn export_with_refs_and_executable(
     executable: &Path,
     pdf: &Path,
@@ -288,6 +376,7 @@ fn export_with_refs_and_executable(
     items: &[ExportItem],
     updates: &[RefUpdate],
     deletes: &[PdfObjectRef],
+    inline: &InlineChanges,
     expected_pages: u32,
 ) -> Result<ExportReport, String> {
     // 子进程按"相对 job 文件所在目录"解析路径，而 job 写在系统临时目录里 ——
@@ -306,7 +395,9 @@ fn export_with_refs_and_executable(
 
     // 导出副本也用增量：保留源文件的对象流/外部注释结构。
     // 用户实测：全量重写 Adobe 的 PDF 后，Okular 另存会报“文件有问题”。
-    if let Err(error) = run_child_refs(executable, pdf, &temporary, items, updates, deletes, true) {
+    if let Err(error) = run_child_refs(
+        executable, pdf, &temporary, items, updates, deletes, inline, true,
+    ) {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
@@ -318,6 +409,7 @@ fn export_with_refs_and_executable(
     report
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_child_refs(
     executable: &Path,
     pdf: &Path,
@@ -325,6 +417,7 @@ fn run_child_refs(
     items: &[ExportItem],
     updates: &[RefUpdate],
     deletes: &[PdfObjectRef],
+    inline: &InlineChanges,
     incremental: bool,
 ) -> Result<(), String> {
     let job_path = std::env::temp_dir().join(format!(
@@ -334,7 +427,7 @@ fn run_child_refs(
     ));
     std::fs::write(
         &job_path,
-        job_json_with_refs(pdf, temporary, items, updates, deletes, incremental),
+        job_json_with_refs_and_inline(pdf, temporary, items, updates, deletes, inline, incremental),
     )
     .map_err(|error| format!("写 job {} 失败：{error}", job_path.display()))?;
     let child = std::process::Command::new(executable)
@@ -376,6 +469,25 @@ pub fn stage_in_place_with_refs(
     deletes: &[PdfObjectRef],
     expected_pages: u32,
 ) -> Result<PathBuf, String> {
+    stage_in_place_with_refs_and_inline(
+        pdf,
+        items,
+        updates,
+        deletes,
+        &InlineChanges::default(),
+        expected_pages,
+    )
+}
+
+/// 带内联注释改动的原地暂存。
+pub fn stage_in_place_with_refs_and_inline(
+    pdf: &Path,
+    items: &[ExportItem],
+    updates: &[RefUpdate],
+    deletes: &[PdfObjectRef],
+    inline: &InlineChanges,
+    expected_pages: u32,
+) -> Result<PathBuf, String> {
     let pdf = absolute_path(pdf)?;
     if !pdf.is_file() {
         return Err(format!("源文件不存在：{}", pdf.display()));
@@ -389,8 +501,16 @@ pub fn stage_in_place_with_refs(
         .map_err(|error| format!("找不到自身可执行文件：{error}"))?;
     let temporary = temporary_path(&pdf);
     let _ = std::fs::remove_file(&temporary);
-    if let Err(error) = run_child_refs(&executable, &pdf, &temporary, items, updates, deletes, true)
-    {
+    if let Err(error) = run_child_refs(
+        &executable,
+        &pdf,
+        &temporary,
+        items,
+        updates,
+        deletes,
+        inline,
+        true,
+    ) {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }

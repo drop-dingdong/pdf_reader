@@ -186,3 +186,81 @@ fn appends_page_object_delete_for_indirect_annots_array() {
     let read = read_bytes(&output);
     assert_eq!(read.annotations.len(), before - 1);
 }
+
+fn inline_pdf() -> Vec<u8> {
+    let content = "BT /F1 12 Tf 20 100 Td (Inline) Tj ET\n";
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
+         /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R \
+         /Annots [<< /Type /Annot /Subtype /Highlight /Rect [50 100 150 114] \
+         /QuadPoints [50 114 150 114 50 100 150 100] /C [1 1 0] /CA 0.35 \
+         /Contents (OLD) >>] >>"
+            .to_string(),
+        format!(
+            "<< /Length {} >>\nstream\n{}endstream",
+            content.len(),
+            content
+        ),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+    ];
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{}\nendobj\n", index + 1, body));
+    }
+    let xref = out.len();
+    out.push_str(&format!("xref\n0 {}\n", objects.len() + 1));
+    out.push_str("0000000000 65535 f \n");
+    for offset in offsets {
+        out.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+        objects.len() + 1
+    ));
+    out.into_bytes()
+}
+
+#[test]
+fn inline_annotation_body_update_and_delete() {
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    if backend_pdfium::pdfium().is_err() {
+        return;
+    }
+    let source = inline_pdf();
+    let updated = backend_pdfium::pdf_patch::append_inline_changes(
+        &source,
+        &backend_pdfium::pdf_patch::InlineChanges {
+            updates: vec![backend_pdfium::pdf_patch::InlineUpdate {
+                page: 0,
+                position: 0,
+                body: Some("NEW".to_string()),
+            }],
+            deletes: Vec::new(),
+        },
+    )
+    .expect("inline update");
+    // readback 需要路径；先写临时文件
+    std::fs::write("/tmp/pdf-inline-test.pdf", &updated).expect("write");
+    let read = backend_pdfium::readback::read(&PathBuf::from("/tmp/pdf-inline-test.pdf"), None)
+        .expect("read");
+    assert_eq!(read.annotations.len(), 1);
+    assert_eq!(read.annotations[0].body.as_deref(), Some("NEW"));
+
+    let deleted = backend_pdfium::pdf_patch::append_inline_changes(
+        &updated,
+        &backend_pdfium::pdf_patch::InlineChanges {
+            updates: Vec::new(),
+            deletes: vec![backend_pdfium::pdf_patch::InlineDelete {
+                page: 0,
+                position: 0,
+            }],
+        },
+    )
+    .expect("inline delete");
+    assert!(page_annotations(&deleted).expect("index")[0].is_empty());
+    let _ = std::fs::remove_file("/tmp/pdf-inline-test.pdf");
+}

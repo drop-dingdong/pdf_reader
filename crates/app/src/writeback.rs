@@ -39,11 +39,11 @@ use crate::json::{Json, JsonLookup};
 
 /// 执行一个 job 文件，返回给人看的一句话（成功时）。
 pub fn run_job(path: &Path) -> Result<String, String> {
-    let (spec, incremental) = read_spec_mode(path)?;
+    let (spec, incremental, inline) = read_spec_mode(path)?;
     let report = if incremental {
-        backend::write_incremental(&spec)
+        backend::write_incremental_with_inline(&spec, &inline)
     } else {
-        backend::write(&spec)
+        backend::write_with_inline(&spec, &inline)
     }
     .map_err(|error| error.to_string())?;
     Ok(format!(
@@ -54,7 +54,16 @@ pub fn run_job(path: &Path) -> Result<String, String> {
     ))
 }
 
-fn read_spec_mode(path: &Path) -> Result<(WritebackSpec, bool), String> {
+fn read_spec_mode(
+    path: &Path,
+) -> Result<
+    (
+        WritebackSpec,
+        bool,
+        backend_pdfium::pdf_patch::InlineChanges,
+    ),
+    String,
+> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("读 job {} 失败：{error}", path.display()))?;
     let root = Json::parse(&text).map_err(|error| format!("job JSON 解析失败：{error}"))?;
@@ -106,6 +115,7 @@ fn read_spec_mode(path: &Path) -> Result<(WritebackSpec, bool), String> {
             deletes: parse_deletes(root)?,
         },
         incremental,
+        parse_inline(root)?,
     ))
 }
 
@@ -149,6 +159,49 @@ fn parse_deletes(root: &[(String, Json)]) -> Result<Vec<PdfObjectRef>, String> {
         .as_array()
         .ok_or_else(|| "deletes 不是数组".to_string())?;
     items.iter().map(parse_ref).collect()
+}
+
+fn parse_inline(
+    root: &[(String, Json)],
+) -> Result<backend_pdfium::pdf_patch::InlineChanges, String> {
+    let mut changes = backend_pdfium::pdf_patch::InlineChanges::default();
+    if let Some(items) = root.field("inline_updates") {
+        let items = items
+            .as_array()
+            .ok_or_else(|| "inline_updates 不是数组".to_string())?;
+        for (index, item) in items.iter().enumerate() {
+            let object = item
+                .as_object()
+                .ok_or_else(|| format!("inline_updates[{index}] 不是对象"))?;
+            changes
+                .updates
+                .push(backend_pdfium::pdf_patch::InlineUpdate {
+                    page: number(object, "page")? as u32,
+                    position: number(object, "position")? as usize,
+                    body: object
+                        .field("body")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string),
+                });
+        }
+    }
+    if let Some(items) = root.field("inline_deletes") {
+        let items = items
+            .as_array()
+            .ok_or_else(|| "inline_deletes 不是数组".to_string())?;
+        for (index, item) in items.iter().enumerate() {
+            let object = item
+                .as_object()
+                .ok_or_else(|| format!("inline_deletes[{index}] 不是对象"))?;
+            changes
+                .deletes
+                .push(backend_pdfium::pdf_patch::InlineDelete {
+                    page: number(object, "page")? as u32,
+                    position: number(object, "position")? as usize,
+                });
+        }
+    }
+    Ok(changes)
 }
 
 fn parse_annotation(value: &Json, context: &str) -> Result<WritebackAnnotation, String> {
@@ -297,7 +350,7 @@ mod tests {
                 "deletes":[{"num":18,"gen":1}]}"#,
         )
         .expect("写 job");
-        let (spec, incremental) = read_spec_mode(&job).expect("解析");
+        let (spec, incremental, _) = read_spec_mode(&job).expect("解析");
         assert!(!incremental);
         assert_eq!(spec.updates.len(), 1);
         assert_eq!(spec.updates[0].reference.num, 16);

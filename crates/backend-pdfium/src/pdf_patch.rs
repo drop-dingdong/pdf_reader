@@ -1086,3 +1086,167 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     }
     (year, month, day)
 }
+
+/// 内联注释正文更新：页号 + 页内**可见支持注释**的位置（0 起）。
+pub struct InlineUpdate {
+    /// 页号（0 起）。
+    pub page: u32,
+    /// 该页可见支持注释中的位置（0 起）。
+    pub position: usize,
+    /// 新正文；`None` = 删除 `/Contents`。
+    pub body: Option<String>,
+}
+
+/// 内联注释删除：页号 + 位置。
+pub struct InlineDelete {
+    /// 页号（0 起）。
+    pub page: u32,
+    /// 该页可见支持注释中的位置（0 起）。
+    pub position: usize,
+}
+
+/// 内联注释改动（更新 + 删除）。
+#[derive(Default)]
+pub struct InlineChanges {
+    /// 正文更新。
+    pub updates: Vec<InlineUpdate>,
+    /// 删除。
+    pub deletes: Vec<InlineDelete>,
+}
+
+impl InlineChanges {
+    /// 是否没有任何改动。
+    pub fn is_empty(&self) -> bool {
+        self.updates.is_empty() && self.deletes.is_empty()
+    }
+}
+
+/// 改写内联注释：复制页对象，修改/删除 `/Annots` 里的内联字典，再追加页对象 + xref。
+pub fn append_inline_changes(pdf: &[u8], changes: &InlineChanges) -> Result<Vec<u8>, String> {
+    if changes.is_empty() {
+        return Ok(pdf.to_vec());
+    }
+    let pages = crate::pdf_index::page_objects(pdf)?;
+    let trailer = trailer(pdf)?;
+    let mut out = pdf.to_vec();
+    if !out.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    let mut entries: Vec<(PdfObjectRef, usize)> = Vec::new();
+    let mut pages_to_write: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    for update in &changes.updates {
+        pages_to_write.insert(update.page as usize);
+    }
+    for delete in &changes.deletes {
+        pages_to_write.insert(delete.page as usize);
+    }
+    for page_index in pages_to_write {
+        let page = pages
+            .get(page_index)
+            .ok_or_else(|| format!("页号 {page_index} 越界"))?;
+        let (mut raw, range) = annots_entries(pdf, &page.dict)?;
+        let supported: Vec<usize> = page
+            .annots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                (!entry.hidden && matches!(entry.subtype, Some(9 | 10 | 12 | 15))).then_some(index)
+            })
+            .collect();
+        if raw.len() != page.annots.len() {
+            return Err("页 /Annots 条目数与索引不一致".to_string());
+        }
+        let mut remove = std::collections::BTreeSet::new();
+        for delete in changes
+            .deletes
+            .iter()
+            .filter(|delete| delete.page as usize == page_index)
+        {
+            let raw_index = *supported.get(delete.position).ok_or_else(|| {
+                format!(
+                    "第 {} 页内联注释位置 {} 越界",
+                    page_index + 1,
+                    delete.position
+                )
+            })?;
+            remove.insert(raw_index);
+        }
+        for update in changes
+            .updates
+            .iter()
+            .filter(|update| update.page as usize == page_index)
+        {
+            let raw_index = *supported.get(update.position).ok_or_else(|| {
+                format!(
+                    "第 {} 页内联注释位置 {} 越界",
+                    page_index + 1,
+                    update.position
+                )
+            })?;
+            if !raw[raw_index].starts_with(b"<<") {
+                return Err(format!(
+                    "第 {} 页注释位置 {} 不是内联字典",
+                    page_index + 1,
+                    update.position
+                ));
+            }
+            raw[raw_index] = replace_contents(&raw[raw_index], update.body.as_deref())?;
+        }
+        let raw: Vec<Vec<u8>> = raw
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, entry)| (!remove.contains(&index)).then_some(entry))
+            .collect();
+        let new_dict = replace_annots(&page.dict, range, &raw)?;
+        let offset = out.len();
+        out.extend_from_slice(
+            format!("{} {} obj\n", page.reference.num, page.reference.gen).as_bytes(),
+        );
+        out.extend_from_slice(&new_dict);
+        out.extend_from_slice(b"\nendobj\n");
+        entries.push((page.reference, offset));
+    }
+    append_xref(pdf, trailer, &mut out, entries)
+}
+
+type AnnotsEntries = (Vec<Vec<u8>>, (usize, usize));
+
+fn annots_entries(pdf: &[u8], dict: &[u8]) -> Result<AnnotsEntries, String> {
+    let key = b"/Annots";
+    let index = find_from(dict, 0, key).ok_or_else(|| "页没有 /Annots".to_string())?;
+    let mut cursor = index + key.len();
+    skip_space(dict, &mut cursor);
+    let start = cursor;
+    let end = value_end(dict, cursor)?;
+    let array = if dict.get(start) == Some(&b'[') {
+        let close = balanced(dict, start, b'[', b']')?;
+        dict[start + 1..close - 1].to_vec()
+    } else {
+        let mut ref_cursor = start;
+        let reference = parse_ref_at(dict, &mut ref_cursor)
+            .ok_or_else(|| "页 /Annots 不是数组也不是引用".to_string())?;
+        crate::pdf_index::array_object(pdf, reference)?
+            .ok_or_else(|| format!("数组对象 {reference:?} 不存在"))?
+    };
+    Ok((split_entries(&array)?, (start, end)))
+}
+
+fn replace_annots(
+    dict: &[u8],
+    range: (usize, usize),
+    entries: &[Vec<u8>],
+) -> Result<Vec<u8>, String> {
+    let mut array = vec![b'['];
+    for (index, entry) in entries.iter().enumerate() {
+        if index > 0 {
+            array.push(b' ');
+        }
+        array.extend_from_slice(entry);
+    }
+    array.push(b']');
+    let mut out = Vec::with_capacity(dict.len() + array.len());
+    out.extend_from_slice(&dict[..range.0]);
+    out.extend_from_slice(&array);
+    out.extend_from_slice(&dict[range.1..]);
+    Ok(out)
+}

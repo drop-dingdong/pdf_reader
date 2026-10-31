@@ -1835,6 +1835,21 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - 之前只同步了尺寸，没有同步图片内容；本次补齐。
 - `check.sh` 全绿（397 tests）；图片纹理的 UI 行为需手动验收。
 
+### D-190 外部内联注释：正文编辑与删除
+
+- readback 额外记录可见支持注释的页内位置；app 用 `inline_refs: id → (page, position)`
+  记录无对象号的外部注释，`opened_inline_bodies` 保存打开时的正文。
+- `pdf_patch::append_inline_changes`：复制页对象，在 `/Annots` 中按位置替换内联字典
+  `/Contents` 或删除条目，再追加页对象 + xref；只在有内联改动时走这条路径。
+- 写回链路新增 inline 变体，不改既有 `WritebackSpec` 字面量：
+  `write_*_with_inline`、job JSON 的 `inline_updates` / `inline_deletes`、
+  `export_with_refs_and_inline`、`stage_in_place_with_refs_and_inline`。
+- app：外部内联注释不再拒绝改正文/删除；注释列表标「内联」，筛选「仅内联」；
+  改色仍不支持（避免重建外部对象）。
+- 后端测试：内联正文更新 + 删除；`check.sh` 全绿（398 tests）。
+- 限制：内联注释写回后按位置重新读回，跨写回的自定义历史仍不能保证可撤销；
+  撤销已写回的删除会按新注释恢复。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

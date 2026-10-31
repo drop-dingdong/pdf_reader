@@ -534,6 +534,12 @@ impl MarkupTool {
     }
 }
 
+type ReadAnnotationEntry<'a> = (
+    &'a backend_pdfium::readback::ReadAnnotation,
+    Option<pdfcore::annotation::PdfObjectRef>,
+    Option<(PageIndex, usize)>,
+);
+
 /// 自定义 preview 的会话内稳定键。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct PreviewKey {
@@ -807,6 +813,10 @@ pub struct PdfReaderApp {
     opened_pdf_bodies: std::collections::HashMap<pdfcore::annotation::PdfObjectRef, Option<String>>,
     /// 打开时对象号 → 标记 id（撤销/重做后快照可能暂时没有 pdf_ref）。
     opened_id_by_ref: std::collections::HashMap<pdfcore::annotation::PdfObjectRef, AnnotationId>,
+    /// 外部内联注释：id → (页号, 该页可见支持注释中的位置)。
+    inline_refs: std::collections::HashMap<AnnotationId, (PageIndex, usize)>,
+    /// 打开时内联注释的正文，用于判断是否需要页级正文 patch。
+    opened_inline_bodies: std::collections::HashMap<(PageIndex, usize), Option<String>>,
     /// 外部注释的对象号 → 稳定本地 id（写回重开时复用，撤销栈才能对上）。
     pdf_ref_ids: std::collections::HashMap<pdfcore::annotation::PdfObjectRef, AnnotationId>,
     /// 下一次 `open` 是写回后的重开：保留撤销栈与对象号映射。
@@ -1075,6 +1085,8 @@ impl PdfReaderApp {
             opened_pdf_refs: std::collections::BTreeSet::new(),
             opened_pdf_bodies: std::collections::HashMap::new(),
             opened_id_by_ref: std::collections::HashMap::new(),
+            inline_refs: std::collections::HashMap::new(),
+            opened_inline_bodies: std::collections::HashMap::new(),
             pdf_ref_ids: std::collections::HashMap::new(),
             reopening_after_write: false,
             ink: None,
@@ -1700,10 +1712,16 @@ impl PdfReaderApp {
             }
         }
         let (ref_updates, ref_deletes) = self.pdf_ref_changes();
+        let (inline_updates, inline_deletes) = self.inline_changes();
+        let inline = backend_pdfium::pdf_patch::InlineChanges {
+            updates: inline_updates,
+            deletes: inline_deletes,
+        };
         if self.annotations.is_empty()
             && self.pdf_marked_annotations == 0
             && ref_updates.is_empty()
             && ref_deletes.is_empty()
+            && inline.is_empty()
         {
             self.message = "当前文档没有标注".to_string();
             return;
@@ -1745,13 +1763,14 @@ impl PdfReaderApp {
                 !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
             })
             .count();
-        let updated = ref_updates.len();
-        let deleted = ref_deletes.len();
-        let temporary = match crate::export::stage_in_place_with_refs(
+        let updated = ref_updates.len() + inline.updates.len();
+        let deleted = ref_deletes.len() + inline.deletes.len();
+        let temporary = match crate::export::stage_in_place_with_refs_and_inline(
             &pdf,
             &items,
             &ref_updates,
             &ref_deletes,
+            &inline,
             pages,
         ) {
             Ok(path) => path,
@@ -1858,10 +1877,16 @@ impl PdfReaderApp {
             return;
         }
         let (ref_updates, ref_deletes) = self.pdf_ref_changes();
+        let (inline_updates, inline_deletes) = self.inline_changes();
+        let inline = backend_pdfium::pdf_patch::InlineChanges {
+            updates: inline_updates,
+            deletes: inline_deletes,
+        };
         if self.annotations.is_empty()
             && self.pdf_marked_annotations == 0
             && ref_updates.is_empty()
             && ref_deletes.is_empty()
+            && inline.is_empty()
         {
             self.message = "当前文档没有标注".to_string();
             return;
@@ -1889,12 +1914,13 @@ impl PdfReaderApp {
             .collect();
         let output = crate::export::default_output_path(&pdf);
         self.message = "正在导出标注…".to_string();
-        match crate::export::export_with_refs(
+        match crate::export::export_with_refs_and_inline(
             &pdf,
             &output,
             &items,
             &ref_updates,
             &ref_deletes,
+            &inline,
             session.page_count(),
         ) {
             Ok(report) => {
@@ -2000,6 +2026,11 @@ impl PdfReaderApp {
         let saved_next_preview_id = self.next_preview_id.clone();
         let had_custom_data = self.data_dirty || !saved_previews.is_empty();
         let (ref_updates, ref_deletes) = self.pdf_ref_changes();
+        let (inline_updates, inline_deletes) = self.inline_changes();
+        let inline = backend_pdfium::pdf_patch::InlineChanges {
+            updates: inline_updates,
+            deletes: inline_deletes,
+        };
         let items: Vec<crate::export::ExportItem> = self
             .annotations
             .iter()
@@ -2015,14 +2046,18 @@ impl PdfReaderApp {
                 body: annotation.body.clone().filter(|text| !text.is_empty()),
             })
             .collect();
-        let needs_export = !items.is_empty() || !ref_updates.is_empty() || !ref_deletes.is_empty();
+        let needs_export = !items.is_empty()
+            || !ref_updates.is_empty()
+            || !ref_deletes.is_empty()
+            || !inline.is_empty();
         if needs_export {
-            crate::export::export_with_refs(
+            crate::export::export_with_refs_and_inline(
                 &source,
                 &target,
                 &items,
                 &ref_updates,
                 &ref_deletes,
+                &inline,
                 pages,
             )?;
         } else {
@@ -2380,6 +2415,46 @@ impl PdfReaderApp {
         }
     }
 
+    /// 内联外部注释的正文更新/删除（按页 + 可见支持注释位置）。
+    fn inline_changes(
+        &self,
+    ) -> (
+        Vec<backend_pdfium::pdf_patch::InlineUpdate>,
+        Vec<backend_pdfium::pdf_patch::InlineDelete>,
+    ) {
+        let current: std::collections::HashSet<AnnotationId> = self
+            .annotations
+            .iter()
+            .map(|annotation| annotation.id)
+            .collect();
+        let mut updates = Vec::new();
+        let mut deletes = Vec::new();
+        for (id, (page, position)) in &self.inline_refs {
+            if !current.contains(id) {
+                deletes.push(backend_pdfium::pdf_patch::InlineDelete {
+                    page: page.get(),
+                    position: *position,
+                });
+                continue;
+            }
+            let Some(annotation) = self.annotations.get(*id) else {
+                continue;
+            };
+            if self
+                .opened_inline_bodies
+                .get(&(*page, *position))
+                .is_some_and(|before| before != &annotation.body)
+            {
+                updates.push(backend_pdfium::pdf_patch::InlineUpdate {
+                    page: page.get(),
+                    position: *position,
+                    body: annotation.body.clone(),
+                });
+            }
+        }
+        (updates, deletes)
+    }
+
     fn write_custom_data_to(
         &self,
         target: &std::path::Path,
@@ -2440,6 +2515,8 @@ impl PdfReaderApp {
         self.opened_pdf_refs.clear();
         self.opened_pdf_bodies.clear();
         self.opened_id_by_ref.clear();
+        self.inline_refs.clear();
+        self.opened_inline_bodies.clear();
         let mut by_page: std::collections::BTreeMap<
             u32,
             Vec<&backend_pdfium::readback::ReadAnnotation>,
@@ -2450,10 +2527,7 @@ impl PdfReaderApp {
 
         // 先把读回结果和对象号配对；**先导入带标记的注释，再给外部注释分配 id**，
         // 否则外部 id 可能先占用了后面 pd-fr 标记要用的 id，把注释覆盖掉。
-        let mut entries: Vec<(
-            &backend_pdfium::readback::ReadAnnotation,
-            Option<pdfcore::annotation::PdfObjectRef>,
-        )> = Vec::new();
+        let mut entries: Vec<ReadAnnotationEntry<'_>> = Vec::new();
         for (page, items) in by_page {
             let page_entries: Vec<&backend_pdfium::pdf_index::PageAnnot> = ref_pages
                 .get(page as usize)
@@ -2467,7 +2541,7 @@ impl PdfReaderApp {
                 })
                 .unwrap_or_default();
             let refs_ok = page_entries.len() == items.len();
-            for (item, entry) in items.into_iter().zip(page_entries) {
+            for (position, (item, entry)) in items.into_iter().zip(page_entries).enumerate() {
                 let reference = refs_ok
                     .then_some(entry.reference)
                     .flatten()
@@ -2475,6 +2549,11 @@ impl PdfReaderApp {
                         num: reference.num,
                         gen: reference.gen,
                     });
+                let inline =
+                    (refs_ok && reference.is_none()).then_some((PageIndex::new(page), position));
+                if let Some(inline) = inline {
+                    self.opened_inline_bodies.insert(inline, item.body.clone());
+                }
                 if let Some(reference) = reference {
                     self.opened_pdf_refs.insert(reference);
                     self.opened_pdf_bodies.insert(reference, item.body.clone());
@@ -2483,14 +2562,14 @@ impl PdfReaderApp {
                             .insert(reference, AnnotationId(raw_id));
                     }
                 }
-                entries.push((item, reference));
+                entries.push((item, reference, inline));
             }
         }
 
         let mut restored = 0;
         let mut recovered = 0;
         // 第一遍：带 pd-fr 标记的注释（id 固定，先占住 id 空间）
-        for (item, reference) in &entries {
+        for (item, reference, _) in &entries {
             let Some(raw_id) = item.id else {
                 continue;
             };
@@ -2515,7 +2594,7 @@ impl PdfReaderApp {
             }
         }
         // 第二遍：无标记的外部注释
-        for (item, reference) in &entries {
+        for (item, reference, inline) in &entries {
             if item.id.is_some() {
                 continue;
             }
@@ -2545,6 +2624,9 @@ impl PdfReaderApp {
             }
             if let Some(reference) = reference {
                 self.pdf_ref_ids.insert(*reference, id);
+            }
+            if let Some(position) = inline {
+                self.inline_refs.insert(id, *position);
             }
             self.external_ids.insert(id);
         }
@@ -3967,7 +4049,7 @@ impl PdfReaderApp {
                     }
                     let mut text = format!("[{label}] {summary}");
                     if readonly {
-                        text.push_str("  [只读]");
+                        text.push_str("  [内联]");
                     }
                     ui.horizontal(|ui| {
                         ui.add_space(8.0);
@@ -3992,7 +4074,7 @@ impl PdfReaderApp {
                                 "{preview}\n\n{label} · 第 {} 页{}{}",
                                 page.display_number(),
                                 if external { " · 外部" } else { " · 自有" },
-                                if readonly { " · 只读" } else { "" }
+                                if readonly { " · 内联" } else { "" }
                             ));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let delete = ui.add_enabled(
@@ -4706,10 +4788,6 @@ impl PdfReaderApp {
         let Some(annotation) = self.annotations.get(id).cloned() else {
             return false;
         };
-        if self.external_ids.contains(&id) && annotation.pdf_ref.is_none() {
-            self.message = "该外部注释没有对象号（内联/无法定位），暂不支持删除".to_string();
-            return false;
-        }
         self.apply_edit(AppEdit::DeleteAnnotation { annotation }, true);
         self.message = "已删除标注（Ctrl+Z 可撤销）".to_string();
         true
@@ -4759,12 +4837,9 @@ impl PdfReaderApp {
             return;
         };
         let external = self.external_ids.contains(&id);
-        let readonly = external && annotation.pdf_ref.is_none();
         let current = annotation.color;
-        if readonly {
-            ui.label("只读：无对象号，不能修改");
-        } else if external {
-            ui.label("外部注释暂不支持改色");
+        if external {
+            ui.label("外部注释暂不支持改色（正文/删除可用）");
         } else {
             ui.menu_button("颜色", |ui| {
                 for (name, rgb) in [
@@ -4783,9 +4858,7 @@ impl PdfReaderApp {
                 }
             });
         }
-        if readonly {
-            ui.label("该外部注释无对象号，暂不支持删除");
-        } else if ui.button("删除注释（可撤销）").clicked() {
+        if ui.button("删除注释（可撤销）").clicked() {
             self.delete_annotation(id);
             self.context_annotation = None;
             self.context_menu_pos = None;
@@ -6533,17 +6606,6 @@ impl PdfReaderApp {
                     }
                 }
                 FloatOwner::Annotation(id) => {
-                    if self.external_ids.contains(&id)
-                        && self
-                            .annotations
-                            .get(id)
-                            .is_some_and(|annotation| annotation.pdf_ref.is_none())
-                    {
-                        self.message =
-                            "该外部注释没有对象号（内联/无法定位），暂不支持编辑".to_string();
-                        self.editing_body = None;
-                        return;
-                    }
                     let before = self.annotations.get(id).and_then(|a| a.body.clone());
                     let after = if text.is_empty() { None } else { Some(text) };
                     if before != after {
@@ -8143,7 +8205,7 @@ mod annotation_body_tests {
     }
 
     #[test]
-    fn annotation_list_delete_is_undoable_and_refuses_inline_external() {
+    fn annotation_list_delete_is_undoable_for_inline_external() {
         let mut app = app();
         assert!(app.add_annotation(
             PageIndex::FIRST,
@@ -8159,11 +8221,21 @@ mod annotation_body_tests {
 
         let id = app.annotations.iter().next().unwrap().id;
         app.external_ids.insert(id);
+        app.inline_refs.insert(id, (PageIndex::FIRST, 2));
+        app.opened_inline_bodies
+            .insert((PageIndex::FIRST, 2), Some("旧正文".to_string()));
         if let Some(annotation) = app.annotations.get_mut(id) {
             annotation.pdf_ref = None;
+            annotation.body = Some("新正文".to_string());
         }
-        assert!(!app.delete_annotation(id), "内联外部注释只能读");
-        assert!(app.annotations.get(id).is_some());
+        let (updates, deletes) = app.inline_changes();
+        assert_eq!(updates.len(), 1);
+        assert!(deletes.is_empty());
+        assert!(app.delete_annotation(id));
+        assert!(app.annotations.get(id).is_none());
+        let (_, deletes) = app.inline_changes();
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0].position, 2);
     }
 
     #[test]
