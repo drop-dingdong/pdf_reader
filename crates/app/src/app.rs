@@ -1286,13 +1286,32 @@ impl PdfReaderApp {
                     if let Some(preview) = self.custom_previews.get_mut(index) {
                         preview.body_size = *after;
                     }
+                    for window in &mut self.floats {
+                        if window.custom_index() == Some(index) {
+                            window.body = *after;
+                            window.rect = egui::Rect::from_min_size(
+                                window.rect.min,
+                                float_size_for_body(*after, FLOAT_TITLE_HEIGHT),
+                            );
+                        }
+                    }
                 }
             }
             AppEdit::ReplacePreview { key, after, .. } => {
                 if let Some(index) = self.preview_index(*key) {
                     let mut replacement = (**after).clone();
                     replacement.id = key.id;
+                    let body = replacement.body_size;
                     self.custom_previews[index] = replacement;
+                    for window in &mut self.floats {
+                        if window.custom_index() == Some(index) {
+                            window.body = body;
+                            window.rect = egui::Rect::from_min_size(
+                                window.rect.min,
+                                float_size_for_body(body, FLOAT_TITLE_HEIGHT),
+                            );
+                        }
+                    }
                 }
             }
             AppEdit::MovePreview { key, from, to } => {
@@ -1314,6 +1333,15 @@ impl PdfReaderApp {
                     .and_then(|marks| marks.get_mut(*index))
                 {
                     *slot = (**after).clone();
+                    for window in &mut self.floats {
+                        if window.origin == Some((*page, *index)) {
+                            window.body = after.body_size;
+                            window.rect = egui::Rect::from_min_size(
+                                window.rect.min,
+                                float_size_for_body(after.body_size, FLOAT_TITLE_HEIGHT),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -8305,8 +8333,22 @@ mod annotation_body_tests {
         app.apply_preview_resize(key, DEFAULT_CUSTOM_TEXT_BODY, EVec2::new(400.0, 200.0));
         app.apply_preview_resize(key, EVec2::new(400.0, 200.0), EVec2::new(500.0, 250.0));
         assert_eq!(app.history.len(), 2, "创建 + 合并后的 resize 应只有两条");
-        let before = app.custom_previews[0].body_size;
-        assert_eq!(before, EVec2::new(500.0, 250.0));
+        assert_eq!(app.custom_previews[0].body_size, EVec2::new(500.0, 250.0));
+        app.floats.push(Float {
+            id: 1,
+            title: "t".to_string(),
+            content: FloatContent::Text(String::new()),
+            rect: egui::Rect::from_min_size(
+                egui::pos2(10.0, 10.0),
+                float_size_for_body(EVec2::new(500.0, 250.0), FLOAT_TITLE_HEIGHT),
+            ),
+            owner: FloatOwner::Custom(0),
+            body: EVec2::new(500.0, 250.0),
+            origin: None,
+        });
+        app.undo_edit();
+        assert_eq!(app.custom_previews[0].body_size, DEFAULT_CUSTOM_TEXT_BODY);
+        assert_eq!(app.floats[0].body, DEFAULT_CUSTOM_TEXT_BODY);
     }
 
     #[test]

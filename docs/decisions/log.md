@@ -1820,6 +1820,13 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - v3 的旧程序读取会被拒绝（D-107：不加载、不覆盖），这是有意的向前兼容；
 - 更新 `docs/current/persistence.md`；`check.sh` 全绿（397 tests）。
 
+### D-188 Resize 撤销同步浮窗权威尺寸
+
+- 根因：撤销只改 preview.body_size，浮窗仍持新 body；下一帧 resize 回写又把它改回新尺寸。
+- `ResizePreview` apply 现在同步所有 owner 为同一 preview 的浮窗 `body` 与 `rect`；
+  `EditDestMark` 也同步 dest 浮窗；`ReplacePreview` 同步截图后的 body。
+- 测试：合并后的 resize 撤销，preview 与浮窗 body 都回旧值；`check.sh` 全绿（397 tests）。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |
