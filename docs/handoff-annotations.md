@@ -1,5 +1,6 @@
 # 交接：注释功能（另一个会话从这里继续）
 
+> **最新状态 / 验证清单**：[`current/session-handoff.md`](current/session-handoff.md)（HEAD `4165d05`，399 tests）。
 > 分支 `feat/annotations`，最后提交见 `git log`。**S0–S4（模型 / 图层 v2 / 撤销 / 墨迹 / 压力门槛）已完成**并通过门禁。
 > **S5（写回 PDF）已完成评估 + S5a spike**（[`decisions/evaluations/s5-writeback.md`](decisions/evaluations/s5-writeback.md)，D-123），
 > 5 个决策已由用户确认：**导出副本 / 保留 overlay / 四种都写 / 受限文档拒绝 / 不覆盖**。
