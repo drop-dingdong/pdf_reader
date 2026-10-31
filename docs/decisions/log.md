@@ -1785,6 +1785,23 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - 自定义数据自身的撤销/重做仍是独立缺口，另做。
 - 测试 `save_as_warning_truth_table`；`check.sh` 全绿。
 
+### D-185 Preview 稳定键与完整撤销入口
+
+- `CustomPreview` 增加**会话内** `id`：不写 sidecar；每页加载时按顺序分配 0..n-1，
+  新建取 `next_id`（删除不回收）。`(page, id)` 只在当前会话有效，正常重开重新编号。
+- sidecar 保留跨类型顺序：`SavedCustom.order`，旧文件没有 order 时沿用“先图片后文字”；
+  app 读取按 order 排序后再分配 id。
+- 自定义数据历史改为稳定键：
+  * `AddPreview` / `DeletePreview` 记录 key + position；
+  * `SetPreviewTitle` / `SetPreviewBody` / `ResizePreview`；
+  * `ReplacePreview`（截图重选）；
+  * `MovePreview` 预留接口（侧栏暂无拖拽 UI）。
+- 创建 preview、标题/正文编辑、浮窗 resize 都走 `apply_edit`，不再是直接改字段。
+- 另存为和写入 PDF 重开后**继承内存 preview/dest 数据与 next id**，不从 sidecar 重新加载；
+  正常重开才按文件顺序重新编号。
+- 测试：preview 移动、标题/正文/resize 撤销；`check.sh` 全绿（396 tests）。
+- 说明：侧栏拖拽排序尚未做，只留 `move_custom_preview` 接口。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

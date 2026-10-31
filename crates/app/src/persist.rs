@@ -69,6 +69,8 @@ pub struct SavedMark {
 /// 一条自定义 preview 的可持久化数据（不含截图）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SavedCustom {
+    /// 同一数据文件内的全局顺序；旧文件没有该字段。
+    pub order: Option<u32>,
     /// 所在页
     pub page: PageIndex,
     /// 页内坐标
@@ -369,7 +371,11 @@ fn write_customs(out: &mut String, key: &str, items: &[SavedCustom]) {
         if index > 0 {
             out.push(',');
         }
-        out.push_str("\n    {\"page\": ");
+        out.push_str("\n    {");
+        if let Some(order) = item.order {
+            let _ = write!(out, "\"order\": {order}, ");
+        }
+        out.push_str("\"page\": ");
         let _ = write!(out, "{}", item.page.get());
         out.push_str(", ");
         write_point(out, "point", item.point);
@@ -472,6 +478,10 @@ fn parse_custom(value: &Json) -> Parsed<SavedCustom> {
         .and_then(|v| v.as_number())
         .ok_or("custom 缺 page")? as u32;
     Ok(SavedCustom {
+        order: object
+            .field("order")
+            .and_then(|value| value.as_number())
+            .map(|value| value.round().max(0.0) as u32),
         page: PageIndex::new(page),
         point: parse_point(object.field("point").ok_or("custom 缺 point")?)?,
         rect: parse_rect(object.field("rect").ok_or("custom 缺 rect")?)?,
@@ -550,6 +560,7 @@ mod tests {
                 Vec::new(),
             ],
             custom_images: vec![SavedCustom {
+                order: None,
                 page: PageIndex::new(1),
                 point: Point::new(50.0, 60.0),
                 rect: Rect::new(10.0, 20.0, 30.0, 40.0),
@@ -559,6 +570,7 @@ mod tests {
                 scale: 2.5,
             }],
             custom_texts: vec![SavedCustom {
+                order: None,
                 page: PageIndex::new(2),
                 point: Point::new(5.0, 6.0),
                 rect: Rect::new(5.0, 6.0, 0.0, 0.0),

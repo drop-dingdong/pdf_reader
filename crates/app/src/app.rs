@@ -427,6 +427,8 @@ struct CustomDialog {
 /// 它们是给"自定义 preview 与链接/被引用点挂接"的下一版准备的。
 #[derive(Clone)]
 struct CustomPreview {
+    /// 会话内稳定 id：按页从 0 开始，删除不回收；不写进 sidecar。
+    id: u64,
     page: PageIndex,
     /// 记录时的页内坐标。**只写不读**：当前只用于写回存档（D-49 的"位置类字段"），
     /// 后续"自定义 preview 与链接/被引用点挂接"会读它。
@@ -532,6 +534,13 @@ impl MarkupTool {
     }
 }
 
+/// 自定义 preview 的会话内稳定键。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PreviewKey {
+    page: PageIndex,
+    id: u64,
+}
+
 /// 一条可撤销的编辑（S3）。
 ///
 /// 命令里**持有旧值**（`Arc` 共享，不做深拷贝）：撤销时把它移回应用即可。
@@ -565,22 +574,53 @@ enum AppEdit {
         /// 新正文。
         after: Option<String>,
     },
-    /// 删除一条自定义 preview（撤销 = 按原下标放回）。
-    ///
-    /// 备注：自定义 preview 的"重新截图"入口**目前不存在**（截图入口只用于新建），
-    /// 所以这一类编辑现在只有"删除"。
+    /// 删除一条自定义 preview。
     DeletePreview {
-        /// 原来在下标里的位置。
-        index: usize,
-        /// 被删掉的那一条（`Arc` 共享，不深拷贝）。
+        /// 稳定键。
+        key: PreviewKey,
+        /// 删除时的全局位置（用于插回）。
+        position: usize,
+        /// 被删掉的快照。
         preview: std::sync::Arc<CustomPreview>,
     },
-    /// 放回一条自定义 preview（撤销"删除"时用；`index` 是原来的位置）。
+    /// 放回一条自定义 preview（撤销删除，或新建时插入）。
     AddPreview {
-        /// 原位置。
-        index: usize,
-        /// 那一条。
+        /// 稳定键。
+        key: PreviewKey,
+        /// 插入位置。
+        position: usize,
+        /// 内容。
         preview: std::sync::Arc<CustomPreview>,
+    },
+    /// 修改 preview 标题。
+    SetPreviewTitle {
+        key: PreviewKey,
+        before: String,
+        after: String,
+    },
+    /// 修改文字 preview 正文。
+    SetPreviewBody {
+        key: PreviewKey,
+        before: Option<String>,
+        after: Option<String>,
+    },
+    /// 修改 preview 浮窗正文尺寸。
+    ResizePreview {
+        key: PreviewKey,
+        before: egui::Vec2,
+        after: egui::Vec2,
+    },
+    /// 替换 preview 内容（截图重选/图片重选）。
+    ReplacePreview {
+        key: PreviewKey,
+        before: std::sync::Arc<CustomPreview>,
+        after: std::sync::Arc<CustomPreview>,
+    },
+    /// 调整 preview 顺序（当前 UI 尚无入口，先留统一命令）。
+    MovePreview {
+        key: PreviewKey,
+        from: usize,
+        to: usize,
     },
     /// 重选引用点（撤销 = 换回旧的矩形/截图/文字）。
     EditDestMark {
@@ -627,8 +667,35 @@ impl AppEdit {
             Self::SetBody { page, .. } => {
                 format!("修改注释正文（第 {} 页）", page.display_number())
             }
-            Self::DeletePreview { index, .. } => format!("删除自定义preview #{index}"),
-            Self::AddPreview { index, .. } => format!("恢复自定义preview #{index}"),
+            Self::DeletePreview { key, .. } => {
+                format!(
+                    "删除自定义preview（第 {} 页 #{}）",
+                    key.page.display_number(),
+                    key.id
+                )
+            }
+            Self::AddPreview { key, .. } => {
+                format!(
+                    "添加自定义preview（第 {} 页 #{}）",
+                    key.page.display_number(),
+                    key.id
+                )
+            }
+            Self::SetPreviewTitle { key, .. } => {
+                format!("修改preview标题（第 {} 页）", key.page.display_number())
+            }
+            Self::SetPreviewBody { key, .. } => {
+                format!("修改preview正文（第 {} 页）", key.page.display_number())
+            }
+            Self::ResizePreview { key, .. } => {
+                format!("调整preview浮窗大小（第 {} 页）", key.page.display_number())
+            }
+            Self::ReplacePreview { key, .. } => {
+                format!("替换preview内容（第 {} 页）", key.page.display_number())
+            }
+            Self::MovePreview { key, .. } => {
+                format!("调整preview顺序（第 {} 页）", key.page.display_number())
+            }
             Self::EditDestMark { page, .. } => {
                 format!("重选引用点（第 {} 页）", page.display_number())
             }
@@ -638,7 +705,13 @@ impl AppEdit {
     /// 估算权重：截图类命令持有位图（在 `Arc` 后面共享），按 1 MiB 估。
     fn weight(&self) -> usize {
         match self {
-            Self::DeletePreview { .. } | Self::AddPreview { .. } => 512,
+            Self::DeletePreview { .. } | Self::AddPreview { .. } | Self::ReplacePreview { .. } => {
+                1024 * 1024
+            }
+            Self::SetPreviewTitle { .. }
+            | Self::SetPreviewBody { .. }
+            | Self::ResizePreview { .. }
+            | Self::MovePreview { .. } => 512,
             Self::EditDestMark { .. } => 1024 * 1024,
             _ => 768,
         }
@@ -815,6 +888,8 @@ pub struct PdfReaderApp {
     custom_dialog: Option<CustomDialog>,
     /// 已保存的自定义 preview。
     custom_previews: Vec<CustomPreview>,
+    /// 每页下一个可用的 custom preview id（会话内）。
+    next_preview_id: Vec<u64>,
     /// 自定义数据是否有未保存的修改（影响保存按钮文案）。
     data_dirty: bool,
     /// 页码原位编辑草稿（`Some` = 正在编辑）。
@@ -1037,6 +1112,7 @@ impl PdfReaderApp {
             custom_pin: None,
             custom_dialog: None,
             custom_previews: Vec::new(),
+            next_preview_id: Vec::new(),
             data_dirty: false,
             page_edit: None,
             zoom_edit: None,
@@ -1165,15 +1241,66 @@ impl PdfReaderApp {
             AppEdit::SetBody { id, after, .. } => {
                 self.annotations.set_body(*id, after.clone());
             }
-            AppEdit::DeletePreview { index, .. } => {
-                if *index < self.custom_previews.len() {
-                    self.custom_previews.remove(*index);
-                    self.shift_float_custom_indices(*index);
+            AppEdit::DeletePreview { key, .. } => {
+                if let Some(index) = self.preview_index(*key) {
+                    self.custom_previews.remove(index);
+                    self.shift_float_custom_indices(index);
                 }
             }
-            AppEdit::AddPreview { index, preview } => {
-                let at = (*index).min(self.custom_previews.len());
-                self.custom_previews.insert(at, (**preview).clone());
+            AppEdit::AddPreview {
+                key,
+                position,
+                preview,
+            } => {
+                let at = (*position).min(self.custom_previews.len());
+                let mut preview = (**preview).clone();
+                preview.id = key.id;
+                self.custom_previews.insert(at, preview);
+                for window in &mut self.floats {
+                    if let FloatOwner::Custom(index) = window.owner {
+                        if index >= at {
+                            window.owner = FloatOwner::Custom(index + 1);
+                        }
+                    }
+                }
+            }
+            AppEdit::SetPreviewTitle { key, after, .. } => {
+                if let Some(index) = self.preview_index(*key) {
+                    if let Some(preview) = self.custom_previews.get_mut(index) {
+                        preview.title = after.clone();
+                    }
+                }
+            }
+            AppEdit::SetPreviewBody { key, after, .. } => {
+                if let Some(index) = self.preview_index(*key) {
+                    if let Some(preview) = self.custom_previews.get_mut(index) {
+                        preview.text = after.clone();
+                    }
+                }
+            }
+            AppEdit::ResizePreview { key, after, .. } => {
+                if let Some(index) = self.preview_index(*key) {
+                    if let Some(preview) = self.custom_previews.get_mut(index) {
+                        preview.body_size = *after;
+                    }
+                }
+            }
+            AppEdit::ReplacePreview { key, after, .. } => {
+                if let Some(index) = self.preview_index(*key) {
+                    let mut replacement = (**after).clone();
+                    replacement.id = key.id;
+                    self.custom_previews[index] = replacement;
+                }
+            }
+            AppEdit::MovePreview { key, from, to } => {
+                if let Some(index) = self.preview_index(*key) {
+                    let target = (*to).min(self.custom_previews.len().saturating_sub(1));
+                    if index != target {
+                        let preview = self.custom_previews.remove(index);
+                        self.custom_previews.insert(target, preview);
+                    }
+                    let _ = (*from, index);
+                }
             }
             AppEdit::EditDestMark {
                 page, index, after, ..
@@ -1218,9 +1345,49 @@ impl PdfReaderApp {
                 before: after,
                 after: before,
             },
-            // 这两个的"逆"由 `apply_edit` 自身根据当前状态判别（见各自的注释）
-            AppEdit::DeletePreview { index, preview } => AppEdit::AddPreview { index, preview },
-            AppEdit::AddPreview { index, preview } => AppEdit::DeletePreview { index, preview },
+            AppEdit::DeletePreview {
+                key,
+                position,
+                preview,
+            } => AppEdit::AddPreview {
+                key,
+                position,
+                preview,
+            },
+            AppEdit::AddPreview {
+                key,
+                position,
+                preview,
+            } => AppEdit::DeletePreview {
+                key,
+                position,
+                preview,
+            },
+            AppEdit::SetPreviewTitle { key, before, after } => AppEdit::SetPreviewTitle {
+                key,
+                before: after,
+                after: before,
+            },
+            AppEdit::SetPreviewBody { key, before, after } => AppEdit::SetPreviewBody {
+                key,
+                before: after,
+                after: before,
+            },
+            AppEdit::ResizePreview { key, before, after } => AppEdit::ResizePreview {
+                key,
+                before: after,
+                after: before,
+            },
+            AppEdit::ReplacePreview { key, before, after } => AppEdit::ReplacePreview {
+                key,
+                before: after,
+                after: before,
+            },
+            AppEdit::MovePreview { key, from, to } => AppEdit::MovePreview {
+                key,
+                from: to,
+                to: from,
+            },
             AppEdit::EditDestMark {
                 page,
                 index,
@@ -1568,6 +1735,10 @@ impl PdfReaderApp {
                 }
             }
         }
+        let saved_previews = self.custom_previews.clone();
+        let saved_dest_marks = self.dest_marks.clone();
+        let saved_next_preview_id = self.next_preview_id.clone();
+
         // 关闭会话：释放 PDFium 的文件句柄（Windows 上不放开就无法替换原文件）
         self.session = None;
         self.textures.clear();
@@ -1610,6 +1781,11 @@ impl PdfReaderApp {
         self.reopening_after_write = true;
         self.open(&pdf, None);
         if self.session.is_some() {
+            self.custom_previews = saved_previews;
+            self.dest_marks = saved_dest_marks;
+            self.next_preview_id = saved_next_preview_id;
+            self.data_dirty = false;
+            self.data_clean_hash = Some(self.data_fingerprint());
             // 两帧后再恢复：先让新会话收到真实视口尺寸（见 `pending_view_restore` 的注释）
             self.pending_view_restore = Some((page, zoom, scroll, 2));
             self.message = format!(
@@ -1780,6 +1956,7 @@ impl PdfReaderApp {
         let data = self.custom_data();
         let saved_previews = self.custom_previews.clone();
         let saved_dest_marks = self.dest_marks.clone();
+        let saved_next_preview_id = self.next_preview_id.clone();
         let had_custom_data = self.data_dirty || !saved_previews.is_empty();
         let (ref_updates, ref_deletes) = self.pdf_ref_changes();
         let items: Vec<crate::export::ExportItem> = self
@@ -1828,14 +2005,17 @@ impl PdfReaderApp {
                 target.display()
             ));
         }
-        // 未写新数据文件：切换后把数据留在内存，并标记未保存。
-        if !write_target {
-            self.custom_previews = saved_previews;
-            self.dest_marks = saved_dest_marks;
-            if had_custom_data {
-                self.data_dirty = true;
-                self.data_clean_hash = None;
-            }
+        // 切换后继承内存中的 preview / dest 数据，不从新 sidecar 重新解析：
+        // 这样 preview 的 `(page, id)` 在同一个会话里保持稳定。
+        self.custom_previews = saved_previews;
+        self.dest_marks = saved_dest_marks;
+        self.next_preview_id = saved_next_preview_id;
+        if write_target {
+            self.data_dirty = false;
+            self.data_clean_hash = Some(self.data_fingerprint());
+        } else if had_custom_data {
+            self.data_dirty = true;
+            self.data_clean_hash = None;
         }
         self.pending_view_restore = Some((page, zoom, scroll, 2));
         self.message = format!("已另存为并切换到：{}（原文件未改动）", target.display());
@@ -2132,8 +2312,9 @@ impl PdfReaderApp {
             .collect();
         let mut custom_images = Vec::new();
         let mut custom_texts = Vec::new();
-        for preview in &self.custom_previews {
+        for (order, preview) in self.custom_previews.iter().enumerate() {
             let saved = persist::SavedCustom {
+                order: Some(order as u32),
                 page: preview.page,
                 point: preview.point,
                 rect: preview.rect,
@@ -2525,24 +2706,50 @@ impl PdfReaderApp {
                                 }
                             }
                             self.custom_previews.clear();
+                            // 新格式用 `order` 保留跨类型的全局顺序；旧格式没有 order，
+                            // 沿用“先图片后文字”的加载顺序。
+                            let mut ordered = Vec::new();
                             for (kind, items) in [
                                 (CustomKind::Image, &saved.custom_images),
                                 (CustomKind::Text, &saved.custom_texts),
                             ] {
-                                for item in items {
-                                    self.custom_previews.push(CustomPreview {
-                                        page: item.page,
-                                        point: item.point,
-                                        rect: item.rect,
+                                let priority = if kind == CustomKind::Image { 0 } else { 1 };
+                                for (index, item) in items.iter().enumerate() {
+                                    ordered.push((
+                                        item.order.unwrap_or(u32::MAX / 2),
+                                        priority,
+                                        index,
                                         kind,
-                                        title: item.title.clone(),
-                                        text: item.text.clone(),
-                                        snapshot: None,
-                                        body_size: egui::vec2(item.body[0], item.body[1]),
-                                        scale: item.scale,
-                                    });
+                                        item,
+                                    ));
                                 }
                             }
+                            ordered.sort_by_key(|(order, priority, index, _, _)| {
+                                (*order, *priority, *index)
+                            });
+                            for (_, _, _, kind, item) in ordered {
+                                self.custom_previews.push(CustomPreview {
+                                    id: 0,
+                                    page: item.page,
+                                    point: item.point,
+                                    rect: item.rect,
+                                    kind,
+                                    title: item.title.clone(),
+                                    text: item.text.clone(),
+                                    snapshot: None,
+                                    body_size: egui::vec2(item.body[0], item.body[1]),
+                                    scale: item.scale,
+                                });
+                            }
+                        }
+                        self.next_preview_id = vec![0; session.page_count() as usize];
+                        for preview in &mut self.custom_previews {
+                            let page = preview.page.get() as usize;
+                            if page >= self.next_preview_id.len() {
+                                self.next_preview_id.resize(page + 1, 0);
+                            }
+                            preview.id = self.next_preview_id[page];
+                            self.next_preview_id[page] += 1;
                         }
                         // 先载入主存档（custom_previews），再载入/迁移 A（v2 的正文在 `.json` 里）
                         if overlay_file_exists {
@@ -4392,6 +4599,21 @@ impl PdfReaderApp {
         true
     }
 
+    /// 预留的顺序调整接口：当前侧栏还没有拖拽 UI。
+    #[allow(dead_code)]
+    fn move_custom_preview(&mut self, key: PreviewKey, to: usize) {
+        if let Some(from) = self.preview_index(key) {
+            self.apply_edit(AppEdit::MovePreview { key, from, to }, true);
+        }
+    }
+
+    /// 按稳定键查找 preview 的全局下标。
+    fn preview_index(&self, key: PreviewKey) -> Option<usize> {
+        self.custom_previews
+            .iter()
+            .position(|preview| preview.id == key.id && preview.page == key.page)
+    }
+
     /// 删除 `custom_previews[index]` 之后，把浮窗里的下标引用左移并移除指向它的浮窗。
     fn shift_float_custom_indices(&mut self, index: usize) {
         for window in &mut self.floats {
@@ -4627,13 +4849,35 @@ impl PdfReaderApp {
         self.highlight_float = Some(id);
     }
 
+    /// 分配本页新的 preview id；删除不回收，保证会话内 `(page, id)` 唯一。
+    fn allocate_preview_id(&mut self, page: PageIndex) -> u64 {
+        let index = page.get() as usize;
+        if self.next_preview_id.len() <= index {
+            self.next_preview_id.resize(index + 1, 0);
+        }
+        let id = self.next_preview_id[index];
+        self.next_preview_id[index] += 1;
+        id
+    }
+
     /// 删除某个自定义 preview：同时清掉它的浮窗，并把后续条目的 `custom` 下标左移。
     fn delete_custom_preview(&mut self, index: usize) {
         if index >= self.custom_previews.len() {
             return;
         }
-        let preview = std::sync::Arc::new(self.custom_previews[index].clone());
-        self.apply_edit(AppEdit::DeletePreview { index, preview }, true);
+        let preview = self.custom_previews[index].clone();
+        let key = PreviewKey {
+            page: preview.page,
+            id: preview.id,
+        };
+        self.apply_edit(
+            AppEdit::DeletePreview {
+                key,
+                position: index,
+                preview: std::sync::Arc::new(preview),
+            },
+            true,
+        );
         self.message = "已删除该自定义preview（Ctrl+Z 可撤销）".to_string();
     }
 
@@ -5692,30 +5936,61 @@ impl PdfReaderApp {
             }
 
             // 浮窗尺寸变化 → 回写正文尺寸到来源数据（用户要求：改大小即记住正文面积）
+            // 先收集，再统一走 apply_edit，保证一次 resize 进入撤销栈。
+            let mut preview_resizes: Vec<(PreviewKey, egui::Vec2, egui::Vec2)> = Vec::new();
+            let mut dest_resizes: Vec<(PageIndex, usize, DestMark, DestMark)> = Vec::new();
             for window in std::mem::take(&mut self.floats) {
-                // 权威尺寸来自浮窗自身（创建/改大小时写入），不做任何反算
                 let body = window.body;
                 if let Some((page, index)) = window.origin {
                     if let Some(mark) = self
                         .dest_marks
-                        .get_mut(page.get() as usize)
-                        .and_then(|marks| marks.get_mut(index))
+                        .get(page.get() as usize)
+                        .and_then(|marks| marks.get(index))
                     {
                         if body_size_changed(mark.body_size, body) {
-                            mark.body_size = body;
-                            self.data_dirty = true;
+                            let before = mark.clone();
+                            let mut after = before.clone();
+                            after.body_size = body;
+                            dest_resizes.push((page, index, before, after));
                         }
                     }
                 }
                 if let Some(index) = window.custom_index() {
-                    if let Some(preview) = self.custom_previews.get_mut(index) {
+                    if let Some(preview) = self.custom_previews.get(index) {
                         if body_size_changed(preview.body_size, body) {
-                            preview.body_size = body;
-                            self.data_dirty = true;
+                            preview_resizes.push((
+                                PreviewKey {
+                                    page: preview.page,
+                                    id: preview.id,
+                                },
+                                preview.body_size,
+                                body,
+                            ));
                         }
                     }
                 }
                 self.floats.push(window);
+            }
+            for (key, before, after) in preview_resizes {
+                self.apply_edit(
+                    AppEdit::ResizePreview {
+                        key,
+                        before,
+                        after,
+                    },
+                    true,
+                );
+            }
+            for (page, index, before, after) in dest_resizes {
+                self.apply_edit(
+                    AppEdit::EditDestMark {
+                        page,
+                        index,
+                        before: std::sync::Arc::new(before),
+                        after: std::sync::Arc::new(after),
+                    },
+                    true,
+                );
             }
 
             // 固定浮窗：绘制与注册都在此；后加入的在更上层（见 draw_floats）
@@ -6172,10 +6447,23 @@ impl PdfReaderApp {
         if response.lost_focus() {
             match editing_owner {
                 FloatOwner::Custom(index) => {
-                    if let Some(preview) = self.custom_previews.get_mut(index) {
-                        preview.text = Some(text);
+                    if let Some(preview) = self.custom_previews.get(index) {
+                        let before = preview.text.clone();
+                        let after = Some(text);
+                        if before != after {
+                            self.apply_edit(
+                                AppEdit::SetPreviewBody {
+                                    key: PreviewKey {
+                                        page: preview.page,
+                                        id: preview.id,
+                                    },
+                                    before,
+                                    after,
+                                },
+                                true,
+                            );
+                        }
                     }
-                    self.data_dirty = true;
                 }
                 FloatOwner::Annotation(id) => {
                     if self.external_ids.contains(&id)
@@ -6297,11 +6585,23 @@ impl PdfReaderApp {
             });
             self.editing_title = Some((index, text.clone()));
             if close {
-                if let Some(preview) = self.custom_previews.get_mut(index) {
-                    preview.title = text;
+                if let Some(preview) = self.custom_previews.get(index) {
+                    let before = preview.title.clone();
+                    if before != text {
+                        self.apply_edit(
+                            AppEdit::SetPreviewTitle {
+                                key: PreviewKey {
+                                    page: preview.page,
+                                    id: preview.id,
+                                },
+                                before,
+                                after: text,
+                            },
+                            true,
+                        );
+                    }
                 }
                 self.editing_title = None;
-                self.data_dirty = true;
                 self.message = "已更新题目".to_string();
             }
         }
@@ -6379,15 +6679,27 @@ impl PdfReaderApp {
                 )
             })
             .unwrap_or(overlap);
-        let Some(preview) = self.custom_previews.get_mut(index) else {
+        let Some(before) = self.custom_previews.get(index).cloned() else {
             return;
         };
-        preview.snapshot = Some(texture);
-        preview.rect = page_rect;
-        preview.body_size = egui::vec2(overlap.width, overlap.height);
+        let key = PreviewKey {
+            page: before.page,
+            id: before.id,
+        };
+        let mut after = before.clone();
+        after.snapshot = Some(texture);
+        after.rect = page_rect;
+        after.body_size = egui::vec2(overlap.width, overlap.height);
         // ▲v2：记录这张图的分辨率（截图时的显示比例）—— 之后重建预览时按它请求渲染
-        preview.scale = session.state().zoom;
-        self.data_dirty = true;
+        after.scale = session.state().zoom;
+        self.apply_edit(
+            AppEdit::ReplacePreview {
+                key,
+                before: std::sync::Arc::new(before),
+                after: std::sync::Arc::new(after),
+            },
+            true,
+        );
         self.message = format!(
             "已保存图片预览（取第 {} 页，交叠 {:.0}×{:.0}）",
             page.display_number(),
@@ -6500,7 +6812,9 @@ impl PdfReaderApp {
         if save {
             if let Some(dialog) = self.custom_dialog.take() {
                 let body_size = DEFAULT_CUSTOM_TEXT_BODY;
-                self.custom_previews.push(CustomPreview {
+                let id = self.allocate_preview_id(dialog.page);
+                let preview = CustomPreview {
+                    id,
                     page: dialog.page,
                     point: dialog.point,
                     rect: zero_rect_at(dialog.point),
@@ -6510,15 +6824,28 @@ impl PdfReaderApp {
                     snapshot: None,
                     body_size,
                     scale: 1.0,
-                });
+                };
+                let position = self.custom_previews.len();
+                self.apply_edit(
+                    AppEdit::AddPreview {
+                        key: PreviewKey {
+                            page: preview.page,
+                            id,
+                        },
+                        position,
+                        preview: std::sync::Arc::new(preview),
+                    },
+                    true,
+                );
                 // **不**自动生成浮窗（用户要求）：只在从侧栏悬浮/点击该条目时出现
-                self.data_dirty = true;
                 self.message = "已保存文字预览（从侧栏「自定义preview」唤出）".to_string();
             }
         } else if shoot {
             if let Some(dialog) = self.custom_dialog.take() {
                 let index = self.custom_previews.len();
-                self.custom_previews.push(CustomPreview {
+                let id = self.allocate_preview_id(dialog.page);
+                let preview = CustomPreview {
+                    id,
                     page: dialog.page,
                     point: dialog.point,
                     rect: zero_rect_at(dialog.point),
@@ -6530,7 +6857,18 @@ impl PdfReaderApp {
                     body_size: DEFAULT_CUSTOM_TEXT_BODY,
                     // 占位：截图完成时写入当时的显示比例
                     scale: 1.0,
-                });
+                };
+                self.apply_edit(
+                    AppEdit::AddPreview {
+                        key: PreviewKey {
+                            page: preview.page,
+                            id,
+                        },
+                        position: index,
+                        preview: std::sync::Arc::new(preview),
+                    },
+                    true,
+                );
                 // 进入截图模式：结果回写到这条自定义记录
                 self.capture = Some(CaptureState {
                     rect: None,
@@ -7842,6 +8180,107 @@ mod annotation_body_tests {
         let tooltip = body_tooltip(Some(&long));
         assert_eq!(tooltip.chars().count(), 281);
         assert!(tooltip.ends_with('…'));
+    }
+
+    #[test]
+    fn preview_title_body_and_resize_are_undoable() {
+        let mut app = app();
+        let preview = CustomPreview {
+            id: 7,
+            page: PageIndex::FIRST,
+            point: Point::new(10.0, 10.0),
+            rect: Rect::new(10.0, 10.0, 0.0, 0.0),
+            kind: CustomKind::Text,
+            title: "旧标题".to_string(),
+            text: Some("旧正文".to_string()),
+            snapshot: None,
+            body_size: DEFAULT_CUSTOM_TEXT_BODY,
+            scale: 1.0,
+        };
+        let key = PreviewKey {
+            page: preview.page,
+            id: preview.id,
+        };
+        app.apply_edit(
+            AppEdit::AddPreview {
+                key,
+                position: 0,
+                preview: std::sync::Arc::new(preview),
+            },
+            true,
+        );
+        app.apply_edit(
+            AppEdit::SetPreviewTitle {
+                key,
+                before: "旧标题".to_string(),
+                after: "新标题".to_string(),
+            },
+            true,
+        );
+        app.apply_edit(
+            AppEdit::SetPreviewBody {
+                key,
+                before: Some("旧正文".to_string()),
+                after: Some("新正文".to_string()),
+            },
+            true,
+        );
+        app.apply_edit(
+            AppEdit::ResizePreview {
+                key,
+                before: DEFAULT_CUSTOM_TEXT_BODY,
+                after: EVec2::new(400.0, 200.0),
+            },
+            true,
+        );
+        assert_eq!(app.custom_previews[0].title, "新标题");
+        assert_eq!(app.custom_previews[0].text.as_deref(), Some("新正文"));
+        assert_eq!(app.custom_previews[0].body_size, EVec2::new(400.0, 200.0));
+        app.undo_edit();
+        assert_eq!(app.custom_previews[0].body_size, DEFAULT_CUSTOM_TEXT_BODY);
+        app.undo_edit();
+        assert_eq!(app.custom_previews[0].text.as_deref(), Some("旧正文"));
+        app.undo_edit();
+        assert_eq!(app.custom_previews[0].title, "旧标题");
+    }
+
+    #[test]
+    fn preview_move_interface_keeps_stable_key() {
+        let mut app = app();
+        for (index, title) in ["A", "B"].iter().enumerate() {
+            let preview = CustomPreview {
+                id: index as u64,
+                page: PageIndex::FIRST,
+                point: Point::new(index as f32, 0.0),
+                rect: Rect::new(index as f32, 0.0, 0.0, 0.0),
+                kind: CustomKind::Text,
+                title: (*title).to_string(),
+                text: Some(String::new()),
+                snapshot: None,
+                body_size: DEFAULT_CUSTOM_TEXT_BODY,
+                scale: 1.0,
+            };
+            app.apply_edit(
+                AppEdit::AddPreview {
+                    key: PreviewKey {
+                        page: preview.page,
+                        id: preview.id,
+                    },
+                    position: app.custom_previews.len(),
+                    preview: std::sync::Arc::new(preview),
+                },
+                true,
+            );
+        }
+        let key = PreviewKey {
+            page: PageIndex::FIRST,
+            id: 0,
+        };
+        app.move_custom_preview(key, 1);
+        assert_eq!(app.custom_previews[0].id, 1);
+        assert_eq!(app.custom_previews[1].id, 0);
+        app.undo_edit();
+        assert_eq!(app.custom_previews[0].id, 0);
     }
 
     #[test]
