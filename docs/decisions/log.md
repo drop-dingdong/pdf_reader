@@ -1874,6 +1874,14 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - 测试：`new_markup_and_ink_share_one_incremental_revision`（EOF=2、计数正确、
   体积增长有限）；`check.sh` 全绿（399 tests）。
 
+### D-193 注释作者 `/T`
+
+- 来源不引入设置缓存：`PDF_READER_AUTHOR` → 系统 `USER`/`USERNAME` → 省略；
+- 对象级新注释和 PDFium 全量路径都写 `/T <UTF-16BE>`；空作者不写；
+- 现有注释不改作者；改色重建会使用当前作者。
+- 测试：有作者来源时输出含 `/T`；`check.sh` 全绿（399 tests）。
+- 说明：目前没有作者 UI/配置；需要固定作者时设置环境变量。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

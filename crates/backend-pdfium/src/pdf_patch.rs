@@ -816,6 +816,9 @@ pub fn append_new_annotations(
         }
         let date = pdf_date_now();
         dict.push_str(&format!("/M ({date})/CreationDate ({date})"));
+        if let Some(author) = pdf_author() {
+            dict.push_str(&format!("/T {}", pdf_text(&author)));
+        }
         if let Some(ap_number) = ap_number {
             dict.push_str(&format!("/AP<</N {ap_number} 0 R>>"));
         }
@@ -935,6 +938,9 @@ pub fn append_new_annotations(
         }
         let date = pdf_date_now();
         dict.push_str(&format!("/M ({date})/CreationDate ({date})"));
+        if let Some(author) = pdf_author() {
+            dict.push_str(&format!("/T {}", pdf_text(&author)));
+        }
         dict.push_str(&format!(
             "/P {} {} R>>",
             page.reference.num, page.reference.gen
@@ -1522,4 +1528,21 @@ fn replace_annots(
     out.extend_from_slice(&array);
     out.extend_from_slice(&dict[range.1..]);
     Ok(out)
+}
+
+/// 新注释作者：优先环境变量，其次系统用户名；空则不写 `/T`。
+pub fn pdf_author() -> Option<String> {
+    for key in ["PDF_READER_AUTHOR", "USER", "USERNAME"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn pdf_text(value: &str) -> String {
+    format!("<{}>", utf16_hex(value))
 }

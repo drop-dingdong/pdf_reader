@@ -791,6 +791,11 @@ unsafe fn add_annotation(
         let key = CString::new(key_name).expect("字面量");
         let _ = (ffi.set_string)(handle, key.as_ptr(), wide_date.as_ptr());
     }
+    if let Some(author) = crate::pdf_patch::pdf_author() {
+        let wide_author = wide_string(&author);
+        let key = CString::new("T").expect("字面量");
+        let _ = (ffi.set_string)(handle, key.as_ptr(), wide_author.as_ptr());
+    }
 
     // 线宽写进 /BS（编辑器要知道笔宽；PDFium 不会替我们补）
     if let AnnotationKind::Ink { width, .. } = &annotation.kind {

@@ -1323,6 +1323,12 @@ fn new_highlight_uses_object_patch_and_one_revision() {
         bytes.windows(13).any(|window| window == b"/CreationDate"),
         "应写 /CreationDate"
     );
+    if backend_pdfium::pdf_patch::pdf_author().is_some() {
+        assert!(
+            bytes.windows(3).any(|window| window == b"/T "),
+            "有作者来源时应写 /T"
+        );
+    }
     let read = readback::read(&output, None).expect("读回");
     assert_eq!(read.annotations.len(), 1);
     assert_eq!(read.annotations[0].body.as_deref(), Some("new"));
