@@ -240,6 +240,26 @@ fn write_with_mode(
         )));
     }
     validate(spec)?;
+    if spec.pages.is_empty()
+        && spec.updates.is_empty()
+        && spec.deletes.is_empty()
+        && inline.is_empty()
+    {
+        // 无任何改动：不要为了“写回”而让 PDFium 重写整份文件。
+        std::fs::copy(&spec.source, &spec.output).map_err(|error| {
+            WritebackError::Io(format!(
+                "复制源文件到 {} 失败：{error}",
+                spec.output.display()
+            ))
+        })?;
+        let bytes = std::fs::metadata(&spec.output)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        return Ok(WritebackReport {
+            annotations: 0,
+            bytes,
+        });
+    }
 
     let ffi = Ffi::load()?;
     let source_bytes = std::fs::read(&spec.source)

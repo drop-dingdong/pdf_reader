@@ -135,8 +135,7 @@ fn incremental_job_preserves_external_annotations() {
     .expect("写 job");
     app::writeback::run_job(&job).expect("增量写回");
     let saved = std::fs::read(&output).expect("读输出");
-    assert!(saved.len() > original.len());
-    assert!(saved.starts_with(&original[..64]), "增量保存不应全量重写");
+    assert_eq!(saved, original, "无改动的增量写回应直接复制源文件");
     assert_eq!(
         backend_pdfium::writeback::count_annotations(&output).expect("数"),
         vec![7, 4],

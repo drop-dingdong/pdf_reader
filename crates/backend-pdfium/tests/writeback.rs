@@ -671,11 +671,7 @@ fn incremental_save_keeps_external_annotations_and_object_streams() {
     .expect("增量保存");
     let saved = std::fs::read(&output).expect("读输出");
     assert!(report.annotations == 0);
-    assert!(saved.len() > original.len(), "增量保存应当追加内容");
-    assert!(
-        saved.starts_with(&original[..64]),
-        "增量保存应当保留原文件开头（不是全量重写）"
-    );
+    assert_eq!(saved, original, "无改动的增量写回应直接复制源文件");
     let text = String::from_utf8_lossy(&saved);
     assert!(text.contains("/ObjStm"), "原文件的对象流应保留");
     assert_eq!(
