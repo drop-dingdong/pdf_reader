@@ -1802,6 +1802,17 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
 - 测试：preview 移动、标题/正文/resize 撤销；`check.sh` 全绿（396 tests）。
 - 说明：侧栏拖拽排序尚未做，只留 `move_custom_preview` 接口。
 
+### D-186 连续 preview resize 合并为一条撤销
+
+- 同一 preview、1 秒窗口内、且栈顶就是该 preview 的 ResizePreview 时，
+  只更新栈顶命令的 after，不新增历史；
+- 其它编辑/撤销/重做会打断合并；
+- `History::last_mut` 提供栈顶命令访问。
+- 图片 preview 仍分“创建占位 + 截图替换”两步，符合后续重选截图的需求。
+- 待决策：sidecar 的 `order` 字段目前写在 v2 中，严格来说应升版本或改成
+  有序统一列表；这会影响旧版本程序是否拒绝新 sidecar，需确认。
+- 测试：连续 resize 合并；`check.sh` 全绿。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |

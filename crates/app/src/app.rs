@@ -890,6 +890,8 @@ pub struct PdfReaderApp {
     custom_previews: Vec<CustomPreview>,
     /// 每页下一个可用的 custom preview id（会话内）。
     next_preview_id: Vec<u64>,
+    /// 连续的 preview resize 合并窗口。
+    last_preview_resize: Option<(PreviewKey, std::time::Instant)>,
     /// 自定义数据是否有未保存的修改（影响保存按钮文案）。
     data_dirty: bool,
     /// 页码原位编辑草稿（`Some` = 正在编辑）。
@@ -1113,6 +1115,7 @@ impl PdfReaderApp {
             custom_dialog: None,
             custom_previews: Vec::new(),
             next_preview_id: Vec::new(),
+            last_preview_resize: None,
             data_dirty: false,
             page_edit: None,
             zoom_edit: None,
@@ -1323,6 +1326,7 @@ impl PdfReaderApp {
 
     /// 撤销一步（反向应用栈顶命令）。
     fn undo_edit(&mut self) {
+        self.last_preview_resize = None;
         let Some(entry) = self.history.undo() else {
             self.message = "没有可撤销的编辑".to_string();
             return;
@@ -1407,6 +1411,7 @@ impl PdfReaderApp {
 
     /// 重做一步。
     fn redo_edit(&mut self) {
+        self.last_preview_resize = None;
         let Some(entry) = self.history.redo() else {
             self.message = "没有可重做的编辑".to_string();
             return;
@@ -4327,7 +4332,33 @@ impl PdfReaderApp {
         }
     }
 
-    /// 按某个自定义 preview 的数据生成它的**正式浮窗**（正文尺寸取 `body_size`）。
+    /// 连续拖拽同一 preview 的 resize 合并成一条历史（1 秒窗口）。
+    fn apply_preview_resize(&mut self, key: PreviewKey, before: egui::Vec2, after: egui::Vec2) {
+        let now = self.clock.now();
+        let merge = self.last_preview_resize.is_some_and(|(last_key, last_at)| {
+            last_key == key
+                && now.duration_since(last_at) <= std::time::Duration::from_secs(1)
+                && !self.history.can_redo()
+        });
+        let merged = merge
+            && self.history.last_mut().is_some_and(
+                |entry| matches!(entry.command, AppEdit::ResizePreview { key: k, .. } if k == key),
+            );
+        if merged {
+            self.apply_edit(AppEdit::ResizePreview { key, before, after }, false);
+            if let Some(entry) = self.history.last_mut() {
+                if let AppEdit::ResizePreview { after: last, .. } = &mut entry.command {
+                    *last = after;
+                }
+            }
+            self.refresh_dirty();
+        } else {
+            self.apply_edit(AppEdit::ResizePreview { key, before, after }, true);
+        }
+        self.last_preview_resize = Some((key, now));
+    }
+
+    /// 按某个自定义 preview 的数据生成它的**正式浮窗**（正文尺寸取 `body_size`）。    /// 按某个自定义 preview 的数据生成它的**正式浮窗**（正文尺寸取 `body_size`）。
     /// 把当前选区变成指定文本标记，返回新增数量（D-118 S1）。
     ///
     /// 几何来自文本层的 `rects_for_range`（已按行合并），因此三种标记共用同一套算法；
@@ -5972,14 +6003,7 @@ impl PdfReaderApp {
                 self.floats.push(window);
             }
             for (key, before, after) in preview_resizes {
-                self.apply_edit(
-                    AppEdit::ResizePreview {
-                        key,
-                        before,
-                        after,
-                    },
-                    true,
-                );
+                self.apply_preview_resize(key, before, after);
             }
             for (page, index, before, after) in dest_resizes {
                 self.apply_edit(
@@ -8242,6 +8266,40 @@ mod annotation_body_tests {
         assert_eq!(app.custom_previews[0].text.as_deref(), Some("旧正文"));
         app.undo_edit();
         assert_eq!(app.custom_previews[0].title, "旧标题");
+    }
+
+    #[test]
+    fn consecutive_preview_resizes_merge_into_one_undo() {
+        let mut app = app();
+        let preview = CustomPreview {
+            id: 1,
+            page: PageIndex::FIRST,
+            point: Point::new(0.0, 0.0),
+            rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+            kind: CustomKind::Text,
+            title: "t".to_string(),
+            text: None,
+            snapshot: None,
+            body_size: DEFAULT_CUSTOM_TEXT_BODY,
+            scale: 1.0,
+        };
+        let key = PreviewKey {
+            page: preview.page,
+            id: preview.id,
+        };
+        app.apply_edit(
+            AppEdit::AddPreview {
+                key,
+                position: 0,
+                preview: std::sync::Arc::new(preview),
+            },
+            true,
+        );
+        app.apply_preview_resize(key, DEFAULT_CUSTOM_TEXT_BODY, EVec2::new(400.0, 200.0));
+        app.apply_preview_resize(key, EVec2::new(400.0, 200.0), EVec2::new(500.0, 250.0));
+        assert_eq!(app.history.len(), 2, "创建 + 合并后的 resize 应只有两条");
+        let before = app.custom_previews[0].body_size;
+        assert_eq!(before, EVec2::new(500.0, 250.0));
     }
 
     #[test]

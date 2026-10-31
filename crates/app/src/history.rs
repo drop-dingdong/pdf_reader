@@ -91,6 +91,11 @@ impl<T> History<T> {
         Some(entry)
     }
 
+    /// 最后一条可撤销命令（用于合并连续 resize）。
+    pub fn last_mut(&mut self) -> Option<&mut Entry<T>> {
+        self.undo.last_mut()
+    }
+
     /// 是否可撤销。
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
