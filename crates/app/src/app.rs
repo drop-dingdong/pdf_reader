@@ -1302,15 +1302,23 @@ impl PdfReaderApp {
                     let mut replacement = (**after).clone();
                     replacement.id = key.id;
                     let body = replacement.body_size;
+                    let snapshot = replacement.snapshot.clone();
                     self.custom_previews[index] = replacement;
-                    for window in &mut self.floats {
-                        if window.custom_index() == Some(index) {
-                            window.body = body;
-                            window.rect = egui::Rect::from_min_size(
-                                window.rect.min,
-                                float_size_for_body(body, FLOAT_TITLE_HEIGHT),
-                            );
+                    if let Some(snapshot) = snapshot {
+                        for window in &mut self.floats {
+                            if window.custom_index() == Some(index) {
+                                window.content = FloatContent::Image(snapshot.clone());
+                                window.body = body;
+                                window.rect = egui::Rect::from_min_size(
+                                    window.rect.min,
+                                    float_size_for_body(body, FLOAT_TITLE_HEIGHT),
+                                );
+                            }
                         }
+                    } else {
+                        // 回到“占位截图”状态：关掉仍显示旧图/新图的浮窗。
+                        self.floats
+                            .retain(|window| window.custom_index() != Some(index));
                     }
                 }
             }

@@ -1827,6 +1827,14 @@ timing 模式全速转，160ms 预览窗口里空转约 2000 帧（每帧 0.08ms
   `EditDestMark` 也同步 dest 浮窗；`ReplacePreview` 同步截图后的 body。
 - 测试：合并后的 resize 撤销，preview 与浮窗 body 都回旧值；`check.sh` 全绿（397 tests）。
 
+### D-189 ReplacePreview 撤销同步浮窗图片内容
+
+- `ReplacePreview` 撤销/重做时，若对应浮窗开着：
+  * 有快照：把 `FloatContent::Image` 换成命令目标快照，并同步 body/rect；
+  * 回到占位（快照为 None）：关掉该 preview 的浮窗，避免继续显示旧图/新图。
+- 之前只同步了尺寸，没有同步图片内容；本次补齐。
+- `check.sh` 全绿（397 tests）；图片纹理的 UI 行为需手动验收。
+
 ## 五、开放项（尚未决策，等实测/评审）
 
 | # | 事项 | 触发条件 |
