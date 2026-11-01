@@ -190,6 +190,7 @@ app::compact::run_child → app --compact <in> <out>
 | INV-20 | 原地写入前检查 `pdf_file_stamp`；只写 `.json` 不检查 | `external_change_is_detected…` |
 | INV-21 | 整理副本不覆盖源文件；签名/加密拒绝；不更小不落盘 | `tests/compact.rs` |
 | INV-22 | 外部注释只读几何/颜色；改正文/删除可以写回 | `readback`/UI 人工验收 |
+| INV-23 | Markdown 只影响文字浮窗的显示：不改 `Float.body`、不改源文本/持久化/写回；滚轮不穿透浮窗；外部链接不打开浏览器 | `markdown` 单测 + 浮窗人工验收 |
 
 ## 9. 架构层面的已知限制
 

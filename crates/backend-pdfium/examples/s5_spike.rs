@@ -291,8 +291,10 @@ fn build_pdf(width: u32, height: u32, rotate: u32, content: &str) -> Vec<u8> {
 fn count_pixels(image: &RasterImage, predicate: impl Fn(&[u8]) -> bool) -> usize {
     image
         .data()
-        .chunks_exact(4)
-        .filter(|pixel| predicate(pixel))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| predicate(&pixel[..]))
         .count()
 }
 
@@ -303,7 +305,7 @@ fn is_red(pixel: &[u8]) -> bool {
 /// 命中像素的包围盒（左、上、右、下，**位图坐标**）。
 fn bbox(image: &RasterImage, predicate: impl Fn(&[u8]) -> bool) -> Option<(u32, u32, u32, u32)> {
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0, 0);
-    for (index, pixel) in image.data().chunks_exact(4).enumerate() {
+    for (index, pixel) in image.data().as_chunks::<4>().0.iter().enumerate() {
         if !predicate(pixel) {
             continue;
         }

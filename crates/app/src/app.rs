@@ -42,10 +42,10 @@ use crate::view::{
     page_index_from_text, page_rect_to_screen, pages_intersecting, parse_zoom_percent,
     pin_exits_on_mode_change, plan_page, pointer_over_any, screen_rect_to_content, texture_pages,
     tile_view_rect, tile_view_rect_scaled, tip_rect_for, veil_bands, view_rect_for,
-    view_rect_to_page_rect, view_to_content, wheel_targets_canvas, zero_rect_at, zoom_percent_text,
-    Desired, DrawInput, KeyedStore, PageDraw, PageFacts, PageShape, PlanStamp, Preview,
-    SnapshotLayer, SnapshotPage, CUSTOM_SYMBOL_DELETE, CUSTOM_SYMBOL_EDIT, CUSTOM_SYMBOL_IMAGE,
-    CUSTOM_SYMBOL_TEXT, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
+    view_rect_to_page_rect, view_to_content, wheel_targets_canvas_with_float, zero_rect_at,
+    zoom_percent_text, Desired, DrawInput, KeyedStore, PageDraw, PageFacts, PageShape, PlanStamp,
+    Preview, SnapshotLayer, SnapshotPage, CUSTOM_SYMBOL_DELETE, CUSTOM_SYMBOL_EDIT,
+    CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
 };
 
 /// 纹理层的**字节**预算（软上限，D-111）。
@@ -1189,6 +1189,15 @@ pub struct PdfReaderApp {
     context_menu_pos: Option<egui::Pos2>,
     /// Pin 条目悬浮响应开关（勾选 = 悬浮时显示临时预览/高亮旧浮窗）。
     pin_hover_enabled: bool,
+    /// 文字浮窗是否以 Markdown 渲染（`settings.json`，默认关闭）。
+    markdown_floats: bool,
+    /// egui_commonmark 的排版/图片缓存（每个浮窗用稳定的 `Id` 区分）。
+    markdown_cache: egui_commonmark::CommonMarkCache,
+    /// 本帧是否有 Markdown 浮窗渲染过；用于把外部链接的 `OpenUrl` 改成状态栏提示。
+    markdown_rendered: bool,
+    /// 每个浮窗上一次渲染的 Markdown 文本哈希：正文编辑后要让 commonmark 的
+    /// 分块/滚动缓存失效，否则滚动位置和可见切片会停留在旧文本上。
+    markdown_text_hash: std::collections::HashMap<u64, u64>,
     /// 侧栏 Pin 列表里正在被悬浮的条目（下标 + 该行的屏幕矩形，用于定位临时浮窗）。
     custom_hover: Option<(usize, egui::Rect)>,
     /// 上一帧主视图（画布）的矩形：侧栏先于画布绘制，用它给浮窗定位。
@@ -1425,6 +1434,10 @@ impl PdfReaderApp {
             context_annotation: None,
             context_menu_pos: None,
             pin_hover_enabled: ui_settings.pin_hover_enabled,
+            markdown_floats: ui_settings.markdown_floats,
+            markdown_cache: egui_commonmark::CommonMarkCache::default(),
+            markdown_rendered: false,
+            markdown_text_hash: std::collections::HashMap::new(),
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
             click_highlight: None,
@@ -1821,6 +1834,7 @@ impl PdfReaderApp {
             show_links: self.show_links,
             show_dest_points: self.show_dest_points,
             show_annotations: self.show_annotations,
+            markdown_floats: self.markdown_floats,
         };
         if ui != self.settings.ui {
             self.settings.ui = ui;
@@ -3945,6 +3959,16 @@ impl PdfReaderApp {
                 ui.checkbox(&mut self.pin_hover_enabled, "Pin悬浮响应");
                 ui.checkbox(&mut self.horizontal_scroll, "横向滚动")
                     .on_hover_text("勾选后纵向滚轮改为横向滚动（拖动不受影响）");
+                ui.separator();
+                if ui
+                    .checkbox(&mut self.markdown_floats, "Markdown")
+                    .on_hover_text("文字浮窗按 Markdown 渲染；关闭则显示原文")
+                    .changed()
+                {
+                    // 顶栏开关立即写回设置（与样式菜单同一套脏位）。
+                    self.settings.ui.markdown_floats = self.markdown_floats;
+                    self.settings_dirty = true;
+                }
             });
 
             // ---- 第 2 行：页 / 缩放 / 旋转 / 预览模式（左） + 引用显示样式（右）----
@@ -5831,6 +5855,18 @@ impl PdfReaderApp {
                 .ctx()
                 .pointer_hover_pos()
                 .is_some_and(|position| canvas.contains(position));
+            // 浮窗是画布上的不透明覆盖层：指针在浮窗上时，滚轮/缩放只归浮窗内部
+            // （Markdown 的 ScrollArea 会自己消费）。否则文档会跟着一起滚。
+            let over_float = ui.ctx().pointer_hover_pos().is_some_and(|position| {
+                self.floats
+                    .iter()
+                    .any(|window| window.rect.contains(position))
+                    || self
+                        .hover_tip
+                        .as_ref()
+                        .and_then(|tip| tip.rect)
+                        .is_some_and(|rect| rect.contains(position))
+            });
             // Alt 悬停在墨迹上：抓手光标，提示可以拖动。
             let (alt, ctrl) = ui.ctx().input(|input| (input.modifiers.alt, input.modifiers.ctrl));
             if (alt || ctrl || self.move_ink_armed.is_some())
@@ -5872,7 +5908,7 @@ impl PdfReaderApp {
                     self.message = "已退出自定义preview".to_string();
                 }
             }
-            if self.capture.is_none() && wheel_targets_canvas(pointer_over_canvas) {
+            if self.capture.is_none() && wheel_targets_canvas_with_float(pointer_over_canvas, over_float) {
                 let (scroll_delta, zoom_delta, modifiers) = ui.input(|input| {
                     (input.smooth_scroll_delta, input.zoom_delta(), input.modifiers)
                 });
@@ -6879,6 +6915,8 @@ impl PdfReaderApp {
                 self.draw_hover_preview(ui, canvas);
                 // 侧栏条目悬浮 → 主视图右侧的临时浮窗
                 self.draw_sidebar_hover_float(ui, canvas);
+                // Markdown 链接只提示，不打开浏览器（与 PDF URI 的行为一致）。
+                self.consume_markdown_links(ui.ctx());
             } else if self.capture.is_some() {
                 self.draw_capture(ui, canvas, session, scroll);
             }
@@ -7381,6 +7419,12 @@ impl PdfReaderApp {
     /// 双击浮窗正文 → 进入原位编辑（自定义文字 preview 或注释正文）。
     fn detect_body_double_click(&mut self, ui: &mut egui::Ui) {
         if self.editing_body.is_some() {
+            return;
+        }
+        // Markdown 模式的正文有自己的内容控件（链接/滚动条）。这个全窗 click
+        // 层注册在浮窗之后，会按"后注册优先"挡住它们；双击改由
+        // `draw_floats` 里的 body 响应当场处理。
+        if self.markdown_floats {
             return;
         }
         let targets: Vec<(u64, FloatOwner, egui::Rect)> = self
@@ -8310,23 +8354,45 @@ impl PdfReaderApp {
     /// （用户要求"后出现的浮窗更高"）。子区域（标题栏/把手/关闭按钮）在主提之后注册，
     /// 因此优先于主体，不会被主体吞掉。
     fn draw_floats(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
+        self.markdown_rendered = false;
         if self.floats.is_empty() {
             return;
         }
         let mut close: Option<u64> = None;
         let mut raise: Option<u64> = None;
+        // 点击浮窗任意处（含链接、滚动条）→ 置顶；后画的浮窗在循环后面，
+        // 因此天然覆盖先画的（顶层优先）。
+        let clicked_pos = ui.ctx().input(|input| {
+            input
+                .pointer
+                .any_click()
+                .then(|| input.pointer.interact_pos())
+                .flatten()
+        });
         for index in 0..self.floats.len() {
             // 每帧夹取回视图区域内（用户要求：浮窗始终在视图区域内部）
             let rect = clamp_float_rect(self.floats[index].rect, canvas, FLOAT_MIN_SIZE);
             self.floats[index].rect = rect;
             let id = self.floats[index].id;
+            let markdown_active = self.markdown_floats
+                && matches!(&self.floats[index].content, FloatContent::Text(text) if !text.is_empty());
 
-            // 主体：占住点击（避免"点在浮窗上却给文档落了光标"）；不参与拖动。
-            // 点击主体任意处（除关闭按钮）→ 该浮窗置顶，其余浮窗相对顺序不变。
-            // 主体（文字区/截图区）同样**整体拖动浮窗** —— 不能让拖动穿透去拖 PDF 页面
-            let body = ui.interact(rect, Id::unique(("float", id)), Sense::click_and_drag());
+            // 主体：占住点击（避免"点在浮窗上却给文档落了光标"）。
+            // 纯文本模式沿用"整个主体可拖动"；Markdown 模式只允许标题栏拖动，
+            // 正文留给内部滚动条/链接/双击编辑。
+            let body_sense = if markdown_active {
+                Sense::click()
+            } else {
+                Sense::click_and_drag()
+            };
+            let body = ui.interact(rect, Id::unique(("float", id)), body_sense);
             if body.clicked() || body.drag_started() {
                 raise = Some(id);
+            }
+            if let Some(position) = clicked_pos {
+                if rect.contains(position) {
+                    raise = Some(id);
+                }
             }
             if body.dragged() {
                 self.floats[index].rect =
@@ -8477,6 +8543,17 @@ impl PdfReaderApp {
                     self.floats[index].title = format!("标注 #{}", id.get());
                 }
             }
+            // Markdown 模式：正文的 body 先于内容控件注册，双击普通文字会落到 body；
+            // 链接/滚动条的单次点击由它们自己优先，不会被双击层吞掉。
+            let markdown_active = self.markdown_floats
+                && matches!(&self.floats[index].content, FloatContent::Text(text) if !text.is_empty());
+            if markdown_active && body.double_clicked() && self.editing_body.is_none() {
+                if let FloatContent::Text(text) = &self.floats[index].content {
+                    self.editing_body = Some((self.floats[index].owner, text.clone()));
+                    self.focus_body_edit = true;
+                    ui.ctx().request_repaint();
+                }
+            }
             // 正在原位编辑的浮窗：跳过正文绘制（编辑框由
             // `draw_float_body_editing` 单独绘制，见下）
             let editing_inline = self
@@ -8487,6 +8564,87 @@ impl PdfReaderApp {
                 continue;
             }
             match &self.floats[index].content {
+                FloatContent::Text(text) if markdown_active => {
+                    // Markdown 正文：子 Ui + 内部 ScrollArea（可滚动、可点链接）。
+                    // 右侧留出滚动条位置，底部留出缩放手柄位置。
+                    let body_area = egui::Rect::from_min_max(
+                        rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 6.0),
+                        rect.max - EVec2::new(18.0, 16.0),
+                    );
+                    if body_area.width() > 0.0 && body_area.height() > 0.0 {
+                        let text = crate::markdown::preserve_single_line_breaks(text);
+                        let view_id = Id::unique(("float-md", id));
+                        // 文本变了就丢弃 commonmark 的滚动/分块缓存（同宽也会失效）。
+                        let text_hash = {
+                            use std::hash::{Hash, Hasher};
+                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                            text.hash(&mut hasher);
+                            hasher.finish()
+                        };
+                        if self.markdown_text_hash.get(&id).copied() != Some(text_hash) {
+                            self.markdown_cache.clear_viewer(&view_id);
+                            self.markdown_text_hash.insert(id, text_hash);
+                        }
+                        // 代码块/表格/长 URL 不应当被硬折成 body 宽度：测一个最小内容
+                        // 宽度，超过 body 时由 commonmark 的横向 ScrollArea 承载。
+                        let min_width = {
+                            let mut measure = |line: &str, monospace: bool| {
+                                let font = if monospace {
+                                    egui::FontId::monospace(13.0)
+                                } else {
+                                    egui::FontId::proportional(13.0)
+                                };
+                                ui.fonts_mut(|fonts| {
+                                    fonts
+                                        .layout_no_wrap(
+                                            line.to_owned(),
+                                            font,
+                                            Color32::from_gray(225),
+                                        )
+                                        .size()
+                                        .x
+                                })
+                            };
+                            crate::markdown::min_unwrapped_width(&text, &mut measure)
+                        };
+                        let default_width = if min_width > body_area.width() {
+                            Some(
+                                (min_width.ceil() as usize)
+                                    .max(1)
+                                    .min(canvas.width().max(1.0) as usize),
+                            )
+                        } else {
+                            None
+                        };
+                        ui.scope_builder(
+                            egui::UiBuilder::new().max_rect(body_area).id_salt(view_id),
+                            |ui| {
+                                ui.set_clip_rect(body_area.intersect(canvas));
+                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                                ui.style_mut().url_in_tooltip = true;
+                                let mut visuals = egui::Visuals::dark();
+                                visuals.override_text_color = Some(Color32::from_gray(225));
+                                visuals.hyperlink_color = Color32::from_rgb(120, 180, 255);
+                                *ui.visuals_mut() = visuals;
+                                ui.spacing_mut().item_spacing = EVec2::new(0.0, 4.0);
+                                let scroll = egui_commonmark::CommonMarkScrollOptions::default()
+                                    .viewport_cache(true)
+                                    .horizontal_scrolling(true)
+                                    .content_margin(egui::Margin::same(4));
+                                egui_commonmark::CommonMarkViewer::new()
+                                    .default_width(default_width)
+                                    .show_scrollable(
+                                        view_id,
+                                        ui,
+                                        &mut self.markdown_cache,
+                                        &scroll,
+                                        &text,
+                                    );
+                            },
+                        );
+                        self.markdown_rendered = true;
+                    }
+                }
                 FloatContent::Text(text) => {
                     // 正文：**自动换行 + 行数上限（放不下就截断并显示 …）**
                     let body_origin = rect.min + EVec2::new(10.0, FLOAT_TITLE_HEIGHT + 8.0);
@@ -8531,12 +8689,39 @@ impl PdfReaderApp {
         }
         if let Some(id) = close {
             self.floats.retain(|window| window.id != id);
+            self.markdown_text_hash.remove(&id);
             self.message = format!("已关闭浮窗 #{id}");
         } else if let Some(id) = raise {
             // 关闭按钮优先；否则把被点击的浮窗移到末尾（最上层），其余顺序不变
             if let Some(index) = self.floats.iter().position(|window| window.id == id) {
                 move_to_last(&mut self.floats, index);
             }
+        }
+    }
+
+    /// 取走本帧 Markdown 链接产生的 `OpenUrl` 命令，改为状态栏提示。
+    ///
+    /// `egui_commonmark` 的外部链接最终走 `ui.hyperlink_to` → `ctx.open_url`；
+    /// 项目当前对 PDF URI 也只提示、不打开浏览器（见 `follow_link`）。在
+    /// `egui_commonmark` 没有链接钩子的情况下，这是官方文档给出的检查方式
+    /// （`ctx.output_mut` 遍历 `OutputCommand::OpenUrl`）。
+    fn consume_markdown_links(&mut self, ctx: &egui::Context) {
+        if !self.markdown_rendered {
+            return;
+        }
+        self.markdown_rendered = false;
+        let mut opened = Vec::new();
+        ctx.output_mut(|output| {
+            output.commands.retain(|command| match command {
+                egui::OutputCommand::OpenUrl(open) => {
+                    opened.push(open.url.clone());
+                    false
+                }
+                _ => true,
+            });
+        });
+        if let Some(url) = opened.last() {
+            self.message = format!("外部链接：{url}（打开浏览器暂未实现）");
         }
     }
 
@@ -9169,6 +9354,34 @@ mod annotation_body_tests {
             crate::diag::diagnostics_for_tests(),
             None,
         )
+    }
+
+    #[test]
+    fn markdown_float_renders_inside_a_scroll_area() {
+        let mut app = app();
+        app.markdown_floats = true;
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 40.0), egui::vec2(320.0, 240.0));
+        app.floats.push(Float {
+            id: 1,
+            title: "Markdown 测试".to_string(),
+            content: FloatContent::Text("# 标题\n\n- a\n- b\n\n正文".to_string()),
+            rect,
+            owner: FloatOwner::None,
+            body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
+            origin: None,
+        });
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let input = egui::RawInput {
+            screen_rect: Some(canvas),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            app.draw_floats(ui, canvas);
+        });
+        output.drop_without_applying_deltas();
+        assert!(app.markdown_rendered, "文字浮窗应走 Markdown 渲染分支");
     }
 
     #[test]

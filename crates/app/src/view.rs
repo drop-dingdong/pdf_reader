@@ -725,7 +725,7 @@ pub fn largest_overlap_page(
             continue;
         }
         let area = overlap.width * overlap.height;
-        if best.map_or(true, |(_, _, best_area)| area > best_area) {
+        if best.is_none_or(|(_, _, best_area)| area > best_area) {
             best = Some((index, overlap, area));
         }
     }
@@ -1215,6 +1215,17 @@ pub fn wheel_targets_canvas(pointer_over_canvas: bool) -> bool {
     pointer_over_canvas
 }
 
+/// 滚轮是否应作用于文档视图，**同时考虑浮窗覆盖层**。
+///
+/// 浮窗画在画布之上且不透明：指针在其上时，滚轮/缩放归浮窗内部
+/// （Markdown 正文的 `ScrollArea` 会自己消费），不能再滚后面的 PDF。
+pub fn wheel_targets_canvas_with_float(
+    pointer_over_canvas: bool,
+    pointer_over_float: bool,
+) -> bool {
+    wheel_targets_canvas(pointer_over_canvas && !pointer_over_float)
+}
+
 /// 把位图**一遍**转成 egui 的 `ColorImage`。
 ///
 /// 为什么不用 `RasterImage::to_rgba8()` + `ColorImage::from_rgba_unmultiplied()`：
@@ -1227,14 +1238,14 @@ pub fn color_image(format: PixelFormat, data: &[u8], width: u32, height: u32) ->
     let mut pixels = Vec::with_capacity(w * h);
     match format {
         PixelFormat::Bgra8 => {
-            for px in data.chunks_exact(4).take(w * h) {
+            for px in data.as_chunks::<4>().0.iter().take(w * h) {
                 pixels.push(egui::Color32::from_rgba_premultiplied(
                     px[2], px[1], px[0], px[3],
                 ));
             }
         }
         PixelFormat::Rgba8 => {
-            for px in data.chunks_exact(4).take(w * h) {
+            for px in data.as_chunks::<4>().0.iter().take(w * h) {
                 pixels.push(egui::Color32::from_rgba_premultiplied(
                     px[0], px[1], px[2], px[3],
                 ));
@@ -1453,9 +1464,7 @@ pub fn desired_textures(
                 continue;
             }
             let distance = key.scale_milli.abs_diff(fact.render_milli);
-            if nearest.map_or(true, |current| {
-                distance < current.abs_diff(fact.render_milli)
-            }) {
+            if nearest.is_none_or(|current| distance < current.abs_diff(fact.render_milli)) {
                 nearest = Some(key.scale_milli);
             }
         }
@@ -1775,9 +1784,7 @@ impl<V> KeyedStore<V> {
                 continue;
             }
             let distance = key.scale_milli.abs_diff(target_scale_milli);
-            if best.map_or(true, |current| {
-                distance < current.abs_diff(target_scale_milli)
-            }) {
+            if best.is_none_or(|current| distance < current.abs_diff(target_scale_milli)) {
                 best = Some(key.scale_milli);
             }
         }
@@ -3950,6 +3957,14 @@ mod tests {
         assert!(
             !wheel_targets_canvas(false),
             "指针在侧栏/工具栏上 → 不滚动文档"
+        );
+        assert!(
+            !wheel_targets_canvas_with_float(true, true),
+            "指针在浮窗上 → 只滚浮窗，不滚文档"
+        );
+        assert!(
+            wheel_targets_canvas_with_float(true, false),
+            "指针在画布空白处 → 仍滚文档"
         );
     }
 

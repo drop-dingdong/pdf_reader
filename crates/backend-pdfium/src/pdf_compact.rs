@@ -589,7 +589,7 @@ fn png_unpredict(data: &[u8], columns: usize) -> Result<Vec<u8>, CompactError> {
         return Err(CompactError::Invalid("/Columns 为 0".to_string()));
     }
     let stride = columns + 1;
-    if data.len() % stride != 0 {
+    if !data.len().is_multiple_of(stride) {
         return Err(CompactError::Invalid(
             "xref 流长度不是 (Columns+1) 的整数倍".to_string(),
         ));

@@ -24,3 +24,8 @@ eframe = { version = "0.37", default-features = false, features = [
     "wayland",
 ] }
 egui = "0.37"
+# 文字浮窗的 Markdown 阅读视图。默认特性会带图片加载/正则/语法高亮，
+# 这里全部关掉：注释正文来自外部 PDF，不允许读本地图片，也不需要搜索高亮。
+egui_commonmark = { version = "0.26.0", default-features = false, features = ["pulldown_cmark"] }
+# 把注释正文里的单个换行改写成硬换行（见 src/markdown.rs）。
+pulldown-cmark = "0.13"

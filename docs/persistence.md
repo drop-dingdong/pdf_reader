@@ -125,7 +125,8 @@ v3 不再写 `custom_images` / `custom_texts`，也不使用 `order` 字段；
  "version": 1,
  "ui": { "window_size": [1100, 900], "sidebar_width": 260,
      "pin_hover_enabled": true, "horizontal_scroll": false,
-     "show_links": false, "show_dest_points": false, "show_annotations": true },
+     "show_links": false, "show_dest_points": false, "show_annotations": true,
+     "markdown_floats": false },
  "save": { "backup_in_place": false },
  "annotation_defaults": {
   "markup_color": [255, 214, 0], "highlight_opacity": 0.35,
@@ -143,6 +144,7 @@ v3 不再写 `custom_images` / `custom_texts`，也不使用 `order` 字段；
 | `ui.window_size` / `sidebar_width` | 窗口与侧栏尺寸（逻辑像素）；只在**已有设置文件**时用于恢复窗口大小 |
 | `ui.pin_hover_enabled` / `horizontal_scroll` | 顶栏两个开关的持久化值 |
 | `ui.show_links` / `show_dest_points` / `show_annotations` | 引用显示样式（链接框 / 引用点 / 标注）的持久化值 |
+| `ui.markdown_floats` | 文字浮窗是否默认按 Markdown 渲染（顶栏「Markdown」，默认 `false`；只影响显示，不改源文本/`.json`） |
 | `save.backup_in_place` | 原地保存前是否留一份 `.bak`（默认 `false`，文件菜单可切换） |
 | `annotation_defaults` | 新注释的默认样式（颜色、高亮透明度、墨迹线宽） |
 | `documents` | **每个文件一份**的阅读状态，同时充当"最近文件"（最多 12 条，按 `opened_at` 降序；文件菜单 →「最近打开」展示前 8 条） |

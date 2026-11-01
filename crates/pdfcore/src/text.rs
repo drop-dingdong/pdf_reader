@@ -307,7 +307,7 @@ impl PageText {
                 continue;
             }
             let distance = ch.bbox.center().distance(point);
-            if nearest.map_or(true, |(best, _)| distance < best) {
+            if nearest.is_none_or(|(best, _)| distance < best) {
                 nearest = Some((distance, index as u32));
             }
         }
@@ -505,7 +505,7 @@ pub trait TextSelection: Send {
     /// 是否没有有效选择。
     fn is_empty(&self) -> bool {
         self.selection()
-            .map_or(true, |selection| selection.is_empty())
+            .is_none_or(|selection| selection.is_empty())
     }
 
     /// 计算高亮矩形。

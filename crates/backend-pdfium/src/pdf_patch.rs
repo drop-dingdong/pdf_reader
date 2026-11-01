@@ -210,9 +210,7 @@ fn value_end(bytes: &[u8], mut index: usize) -> Result<usize, String> {
                 let mut third = second_end;
                 skip_space(bytes, &mut third);
                 if bytes.get(third) == Some(&b'R')
-                    && bytes
-                        .get(third + 1)
-                        .map_or(true, |byte| is_delimiter(*byte))
+                    && bytes.get(third + 1).is_none_or(|byte| is_delimiter(*byte))
                 {
                     return Ok(third + 1);
                 }

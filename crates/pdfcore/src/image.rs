@@ -110,7 +110,7 @@ impl RasterImage {
             PixelFormat::Rgba8 => self.data.to_vec(),
             PixelFormat::Bgra8 => {
                 let mut out = Vec::with_capacity(self.data.len());
-                for px in self.data.chunks_exact(4) {
+                for px in self.data.as_chunks::<4>().0 {
                     out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
                 }
                 out
