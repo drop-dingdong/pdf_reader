@@ -36,7 +36,7 @@ cargo test -p pdfcore --lib tiling   # 单模块
  等替身；`MemoryRaster` 执行与真实后端相同的尺寸/块矩形校验。
 - 真实 PDF 夹具在 `crates/backend-pdfium/tests/common/mod.rs` 现场生成（含 `/Rotate 90`、
  大纲/链接、多页），仓库里没有二进制夹具。
-- 回放样本：`app::replay::samples` + `scripts/replay/*.json`；`scripts/replay/error/` 放用户样本。
+- 回放样本：`app::replay::samples` + `scripts/replay/*.json`；错误样本不留在仓库。
 
 ## 4. PDFium 缺失
 
