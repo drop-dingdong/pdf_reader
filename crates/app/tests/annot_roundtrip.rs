@@ -125,69 +125,6 @@ fn annotation_and_body_survive_a_save_and_reopen() {
 }
 
 #[test]
-fn legacy_overlay_is_migrated_into_pdf_and_retired() {
-    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-    if !backend() {
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!(
-        "pdf-p3-migrate-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&dir).expect("建目录");
-    app::replay::samples::Sample::Rotated
-        .write(&dir)
-        .expect("写样本");
-    std::fs::write(
-        dir.join("rotated_2p.pdf.annot.json"),
-        r#"{"version":3,"pages":[[{"id":1,"kind":"highlight","color":[255,255,0],"opacity":0.35,"quads":[[50,690,200,20]],"body":"迁移正文"}]]}"#,
-    )
-    .expect("写旧 A");
-    std::env::set_var("PDF_READER_WRITEBACK_EXE", env!("CARGO_BIN_EXE_app"));
-    let script = dir.join("migrate.json");
-    std::fs::write(
-        &script,
-        r#"{"name":"migrate","pdf":"rotated_2p.pdf","actions":[
-             {"id":"settle","op":"wait","frames":4},
-             {"id":"save","op":"save"},
-             {"id":"after","op":"wait","frames":2}
-           ]}"#,
-    )
-    .expect("写脚本");
-    let report = app::replay::run_script_file(&script, None).expect("回放");
-    assert_eq!(
-        report
-            .actions
-            .iter()
-            .find(|a| a.id == "after")
-            .unwrap()
-            .annotations,
-        1,
-        "旧 A 的注释写进 PDF 后仍应可读"
-    );
-    assert!(
-        !dir.join("rotated_2p.pdf.annot.json").exists(),
-        "成功写入后应退休 A"
-    );
-    assert!(
-        std::fs::read_dir(&dir).unwrap().flatten().any(|entry| entry
-            .file_name()
-            .to_string_lossy()
-            .contains(".annot.json.bak-")),
-        "退休 A 必须保留一次备份"
-    );
-    let readback = backend_pdfium::readback::read(&dir.join("rotated_2p.pdf"), None).expect("读回");
-    assert_eq!(readback.annotations.len(), 1);
-    assert_eq!(readback.annotations[0].body.as_deref(), Some("迁移正文"));
-    std::env::remove_var("PDF_READER_WRITEBACK_EXE");
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
 fn consecutive_saves_keep_earlier_annotations() {
     let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     if !backend() {

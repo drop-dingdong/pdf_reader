@@ -10,6 +10,7 @@ use crate::pdf_index::{object_dict, trailer, PdfObjectRef};
 pub fn append_content_updates(
     pdf: &[u8],
     updates: &[(PdfObjectRef, Option<String>)],
+    modified: &std::collections::HashMap<PdfObjectRef, i64>,
 ) -> Result<Vec<u8>, String> {
     if updates.is_empty() {
         return Ok(pdf.to_vec());
@@ -25,6 +26,7 @@ pub fn append_content_updates(
         let dict = object_dict(pdf, *reference)?
             .ok_or_else(|| format!("对象 {reference:?} 不在源文件里"))?;
         let dict = replace_contents(&dict, body.as_deref())?;
+        let dict = stamp_modified(&dict, modified.get(reference).copied())?;
         let offset = out.len();
         out.extend_from_slice(format!("{} {} obj\n", reference.num, reference.gen).as_bytes());
         out.extend_from_slice(&dict);
@@ -107,15 +109,17 @@ fn replace_contents(dict: &[u8], body: Option<&str>) -> Result<Vec<u8>, String> 
             format!(" /Contents <{hex}>").into_bytes(),
         );
     }
-    stamp_modified(&out)
+    stamp_modified(&out, None)
 }
 
 /// 更新注释字典的 `/M`（修改时间）；没有就插入。
-fn stamp_modified(dict: &[u8]) -> Result<Vec<u8>, String> {
+fn stamp_modified(dict: &[u8], modified: Option<i64>) -> Result<Vec<u8>, String> {
     if !dict.starts_with(b"<<") || !dict.ends_with(b">>") {
         return Err("注释对象不是字典".to_string());
     }
-    let date = pdf_date_now();
+    let date = modified
+        .map(pdf_date_from_secs)
+        .unwrap_or_else(pdf_date_now);
     let value = format!("/M ({date})");
     let mut index = 2;
     let close = dict.len() - 2;
@@ -696,13 +700,30 @@ pub struct NewMarkup {
     pub body: Option<String>,
 }
 
-/// 同一批追加所有新注释：高亮/下划线/删除线 + 墨迹共用一次页对象和 xref。
+/// 一条新便签（`/Subtype /Text`）：正文在 `/Contents`，几何只有图标矩形。
+#[derive(Debug, Clone)]
+pub struct NewNote {
+    /// 页号（0 起）。
+    pub page: u32,
+    /// 我们的注释 id（`/NM` 标记）。
+    pub id: Option<u64>,
+    /// 图标矩形（页面空间）。
+    pub rect: pdfcore::prelude::Rect,
+    /// RGB。
+    pub color: [u8; 3],
+    /// 正文。
+    pub body: Option<String>,
+}
+
+/// 同一批追加所有新注释：高亮/下划线/删除线 + 墨迹 + 便签共用一次页对象和 xref。
 pub fn append_new_annotations(
     pdf: &[u8],
     markups: &[NewMarkup],
     inks: &[NewInk],
+    notes: &[NewNote],
+    meta: &std::collections::HashMap<u64, AnnotationMeta>,
 ) -> Result<Vec<u8>, String> {
-    if markups.is_empty() && inks.is_empty() {
+    if markups.is_empty() && inks.is_empty() && notes.is_empty() {
         return Ok(pdf.to_vec());
     }
     let pages = crate::pdf_index::page_objects(pdf)?;
@@ -814,9 +835,21 @@ pub fn append_new_annotations(
         if let Some(body) = &markup.body {
             dict.push_str(&format!("/Contents <{}>", utf16_hex(body)));
         }
-        let date = pdf_date_now();
-        dict.push_str(&format!("/M ({date})/CreationDate ({date})"));
-        if let Some(author) = pdf_author() {
+        let info = markup
+            .id
+            .and_then(|id| meta.get(&id))
+            .cloned()
+            .unwrap_or_default();
+        let created = info
+            .created
+            .map(pdf_date_from_secs)
+            .unwrap_or_else(pdf_date_now);
+        let modified = info
+            .modified
+            .map(pdf_date_from_secs)
+            .unwrap_or_else(|| created.clone());
+        dict.push_str(&format!("/M ({modified})/CreationDate ({created})"));
+        if let Some(author) = info.author.clone().or_else(pdf_author) {
             dict.push_str(&format!("/T {}", pdf_text(&author)));
         }
         if let Some(ap_number) = ap_number {
@@ -936,9 +969,21 @@ pub fn append_new_annotations(
         if let Some(body) = &ink.body {
             dict.push_str(&format!("/Contents <{}>", utf16_hex(body)));
         }
-        let date = pdf_date_now();
-        dict.push_str(&format!("/M ({date})/CreationDate ({date})"));
-        if let Some(author) = pdf_author() {
+        let info = ink
+            .id
+            .and_then(|id| meta.get(&id))
+            .cloned()
+            .unwrap_or_default();
+        let created = info
+            .created
+            .map(pdf_date_from_secs)
+            .unwrap_or_else(pdf_date_now);
+        let modified = info
+            .modified
+            .map(pdf_date_from_secs)
+            .unwrap_or_else(|| created.clone());
+        dict.push_str(&format!("/M ({modified})/CreationDate ({created})"));
+        if let Some(author) = info.author.clone().or_else(pdf_author) {
             dict.push_str(&format!("/T {}", pdf_text(&author)));
         }
         dict.push_str(&format!(
@@ -956,6 +1001,67 @@ pub fn append_new_annotations(
         entries.push((reference, offset));
         by_page
             .entry(ink.page as usize)
+            .or_default()
+            .push(reference);
+    }
+
+    for note in notes {
+        let page = pages
+            .get(note.page as usize)
+            .ok_or_else(|| format!("页号 {} 越界", note.page))?;
+        let annotation_number = next_object;
+        next_object += 1;
+        let info = note
+            .id
+            .and_then(|id| meta.get(&id))
+            .cloned()
+            .unwrap_or_default();
+        let created = info
+            .created
+            .map(pdf_date_from_secs)
+            .unwrap_or_else(pdf_date_now);
+        let modified = info
+            .modified
+            .map(pdf_date_from_secs)
+            .unwrap_or_else(|| created.clone());
+        let mut dict = format!(
+            "<</Type/Annot/Subtype/Text/Rect[{} {} {} {}]/C[{:.3} {:.3} {:.3}]/F 4",
+            number_f32(note.rect.x),
+            number_f32(note.rect.y),
+            number_f32(note.rect.x + note.rect.width),
+            number_f32(note.rect.y + note.rect.height),
+            note.color[0] as f32 / 255.0,
+            note.color[1] as f32 / 255.0,
+            note.color[2] as f32 / 255.0,
+        );
+        if let Some(id) = note.id {
+            dict.push_str(&format!("/NM(pd-fr:{id})"));
+        }
+        if let Some(body) = &note.body {
+            dict.push_str(&format!("/Contents <{}>", utf16_hex(body)));
+        }
+        dict.push_str(&format!("/M ({modified})/CreationDate ({created})"));
+        if let Some(author) = info.author.clone().or_else(pdf_author) {
+            dict.push_str(&format!("/T {}", pdf_text(&author)));
+        }
+        // 阅读器用 /Name 决定图标（Comment 是最常见的便签图标）。
+        // /CA 与 /Border 跟主流阅读器写出来的一致，减少 Poppler 的兼容性警告。
+        dict.push_str("/Name/Comment/CA 1/Border[0 0 1]");
+        dict.push_str(&format!(
+            "/P {} {} R>>",
+            page.reference.num, page.reference.gen
+        ));
+        let offset = out.len();
+        out.extend_from_slice(format!("{annotation_number} 0 obj\n").as_bytes());
+        out.extend_from_slice(dict.as_bytes());
+        out.extend_from_slice(b"\nendobj\n");
+        let reference = PdfObjectRef {
+            num: annotation_number,
+            gen: 0,
+        };
+        entries.push((reference, offset));
+        by_page
+            .entry(note.page as usize)
             .or_default()
             .push(reference);
     }
@@ -1334,6 +1440,30 @@ pub fn append_new_inks(pdf: &[u8], inks: &[NewInk]) -> Result<Vec<u8>, String> {
     append_xref(pdf, trailer, &mut out, entries)
 }
 
+/// 一条注释的元数据（作者与时间）。写回时按注释 id / 对象号查表。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AnnotationMeta {
+    /// `/T` 作者；`None` = 回落到 [`pdf_author`]。
+    pub author: Option<String>,
+    /// `/CreationDate`（Unix 秒，UTC）；`None` = 用当前时间。
+    pub created: Option<i64>,
+    /// `/M`（Unix 秒，UTC）；`None` = 用 `created`，再退回当前时间。
+    pub modified: Option<i64>,
+}
+
+/// Unix 秒 → PDF 日期字符串（`D:YYYYMMDDHHmmSSZ`，UTC）。
+pub fn pdf_date_from_secs(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "D:{year:04}{month:02}{day:02}{:02}{:02}{:02}Z",
+        seconds_of_day / 3_600,
+        (seconds_of_day % 3_600) / 60,
+        seconds_of_day % 60
+    )
+}
+
 /// 当前 UTC 时间的 PDF 日期字符串（`D:YYYYMMDDHHmmSSZ`）。
 pub fn pdf_date_now() -> String {
     let seconds = std::time::SystemTime::now()
@@ -1429,7 +1559,8 @@ pub fn append_inline_changes(pdf: &[u8], changes: &InlineChanges) -> Result<Vec<
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
-                (!entry.hidden && matches!(entry.subtype, Some(9 | 10 | 12 | 15))).then_some(index)
+                (!entry.hidden && matches!(entry.subtype, Some(1 | 9 | 10 | 12 | 15)))
+                    .then_some(index)
             })
             .collect();
         if raw.len() != page.annots.len() {

@@ -69,6 +69,7 @@ name = "app"
 version = "0.1.0"
 dependencies = [
  "backend-pdfium",
+ "chrono",
  "eframe",
  "egui",
  "pdfcore",

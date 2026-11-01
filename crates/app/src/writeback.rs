@@ -2,7 +2,7 @@
 //!
 //! 这一层只做三件事：读 job JSON → 翻译成 [`backend_pdfium::writeback::WritebackSpec`] →
 //! 调 [`backend_pdfium::writeback::write`]。真正的 FFI 与外观生成都在 backend；
-//! 为什么必须走子进程、以及 FFI 的完整契约，见 `docs/current/writeback.md` 与 D-124。
+//! 为什么必须走子进程、以及 FFI 的完整契约，见 `docs/writeback.md`。
 //!
 //! ## job 格式
 //!
@@ -39,9 +39,9 @@ use crate::json::{Json, JsonLookup};
 
 /// 执行一个 job 文件，返回给人看的一句话（成功时）。
 pub fn run_job(path: &Path) -> Result<String, String> {
-    let (spec, incremental, inline) = read_spec_mode(path)?;
+    let (spec, incremental, inline, meta) = read_spec_mode(path)?;
     let report = if incremental {
-        backend::write_incremental_with_inline(&spec, &inline)
+        backend::write_incremental_with_meta(&spec, &inline, &meta)
     } else {
         backend::write_with_inline(&spec, &inline)
     }
@@ -61,6 +61,7 @@ fn read_spec_mode(
         WritebackSpec,
         bool,
         backend_pdfium::pdf_patch::InlineChanges,
+        backend_pdfium::writeback::AnnotationMetadata,
     ),
     String,
 > {
@@ -116,6 +117,7 @@ fn read_spec_mode(
         },
         incremental,
         parse_inline(root)?,
+        parse_meta(root),
     ))
 }
 
@@ -204,6 +206,67 @@ fn parse_inline(
     Ok(changes)
 }
 
+/// 从 job 里读出作者/时间（写在每条 annotation / update 上，缺省即不写）。
+fn parse_meta(root: &[(String, Json)]) -> backend_pdfium::writeback::AnnotationMetadata {
+    use backend_pdfium::pdf_patch::AnnotationMeta;
+    let mut meta = backend_pdfium::writeback::AnnotationMetadata::default();
+    if let Some(pages) = root.field("pages").and_then(|value| value.as_array()) {
+        for page in pages {
+            let Some(object) = page.as_object() else {
+                continue;
+            };
+            let Some(annotations) = object
+                .field("annotations")
+                .and_then(|value| value.as_array())
+            else {
+                continue;
+            };
+            for annotation in annotations {
+                let Some(annotation) = annotation.as_object() else {
+                    continue;
+                };
+                let Some(id) = annotation.field("id").and_then(|value| value.as_i64()) else {
+                    continue;
+                };
+                let info = AnnotationMeta {
+                    author: annotation
+                        .field("author")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string),
+                    created: annotation.field("created").and_then(|value| value.as_i64()),
+                    modified: annotation
+                        .field("modified")
+                        .and_then(|value| value.as_i64()),
+                };
+                if info != AnnotationMeta::default() {
+                    meta.by_id.insert(id as u64, info);
+                }
+            }
+        }
+    }
+    if let Some(updates) = root.field("updates").and_then(|value| value.as_array()) {
+        for update in updates {
+            let Ok(reference) = parse_ref(update) else {
+                continue;
+            };
+            let modified = update
+                .as_object()
+                .and_then(|object| object.field("modified"))
+                .and_then(|value| value.as_i64());
+            if let Some(modified) = modified {
+                meta.by_ref.insert(
+                    reference,
+                    AnnotationMeta {
+                        modified: Some(modified),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+    meta
+}
+
 fn parse_annotation(value: &Json, context: &str) -> Result<WritebackAnnotation, String> {
     let object = value
         .as_object()
@@ -224,6 +287,10 @@ fn parse_annotation(value: &Json, context: &str) -> Result<WritebackAnnotation, 
         .map(str::to_string);
 
     let kind = match kind_name {
+        "note" => {
+            let rect = rect(object, "rect", context)?;
+            AnnotationKind::Note { rect }
+        }
         "ink" => {
             let points = points(object, "points", context)?;
             let width = number(object, "width").unwrap_or(2.0);
@@ -264,6 +331,17 @@ fn points(object: &[(String, Json)], key: &str, context: &str) -> Result<Vec<Poi
         points.push(Point::new(numbers[0], numbers[1]));
     }
     Ok(points)
+}
+
+fn rect(object: &[(String, Json)], key: &str, context: &str) -> Result<Rect, String> {
+    let numbers = object
+        .field(key)
+        .and_then(numbers)
+        .ok_or_else(|| format!("{context} 缺 {key} 或不是数字数组"))?;
+    if numbers.len() != 4 {
+        return Err(format!("{context}.{key} 必须是 [x,y,宽,高]"));
+    }
+    Ok(Rect::new(numbers[0], numbers[1], numbers[2], numbers[3]))
 }
 
 fn quads(object: &[(String, Json)], key: &str, context: &str) -> Result<Vec<Rect>, String> {
@@ -350,13 +428,48 @@ mod tests {
                 "deletes":[{"num":18,"gen":1}]}"#,
         )
         .expect("写 job");
-        let (spec, incremental, _) = read_spec_mode(&job).expect("解析");
+        let (spec, incremental, _, _) = read_spec_mode(&job).expect("解析");
         assert!(!incremental);
         assert_eq!(spec.updates.len(), 1);
         assert_eq!(spec.updates[0].reference.num, 16);
         assert_eq!(spec.updates[0].body.as_deref(), Some("新正文"));
         assert_eq!(spec.deletes.len(), 1);
         assert_eq!((spec.deletes[0].num, spec.deletes[0].gen), (18, 1));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parses_author_and_times_from_job() {
+        let dir = std::env::temp_dir().join(format!(
+            "pdf-job-meta-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let job = dir.join("job.json");
+        std::fs::write(
+            &job,
+            r#"{"pdf":"in.pdf","output":"out.pdf",
+                "pages":[{"page":0,"annotations":[
+                  {"id":3,"kind":"highlight","quads":[[1,2,3,4]],
+                   "color":[255,214,0],"opacity":0.35,"body":"正文",
+                   "author":"张三","created":1700000000,"modified":1700000600}]}],
+                "updates":[{"num":16,"gen":0,"body":"新正文","modified":1700500000}]}"#,
+        )
+        .expect("写 job");
+        let (_, _, _, meta) = read_spec_mode(&job).expect("解析");
+        let info = meta.by_id.get(&3).expect("应解析出 id=3 的元数据");
+        assert_eq!(info.author.as_deref(), Some("张三"));
+        assert_eq!(info.created, Some(1_700_000_000));
+        assert_eq!(info.modified, Some(1_700_000_600));
+        let reference = backend_pdfium::pdf_index::PdfObjectRef { num: 16, gen: 0 };
+        assert_eq!(
+            meta.by_ref.get(&reference).and_then(|info| info.modified),
+            Some(1_700_500_000)
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -14,7 +14,7 @@ use crate::json::{Json, JsonLookup, Parsed};
 
 /// 存档格式的当前版本。
 ///
-/// 约定（加版本时请遵守，见 `docs/current/persistence.md`）：
+/// 约定（加版本时请遵守，见 `docs/persistence.md`）：
 /// * 读取侧必须能读**所有更旧**的版本，并把它升级到当前版本；
 /// * 升级只做**加法**（给新字段填默认值），不删除、不改名、不改变已有字段的语义；
 /// * `to_json` **永远写当前版本**；读到旧版本后由调用方置脏，下次保存即写回新版本。
@@ -844,7 +844,9 @@ mod tests {
 ///   会把墨迹条目当成"未知种类"静默丢掉，再保存就真丢了 —— 所以必须升版本，
 ///   让旧程序按既有规则**拒读且不覆盖**。
 /// * **v3**（S7）：正文从 `custom_texts` 的 `#annot:<id>` 搬进注释自己的 `body` 字段。
-pub const ANNOT_VERSION: u32 = 3;
+/// * **v4**（2026-10-31）：增加 `author` / `created` / `modified`（只做加法）。
+///   v3 文件按"字段缺失"读入（`None`），保存时写 v4；v1/v2 仍按已关闭的迁移通道拒绝。
+pub const ANNOT_VERSION: u32 = 4;
 
 /// `<pdf>.annot.json` 里的一条标注。
 #[derive(Debug, Clone, PartialEq)]
@@ -865,6 +867,12 @@ pub struct SavedAnnotation {
     pub opacity: f32,
     /// 正文（直接属于注释）。
     pub body: Option<String>,
+    /// 作者（`/T`）。
+    pub author: Option<String>,
+    /// 创建时间（Unix 秒，UTC）。
+    pub created: Option<i64>,
+    /// 最后修改时间（Unix 秒，UTC）。
+    pub modified: Option<i64>,
 }
 
 /// 整份标注图层。
@@ -944,6 +952,15 @@ impl SavedOverlay {
                 if let Some(body) = &annotation.body {
                     out.push_str(&format!(", \"body\": {}", json_string(body)));
                 }
+                if let Some(author) = &annotation.author {
+                    out.push_str(&format!(", \"author\": {}", json_string(author)));
+                }
+                if let Some(created) = annotation.created {
+                    out.push_str(&format!(", \"created\": \"{}\"", iso_from_unix(created)));
+                }
+                if let Some(modified) = annotation.modified {
+                    out.push_str(&format!(", \"modified\": \"{}\"", iso_from_unix(modified)));
+                }
                 out.push('}');
             }
             out.push(']');
@@ -965,21 +982,83 @@ impl SavedOverlay {
                 supported: ANNOT_VERSION,
             });
         }
-        if parsed.version < ANNOT_VERSION {
+        if parsed.version < 3 {
             return Err(LoadError::Parse(format!(
-                "标注图层是 v{}（本程序只支持 v{}；v2→v3 迁移通道已关闭）",
+                "标注图层是 v{}（本程序只支持 v3/v{}；v2→v3 迁移通道已关闭）",
                 parsed.version, ANNOT_VERSION
             )));
         }
+        // v3 → v4 只做加法：缺 author/created/modified 就留空，下次保存写 v4。
         Ok(parsed)
     }
 }
 
-/// `<pdf>.annot.json` 的路径。
-pub fn annot_path(pdf: &std::path::Path) -> std::path::PathBuf {
-    let mut name = pdf.as_os_str().to_owned();
-    name.push(".annot.json");
-    std::path::PathBuf::from(name)
+/// Unix 秒 → `YYYY-MM-DDTHH:MM:SSZ`（UTC）。
+fn iso_from_unix(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds_of_day / 3_600,
+        (seconds_of_day % 3_600) / 60,
+        seconds_of_day % 60
+    )
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` → Unix 秒；只认我们自己写的格式。
+fn unix_from_iso(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    if bytes.len() < 10 {
+        return None;
+    }
+    let number =
+        |start: usize, len: usize| -> Option<i64> { text.get(start..start + len)?.parse().ok() };
+    let year = number(0, 4)?;
+    let month = number(5, 2)? as u32;
+    let day = number(8, 2)? as u32;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let (hour, minute, second) = if bytes.len() >= 19 {
+        (number(11, 2)?, number(14, 2)?, number(17, 2)?)
+    } else {
+        (0, 0, 0)
+    };
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let shifted_month = (i64::from(month) + 9) % 12;
+    let day_of_year = (153 * shifted_month + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    (
+        if month <= 2 { year + 1 } else { year },
+        month as u32,
+        day as u32,
+    )
 }
 
 /// 原子写：先写同目录的临时文件，再 `rename` 覆盖。
@@ -1086,6 +1165,18 @@ fn parse_overlay(text: &str) -> std::result::Result<SavedOverlay, LoadError> {
                 .field("body")
                 .and_then(|value| value.as_str())
                 .map(str::to_string);
+            let author = annotation
+                .field("author")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            let created = annotation
+                .field("created")
+                .and_then(|value| value.as_str())
+                .and_then(unix_from_iso);
+            let modified = annotation
+                .field("modified")
+                .and_then(|value| value.as_str())
+                .and_then(unix_from_iso);
             annotations.push(SavedAnnotation {
                 id,
                 kind,
@@ -1095,6 +1186,9 @@ fn parse_overlay(text: &str) -> std::result::Result<SavedOverlay, LoadError> {
                 color,
                 opacity,
                 body,
+                author,
+                created,
+                modified,
             });
         }
         pages.push(annotations);
@@ -1111,6 +1205,7 @@ pub fn annotation_kind_name(kind: &pdfcore::annotation::AnnotationKind) -> &'sta
         AnnotationKind::Underline { .. } => "underline",
         AnnotationKind::StrikeOut { .. } => "strike_out",
         AnnotationKind::Ink { .. } => "ink",
+        AnnotationKind::Note { .. } => "note",
     }
 }
 
@@ -1120,6 +1215,12 @@ pub fn annotation_kind_name(kind: &pdfcore::annotation::AnnotationKind) -> &'sta
 /// 这样"缺几何 / 单点墨迹 / 零宽矩形"的跳过规则只有一处。
 pub fn annotation_kind_from_saved(saved: &SavedAnnotation) -> pdfcore::annotation::AnnotationKind {
     use pdfcore::annotation::AnnotationKind;
+    if saved.kind == "note" {
+        return match saved.quads.first() {
+            Some(rect) => AnnotationKind::Note { rect: *rect },
+            None => AnnotationKind::Highlight { quads: Vec::new() },
+        };
+    }
     if saved.kind == "ink" {
         return AnnotationKind::Ink {
             points: saved.points.clone(),
@@ -1162,6 +1263,9 @@ pub fn overlay_from_store(store: &pdfcore::annotation::AnnotationStore) -> Saved
             color: annotation.color,
             opacity: annotation.opacity,
             body: annotation.body.clone(),
+            author: annotation.author.clone(),
+            created: annotation.created,
+            modified: annotation.modified,
         });
     }
     SavedOverlay {
@@ -1187,6 +1291,9 @@ pub fn store_from_overlay(overlay: &SavedOverlay) -> pdfcore::annotation::Annota
             annotation.color = saved.color;
             annotation.opacity = saved.opacity;
             annotation.body = saved.body.clone();
+            annotation.author = saved.author.clone();
+            annotation.created = saved.created;
+            annotation.modified = saved.modified;
             store.insert(annotation);
         }
     }
@@ -1237,6 +1344,48 @@ mod annot_tests {
            "quads":[[10,20,30,8]],"body":"#annot:7"}
         ]]}"##;
         assert!(SavedOverlay::from_json(text).is_err(), "v2 通道已关闭");
+    }
+
+    #[test]
+    fn annotation_meta_round_trips() {
+        let mut store = store_with_one();
+        let id = store.iter().next().expect("一条").id;
+        if let Some(annotation) = store.get_mut(id) {
+            annotation.author = Some("张三".to_string());
+            annotation.created = Some(1_700_000_000);
+            annotation.modified = Some(1_700_000_600);
+        }
+        let overlay = overlay_from_store(&store);
+        let text = overlay.to_json();
+        assert!(text.contains("\"author\": \"张三\""), "应写出作者：{text}");
+        assert!(
+            text.contains("\"created\": \"2023-11-14T22:13:20Z\""),
+            "应写出创建时间：{text}"
+        );
+        let parsed = SavedOverlay::from_json(&text).expect("应当能解析");
+        let restored = store_from_overlay(&parsed);
+        let item = restored.get(id).expect("恢复一条");
+        assert_eq!(item.author.as_deref(), Some("张三"));
+        assert_eq!(item.created, Some(1_700_000_000));
+        assert_eq!(item.modified, Some(1_700_000_600));
+    }
+
+    #[test]
+    fn version_3_overlay_loads_without_meta() {
+        let text = r#"{
+  "version": 3,
+  "pages": [
+    [ {"id":1, "kind":"highlight", "color":[255,214,0], "opacity":0.35,
+       "quads":[[50,690,450,50]], "body":"旧正文"} ]
+  ]
+}"#;
+        let overlay = SavedOverlay::from_json(text).expect("v3 应当能读");
+        let restored = store_from_overlay(&overlay);
+        let item = restored.iter().next().expect("一条");
+        assert_eq!(item.body.as_deref(), Some("旧正文"));
+        assert_eq!(item.author, None, "v3 没有作者");
+        assert_eq!(item.created, None);
+        assert_eq!(item.modified, None);
     }
 
     #[test]
@@ -1340,11 +1489,5 @@ mod annot_tests {
             "临时文件必须被 rename 掉"
         );
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn annot_path_sits_next_to_the_pdf() {
-        let path = annot_path(std::path::Path::new("/tmp/book.pdf"));
-        assert_eq!(path, std::path::PathBuf::from("/tmp/book.pdf.annot.json"));
     }
 }

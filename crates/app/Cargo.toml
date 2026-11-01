@@ -8,6 +8,8 @@ license.workspace = true
 
 [dependencies]
 pdfcore = { path = "../pdfcore" }
+# 时间显示：把 Unix 秒按系统时区格式化（注释 tooltip 用）。
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 backend-pdfium = { path = "../backend-pdfium" }
 # UI：默认特性会带上 wgpu；这里显式选 glow（OpenGL）后端以缩小体积、提升老机器兼容性。
 # x11/wayland 必须显式开启（关闭默认特性后 winit 没有平台后端，会直接编译失败）；

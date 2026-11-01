@@ -13,7 +13,7 @@ fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // 写回模式（S5b）：隐藏子进程入口。**必须在主进程之外执行**——这个分支直接调 PDFium 的
-    // 注释 API，与主进程的后台渲染线程并发会崩（见 docs/current/writeback.md）。
+    // 注释 API，与主进程的后台渲染线程并发会崩（见 docs/writeback.md）。
     if args.first().map(String::as_str) == Some("--writeback") {
         let Some(job) = args.get(1).map(PathBuf::from) else {
             eprintln!("用法：app --writeback <job.json>");
@@ -31,6 +31,22 @@ fn main() -> eframe::Result<()> {
             Ok(summary) => println!("{summary}"),
             Err(error) => {
                 eprintln!("写回失败：{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
+    // 整理副本（S8a）：无窗口，供调试/脚本使用
+    if args.first().map(String::as_str) == Some("--compact") {
+        let (Some(input), Some(output)) = (args.get(1), args.get(2)) else {
+            eprintln!("用法：app --compact <输入.pdf> <输出.pdf>");
+            std::process::exit(2);
+        };
+        match app::compact::run(std::path::Path::new(input), std::path::Path::new(output)) {
+            Ok(message) => println!("{message}"),
+            Err(error) => {
+                eprintln!("整理失败：{error}");
                 std::process::exit(1);
             }
         }

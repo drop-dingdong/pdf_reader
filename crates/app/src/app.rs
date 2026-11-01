@@ -4,7 +4,7 @@
 //! **只做胶水**：坐标换算、输入映射、纹理存储都在 [`crate::view`] 里（可单测）。
 //! 剩下的部分需要真实窗口才能验证，按 agent.md 规则 2 **交由用户验收**。
 //!
-//! ## 每帧流程（与 `docs/current/architecture.md` §4.2 的契约一致）
+//! ## 每帧流程（与 `docs/architecture.md` §4.2 的契约一致）
 //! 1. 采集输入 → 命令；2. `handle` 命令；3. `pump` 取回渲染结果；
 //! 4. 画页面（就绪则贴纹理，未就绪则白底页框）；5. 画高亮；6. 请求可见页渲染。
 //!
@@ -23,7 +23,6 @@ use egui::{
 };
 use pdfcore::annotation::{
     Annotation, AnnotationId, AnnotationKind, AnnotationStore, INK_COLOR, INK_OPACITY,
-    TEXT_MARK_COLOR, TEXT_MARK_OPACITY,
 };
 use pdfcore::prelude::*;
 
@@ -33,21 +32,20 @@ use crate::persist;
 /// 无窗口回放器（脚本驱动真实 `App::ui`，用于回归断言与性能基线，见 D-103）。
 pub mod replay;
 use crate::view::{
-    body_size_changed, body_size_of, canvas_rect_for, checkbox_row, clamp_float_rect, color_image,
-    command_for_key, command_for_scroll, command_for_zoom_delta, commands_for_destination,
-    compose_region_snapshot, compose_snapshot, default_dest_rect, desired_textures,
-    destination_points, drag_float_rect, find_dest_index, find_float_for_custom,
+    annotation_time_line, body_size_changed, body_size_of, canvas_rect_for, checkbox_row,
+    clamp_float_rect, color_image, command_for_key, command_for_scroll, command_for_zoom_delta,
+    commands_for_destination, compose_region_snapshot, compose_snapshot, default_dest_rect,
+    desired_textures, destination_points, drag_float_rect, find_dest_index, find_float_for_custom,
     find_float_for_target, fit_height_zoom, fit_inside, flatten_outline, float_rect_at_row,
     float_size_for_body, hover_preview_allowed, link_box_color, link_overlay_visible,
     link_rect_in_page_bounds, move_to_last, needs_underlay, outline_node_count, overflow_layout,
     page_index_from_text, page_rect_to_screen, pages_intersecting, parse_zoom_percent,
-    pin_exits_on_mode_change, plan_page, pointer_over_any, save_button_label,
-    screen_rect_to_content, texture_pages, tile_view_rect, tile_view_rect_scaled, tip_rect_for,
-    veil_bands, view_rect_for, view_rect_to_page_rect, view_to_content, wheel_targets_canvas,
-    zero_rect_at, zoom_percent_text, Desired, DrawInput, KeyedStore, PageDraw, PageFacts,
-    PageShape, PlanStamp, Preview, SnapshotLayer, SnapshotPage, CUSTOM_SYMBOL_DELETE,
-    CUSTOM_SYMBOL_EDIT, CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE,
-    FLOAT_TITLE_HEIGHT,
+    pin_exits_on_mode_change, plan_page, pointer_over_any, screen_rect_to_content, texture_pages,
+    tile_view_rect, tile_view_rect_scaled, tip_rect_for, veil_bands, view_rect_for,
+    view_rect_to_page_rect, view_to_content, wheel_targets_canvas, zero_rect_at, zoom_percent_text,
+    Desired, DrawInput, KeyedStore, PageDraw, PageFacts, PageShape, PlanStamp, Preview,
+    SnapshotLayer, SnapshotPage, CUSTOM_SYMBOL_DELETE, CUSTOM_SYMBOL_EDIT, CUSTOM_SYMBOL_IMAGE,
+    CUSTOM_SYMBOL_TEXT, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
 };
 
 /// 纹理层的**字节**预算（软上限，D-111）。
@@ -59,6 +57,25 @@ use crate::view::{
 /// 可用 `PDF_READER_TEXTURE_BUDGET_MB` 覆盖（0 = 不限制）。
 pub const TEXTURE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 
+/// 注释列表的视图：按页分组 / 最近修改（平铺，按修改时间倒序）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AnnotationListView {
+    /// 按页分组、页内自上而下（阅读顺序）。
+    #[default]
+    ByPage,
+    /// 平铺，按修改时间倒序；没有时间的排最后。
+    Recent,
+}
+
+impl AnnotationListView {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ByPage => "按页",
+            Self::Recent => "最近修改",
+        }
+    }
+}
+
 /// 注释列表的一行（渲染前先收集、排序，避免边遍历边改 UI）。
 struct AnnotationRow {
     page: PageIndex,
@@ -68,7 +85,52 @@ struct AnnotationRow {
     external: bool,
     summary: String,
     preview: String,
+    author: Option<String>,
+    created: Option<i64>,
+    modified: Option<i64>,
     bounds: Option<Rect>,
+}
+
+/// 注释列表搜索：正文或作者包含查询词（忽略大小写）。
+fn annotation_matches_query(annotation: &Annotation, query: &str) -> bool {
+    let needle = query.to_lowercase();
+    annotation
+        .body
+        .as_deref()
+        .is_some_and(|body| body.to_lowercase().contains(&needle))
+        || annotation
+            .author
+            .as_deref()
+            .is_some_and(|author| author.to_lowercase().contains(&needle))
+}
+
+/// 按页视图：页号 → 页内自上而下 → 左 → id。
+fn by_page_order(a: &AnnotationRow, b: &AnnotationRow) -> std::cmp::Ordering {
+    a.page
+        .get()
+        .cmp(&b.page.get())
+        .then_with(|| match (a.bounds, b.bounds) {
+            (Some(left), Some(right)) => right
+                .y
+                .partial_cmp(&left.y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    left.x
+                        .partial_cmp(&right.x)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }),
+            _ => std::cmp::Ordering::Equal,
+        })
+        .then_with(|| a.id.get().cmp(&b.id.get()))
+}
+
+/// 最近修改视图：修改时间倒序（没有时间的排最后），再按页号稳定排序。
+fn recent_order(a: &AnnotationRow, b: &AnnotationRow) -> std::cmp::Ordering {
+    b.modified
+        .unwrap_or(i64::MIN)
+        .cmp(&a.modified.unwrap_or(i64::MIN))
+        .then_with(|| a.page.get().cmp(&b.page.get()))
+        .then_with(|| a.id.get().cmp(&b.id.get()))
 }
 
 /// 注释列表里的类型名；`visible` 恒为 true，预留给将来不可列类型。
@@ -78,6 +140,7 @@ fn annotation_kind_label(kind: &AnnotationKind) -> (&'static str, bool) {
         AnnotationKind::Underline { .. } => ("下划线", true),
         AnnotationKind::StrikeOut { .. } => ("删除线", true),
         AnnotationKind::Ink { .. } => ("墨迹", true),
+        AnnotationKind::Note { .. } => ("便签", true),
     }
 }
 
@@ -112,6 +175,40 @@ fn body_summary(body: Option<&str>) -> String {
     } else {
         collapsed
     }
+}
+
+/// 当前 Unix 秒（UTC）。
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 注释摘要的默认路径：`<stem>.annotations.md`，已存在则递增 `-2`、`-3`…（不覆盖）。
+fn annotation_summary_path(pdf: &std::path::Path) -> PathBuf {
+    let stem = pdf
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| "document".to_string());
+    let mut index = 1u32;
+    loop {
+        let suffix = if index == 1 {
+            String::new()
+        } else {
+            format!("-{index}")
+        };
+        let candidate = pdf.with_file_name(format!("{stem}.annotations{suffix}.md"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+/// 设置里记录文件用的键：能规范化就规范化（相对路径 → 绝对路径）。/// 设置里记录文件用的键：能规范化就规范化（相对路径 → 绝对路径）。
+fn settings_key(path: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// 「另存为」的提示位；条件集中在这里，便于按真值表测试。
@@ -227,6 +324,8 @@ const ANNOTATION_HIT_TOLERANCE_PX: f32 = 4.0;
 
 /// 墨迹的默认线宽（**页面空间**单位；回放动作与 S4 的墨迹工具共用）。
 const DEFAULT_INK_WIDTH: f32 = 2.0;
+/// 新建便签的图标边长（页面空间 pt）。
+const NOTE_ICON_SIZE: f32 = 18.0;
 
 /// 历史窗口每行的高度（虚拟化列表要求等行高）。
 const HISTORY_ROW_HEIGHT: f32 = 18.0;
@@ -261,6 +360,45 @@ enum DragMode {
     Select,
     /// 正在画墨迹（S4b）：采样点累积在 `ink` 里，抬笔才变成标注。
     Ink,
+    /// 正在平移一条墨迹（Alt+拖拽）：拖动中直接改坐标，松手记一条历史。
+    MoveInk,
+}
+
+/// Alt+拖拽墨迹的瞬时状态：只记录起点和原始点集，拖动中直接改内存坐标。
+struct InkMoveState {
+    /// 被移动的注释。
+    id: AnnotationId,
+    /// 拖动前的快照（undo 用）。
+    before: Annotation,
+    /// 按下时指针在页面空间的位置。
+    start: Point,
+    /// 原始折线（每次拖动都从它出发，避免累积误差）。
+    original: Vec<Point>,
+}
+
+/// 关闭/切换文件前挂起的动作。
+enum PendingActionKind {
+    Quit,
+    Open(PathBuf),
+}
+
+/// 有未保存改动时，关闭窗口或切换文件前先问一句。
+struct PendingAction {
+    kind: PendingActionKind,
+}
+
+/// 一次写回请求：保存 / 另存为 / 覆盖保存共用。
+struct WriteRequest {
+    /// 目标地址（等于当前文档就是原地保存）。
+    target: PathBuf,
+    /// 目标已存在时是否允许覆盖（UI 已确认）。
+    allow_overwrite: bool,
+    /// 覆盖原文件时忽略外部修改（UI 已二次确认）。
+    allow_conflict: bool,
+    /// 是否写原文件的数据文件。
+    write_source_data: bool,
+    /// 是否写目标文件的数据文件。
+    write_target_data: bool,
 }
 
 /// 鼠标拖拽的语义（第二轮验收：去掉不可靠的"自动"模式，只留两种明确行为）。
@@ -420,6 +558,16 @@ struct CustomDialog {
     content: String,
 }
 
+/// 新建便签的输入对话框。
+struct NoteDraft {
+    /// 所在页。
+    page: PageIndex,
+    /// 图标矩形（页面空间）。
+    rect: Rect,
+    /// 正文草稿。
+    text: String,
+}
+
 /// 已保存的自定义 preview。
 ///
 /// 按用户要求记录：Pin 结束时的**页号 + 页内坐标**、以该坐标为中心的**零尺寸矩形**
@@ -562,11 +710,18 @@ enum AppEdit {
         /// 被删掉的标注（含删除那一刻的正文）。
         annotation: pdfcore::annotation::Annotation,
     },
-    /// 修改已有标注的颜色（重新创建对象，旧对象由写回 deletes 删除）。
-    RecolorAnnotation {
-        /// 改色前快照。
+    /// 修改已有标注的样式（颜色/透明度/墨迹线宽）：重建对象，旧对象由写回 deletes 删除。
+    RestyleAnnotation {
+        /// 改样式前快照。
         before: pdfcore::annotation::Annotation,
-        /// 改色后快照（id 可能不同）。
+        /// 改样式后快照（id 可能不同）。
+        after: pdfcore::annotation::Annotation,
+    },
+    /// 移动已有标注（目前只有墨迹）：原地改几何；写回时旧对象删除、新对象重建。
+    MoveAnnotation {
+        /// 移动前快照。
+        before: pdfcore::annotation::Annotation,
+        /// 移动后快照（同 id，`pdf_ref = None` 表示要重建对象）。
         after: pdfcore::annotation::Annotation,
     },
     /// 修改注释正文（一条命令一次提交，不按字符记历史）。
@@ -642,14 +797,27 @@ enum AppEdit {
 }
 
 impl AppEdit {
+    /// 这条编辑是否改变 PDF 里的内容（注释）。preview/引用点只写 `.json`。
+    fn affects_pdf(&self) -> bool {
+        matches!(
+            self,
+            Self::AddAnnotation { .. }
+                | Self::DeleteAnnotation { .. }
+                | Self::RestyleAnnotation { .. }
+                | Self::MoveAnnotation { .. }
+                | Self::SetBody { .. }
+        )
+    }
+
     /// 给人看的一句话（可视列表直接用它）。
     fn describe(&self) -> String {
         match self {
             Self::AddAnnotation { annotation } => {
                 let page = annotation.page.display_number();
                 match &annotation.kind {
-                    // 墨迹没有行矩形：按 quads 数描述会写成"高亮（第 N 页，0 行）"
+                    // 墨迹/便签没有行矩形：按 quads 数描述会写成"高亮（第 N 页，0 行）"
                     AnnotationKind::Ink { .. } => format!("墨迹（第 {page} 页）"),
+                    AnnotationKind::Note { .. } => format!("便签（第 {page} 页）"),
                     AnnotationKind::Underline { .. } => match annotation.kind.quads().len() {
                         1 => format!("下划线（第 {page} 页）"),
                         rows => format!("下划线（第 {page} 页，{rows} 行）"),
@@ -667,8 +835,11 @@ impl AppEdit {
             Self::DeleteAnnotation { annotation } => {
                 format!("删除标注（第 {} 页）", annotation.page.display_number())
             }
-            Self::RecolorAnnotation { after, .. } => {
-                format!("修改标注颜色（第 {} 页）", after.page.display_number())
+            Self::RestyleAnnotation { after, .. } => {
+                format!("修改标注样式（第 {} 页）", after.page.display_number())
+            }
+            Self::MoveAnnotation { after, .. } => {
+                format!("移动标注（第 {} 页）", after.page.display_number())
             }
             Self::SetBody { page, .. } => {
                 format!("修改注释正文（第 {} 页）", page.display_number())
@@ -839,19 +1010,27 @@ pub struct PdfReaderApp {
     tool_before_annotation: Option<Tool>,
     /// 是否正在等"原地写入 PDF"的确认（S5c）。
     pending_in_place: bool,
-    /// 是否正在等"从 PDF 重建标注"的确认（S6c）。
-    pending_rebuild: bool,
+    /// 保存确认框里的错误；失败/冲突时对话框保留并显示它。
+    in_place_error: Option<String>,
     /// 上次打开时 PDF 里带 `pd-fr:` 标记的注释数（决定空 overlay 能否写回/导出）。
     pdf_marked_annotations: usize,
     /// 原地写入重开后要恢复的视图（页、缩放、滚动、剩余帧数）。
     ///
     /// 延迟两帧：**先让新会话收到真实的视口尺寸**，否则 `SetScroll` 会被按旧/默认视口夹紧，
     /// 表现为"缩放对了、滚动偏了一点"（用户实测）。
-    pending_view_restore: Option<(PageIndex, f32, Vec2, u8)>,
+    pending_view_restore: Option<(PageIndex, f32, Option<Vec2>, u8)>,
     /// 注释是否有未写入 PDF 的新增/正文/删除。
     pdf_dirty: bool,
-    /// 上次成功写 PDF / 打开时注释状态的指纹（`None` = 迁移中，保持脏）。
-    pdf_clean_hash: Option<u64>,
+    /// 上次成功写 PDF / 打开时的历史修订号（与当前修订号比较得出脏位）。
+    saved_pdf_revision: u64,
+    /// 原地保存前是否留一份 `.bak` 副本（设置项，默认关闭）。
+    backup_before_inplace: bool,
+    /// 关闭/切换文件前的未保存提示。
+    pending_action: Option<PendingAction>,
+    /// 提示里的错误（保存失败/冲突等）。
+    pending_action_error: Option<String>,
+    /// 用户已经决定关闭：下一次 close_requested 不再拦截。
+    closing_after_decision: bool,
     /// 上次成功保存自定义数据 / 打开时自定义数据的指纹。
     data_clean_hash: Option<u64>,
     /// 编辑历史（注释 + 重选截图/引用点，单栈时间序）。
@@ -892,6 +1071,20 @@ pub struct PdfReaderApp {
     save_as_write_original: bool,
     /// 另存为：写新 PDF 的数据文件。
     save_as_write_target: bool,
+    /// 另存为：目标已存在时是否覆盖（对话框里勾选）。
+    save_as_overwrite: bool,
+    /// 整理副本对话框里的目标路径；`None` = 未打开。
+    compact_dialog: Option<String>,
+    /// 整理副本的错误提示。
+    compact_error: Option<String>,
+    /// 便签模式：下一次点击页面时在该位置新建便签。
+    note_pin: bool,
+    /// 新建便签的输入对话框。
+    note_dialog: Option<NoteDraft>,
+    /// 正在 Alt/Ctrl+拖拽平移的墨迹。
+    ink_move: Option<InkMoveState>,
+    /// 右键「移动」选中的墨迹：下一次拖动它时不需要按修饰键。
+    move_ink_armed: Option<AnnotationId>,
     /// 自定义 preview 的 Pin 状态（`Some` = 正在选点；此时不显示浮窗、不响应链接点击）。
     custom_pin: Option<CustomKind>,
     /// 自定义 preview 的输入对话框。
@@ -948,6 +1141,19 @@ pub struct PdfReaderApp {
     /// 人工验收看到的"拖动边框、松手回弹"就是这个原因。改为每帧把上次观察到的宽度
     /// 作为 `default_size` 回填，尺寸便由我们自己保住。
     sidebar_width: f32,
+    /// 用户设置（注释默认样式 / 每个文件的阅读状态 / 窗口尺寸）。
+    settings: crate::settings::Settings,
+    /// 设置文件路径；`None` = 不读写（无窗口/回放/测试）。
+    settings_path: Option<PathBuf>,
+    /// 设置是否有未落盘的修改。
+    settings_dirty: bool,
+    /// 首帧要恢复的窗口尺寸（`None` = 不动）。
+    pending_window_size: Option<[f32; 2]>,
+    /// 在绘制过程中请求打开的文件：必须等 `session` 放回 `self` 之后再打开，
+    /// 否则 `ui()` 末尾会把旧 session 又塞回去（菜单里直接 `open` 的坑）。
+    pending_open: Option<PathBuf>,
+    /// 新墨迹的线宽（来自设置）。
+    ink_width: f32,
     /// 待输入的密码（文档加密时）。
     password_for: Option<PathBuf>,
     password_input: String,
@@ -965,9 +1171,16 @@ pub struct PdfReaderApp {
     annotation_show_underline: bool,
     annotation_show_strike: bool,
     annotation_show_ink: bool,
+    annotation_show_note: bool,
     /// 注释列表：只看外部/只读注释。
     annotation_only_external: bool,
     annotation_only_readonly: bool,
+    /// 注释列表视图（按页 / 最近修改）。
+    annotation_view: AnnotationListView,
+    /// 注释列表搜索词（正文/作者，忽略大小写）。
+    annotation_search: String,
+    /// 按页视图里被折叠的页。
+    collapsed_annotation_pages: std::collections::HashSet<u32>,
     /// 注释列表点击后的中性定位轮廓（id + 截止时刻）。
     annotation_focus: Option<(AnnotationId, std::time::Instant)>,
     /// 画布右键菜单锚定的注释（菜单/子菜单打开期间保持）。
@@ -1023,11 +1236,23 @@ impl PdfReaderApp {
     pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
         cc.egui_ctx
             .options_mut(|options| options.zoom_with_keyboard = false);
-        Self::with_clock(
+        let settings_path = crate::settings::Settings::path();
+        let had_settings = settings_path.as_ref().is_some_and(|path| path.exists());
+        let (settings, warning) = crate::settings::Settings::load();
+        let mut app = Self::with_clock(
             crate::clock::Clock::system(),
             crate::diag::Diagnostics::from_env(),
             initial,
-        )
+            settings,
+            settings_path,
+            warning,
+        );
+        // 窗口系统在创建时还不知道设置；只有**已有设置文件**时才恢复尺寸，
+        // 首次启动保持 main 的默认窗口大小。
+        if had_settings {
+            app.pending_window_size = Some(app.settings.ui.window_size);
+        }
+        app
     }
 
     /// 设置纹理层字节预算（0 = 不限制）。给回放/调参用；正常路径由构造时读取。
@@ -1044,7 +1269,14 @@ impl PdfReaderApp {
         diag: crate::diag::Diagnostics,
         initial: Option<PathBuf>,
     ) -> Self {
-        let mut app = Self::with_clock(clock, diag, initial);
+        let mut app = Self::with_clock(
+            clock,
+            diag,
+            initial,
+            crate::settings::Settings::default(),
+            None,
+            None,
+        );
         // 无窗口时没有窗口尺寸，给一个明确的默认视口（回放脚本也可以覆盖它）。
         app.commands
             .push(ViewerCommand::ResizeViewport(Size::new(1100.0, 900.0)));
@@ -1055,9 +1287,16 @@ impl PdfReaderApp {
         clock: crate::clock::Clock,
         diag: crate::diag::Diagnostics,
         initial: Option<PathBuf>,
+        settings: crate::settings::Settings,
+        settings_path: Option<PathBuf>,
+        settings_warning: Option<String>,
     ) -> Self {
         // 诊断限流与"启动时刻"都取注入时钟的当前值（回放时它由脚本推进）。
         let boot = clock.now();
+        let style = settings.annotation.clone();
+        let sidebar_width = settings.ui.sidebar_width;
+        let ui_settings = settings.ui.clone();
+        let save_settings = settings.save.clone();
         let mut app = Self {
             session: None,
             navigation: None,
@@ -1078,8 +1317,8 @@ impl PdfReaderApp {
             visible: Vec::new(),
             drag: None,
             tool: Tool::default(),
-            show_links: false,
-            show_annotations: true,
+            show_links: ui_settings.show_links,
+            show_annotations: ui_settings.show_annotations,
             annotations: AnnotationStore::new(),
             external_ids: std::collections::HashSet::new(),
             opened_pdf_refs: std::collections::BTreeSet::new(),
@@ -1093,16 +1332,26 @@ impl PdfReaderApp {
             pending_annotate: None,
             annotation_tool: None,
             selection_started_on_text: false,
-            markup_color: TEXT_MARK_COLOR,
-            markup_opacity: TEXT_MARK_OPACITY,
-            ink_color: INK_COLOR,
+            markup_color: style.markup_color,
+            markup_opacity: style.highlight_opacity,
+            ink_color: style.ink_color,
+            ink_width: style.ink_width,
+            settings,
+            settings_path,
+            settings_dirty: false,
+            pending_window_size: None,
+            pending_open: None,
             tool_before_annotation: None,
             pending_in_place: false,
-            pending_rebuild: false,
+            in_place_error: None,
             pdf_marked_annotations: 0,
             pending_view_restore: None,
             pdf_dirty: false,
-            pdf_clean_hash: None,
+            saved_pdf_revision: 0,
+            backup_before_inplace: save_settings.backup_in_place,
+            pending_action: None,
+            pending_action_error: None,
+            closing_after_decision: false,
             data_clean_hash: None,
             history: crate::history::History::new(),
             show_history: false,
@@ -1110,7 +1359,7 @@ impl PdfReaderApp {
             outline_rows: Vec::new(),
             floats: Vec::new(),
             next_float_id: 1,
-            show_dest_points: false,
+            show_dest_points: ui_settings.show_dest_points,
             dest_marks: Vec::new(),
             capture: None,
             hover_tip: None,
@@ -1122,7 +1371,14 @@ impl PdfReaderApp {
             save_as: None,
             save_as_error: None,
             save_as_write_original: true,
+            compact_dialog: None,
+            compact_error: None,
+            note_pin: false,
+            note_dialog: None,
+            ink_move: None,
+            move_ink_armed: None,
             save_as_write_target: true,
+            save_as_overwrite: false,
             custom_pin: None,
             custom_dialog: None,
             custom_previews: Vec::new(),
@@ -1138,7 +1394,7 @@ impl PdfReaderApp {
             fullscreen: false,
             reveal_toolbar: false,
             horizontal_layout: false,
-            horizontal_scroll: false,
+            horizontal_scroll: ui_settings.horizontal_scroll,
             pending_layout: None,
             search_open: false,
             editing_title: None,
@@ -1146,7 +1402,7 @@ impl PdfReaderApp {
             link_marks: Vec::new(),
             last_convert_ms: 0.0,
             last_upload_ms: 0.0,
-            sidebar_width: 260.0,
+            sidebar_width,
             password_for: None,
             password_input: String::new(),
             search_input: String::new(),
@@ -1159,12 +1415,16 @@ impl PdfReaderApp {
             annotation_show_underline: true,
             annotation_show_strike: true,
             annotation_show_ink: true,
+            annotation_show_note: true,
             annotation_only_external: false,
             annotation_only_readonly: false,
+            annotation_view: AnnotationListView::default(),
+            annotation_search: String::new(),
+            collapsed_annotation_pages: std::collections::HashSet::new(),
             annotation_focus: None,
             context_annotation: None,
             context_menu_pos: None,
-            pin_hover_enabled: true,
+            pin_hover_enabled: ui_settings.pin_hover_enabled,
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
             click_highlight: None,
@@ -1181,7 +1441,10 @@ impl PdfReaderApp {
             last_pan_at: None,
             last_visible: Vec::new(),
         };
-        app.pdf_clean_hash = Some(app.pdf_fingerprint());
+        if let Some(warning) = settings_warning {
+            app.message = warning;
+        }
+        app.saved_pdf_revision = app.history.current_pdf_revision();
         app.data_clean_hash = Some(app.data_fingerprint());
         if let Some(path) = initial {
             app.open(&path, None);
@@ -1237,7 +1500,7 @@ impl PdfReaderApp {
                 self.floats
                     .retain(|window| window.owner != FloatOwner::Annotation(annotation.id));
             }
-            AppEdit::RecolorAnnotation { before, after } => {
+            AppEdit::RestyleAnnotation { before, after } => {
                 self.annotations.remove(before.id);
                 self.annotations.insert(after.clone());
                 for window in &mut self.floats {
@@ -1253,8 +1516,15 @@ impl PdfReaderApp {
                     }
                 }
             }
+            AppEdit::MoveAnnotation { before, after } => {
+                self.annotations.remove(before.id);
+                self.annotations.insert(after.clone());
+            }
             AppEdit::SetBody { id, after, .. } => {
                 self.annotations.set_body(*id, after.clone());
+                if let Some(annotation) = self.annotations.get_mut(*id) {
+                    annotation.modified = Some(unix_now());
+                }
             }
             AppEdit::DeletePreview { key, .. } => {
                 if let Some(index) = self.preview_index(*key) {
@@ -1367,7 +1637,9 @@ impl PdfReaderApp {
         }
         if record {
             let weight = edit.weight();
-            self.history.push(description, edit, weight);
+            let affects_pdf = edit.affects_pdf();
+            self.history
+                .push_tagged(description, edit, weight, affects_pdf);
         }
         self.refresh_dirty();
     }
@@ -1382,7 +1654,11 @@ impl PdfReaderApp {
         let inverse = match entry.command {
             AppEdit::AddAnnotation { annotation } => AppEdit::DeleteAnnotation { annotation },
             AppEdit::DeleteAnnotation { annotation } => AppEdit::AddAnnotation { annotation },
-            AppEdit::RecolorAnnotation { before, after } => AppEdit::RecolorAnnotation {
+            AppEdit::RestyleAnnotation { before, after } => AppEdit::RestyleAnnotation {
+                before: after,
+                after: before,
+            },
+            AppEdit::MoveAnnotation { before, after } => AppEdit::MoveAnnotation {
                 before: after,
                 after: before,
             },
@@ -1474,6 +1750,88 @@ impl PdfReaderApp {
     /// 顺序固定：先主存档（正文在里面）、再图层；两份各自原子写，互不依赖，
     /// 所以即使图层写失败，正文也已经落盘（加载时缺图层只是"没有标注"，不会崩）。
     /// 原地写入重开之后，**等视口尺寸生效**再恢复页/缩放/滚动。
+    /// 把当前文档的页码/缩放/排版记到设置里（换文档、关闭窗口时）。
+    fn remember_document_view(&mut self) {
+        let Some(path) = self.document_path.clone() else {
+            return;
+        };
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let scroll = session.viewport().scroll;
+        let state = crate::settings::DocumentState {
+            path: settings_key(&path),
+            page: session.state().current_page.get(),
+            zoom: session.state().zoom,
+            // 页面锚点：视口左上角在内容空间的位置，和页码一起才能回到原处。
+            anchor: Some([scroll.x.max(0.0), scroll.y.max(0.0)]),
+            horizontal: self.horizontal_layout,
+            opened_at: unix_now(),
+        };
+        self.settings.remember_document(state);
+        self.settings_dirty = true;
+    }
+
+    /// 把设置写到磁盘（`settings_path == None` 时什么也不做：回放/测试不碰用户配置）。
+    fn flush_settings(&mut self, ctx: Option<&egui::Context>) {
+        if self.settings_path.is_none() {
+            self.settings_dirty = false;
+            return;
+        }
+        if let Some(ctx) = ctx {
+            if let Some(rect) = ctx.input(|input| input.viewport().inner_rect) {
+                if rect.width() > 1.0 && rect.height() > 1.0 {
+                    self.settings.ui.window_size = [rect.width(), rect.height()];
+                }
+            }
+        }
+        self.settings.ui.sidebar_width = self.sidebar_width;
+        if let Err(error) = self.settings.save() {
+            eprintln!("[settings] 保存失败：{error}");
+        }
+        self.settings_dirty = false;
+    }
+
+    /// 首帧恢复上次的窗口尺寸（窗口创建时还不知道设置）。
+    fn apply_pending_window_size(&mut self, ctx: &egui::Context) {
+        if let Some(size) = self.pending_window_size.take() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                size[0], size[1],
+            )));
+        }
+    }
+
+    /// 样式菜单改动后同步到设置（变了才标记脏，避免每帧写盘）。
+    fn sync_style_settings(&mut self) {
+        let current = crate::settings::AnnotationDefaults {
+            markup_color: self.markup_color,
+            highlight_opacity: self.markup_opacity,
+            ink_color: self.ink_color,
+            ink_width: self.ink_width,
+        };
+        if current != self.settings.annotation {
+            self.settings.annotation = current;
+            self.settings_dirty = true;
+        }
+        let ui = crate::settings::UiSettings {
+            window_size: self.settings.ui.window_size,
+            sidebar_width: self.settings.ui.sidebar_width,
+            pin_hover_enabled: self.pin_hover_enabled,
+            horizontal_scroll: self.horizontal_scroll,
+            show_links: self.show_links,
+            show_dest_points: self.show_dest_points,
+            show_annotations: self.show_annotations,
+        };
+        if ui != self.settings.ui {
+            self.settings.ui = ui;
+            self.settings_dirty = true;
+        }
+        if self.settings.save.backup_in_place != self.backup_before_inplace {
+            self.settings.save.backup_in_place = self.backup_before_inplace;
+            self.settings_dirty = true;
+        }
+    }
+
     fn apply_pending_view_restore(&mut self, ctx: &egui::Context) {
         let Some((page, zoom, scroll, remaining)) = self.pending_view_restore else {
             return;
@@ -1485,149 +1843,15 @@ impl PdfReaderApp {
         if remaining == 0 {
             self.commands.push(ViewerCommand::GoToPage(page));
             self.commands.push(ViewerCommand::SetZoom(zoom));
-            self.commands.push(ViewerCommand::SetScroll(scroll));
+            // 设置里只记了页码/缩放：没有滚动快照时不要 SetScroll(0)，
+            // 否则会把刚跳到的页又拉回文档开头（用户 2026-11-01 反馈"页数不恢复"）。
+            if let Some(scroll) = scroll {
+                self.commands.push(ViewerCommand::SetScroll(scroll));
+            }
             self.pending_view_restore = None;
         } else {
             self.pending_view_restore = Some((page, zoom, scroll, remaining - 1));
             ctx.request_repaint();
-        }
-    }
-
-    /// 「从 PDF 重建标注」确认框（S6c）。
-    fn draw_rebuild_dialog(&mut self, ctx: &egui::Context) {
-        if !self.pending_rebuild {
-            return;
-        }
-        let overlay = self.annotations.len();
-        let bodies = self
-            .custom_previews
-            .iter()
-            .filter(|preview| preview.title.starts_with("#annot:"))
-            .count();
-        let marked = self.pdf_marked_annotations;
-        let mut decision: Option<bool> = None;
-        egui::Modal::new(Id::unique("rebuild-from-pdf")).show(ctx, |ui| {
-            ui.set_width(460.0);
-            ui.heading("从 PDF 重建标注");
-            ui.label(format!(
-                "PDF 里有 {marked} 条带标记的注释。将先备份 `.annot.json` / `.json`，                 然后**丢弃当前 overlay**，按 PDF 重建："
-            ));
-            ui.label(format!(
-                "当前 overlay：{overlay} 条标注、{bodies} 条正文，都会被替换。"
-            ));
-            ui.label("没有被写进 PDF 的标注（以及它们独有的正文）会丢失。");
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("取消").clicked() {
-                    decision = Some(false);
-                }
-                if ui.button("备份并重建").clicked() {
-                    decision = Some(true);
-                }
-            });
-        });
-        match decision {
-            Some(false) => self.pending_rebuild = false,
-            Some(true) => {
-                self.pending_rebuild = false;
-                self.perform_rebuild_from_pdf();
-            }
-            None => {}
-        }
-    }
-
-    /// 以 PDF 为准重建：备份 → 删 A/J 里的注释正文 → 重开（S6a 会从 PDF 导入）→ 落盘。
-    fn perform_rebuild_from_pdf(&mut self) {
-        let Some(pdf) = self.document_path.clone() else {
-            self.message = "先打开一个 PDF".to_string();
-            return;
-        };
-        if self.pdf_marked_annotations == 0 {
-            self.message = "PDF 里没有可用来重建的标记注释".to_string();
-            return;
-        }
-        if self.sidecar_locked.is_some() {
-            self.message = "主存档由更新版本写入，拒绝重建（否则会破坏它）".to_string();
-            return;
-        }
-        let Some((page, zoom, scroll)) = self.session.as_ref().map(|session| {
-            (
-                session.state().current_page,
-                session.state().zoom,
-                session.viewport().scroll,
-            )
-        }) else {
-            self.message = "没有打开的文档".to_string();
-            return;
-        };
-
-        // 1) 备份 A/J（存在才备份）
-        let annot_path = persist::annot_path(&pdf);
-        let sidecar_path = persist::sidecar_path(&pdf);
-        let mut backups: Vec<std::path::PathBuf> = Vec::new();
-        for path in [&annot_path, &sidecar_path] {
-            if path.exists() {
-                let backup = crate::export::backup_path(path);
-                if let Err(error) = std::fs::copy(path, &backup) {
-                    self.message = format!("备份 {} 失败，已取消：{error}", path.display());
-                    return;
-                }
-                backups.push(backup);
-            }
-        }
-
-        // 2) 删 A；保留 J 里的链接/自定义 preview，只删 `#annot:` 正文条目
-        if annot_path.exists() {
-            if let Err(error) = std::fs::remove_file(&annot_path) {
-                self.message = format!("删除 {} 失败，已取消：{error}", annot_path.display());
-                return;
-            }
-        }
-        self.custom_previews
-            .retain(|preview| !preview.title.starts_with("#annot:"));
-        self.data_dirty = true;
-        self.save_custom_data();
-        if self.data_dirty {
-            // J 没写成：把 A 恢复回去（有备份的话），避免 A 丢了而 J 也缺正文
-            if let Some(backup) = backups
-                .iter()
-                .find(|path| path.to_string_lossy().contains(".annot.json.bak-"))
-            {
-                let _ = std::fs::copy(backup, &annot_path);
-            }
-            self.message = format!("保存主存档失败，已取消重建：{}", self.message);
-            return;
-        }
-
-        // 3) 重开：A 不在 → S6a 从 PDF 导入标注，正文从 /Contents 重建
-        self.history.clear();
-        self.open(&pdf, None);
-        if self.session.is_some() {
-            self.pending_view_restore = Some((page, zoom, scroll, 2));
-            self.save_all();
-            let names = backups
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join("、");
-            self.message = if names.is_empty() {
-                format!("已从 PDF 重建 {} 条标注", self.pdf_marked_annotations)
-            } else {
-                format!(
-                    "已从 PDF 重建 {} 条标注（备份：{names}）",
-                    self.pdf_marked_annotations
-                )
-            };
-        } else {
-            self.message = format!(
-                "重建后重新打开失败：{}（备份：{}）",
-                pdf.display(),
-                backups
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join("、")
-            );
         }
     }
 
@@ -1636,130 +1860,20 @@ impl PdfReaderApp {
         if !self.pending_in_place {
             return;
         }
-        let path = self
-            .document_path
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default();
-        let mut decision: Option<bool> = None;
-        egui::Modal::new(Id::unique("in-place-confirm")).show(ctx, |ui| {
-            ui.set_width(440.0);
-            ui.heading("写入 PDF（原地覆盖）");
-            ui.label(format!("将把当前标注写入：{path}"));
-            ui.label("写入前会先备份原文件为 `<文件名>.bak-<时间>`；`.annot.json` 保留。");
-            ui.label("重复写入是幂等的：按注释里的 /NM 标记同步，不会叠加。");
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("取消").clicked() {
-                    decision = Some(false);
-                }
-                if ui.button("备份并写入").clicked() {
-                    decision = Some(true);
-                }
-            });
-        });
-        match decision {
-            Some(false) => self.pending_in_place = false,
-            Some(true) => {
-                self.pending_in_place = false;
-                self.perform_in_place_writeback();
-            }
-            None => {}
-        }
-    }
-
-    /// 原地写入（S5c）：暂存 → 关闭会话 → 备份 → 原子替换 → 重开并恢复视图。
-    ///
-    /// 注释不删 overlay（S6 才能读回 PDF 注释；删了本程序就看不到/改不了它们了）。
-    /// 写回本身在子进程里（见 `docs/current/writeback.md`）。
-    fn perform_in_place_writeback(&mut self) {
-        let Some(pdf) = self.document_path.clone() else {
-            self.message = "先打开一个 PDF 再写入".to_string();
+        let Some(path) = self.document_path.clone() else {
+            self.pending_in_place = false;
             return;
         };
-        if !self.pdf_dirty {
-            self.message = "无改动：PDF 没有需要写入的修改".to_string();
+        let sidecar = persist::sidecar_path(&path);
+        let pdf = self.pdf_dirty;
+        let data = self.data_dirty;
+        if !pdf && !data {
+            self.pending_in_place = false;
+            self.message = "无改动".to_string();
             return;
-        }
-        // 一次性取出快照，随后要释放会话的借用
-        let Some((page, zoom, scroll, pages)) = self.session.as_ref().map(|session| {
-            (
-                session.state().current_page,
-                session.state().zoom,
-                session.viewport().scroll,
-                session.page_count(),
-            )
-        }) else {
-            self.message = "没有打开的文档".to_string();
-            return;
-        };
-        {
-            let Some(session) = self.session.as_ref() else {
-                return;
-            };
-            if session.opened().document.info().encrypted {
-                self.message = "加密文档暂不支持原地写入".to_string();
-                return;
-            }
-        }
-        if let Some(opened) = self.pdf_file_stamp {
-            match pdf_file_stamp(&pdf) {
-                Ok(current) if current != opened => {
-                    self.message = PDF_CONFLICT_MESSAGE.to_string();
-                    return;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    self.message = format!("无法检查 PDF 文件状态，已取消写入：{error}");
-                    return;
-                }
-            }
         }
         let (ref_updates, ref_deletes) = self.pdf_ref_changes();
         let (inline_updates, inline_deletes) = self.inline_changes();
-        let inline = backend_pdfium::pdf_patch::InlineChanges {
-            updates: inline_updates,
-            deletes: inline_deletes,
-        };
-        if self.annotations.is_empty()
-            && self.pdf_marked_annotations == 0
-            && ref_updates.is_empty()
-            && ref_deletes.is_empty()
-            && inline.is_empty()
-        {
-            self.message = "当前文档没有标注".to_string();
-            return;
-        }
-        // P5：pages 只放“新注释”（没有 PDF 对象号的注释）；已有注释的正文
-        // 全部走 updates，不再靠 marker 差分删除/保留。
-        let items: Vec<crate::export::ExportItem> = self
-            .annotations
-            .iter()
-            .filter(|annotation| {
-                !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
-            })
-            .map(|annotation| {
-                let body = annotation.body.clone().filter(|text| !text.is_empty());
-                crate::export::ExportItem {
-                    id: Some(annotation.id.get()),
-                    page: annotation.page,
-                    kind: annotation.kind.clone(),
-                    color: annotation.color,
-                    opacity: annotation.opacity,
-                    body,
-                }
-            })
-            .collect();
-
-        // 先把自定义数据落盘（重开会重新加载 `.json`）；注释本身只写 PDF。
-        if self.data_dirty {
-            self.save_custom_data();
-        }
-        if self.data_dirty {
-            self.message = "自定义数据未能保存（存档被占用？），已取消写入".to_string();
-            return;
-        }
-
         let new_count = self
             .annotations
             .iter()
@@ -1767,189 +1881,302 @@ impl PdfReaderApp {
                 !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
             })
             .count();
-        let updated = ref_updates.len() + inline.updates.len();
-        let deleted = ref_deletes.len() + inline.deletes.len();
-        let temporary = match crate::export::stage_in_place_with_refs_and_inline(
-            &pdf,
-            &items,
-            &ref_updates,
-            &ref_deletes,
-            &inline,
-            pages,
-        ) {
-            Ok(path) => path,
-            Err(error) => {
-                self.message = format!("写入失败（原文件未改动）：{error}");
-                return;
-            }
-        };
-
-        if let Some(opened) = self.pdf_file_stamp {
-            match pdf_file_stamp(&pdf) {
-                Ok(current) if current != opened => {
-                    let _ = std::fs::remove_file(&temporary);
-                    self.message = PDF_CONFLICT_MESSAGE.to_string();
-                    return;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    let _ = std::fs::remove_file(&temporary);
-                    self.message = format!("无法复查 PDF 文件状态，已取消写入：{error}");
-                    return;
+        let updated = ref_updates.len() + inline_updates.len();
+        let deleted = ref_deletes.len() + inline_deletes.len();
+        let conflict = pdf && self.pdf_conflict();
+        let error = self.in_place_error.clone();
+        let mut decision: Option<u8> = None;
+        egui::Modal::new(Id::unique("in-place-confirm")).show(ctx, |ui| {
+            ui.set_width(520.0);
+            let heading = match (pdf, data) {
+                (true, true) => "保存",
+                (true, false) => "保存到 PDF",
+                _ => "保存自定义数据",
+            };
+            ui.heading(heading);
+            if pdf {
+                ui.label(format!("将注释写入 PDF：{}", path.display()));
+                ui.label(format!(
+                    "注释：新增 {new_count}、更新 {updated}、删除 {deleted} 条"
+                ));
+                if self.backup_before_inplace {
+                    ui.label("写入前会在同目录保留一份 .bak 备份。");
+                } else {
+                    ui.label("不会额外保留备份（可在「文件」菜单开启）。");
                 }
             }
+            if data {
+                ui.label(format!("将自定义数据写入：{}", sidecar.display()));
+            }
+            if conflict {
+                ui.colored_label(
+                    Color32::from_rgb(200, 60, 60),
+                    "原 PDF 已被其他程序修改：直接保存会丢弃对方的修改。请另存为或取消。",
+                );
+            }
+            if let Some(error) = &error {
+                ui.colored_label(Color32::from_rgb(200, 60, 60), error);
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("取消").clicked() {
+                    decision = Some(0);
+                }
+                if pdf && ui.button("另存为…").clicked() {
+                    decision = Some(1);
+                }
+                if ui.button("保存").clicked() {
+                    decision = Some(2);
+                }
+            });
+        });
+        match decision {
+            Some(0) => {
+                self.pending_in_place = false;
+                self.in_place_error = None;
+            }
+            Some(1) => {
+                self.pending_in_place = false;
+                self.in_place_error = None;
+                self.open_save_as_dialog();
+            }
+            Some(2) => match self.save_in_place_now(false) {
+                Ok(()) => {
+                    self.pending_in_place = false;
+                    self.in_place_error = None;
+                }
+                // 失败/冲突：保留对话框与错误，用户可以直接改走另存为。
+                Err(error) => self.in_place_error = Some(error),
+            },
+            _ => {}
         }
-        let saved_previews = self.custom_previews.clone();
-        let saved_dest_marks = self.dest_marks.clone();
-        let saved_next_preview_id = self.next_preview_id.clone();
+    }
 
-        // 关闭会话：释放 PDFium 的文件句柄（Windows 上不放开就无法替换原文件）
-        self.session = None;
-        self.textures.clear();
+    /// 原地写入（S5c）：暂存 → 关闭会话 → 备份 → 原子替换 → 重开并恢复视图。
+    ///
+    /// 注释不删 overlay（S6 才能读回 PDF 注释；删了本程序就看不到/改不了它们了）。
+    /// 写回本身在子进程里（见 `docs/writeback.md`）。
+    /// 有未保存改动（注释或自定义数据）。
+    fn is_dirty(&self) -> bool {
+        self.pdf_dirty || self.data_dirty
+    }
 
-        let backup = crate::export::backup_path(&pdf);
-        if let Err(error) = std::fs::copy(&pdf, &backup) {
-            let _ = std::fs::remove_file(&temporary);
-            self.open(&pdf, None);
-            self.message = format!("备份失败，已取消（原文件未改动）：{error}");
+    /// 请求打开另一个文件：脏就先弹提示，干净就直接延后打开。
+    fn request_open(&mut self, path: PathBuf) {
+        if self.document_path.as_ref() == Some(&path) {
             return;
         }
-        if let Err(error) = std::fs::rename(&temporary, &pdf) {
-            let _ = std::fs::remove_file(&temporary);
-            self.open(&pdf, None);
-            self.message = format!(
-                "替换原文件失败（原文件未改动，备份在 {}）：{error}",
-                backup.display()
-            );
-            return;
-        }
-
-        // 旧 `.annot.json` 的注释已经写进 PDF：保留一次备份后退休 A。
-        let overlay = persist::annot_path(&pdf);
-        if overlay.exists() {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0);
-            let backup = overlay.with_file_name(format!(
-                "{}.bak-{nanos}",
-                overlay
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "overlay".to_string())
-            ));
-            let _ = std::fs::rename(&overlay, &backup);
-        }
-
-        // 重开并恢复视图；保留撤销栈，并把快照重新绑到新 PDF 对象号
-        self.reopening_after_write = true;
-        self.open(&pdf, None);
-        if self.session.is_some() {
-            self.custom_previews = saved_previews;
-            self.dest_marks = saved_dest_marks;
-            self.next_preview_id = saved_next_preview_id;
-            self.data_dirty = false;
-            self.data_clean_hash = Some(self.data_fingerprint());
-            // 两帧后再恢复：先让新会话收到真实视口尺寸（见 `pending_view_restore` 的注释）
-            self.pending_view_restore = Some((page, zoom, scroll, 2));
-            self.message = format!(
-                "已写入 PDF：新增 {new_count}、更新 {updated}、删除 {deleted} 条注释：{}（备份：{}）",
-                pdf.display(),
-                backup.display()
-            );
+        if self.is_dirty() {
+            self.pending_action = Some(PendingAction {
+                kind: PendingActionKind::Open(path),
+            });
+            self.pending_action_error = None;
         } else {
-            self.message = format!(
-                "写入完成，但重新打开失败：{}（备份：{}）",
-                pdf.display(),
-                backup.display()
-            );
+            self.pending_open = Some(path);
+        }
+    }
+
+    /// 原 PDF 是否已被其他程序改过（决定提示里是否禁用原地保存）。
+    fn pdf_conflict(&self) -> bool {
+        let Some(path) = self.document_path.as_ref() else {
+            return false;
+        };
+        match self.pdf_file_stamp {
+            Some(opened) => pdf_file_stamp(path)
+                .map(|now| now != opened)
+                .unwrap_or(true),
+            None => false,
+        }
+    }
+
+    /// 提示框里的"保存"：显式允许/不允许忽略外部修改。
+    fn save_in_place_now(&mut self, allow_conflict: bool) -> std::result::Result<(), String> {
+        let Some(pdf) = self.document_path.clone() else {
+            return Err("没有打开的文档".to_string());
+        };
+        let request = WriteRequest {
+            target: pdf,
+            allow_overwrite: true,
+            allow_conflict,
+            write_source_data: true,
+            write_target_data: true,
+        };
+        self.write_document(request)
+    }
+
+    /// 保存/另存为成功之后，继续挂起的关闭或切换动作。
+    fn continue_pending_action(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_action.take() else {
+            return;
+        };
+        self.pending_action_error = None;
+        match pending.kind {
+            PendingActionKind::Quit => {
+                self.closing_after_decision = true;
+                self.remember_document_view();
+                self.flush_settings(Some(ctx));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            PendingActionKind::Open(path) => self.pending_open = Some(path),
+        }
+    }
+
+    /// 关闭/切换前的未保存提示。
+    fn draw_pending_action_dialog(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_action.as_ref() else {
+            return;
+        };
+        // 另存为对话框已经在上面时，先让它处理，避免两个模态叠在一起。
+        if self.save_as.is_some() {
+            return;
+        }
+        let action = match &pending.kind {
+            PendingActionKind::Quit => "关闭窗口".to_string(),
+            PendingActionKind::Open(path) => format!("打开 {}", path.display()),
+        };
+        let (ref_updates, ref_deletes) = self.pdf_ref_changes();
+        let (inline_updates, inline_deletes) = self.inline_changes();
+        let updated = ref_updates.len() + inline_updates.len();
+        let deleted = ref_deletes.len() + inline_deletes.len();
+        let new_count = self
+            .annotations
+            .iter()
+            .filter(|annotation| {
+                !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
+            })
+            .count();
+        let conflict = self.pdf_dirty && self.pdf_conflict();
+        let mut decision: Option<u8> = None;
+        egui::Modal::new(Id::unique("pending-action")).show(ctx, |ui| {
+            ui.set_width(520.0);
+            ui.heading("有未保存的改动");
+            ui.label(format!("即将{action}，但当前还有改动没有保存。"));
+            if self.pdf_dirty {
+                ui.label(format!(
+                    "注释：新增 {new_count}、更新 {updated}、删除 {deleted} 条"
+                ));
+            }
+            if self.data_dirty {
+                ui.label("自定义数据（preview / 引用点）：有未保存改动");
+            }
+            if conflict {
+                ui.colored_label(
+                    Color32::from_rgb(200, 60, 60),
+                    "原 PDF 已被其他程序修改：原地保存会丢弃对方的修改。",
+                );
+            }
+            if let Some(error) = &self.pending_action_error {
+                ui.colored_label(Color32::from_rgb(200, 60, 60), error);
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if !conflict {
+                    if ui.button("保存并继续").clicked() {
+                        decision = Some(0);
+                    }
+                } else if ui.button("覆盖保存…").clicked() {
+                    decision = Some(1);
+                }
+                if ui.button("另存为…").clicked() {
+                    decision = Some(2);
+                }
+                if ui.button("不保存").clicked() {
+                    decision = Some(3);
+                }
+                if ui.button("取消").clicked() {
+                    decision = Some(4);
+                }
+            });
+        });
+        match decision {
+            Some(0) => match self.save_in_place_now(false) {
+                Ok(()) => self.continue_pending_action(ctx),
+                Err(error) => self.pending_action_error = Some(error),
+            },
+            Some(1) => {
+                // 覆盖保存 = 另存为到原路径；勾选覆盖后走同一条写回。
+                if let Some(path) = self.document_path.clone() {
+                    self.open_save_as_dialog_at(path);
+                }
+            }
+            Some(2) => self.open_save_as_dialog(),
+            Some(3) => self.continue_pending_action(ctx),
+            Some(4) => {
+                self.pending_action = None;
+                self.pending_action_error = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn perform_in_place_writeback(&mut self) {
+        let Some(pdf) = self.document_path.clone() else {
+            self.message = "先打开一个 PDF 再写入".to_string();
+            return;
+        };
+        if !self.pdf_dirty && !self.data_dirty {
+            self.message = "无改动：没有需要写入的内容".to_string();
+            return;
+        }
+        let request = WriteRequest {
+            target: pdf,
+            allow_overwrite: true,
+            allow_conflict: false,
+            write_source_data: true,
+            write_target_data: true,
+        };
+        if let Err(error) = self.write_document(request) {
+            self.message = error;
         }
     }
 
     /// 导出带标注的 PDF（S5b-2）：overlay + 正文 → job → 子进程 → 校验 → 原子改名。
     ///
     /// 目标固定为同目录 `<stem>.annotated.pdf`，**不覆盖**已有文件；
-    /// 真正的 FFI 写回在子进程里（见 `docs/current/writeback.md`），这里只做编排与冒烟校验。
-    fn export_annotated_pdf(&mut self, session: &DocumentSession) {
+    /// 真正的 FFI 写回在子进程里（见 `docs/writeback.md`），这里只做编排与冒烟校验。
+    /// 导出注释摘要（Markdown）：同目录 `<stem>.annotations.md`，已存在则递增，不覆盖。
+    fn export_annotation_summary(&mut self) {
         let Some(pdf) = self.document_path.clone() else {
             self.message = "先打开一个 PDF 再导出".to_string();
             return;
         };
-        // 加密文档在子进程里也会被拒绝；这里先给一个即时、可读的原因
-        if session.opened().document.info().encrypted {
-            self.message = "加密文档暂不支持导出（权限位可能不允许批注）".to_string();
-            return;
-        }
-        if !self.pdf_dirty {
-            let output = crate::export::default_output_path(&pdf);
-            if let Err(error) = crate::export::ensure_destination_free(&output) {
-                self.message = format!("导出失败：{error}");
-                return;
-            }
-            match std::fs::copy(&pdf, &output) {
-                Ok(_) => {
-                    self.message = format!("无改动：已复制原 PDF 到 {}", output.display());
-                }
-                Err(error) => self.message = format!("导出失败：{error}"),
-            }
-            return;
-        }
-        let (ref_updates, ref_deletes) = self.pdf_ref_changes();
-        let (inline_updates, inline_deletes) = self.inline_changes();
-        let inline = backend_pdfium::pdf_patch::InlineChanges {
-            updates: inline_updates,
-            deletes: inline_deletes,
-        };
-        if self.annotations.is_empty()
-            && self.pdf_marked_annotations == 0
-            && ref_updates.is_empty()
-            && ref_deletes.is_empty()
-            && inline.is_empty()
-        {
-            self.message = "当前文档没有标注".to_string();
-            return;
-        }
-        // P5：pages 只放“新注释”（没有 PDF 对象号的注释）；已有注释的正文
-        // 全部走 updates，不再靠 marker 差分删除/保留。
-        let items: Vec<crate::export::ExportItem> = self
+        let rows: Vec<crate::annotations_md::Row> = self
             .annotations
             .iter()
-            .filter(|annotation| {
-                !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
-            })
             .map(|annotation| {
-                // 正文按哨兵标题从 custom_texts 里取；空正文不写 /Contents
-                let body = annotation.body.clone().filter(|text| !text.is_empty());
-                crate::export::ExportItem {
-                    id: Some(annotation.id.get()),
-                    page: annotation.page,
-                    kind: annotation.kind.clone(),
-                    color: annotation.color,
-                    opacity: annotation.opacity,
-                    body,
+                let (kind, _) = annotation_kind_label(&annotation.kind);
+                let bounds = annotation.bounds();
+                let external = self.external_ids.contains(&annotation.id);
+                crate::annotations_md::Row {
+                    page: annotation.page.get(),
+                    y: bounds.map(|rect| rect.y).unwrap_or(0.0),
+                    x: bounds.map(|rect| rect.x).unwrap_or(0.0),
+                    id: annotation.id.get(),
+                    kind,
+                    author: annotation.author.clone(),
+                    created: annotation.created,
+                    modified: annotation.modified,
+                    body: annotation.body.clone(),
+                    external,
+                    readonly: external && annotation.pdf_ref.is_none(),
                 }
             })
             .collect();
-        let output = crate::export::default_output_path(&pdf);
-        self.message = "正在导出标注…".to_string();
-        match crate::export::export_with_refs_and_inline(
-            &pdf,
-            &output,
-            &items,
-            &ref_updates,
-            &ref_deletes,
-            &inline,
-            session.page_count(),
-        ) {
-            Ok(report) => {
-                self.message = format!(
-                    "已导出 {} 条标注：{}（{} 字节）",
-                    report.annotations,
-                    report.output.display(),
-                    report.bytes
-                );
+        if rows.is_empty() {
+            self.message = "没有可导出的注释".to_string();
+            return;
+        }
+        let file_name = pdf
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "文档".to_string());
+        let text = crate::annotations_md::render(&file_name, &rows, unix_now());
+        let target = annotation_summary_path(&pdf);
+        match std::fs::write(&target, text) {
+            Ok(()) => {
+                self.message = format!("已导出 {} 条注释摘要 → {}", rows.len(), target.display())
             }
-            Err(error) => self.message = format!("导出失败：{error}"),
+            Err(error) => self.error = Some(format!("导出注释摘要失败：{error}")),
         }
     }
 
@@ -1979,44 +2206,182 @@ impl PdfReaderApp {
         self.save_as_error = None;
         self.save_as_write_original = true;
         self.save_as_write_target = true;
+        self.save_as_overwrite = false;
     }
 
-    /// 把当前 PDF + 当前注释写到新文件；成功后切换文档。
-    fn save_as_to(
-        &mut self,
-        target: PathBuf,
-        write_original: bool,
-        write_target: bool,
-    ) -> std::result::Result<(), String> {
+    /// 用指定目标打开「另存为」（覆盖保存时预填原路径，并默认勾选覆盖）。
+    fn open_save_as_dialog_at(&mut self, target: PathBuf) {
+        self.save_as_overwrite = target.exists();
+        self.save_as = Some(target.to_string_lossy().to_string());
+        self.save_as_error = None;
+        self.save_as_write_original = true;
+        self.save_as_write_target = true;
+    }
+
+    /// 打开「整理副本」对话框，默认同目录 `<stem>.compact.pdf`（已存在则递增后缀）。
+    fn open_compact_dialog(&mut self) {
+        let Some(pdf) = self.document_path.clone() else {
+            return;
+        };
+        let stem = pdf
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_else(|| "document".to_string());
+        let mut candidate = crate::compact::default_path(&pdf);
+        let mut index = 1u32;
+        while candidate.exists() {
+            index += 1;
+            candidate = pdf.with_file_name(format!("{stem}.compact-{index}.pdf"));
+        }
+        self.compact_dialog = Some(candidate.to_string_lossy().to_string());
+        self.compact_error = None;
+    }
+
+    /// 「整理副本」对话框：路径输入 + 未保存注释的提示 + 错误信息。
+    fn draw_compact_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.compact_dialog.clone() else {
+            return;
+        };
+        let red = Color32::from_rgb(200, 60, 60);
+        let mut decision: Option<bool> = None;
+        egui::Modal::new(Id::unique("compact-copy")).show(ctx, |ui| {
+            ui.set_width(520.0);
+            ui.heading("整理副本");
+            ui.label("只保留最新一次修订，输出为更小的单段 PDF；原文件与数据文件都不动。");
+            ui.add_space(6.0);
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut draft)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("目标 .pdf 路径"),
+            );
+            if response.gained_focus() {
+                self.compact_error = None;
+            }
+            let mut target = PathBuf::from(draft.trim());
+            if target.extension().is_none() {
+                target.set_extension("pdf");
+            }
+            if let Some(source) = &self.document_path {
+                if target == *source {
+                    ui.colored_label(red, "目标路径与原文件相同；整理副本必须写新文件。");
+                }
+            }
+            if !draft.trim().is_empty() && target.exists() {
+                ui.colored_label(red, format!("目标已存在：{}（不覆盖）", target.display()));
+            }
+            if let Some(hint) = crate::view::compact_unsaved_hint(self.pdf_dirty) {
+                ui.colored_label(red, hint);
+            }
+            if let Some(error) = &self.compact_error {
+                ui.colored_label(red, error);
+            }
+            ui.label(
+                RichText::new("整理后的文件不带历史修订；带数字签名或加密的文档会被拒绝。")
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("取消").clicked() {
+                    decision = Some(false);
+                }
+                if ui.button("整理").clicked() {
+                    decision = Some(true);
+                }
+            });
+        });
+        match decision {
+            Some(true) => {
+                if draft.trim().is_empty() {
+                    self.compact_error = Some("目标路径不能为空".to_string());
+                    self.compact_dialog = Some(draft);
+                    return;
+                }
+                let mut target = PathBuf::from(draft.trim());
+                if target.extension().is_none() {
+                    target.set_extension("pdf");
+                }
+                match self.perform_compact(target) {
+                    Ok(message) => {
+                        self.message = message;
+                        self.compact_dialog = None;
+                        self.compact_error = None;
+                    }
+                    Err(error) => {
+                        self.compact_dialog = Some(draft);
+                        self.compact_error = Some(error);
+                    }
+                }
+            }
+            Some(false) => {
+                self.compact_dialog = None;
+                self.compact_error = None;
+            }
+            None => self.compact_dialog = Some(draft),
+        }
+    }
+
+    /// 在子进程里执行整理；返回状态栏要显示的一句话。
+    fn perform_compact(&mut self, target: PathBuf) -> std::result::Result<String, String> {
         let Some(source) = self.document_path.clone() else {
             return Err("没有打开的文档".to_string());
         };
-        if target == source {
-            return Err("目标路径与原文件相同；另存为必须使用新文件".to_string());
-        }
-        if target.exists() {
-            return Err(format!(
-                "目标 PDF 已存在，不覆盖：{}（请换一个文件名）",
-                target.display()
-            ));
-        }
-        let target_sidecar = persist::sidecar_path(&target);
-        if target_sidecar.exists() {
-            return Err(format!(
-                "目标数据文件已存在，不覆盖：{}（请换一个文件名）",
-                target_sidecar.display()
-            ));
+        crate::compact::validate_target(&source, &target)?;
+        crate::compact::run_child(&source, &target)
+    }
+
+    /// 把当前 PDF + 当前注释写到新文件；成功后切换文档。
+    /// 把当前状态写到 `request.target`。保存/另存为/覆盖保存共用这一条路径，
+    /// 差别只在目标地址与选项（是否写数据文件、是否允许覆盖/忽略外部修改）。
+    fn write_document(&mut self, request: WriteRequest) -> std::result::Result<(), String> {
+        let Some(source) = self.document_path.clone() else {
+            return Err("没有打开的文档".to_string());
+        };
+        let target = request.target;
+        let in_place = target == source;
+        if !in_place && target.exists() && !request.allow_overwrite {
+            return Err(format!("目标已存在，未覆盖：{}", target.display()));
         }
         if let Some(parent) = target.parent() {
             if !parent.as_os_str().is_empty() && !parent.is_dir() {
                 return Err(format!("目标目录不存在：{}", parent.display()));
             }
         }
-        if write_original {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.opened().document.info().encrypted)
+        {
+            return Err("加密文档暂不支持写入".to_string());
+        }
+        if request.write_source_data {
             if let Some((found, supported)) = self.sidecar_locked {
                 return Err(format!(
                     "原 PDF 的数据文件版本是 v{found}（支持到 v{supported}），不能覆盖"
                 ));
+            }
+        }
+        if !in_place && request.write_target_data {
+            let sidecar = persist::sidecar_path(&target);
+            if sidecar.exists() && !request.allow_overwrite {
+                return Err(format!(
+                    "目标数据文件已存在，未覆盖：{}（确认覆盖后可一并写入）",
+                    sidecar.display()
+                ));
+            }
+        }
+        // 只改数据文件时不碰 PDF，也就没有"丢弃外部修改"的风险，跳过冲突检查。
+        if in_place && self.pdf_dirty && !request.allow_conflict {
+            if let Some(opened) = self.pdf_file_stamp {
+                match pdf_file_stamp(&source) {
+                    Ok(current) if current != opened => {
+                        return Err(PDF_CONFLICT_MESSAGE.to_string());
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        return Err(format!("无法检查 PDF 文件状态，已取消写入：{error}"));
+                    }
+                }
             }
         }
         let Some((page, zoom, scroll, pages)) = self.session.as_ref().map(|session| {
@@ -2029,20 +2394,6 @@ impl PdfReaderApp {
         }) else {
             return Err("没有打开的文档".to_string());
         };
-        if self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.opened().document.info().encrypted)
-        {
-            return Err("加密文档暂不支持另存为".to_string());
-        }
-
-        // 导出/复制 PDF 之前先记录数据快照和视图；任何一步失败都不切换文档。
-        let data = self.custom_data();
-        let saved_previews = self.custom_previews.clone();
-        let saved_dest_marks = self.dest_marks.clone();
-        let saved_next_preview_id = self.next_preview_id.clone();
-        let had_custom_data = self.data_dirty || !saved_previews.is_empty();
         let (ref_updates, ref_deletes) = self.pdf_ref_changes();
         let (inline_updates, inline_deletes) = self.inline_changes();
         let inline = backend_pdfium::pdf_patch::InlineChanges {
@@ -2062,58 +2413,182 @@ impl PdfReaderApp {
                 color: annotation.color,
                 opacity: annotation.opacity,
                 body: annotation.body.clone().filter(|text| !text.is_empty()),
+                author: annotation.author.clone(),
+                created: annotation.created,
+                modified: annotation.modified,
             })
             .collect();
-        let needs_export = !items.is_empty()
-            || !ref_updates.is_empty()
-            || !ref_deletes.is_empty()
-            || !inline.is_empty();
-        if needs_export {
-            crate::export::export_with_refs_and_inline(
+        let new_count = items.len();
+        let updated = ref_updates.len() + inline.updates.len();
+        let deleted = ref_deletes.len() + inline.deletes.len();
+        // 数据快照必须在关闭会话前取（preview/引用点与视图无关，但保持与旧路径一致）。
+        let data = self.custom_data();
+        let had_custom_data =
+            self.data_dirty || !self.custom_previews.is_empty() || self.sidecar_migrated;
+        let saved_previews = self.custom_previews.clone();
+        let saved_dest_marks = self.dest_marks.clone();
+        let saved_next_preview_id = self.next_preview_id.clone();
+
+        let mut backup: Option<PathBuf> = None;
+        let data_written = in_place && self.data_dirty;
+        if in_place {
+            let sidecar = persist::sidecar_path(&source);
+            if self.data_dirty {
+                let sidecar = persist::sidecar_path(&source);
+                self.write_custom_data_to(&sidecar, &data)?;
+                self.data_dirty = false;
+                self.data_clean_hash = Some(self.data_fingerprint());
+            }
+            if !self.pdf_dirty {
+                self.mark_pdf_saved();
+                self.message = format!("已保存自定义数据：{}", sidecar.display());
+                return Ok(());
+            }
+            let temporary = crate::export::stage_in_place_with_refs_and_inline(
                 &source,
-                &target,
                 &items,
                 &ref_updates,
                 &ref_deletes,
                 &inline,
                 pages,
             )?;
+            if !request.allow_conflict {
+                if let Some(opened) = self.pdf_file_stamp {
+                    let changed = match pdf_file_stamp(&source) {
+                        Ok(current) => current != opened,
+                        Err(error) => {
+                            let _ = std::fs::remove_file(&temporary);
+                            return Err(format!("无法复查 PDF 文件状态，已取消写入：{error}"));
+                        }
+                    };
+                    if changed {
+                        let _ = std::fs::remove_file(&temporary);
+                        return Err(PDF_CONFLICT_MESSAGE.to_string());
+                    }
+                }
+            }
+            if self.backup_before_inplace {
+                backup = Some(crate::export::backup_path(&source));
+            }
+            // 关闭会话：释放文件句柄（Windows 上不放开无法替换原文件）。
+            self.session = None;
+            self.textures.clear();
+            if let Some(path) = &backup {
+                if let Err(error) = std::fs::copy(&source, path) {
+                    let _ = std::fs::remove_file(&temporary);
+                    self.open(&source, None);
+                    return Err(format!("备份失败，已取消（原文件未改动）：{error}"));
+                }
+            }
+            if let Err(error) = replace_file(&temporary, &source) {
+                let _ = std::fs::remove_file(&temporary);
+                self.open(&source, None);
+                return Err(error);
+            }
         } else {
-            std::fs::copy(&source, &target).map_err(|error| format!("复制 PDF 失败：{error}"))?;
-        }
-
-        // 数据文件：全部成功后才切换；目标已存在在上面已拒绝。
-        if write_original {
-            let source_sidecar = persist::sidecar_path(&source);
-            self.write_custom_data_to(&source_sidecar, &data)?;
-        }
-        if write_target {
-            self.write_custom_data_to(&target_sidecar, &data)?;
+            let temporary = crate::export::staging_path_for(&target);
+            let _ = std::fs::remove_file(&temporary);
+            let written = if items.is_empty()
+                && ref_updates.is_empty()
+                && ref_deletes.is_empty()
+                && inline.is_empty()
+            {
+                std::fs::copy(&source, &temporary)
+                    .map(|_| ())
+                    .map_err(|error| format!("复制 PDF 失败：{error}"))
+            } else {
+                crate::export::export_with_refs_and_inline(
+                    &source,
+                    &temporary,
+                    &items,
+                    &ref_updates,
+                    &ref_deletes,
+                    &inline,
+                    pages,
+                )
+                .map(|_| ())
+            };
+            if let Err(error) = written {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(error);
+            }
+            self.session = None;
+            self.textures.clear();
+            if let Err(error) = replace_file(&temporary, &target) {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(error);
+            }
+            if request.write_source_data {
+                let sidecar = persist::sidecar_path(&source);
+                self.write_custom_data_to(&sidecar, &data)?;
+            }
+            if request.write_target_data {
+                let sidecar = persist::sidecar_path(&target);
+                self.write_custom_data_to(&sidecar, &data)?;
+            }
         }
 
         self.reopening_after_write = true;
         self.open(&target, None);
         if self.session.is_none() {
-            return Err(format!(
-                "新 PDF 已生成，但重新打开失败：{}",
-                target.display()
-            ));
+            return Err(format!("写入完成，但重新打开失败：{}", target.display()));
         }
-        // 切换后继承内存中的 preview / dest 数据，不从新 sidecar 重新解析：
-        // 这样 preview 的 `(page, id)` 在同一个会话里保持稳定。
         self.custom_previews = saved_previews;
         self.dest_marks = saved_dest_marks;
         self.next_preview_id = saved_next_preview_id;
-        if write_target {
+        if in_place || request.write_target_data {
             self.data_dirty = false;
             self.data_clean_hash = Some(self.data_fingerprint());
         } else if had_custom_data {
             self.data_dirty = true;
             self.data_clean_hash = None;
         }
-        self.pending_view_restore = Some((page, zoom, scroll, 2));
-        self.message = format!("已另存为并切换到：{}（原文件未改动）", target.display());
+        self.mark_pdf_saved();
+        self.pending_view_restore = Some((page, zoom, Some(scroll), 2));
+        if in_place {
+            let backup_note = backup
+                .map(|path| format!("（备份：{}）", path.display()))
+                .unwrap_or_default();
+            if data_written {
+                let sidecar = persist::sidecar_path(&target);
+                self.message = format!(
+                    "已保存：注释 → PDF（新增 {new_count}、更新 {updated}、删除 {deleted}；{backup_note}），自定义数据 → {}",
+                    sidecar.display()
+                );
+            } else {
+                self.message = format!(
+                    "已写入 PDF：新增 {new_count}、更新 {updated}、删除 {deleted} 条注释：{}{backup_note}",
+                    target.display()
+                );
+            }
+        } else {
+            self.message = format!("已另存为并切换到：{}（原文件未改动）", target.display());
+        }
         Ok(())
+    }
+
+    /// 另存为 / 覆盖保存：统一走 `write_document`。
+    fn save_as_to(
+        &mut self,
+        target: PathBuf,
+        write_original: bool,
+        write_target: bool,
+        overwrite: bool,
+    ) -> std::result::Result<(), String> {
+        let Some(source) = self.document_path.clone() else {
+            return Err("没有打开的文档".to_string());
+        };
+        if target == source && !overwrite {
+            return Err("目标与原文件相同；确认覆盖后才能写回原文件".to_string());
+        }
+        let request = WriteRequest {
+            target,
+            allow_overwrite: overwrite,
+            allow_conflict: overwrite,
+            write_source_data: write_original,
+            write_target_data: write_target,
+        };
+        self.write_document(request)
     }
 
     /// 「另存为」路径输入与确认框。
@@ -2138,6 +2613,13 @@ impl PdfReaderApp {
             let mut target_preview = PathBuf::from(draft.trim());
             if target_preview.extension().is_none() {
                 target_preview.set_extension("pdf");
+            }
+            let target_exists = target_preview.exists();
+            if target_exists {
+                ui.checkbox(
+                    &mut self.save_as_overwrite,
+                    "目标已存在：覆盖它（同时按下面的勾选覆盖数据文件）",
+                );
             }
             let has_custom_data =
                 self.data_dirty || !self.custom_previews.is_empty() || self.sidecar_migrated;
@@ -2176,19 +2658,19 @@ impl PdfReaderApp {
             if warnings.new_missing_data {
                 ui.colored_label(
                     Color32::from_rgb(200, 60, 60),
-                    "新文件不会写入自定义 preview / 被引用点尺寸等数据；链接会从 PDF 重新解析。",
+                    "新文件不会写入自定义数据（preview / 被引用点尺寸等）；切换后这些数据仍保留在内存中，并标记为未保存；链接会从 PDF 重新解析。",
                 );
             }
             if warnings.unsaved_new {
                 ui.colored_label(
                     Color32::from_rgb(200, 60, 60),
-                    "未保存的自定义数据已写入原数据文件，但新文件不会写入；切换后内存中仍保留未保存副本。",
+                    "未保存的改动已写入原数据文件（归档），但不会写入新文件。",
                 );
             }
             if warnings.no_data_file {
                 ui.colored_label(
                     Color32::from_rgb(200, 60, 60),
-                    "当前自定义数据不会写入任何数据文件；切换后仍保留在内存中，并标记为未保存。",
+                    "当前自定义数据不会写入任何数据文件（原文件和新文件都不写）。",
                 );
             }
             if warnings.original_stale {
@@ -2245,10 +2727,12 @@ impl PdfReaderApp {
                     target,
                     self.save_as_write_original,
                     self.save_as_write_target,
+                    self.save_as_overwrite,
                 ) {
                     Ok(()) => {
                         self.save_as = None;
                         self.save_as_error = None;
+                        self.continue_pending_action(ctx);
                     }
                     Err(error) => self.save_as_error = Some(error),
                 }
@@ -2262,41 +2746,11 @@ impl PdfReaderApp {
     }
 
     fn save_all(&mut self) {
-        if let Some((found, supported)) = self.sidecar_locked {
-            self.message = format!(
-                "存档由更新版本写入（v{found} > v{supported}），拒绝覆盖；请升级程序后再保存"
-            );
-            return;
-        }
-        if !self.data_dirty && !self.pdf_dirty {
-            self.message = "无改动".to_string();
-            return;
-        }
-        if self.data_dirty {
-            self.save_custom_data();
-        }
-        if self.pdf_dirty {
-            self.perform_in_place_writeback();
-        }
+        // 保存 = 写到当前文件的地址：PDF 脏就写回 PDF，数据脏就写 `.json`。
+        self.perform_in_place_writeback();
     }
 
     /// 注释状态指纹（不含 `pdf_ref`：写回重开时对象号会变）。
-    fn pdf_fingerprint(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        let mut annotations: Vec<_> = self.annotations.iter().collect();
-        annotations.sort_by_key(|annotation| annotation.id);
-        for annotation in annotations {
-            annotation.id.get().hash(&mut hasher);
-            annotation.page.get().hash(&mut hasher);
-            annotation.color.hash(&mut hasher);
-            annotation.opacity.to_bits().hash(&mut hasher);
-            annotation.body.hash(&mut hasher);
-            format!("{:?}", annotation.kind).hash(&mut hasher);
-        }
-        hasher.finish()
-    }
-
     /// 自定义数据指纹（preview 的文本/题目/几何 + 被引用点）。
     fn data_fingerprint(&self) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -2325,12 +2779,30 @@ impl PdfReaderApp {
     }
 
     /// 按“当前状态 vs 上次保存状态”重算两个脏位；撤销回到保存点会自然清零。
+    /// 打开/写回重开收尾：确定洁净基线再算脏位。
+    ///
+    /// 顺序很关键：先设置 `data_clean_hash`（迁移中则为 `None`）再 `refresh_dirty`；
+    /// 反过来会在 clean hash 仍为 `None` 时把 `data_dirty` 置真，导致干净文件一打开就显示脏。
+    fn settle_dirty_after_open(&mut self) {
+        self.saved_pdf_revision = self.history.current_pdf_revision();
+        self.data_clean_hash = if self.data_dirty {
+            None
+        } else {
+            Some(self.data_fingerprint())
+        };
+        self.refresh_dirty();
+    }
+
+    /// 保存成功后把当前修订号记成保存点。
+    fn mark_pdf_saved(&mut self) {
+        self.saved_pdf_revision = self.history.current_pdf_revision();
+        self.refresh_dirty();
+    }
+
     fn refresh_dirty(&mut self) {
-        if let Some(clean) = self.pdf_clean_hash {
-            self.pdf_dirty = self.pdf_fingerprint() != clean;
-        } else if self.document_path.is_some() || !self.history.is_empty() {
-            self.pdf_dirty = true;
-        }
+        // 用保存点的修订号，而不是内容指纹：撤销/重做回到保存点就是干净，
+        // 也不会因为写回后坐标被四舍五入而误报脏。
+        self.pdf_dirty = self.history.current_pdf_revision() != self.saved_pdf_revision;
         if let Some(clean) = self.data_clean_hash {
             self.data_dirty = self.data_fingerprint() != clean;
         } else if self.document_path.is_some() || !self.history.is_empty() {
@@ -2350,18 +2822,17 @@ impl PdfReaderApp {
             .iter()
             .filter_map(|annotation| annotation.pdf_ref)
             .collect();
-        let current_ids: std::collections::HashSet<AnnotationId> = self
-            .annotations
-            .iter()
-            .map(|annotation| annotation.id)
-            .collect();
         let deletes = self
             .opened_pdf_refs
             .iter()
             .filter(|reference| match self.opened_id_by_ref.get(reference) {
                 // 标记注释按 id 判断：撤销/重做后的快照可能暂时没有 pdf_ref，
                 // 但它仍在当前集合里，不能当“已删除”。
-                Some(id) => !current_ids.contains(id),
+                Some(id) => match self.annotations.get(*id) {
+                    // 同一条注释换了对象（移动/重建后 pdf_ref = None）→ 旧对象要删。
+                    Some(annotation) => annotation.pdf_ref != Some(**reference),
+                    None => true,
+                },
                 None => !current.contains(reference),
             })
             .cloned()
@@ -2375,6 +2846,7 @@ impl PdfReaderApp {
                 (before != &annotation.body).then(|| crate::export::RefUpdate {
                     reference,
                     body: annotation.body.clone(),
+                    modified: annotation.modified,
                 })
             })
             .collect();
@@ -2482,53 +2954,12 @@ impl PdfReaderApp {
             .map_err(|error| format!("写入数据文件 {} 失败：{error}", target.display()))
     }
 
-    fn save_custom_data(&mut self) {
-        if !self.data_dirty {
-            self.message = "无自定义数据改动".to_string();
-            return;
-        }
-        if let Some((found, supported)) = self.sidecar_locked {
-            self.message = format!(
-                "同目录存档是 v{found}（本程序支持到 v{supported}）：为了不覆盖它，保存被拒绝"
-            );
-            return;
-        }
-        let Some(path) = self.document_path.clone() else {
-            self.message = "没有打开的文档".to_string();
-            return;
-        };
-        let data = self.custom_data();
-        let target = persist::sidecar_path(&path);
-        match self.write_custom_data_to(&target, &data) {
-            Ok(()) => {
-                self.data_dirty = false;
-                let clean = self.data_fingerprint();
-                self.data_clean_hash = Some(clean);
-                self.message = format!("已保存自定义数据：{}", target.display());
-            }
-            Err(error) => self.message = error,
-        }
-    }
-
-    /// 载入标注图层；文件不存在 → 空集合，坏文件 → 提示并返回空集合。
-    fn load_overlay_file(
-        &mut self,
-        path: &std::path::Path,
-    ) -> std::result::Result<pdfcore::annotation::AnnotationStore, String> {
-        let target = persist::annot_path(path);
-        let text = std::fs::read_to_string(&target)
-            .map_err(|error| format!("读取标注图层失败：{error}"))?;
-        let overlay = persist::SavedOverlay::from_json(&text)
-            .map_err(|error| format!("标注图层无法加载（{error}），已按空处理"))?;
-        Ok(persist::store_from_overlay(&overlay))
-    }
-
+    /// 把 PDF 读回的注释并进内存集合，并把对象号配对好。
     fn merge_readback(
         &mut self,
         readback: &backend_pdfium::readback::Readback,
-        overlay_exists: bool,
         ref_pages: &[Vec<backend_pdfium::pdf_index::PageAnnot>],
-    ) -> (usize, usize) {
+    ) -> usize {
         self.external_ids.clear();
         self.opened_pdf_refs.clear();
         self.opened_pdf_bodies.clear();
@@ -2553,7 +2984,7 @@ impl PdfReaderApp {
                     entries
                         .iter()
                         .filter(|entry| {
-                            !entry.hidden && matches!(entry.subtype, Some(9 | 10 | 12 | 15))
+                            !entry.hidden && matches!(entry.subtype, Some(1 | 9 | 10 | 12 | 15))
                         })
                         .collect()
                 })
@@ -2585,7 +3016,7 @@ impl PdfReaderApp {
         }
 
         let mut restored = 0;
-        let mut recovered = 0;
+        let mut seen_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
         // 第一遍：带 pd-fr 标记的注释（id 固定，先占住 id 空间）
         for (item, reference, _) in &entries {
             let Some(raw_id) = item.id else {
@@ -2594,11 +3025,18 @@ impl PdfReaderApp {
             let id = AnnotationId(raw_id);
             if let Some(existing) = self.annotations.get_mut(id) {
                 existing.pdf_ref = *reference;
-                if overlay_exists && existing.body.is_none() && item.body.is_some() {
+                if seen_ids.contains(&raw_id) {
+                    // 同一 id 在页面 /Annots 里出现多次（历史写入/其它阅读器重复保存）：
+                    // 数组顺序就是追加顺序，**以最后一个为准**，否则会拿旧正文覆盖新修改。
+                    existing.kind = item.kind.clone();
+                    existing.color = item.color;
+                    existing.opacity = item.opacity;
                     existing.body = item.body.clone();
-                    recovered += 1;
+                    existing.author = item.author.clone();
+                    existing.created = item.created;
+                    existing.modified = item.modified;
                 }
-            } else if !overlay_exists {
+            } else {
                 let Some(mut annotation) = Annotation::new(item.page, item.kind.clone()) else {
                     continue;
                 };
@@ -2606,10 +3044,14 @@ impl PdfReaderApp {
                 annotation.color = item.color;
                 annotation.opacity = item.opacity;
                 annotation.body = item.body.clone();
+                annotation.author = item.author.clone();
+                annotation.created = item.created;
+                annotation.modified = item.modified;
                 annotation.pdf_ref = *reference;
                 self.annotations.insert(annotation);
                 restored += 1;
             }
+            seen_ids.insert(raw_id);
         }
         // 第二遍：无标记的外部注释
         for (item, reference, inline) in &entries {
@@ -2638,6 +3080,9 @@ impl PdfReaderApp {
                 annotation.color = item.color;
                 annotation.opacity = item.opacity;
                 annotation.body = item.body.clone();
+                annotation.author = item.author.clone();
+                annotation.created = item.created;
+                annotation.modified = item.modified;
                 annotation.pdf_ref = *reference;
             }
             if let Some(reference) = reference {
@@ -2648,7 +3093,7 @@ impl PdfReaderApp {
             }
             self.external_ids.insert(id);
         }
-        (restored, recovered)
+        restored
     }
 
     /// 写回重开后，把撤销栈里注释快照的 `pdf_ref` 重新绑到新 PDF 对象号。
@@ -2662,15 +3107,16 @@ impl PdfReaderApp {
             match command {
                 AppEdit::AddAnnotation { annotation }
                 | AppEdit::DeleteAnnotation { annotation } => {
-                    if let Some(reference) = refs.get(&annotation.id) {
-                        annotation.pdf_ref = Some(*reference);
-                    }
+                    // 写回重开后 id → 新对象号；不在文件里的（例如刚删掉的）清空，
+                    // 撤销恢复时才会按"新注释"重建，而不是拿着过期对象号什么都不写。
+                    annotation.pdf_ref = refs.get(&annotation.id).copied();
                 }
-                AppEdit::RecolorAnnotation { before, after } => {
-                    if let Some(reference) = refs.get(&after.id) {
-                        after.pdf_ref = Some(*reference);
-                    }
+                AppEdit::RestyleAnnotation { before, after }
+                | AppEdit::MoveAnnotation { before, after } => {
+                    // 样式/几何编辑写回时旧对象已删、对象号会变；两个快照都按"重建"处理，
+                    // 撤销/重做才不会带着过期 ref 变成"什么都没写"（移动的墨迹会消失）。
                     before.pdf_ref = None;
+                    after.pdf_ref = None;
                 }
                 _ => {}
             }
@@ -2680,9 +3126,15 @@ impl PdfReaderApp {
     fn open(&mut self, path: &std::path::Path, password: Option<&str>) {
         let preserve_history = self.reopening_after_write;
         self.reopening_after_write = false;
+        if !preserve_history && self.document_path.is_some() {
+            // 换文档前先把"上次看到哪"记下来（写盘在指针空闲的帧里做）。
+            self.remember_document_view();
+        }
         if !preserve_history {
             self.history.clear();
             self.pdf_ref_ids.clear();
+            // 换文档：旧文档的数据脏位不能带过来；迁移/升级会在加载时重新置脏。
+            self.data_dirty = false;
         }
         let backend = PdfiumBackend::new();
         match backend.open(Source::Path(path), password) {
@@ -2702,7 +3154,6 @@ impl PdfReaderApp {
                     .iter()
                     .filter(|annotation| annotation.id.is_some())
                     .count();
-                let mut open_warning: Option<String> = None;
                 let raster = opened.raster.clone();
                 let concurrency = opened.capabilities.max_concurrency as usize;
                 let cache = Arc::new(LruCache::with_default_capacity());
@@ -2732,12 +3183,8 @@ impl PdfReaderApp {
                         self.sidecar_locked = None;
                         self.document_path = Some(path.to_path_buf());
                         self.pdf_file_stamp = pdf_file_stamp(path).ok();
-                        // 标注图层（<pdf>.annot.json）：缺文件 = 空；坏文件只提示，不影响打开文档
                         self.annotations.clear();
                         self.pdf_dirty = false;
-                        let overlay_file_exists = persist::annot_path(path).exists();
-                        // 坏 overlay 当作"不存在"处理：否则 PDF 里明明有注释也恢复不出来
-                        let mut overlay_ok = true;
                         // 同目录若有存档（<pdf>.json），载入并**替换**链接与被引用点/自定义数据。
                         // 旧版本就地升级并置脏（下次保存写回当前版本）；**更新版本一律拒绝**（D-107）。
                         let saved = match load_sidecar(path) {
@@ -2899,48 +3346,34 @@ impl PdfReaderApp {
                             preview.id = self.next_preview_id[page];
                             self.next_preview_id[page] += 1;
                         }
-                        // 先载入主存档（custom_previews），再载入/迁移 A（v2 的正文在 `.json` 里）
-                        if overlay_file_exists {
-                            match self.load_overlay_file(path) {
-                                Ok(store) => {
-                                    if !store.is_empty() {
-                                        // 旧 A 里的注释要迁移进 PDF：保存时写出并退休 A
-                                        self.pdf_dirty = true;
-                                    }
-                                    self.annotations = store;
-                                }
-                                Err(message) => {
-                                    overlay_ok = false;
-                                    open_warning = Some(message);
-                                }
-                            }
-                        }
-                        // v3 之后注释正文不再使用 preview；清掉可能残留的 `#annot:` 条目。
-                        // v2（已关闭通道）或坏 A 不清理：避免把仍可能属于旧数据的正文丢掉。
-                        if overlay_file_exists && overlay_ok {
-                            let before = self.custom_previews.len();
-                            self.custom_previews
-                                .retain(|preview| !preview.title.starts_with("#annot:"));
-                            if self.custom_previews.len() != before {
-                                self.data_dirty = true;
-                            }
-                        }
-                        let overlay_exists = overlay_file_exists && overlay_ok;
                         let ref_pages = std::fs::read(path)
                             .ok()
                             .and_then(|bytes| {
                                 backend_pdfium::pdf_index::page_annotations(&bytes).ok()
                             })
                             .unwrap_or_default();
-                        let (restored, recovered_bodies) =
-                            self.merge_readback(&readback, overlay_exists, &ref_pages);
+                        let restored = self.merge_readback(&readback, &ref_pages);
                         if preserve_history {
                             self.reconcile_history_refs();
                         }
                         self.next_float_id = 1;
                         self.capture = None;
                         let title = session.opened().document.info().to_string();
+                        let page_count = session.page_count();
                         self.session = Some(session);
+                        if !preserve_history {
+                            if let Some(state) =
+                                self.settings.document(&settings_key(path)).cloned()
+                            {
+                                let page =
+                                    PageIndex::new(state.page.min(page_count.saturating_sub(1)));
+                                let scroll =
+                                    state.anchor.map(|anchor| Vec2::new(anchor[0], anchor[1]));
+                                self.pending_view_restore = Some((page, state.zoom, scroll, 2));
+                                self.horizontal_layout = state.horizontal;
+                                self.pending_layout = Some(state.horizontal);
+                            }
+                        }
                         self.textures.clear();
                         // D-96 的记账按页号索引：换文档后必须清空，否则旧文档的
                         // "第一块就绪时刻"会让新文档的同一页号一上来就判定超时（提前补白）。
@@ -2965,23 +3398,7 @@ impl PdfReaderApp {
                             self.message
                                 .push_str(&format!("（已从 PDF 恢复 {restored} 条标注）"));
                         }
-                        if recovered_bodies > 0 {
-                            self.message
-                                .push_str(&format!("（已从 PDF 补回 {recovered_bodies} 条正文）"));
-                        }
-                        if let Some(warning) = open_warning {
-                            self.message.push_str(&format!("（{warning}）"));
-                        }
-                        self.pdf_clean_hash = if self.pdf_dirty {
-                            None
-                        } else {
-                            Some(self.pdf_fingerprint())
-                        };
-                        self.data_clean_hash = if self.data_dirty {
-                            None
-                        } else {
-                            Some(self.data_fingerprint())
-                        };
+                        self.settle_dirty_after_open();
                         self.sidecar_migrated = false;
                         self.password_for = None;
                         self.password_input.clear();
@@ -3076,6 +3493,11 @@ impl PdfReaderApp {
                 self.pending_annotate = Some(MarkupTool::Highlight);
                 continue;
             }
+            if key == Key::Escape && self.move_ink_armed.is_some() {
+                self.move_ink_armed = None;
+                self.message = "已取消移动".to_string();
+                continue;
+            }
             if key == Key::Escape && self.context_menu_pos.is_some() {
                 self.context_annotation = None;
                 self.context_menu_pos = None;
@@ -3088,7 +3510,8 @@ impl PdfReaderApp {
                 continue;
             }
             if key == Key::Escape && self.tool == Tool::Ink && self.ink.is_none() {
-                self.switch_tool(Tool::Pan);
+                let previous = self.tool_before_annotation.take().unwrap_or(Tool::Select);
+                self.switch_tool(previous);
                 self.message = "已退出墨迹模式".to_string();
                 continue;
             }
@@ -3122,7 +3545,7 @@ impl PdfReaderApp {
                 .map(|file| file.path().to_path_buf())
         });
         if let Some(path) = dropped {
-            self.open(&path, None);
+            self.request_open(path);
         }
     }
 
@@ -3140,7 +3563,11 @@ impl PdfReaderApp {
                     self.message = format!("已复制 {} 个字符", text.chars().count());
                 }
                 SessionEvent::PageRenderFailed { page, error } => {
-                    self.error = Some(format!("第 {} 页渲染失败：{error}", page.display_number()));
+                    // 切布局/跳页会取消在途渲染；"任务已取消"不是失败，别弹给用户。
+                    if !error.is_cancelled() {
+                        self.error =
+                            Some(format!("第 {} 页渲染失败：{error}", page.display_number()));
+                    }
                 }
                 SessionEvent::Error(error) => self.error = Some(error.to_string()),
                 SessionEvent::CurrentPageChanged(page) => {
@@ -3394,96 +3821,103 @@ impl PdfReaderApp {
                 );
                 response.on_hover_text(&path_text);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let can_save_as = self.document_path.is_some();
-                    let save_as = ui.add_enabled(can_save_as, egui::Button::new("另存为…"));
-                    let save_as = if can_save_as {
-                        save_as.on_hover_text("把当前 PDF + 注释另存为新文件；当前文件保持不变")
-                    } else {
-                        save_as.on_disabled_hover_text("需要先打开一个 PDF")
-                    };
-                    if save_as.clicked() {
-                        self.open_save_as_dialog();
-                    }
                     ui.add_space(6.0);
-                    let label = save_button_label(self.data_dirty);
-                    match self.sidecar_locked {
-                        // 存档属于更新版本：不读也不写（D-107），按钮直接禁用并说明原因
-                        Some((found, supported)) => {
-                            ui.add_enabled(false, egui::Button::new(label))
-                                .on_disabled_hover_text(format!(
-                                    "同目录存档是 v{found}，本程序只支持到 v{supported}：\
-                                     为了不覆盖它，保存已禁用"
-                                ));
+                    // 文件操作收进一个菜单：少了 5 个按钮，窄窗口不再挤。
+                    let can_write = self.document_path.is_some() && self.is_dirty();
+                    let can_compact = self.document_path.is_some();
+                    let marker = if self.pdf_dirty || self.data_dirty { " *" } else { "" };
+                    ui.menu_button(format!("文件{marker}"), |ui| {
+                        let save = ui.add_enabled(can_write, egui::Button::new("保存"));
+                        let save = if can_write {
+                            save.on_hover_text(
+                                "把注释写进原 PDF、自定义数据写进 .json（原子替换；Ctrl+S）",
+                            )
+                        } else {
+                            save.on_disabled_hover_text("没有需要保存的改动")
+                        };
+                        if save.clicked() {
+                            self.pending_in_place = true;
+                            self.in_place_error = None;
+                            ui.close();
                         }
-                        None => {
-                            if ui
-                                .button(label)
-                                .on_hover_text("保存所有有改动的文件（Ctrl+S）")
-                                .clicked()
-                            {
-                                // 这个按钮只负责自定义数据；注释用「写入 PDF」/Ctrl+S。
-                                self.save_custom_data();
+                        let save_as = ui.add_enabled(
+                            self.document_path.is_some(),
+                            egui::Button::new("另存为…"),
+                        );
+                        let save_as = if self.document_path.is_some() {
+                            save_as.on_hover_text("另存为新的 PDF（可带注释），当前文件保持不变")
+                        } else {
+                            save_as.on_disabled_hover_text("需要先打开一个 PDF")
+                        };
+                        if save_as.clicked() {
+                            self.open_save_as_dialog();
+                            ui.close();
+                        }
+                        let can_summary = !self.annotations.is_empty();
+                        let summary =
+                            ui.add_enabled(can_summary, egui::Button::new("导出注释摘要…"));
+                        let summary = if can_summary {
+                            summary.on_hover_text(
+                                "导出 Markdown 摘要：同目录 <原名>.annotations.md（不覆盖）",
+                            )
+                        } else {
+                            summary.on_disabled_hover_text("当前没有注释")
+                        };
+                        if summary.clicked() {
+                            self.export_annotation_summary();
+                            ui.close();
+                        }
+                        let compact =
+                            ui.add_enabled(can_compact, egui::Button::new("整理副本…"));
+                        let compact = if can_compact {
+                            compact.on_hover_text(
+                                "去掉历史修订，生成更小的单段 PDF；输出为新文件，注释与数据文件都不动",
+                            )
+                        } else {
+                            compact.on_disabled_hover_text("需要先打开一个 PDF")
+                        };
+                        if compact.clicked() {
+                            self.open_compact_dialog();
+                            ui.close();
+                        }
+                        ui.separator();
+                        ui.checkbox(
+                            &mut self.backup_before_inplace,
+                            "原地保存前保留一份 .bak 备份",
+                        )
+                        .on_hover_text("默认关闭；关闭时只做临时文件 + 原子替换");
+                        ui.separator();
+                        ui.menu_button("最近打开", |ui| {
+                            let documents = self.settings.documents.clone();
+                            if documents.is_empty() {
+                                ui.label("（还没有最近文件）");
                             }
-                        }
-                    }
-                    ui.add_space(6.0);
-                    // 原地写入（S5c）：会覆盖原文件，先弹确认 + 自动备份。
-                    // 允许"空标注"：把 PDF 里写过的注释删干净（界面上删光之后要能写回）。
-                    let has_write_work = self.pdf_dirty
-                        || !self.annotations.is_empty()
-                        || self.pdf_marked_annotations > 0;
-                    let can_write = self.document_path.is_some() && self.pdf_dirty;
-                    let write_label = if self.pdf_dirty {
-                        "*写入 PDF"
-                    } else {
-                        "写入 PDF"
-                    };
-                    let write_back =
-                        ui.add_enabled(can_write, egui::Button::new(write_label));
-                    let write_back = if can_write {
-                        write_back.on_hover_text(
-                            "把标注写进原 PDF（会先备份、再原子替换；重复写入是幂等的）",
-                        )
-                    } else {
-                        write_back.on_disabled_hover_text(
-                            "需要打开一个 PDF；当前没有标注，PDF 里也没有写回的注释",
-                        )
-                    };
-                    if write_back.clicked() {
-                        self.pending_in_place = true;
-                    }
-                    ui.add_space(6.0);
-                    // S6c：丢弃 overlay，按 PDF 里写回的注释重建（先备份 A/J）
-                    let can_rebuild =
-                        self.document_path.is_some() && self.pdf_marked_annotations > 0;
-                    let rebuild =
-                        ui.add_enabled(can_rebuild, egui::Button::new("从 PDF 重建"));
-                    let rebuild = if can_rebuild {
-                        rebuild.on_hover_text(
-                            "用 PDF 里写回的注释替换当前标注数据（先备份 .annot.json / .json）",
-                        )
-                    } else {
-                        rebuild.on_disabled_hover_text("PDF 里还没有带标记的注释可用来重建")
-                    };
-                    if rebuild.clicked() {
-                        self.pending_rebuild = true;
-                    }
-                    ui.add_space(6.0);
-                    // 导出带标注的 PDF（S5b-2）：写新文件，不覆盖；真正的写回在子进程里
-                    let can_export = self.document_path.is_some() && has_write_work;
-                    let export = ui.add_enabled(can_export, egui::Button::new("导出标注 PDF"));
-                    let export = if can_export {
-                        export.on_hover_text(
-                            "把当前标注写成真正的 PDF 注释，保存为同目录的 <原名>.annotated.pdf（不覆盖）",
-                        )
-                    } else {
-                        export.on_disabled_hover_text(
-                            "需要打开一个 PDF；当前没有标注，PDF 里也没有写回的注释",
-                        )
-                    };
-                    if export.clicked() {
-                        self.export_annotated_pdf(session);
-                    }
+                            for document in documents.iter().take(8) {
+                                let name = document
+                                    .path
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| document.path.display().to_string());
+                                let label =
+                                    format!("{name}  ·  第 {} 页", document.page + 1);
+                                let exists = document.path.exists();
+                                let item = ui.add_enabled(exists, egui::Button::new(label));
+                                let item = if exists {
+                                    item.on_hover_text(document.path.display().to_string())
+                                } else {
+                                    item.on_disabled_hover_text(format!(
+                                        "文件不存在：{}",
+                                        document.path.display()
+                                    ))
+                                };
+                                if item.clicked() {
+                                    // 这里还在绘制中（`session` 被借出去了），不能直接 open。
+                                    self.request_open(document.path.clone());
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
                 });
             });
 
@@ -3670,10 +4104,16 @@ impl PdfReaderApp {
 
                 // 基础工具：平移 / 选字；墨迹按钮和文本标记放在一起
                 for tool in [Tool::Pan, Tool::Select] {
-                    if ui
-                        .selectable_label(self.tool == tool, tool.label())
-                        .clicked()
-                    {
+                    // 便签模式与阅读模式无关联：不高亮任何阅读模式。
+                    let active = self.tool == tool && !self.note_pin;
+                    let response = ui.selectable_label(active, tool.label()).on_hover_text(
+                        if tool == Tool::Select {
+                            "选字/复制；Ctrl/Alt+拖拽可移动墨迹（也可右键「移动」）"
+                        } else {
+                            "平移画面；Ctrl/Alt+拖拽可移动墨迹（也可右键「移动」）"
+                        },
+                    );
+                    if response.clicked() {
                         self.switch_tool(tool);
                     }
                 }
@@ -3705,30 +4145,51 @@ impl PdfReaderApp {
                 }
 
                 ui.separator();
-                for tool in [
-                    MarkupTool::Highlight,
-                    MarkupTool::Underline,
-                    MarkupTool::StrikeOut,
-                ] {
-                    let active = self.annotation_tool == Some(tool);
-                    let response = ui
-                        .add(egui::Button::new(tool.label()).selected(active))
-                        .on_hover_text(format!(
-                            "进入{}模式：拖选文字后施加；再点一次/Esc 退出",
-                            tool.label()
-                        ));
-                    if response.clicked() {
-                        self.toggle_markup_tool(tool);
+                // 注释工具收进一个弹出菜单；样式是独立按钮（进入模式与改样式是两次操作）。
+                // 不加外框，只用竖线分组。
+                let tool_label = match self.annotation_tool {
+                    Some(tool) => format!("{} ▾", tool.label()),
+                    None if self.tool == Tool::Ink => "墨迹 ▾".to_string(),
+                    None => "注释工具 ▾".to_string(),
+                };
+                ui.menu_button(tool_label, |ui| {
+                    for tool in [
+                        MarkupTool::Highlight,
+                        MarkupTool::Underline,
+                        MarkupTool::StrikeOut,
+                    ] {
+                        let active = self.annotation_tool == Some(tool);
+                        if ui
+                            .selectable_label(active, tool.label())
+                            .on_hover_text(format!(
+                                "进入{}模式：拖选文字后施加；Esc 退出",
+                                tool.label()
+                            ))
+                            .clicked()
+                        {
+                            self.toggle_markup_tool(tool);
+                            ui.close();
+                        }
                     }
-                }
-                let ink_active = self.tool == Tool::Ink && self.annotation_tool.is_none();
-                if ui
-                    .add(egui::Button::new("墨迹").selected(ink_active))
-                    .on_hover_text("墨迹模式：拖拽画一笔；Esc/切换工具退出")
-                    .clicked()
-                {
-                    self.switch_tool(Tool::Ink);
-                }
+                    let ink_active =
+                        self.tool == Tool::Ink && self.annotation_tool.is_none() && !self.note_pin;
+                    if ui
+                        .selectable_label(ink_active, "墨迹")
+                        .on_hover_text("墨迹模式：拖拽画一笔；Esc 退出")
+                        .clicked()
+                    {
+                        self.enter_ink_mode();
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(self.note_pin, "便签")
+                        .on_hover_text("点击页面位置，输入正文后添加；Esc 取消")
+                        .clicked()
+                    {
+                        self.enter_note_mode();
+                        ui.close();
+                    }
+                });
                 ui.menu_button("样式", |ui| {
                     ui.label("标记颜色");
                     ui.horizontal(|ui| {
@@ -3762,8 +4223,15 @@ impl PdfReaderApp {
                             }
                         }
                     });
+                    ui.add(
+                        egui::Slider::new(&mut self.ink_width, 0.5..=6.0)
+                            .text("墨迹线宽")
+                            .fixed_decimals(1),
+                    );
                     ui.label("下划线/删除线固定不透明；线宽随缩放。");
                 });
+                self.sync_style_settings();
+                ui.separator();
 
                 // 引用显示样式（链接框 + 引用点 合并为一个菜单）
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3964,18 +4432,45 @@ impl PdfReaderApp {
     /// 侧栏「注释」标签页：按页分组、类型/正文摘要、筛选与定位。
     fn draw_annotation_list(&mut self, ui: &mut egui::Ui, session: &mut DocumentSession) {
         ui.horizontal(|ui| {
-            ui.label("筛选");
-            ui.menu_button("类型", |ui| {
+            egui::ComboBox::from_id_salt("annotation-list-view")
+                .selected_text(self.annotation_view.label())
+                .width(88.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.annotation_view,
+                        AnnotationListView::ByPage,
+                        "按页",
+                    );
+                    ui.selectable_value(
+                        &mut self.annotation_view,
+                        AnnotationListView::Recent,
+                        "最近修改",
+                    );
+                });
+            ui.add(
+                egui::TextEdit::singleline(&mut self.annotation_search)
+                    .hint_text("搜索正文/作者")
+                    .desired_width(120.0),
+            );
+            if !self.annotation_search.is_empty()
+                && ui.small_button("×").on_hover_text("清空搜索").clicked()
+            {
+                self.annotation_search.clear();
+            }
+            ui.menu_button("筛选", |ui| {
                 ui.checkbox(&mut self.annotation_show_highlight, "高亮");
                 ui.checkbox(&mut self.annotation_show_underline, "下划线");
                 ui.checkbox(&mut self.annotation_show_strike, "删除线");
                 ui.checkbox(&mut self.annotation_show_ink, "墨迹");
+                ui.checkbox(&mut self.annotation_show_note, "便签");
+                ui.separator();
+                ui.checkbox(&mut self.annotation_only_external, "仅外部");
+                ui.checkbox(&mut self.annotation_only_readonly, "仅只读");
             });
-            ui.checkbox(&mut self.annotation_only_external, "仅外部");
-            ui.checkbox(&mut self.annotation_only_readonly, "仅只读");
         });
         ui.separator();
 
+        let query = self.annotation_search.trim().to_lowercase();
         let mut rows: Vec<AnnotationRow> = Vec::new();
         for annotation in self.annotations.iter() {
             let (label, visible) = annotation_kind_label(&annotation.kind);
@@ -3987,6 +4482,7 @@ impl PdfReaderApp {
                 AnnotationKind::Underline { .. } => self.annotation_show_underline,
                 AnnotationKind::StrikeOut { .. } => self.annotation_show_strike,
                 AnnotationKind::Ink { .. } => self.annotation_show_ink,
+                AnnotationKind::Note { .. } => self.annotation_show_note,
             };
             if !enabled {
                 continue;
@@ -3999,6 +4495,9 @@ impl PdfReaderApp {
             if self.annotation_only_readonly && !readonly {
                 continue;
             }
+            if !query.is_empty() && !annotation_matches_query(annotation, &query) {
+                continue;
+            }
             let summary = body_summary(annotation.body.as_deref());
             let preview = body_tooltip(annotation.body.as_deref());
             rows.push(AnnotationRow {
@@ -4009,6 +4508,9 @@ impl PdfReaderApp {
                 external,
                 summary,
                 preview,
+                author: annotation.author.clone(),
+                created: annotation.created,
+                modified: annotation.modified,
                 bounds: annotation.bounds(),
             });
         }
@@ -4016,29 +4518,25 @@ impl PdfReaderApp {
             ui.label(if self.annotations.is_empty() {
                 "（本文档还没有注释）"
             } else {
-                "（筛选后没有注释）"
+                "（没有匹配的注释）"
             });
             return;
         }
-        rows.sort_by(|a, b| {
-            a.page
-                .get()
-                .cmp(&b.page.get())
-                .then_with(|| match (a.bounds, b.bounds) {
-                    (Some(left), Some(right)) => right
-                        .y
-                        .partial_cmp(&left.y)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| {
-                            left.x
-                                .partial_cmp(&right.x)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        }),
-                    _ => std::cmp::Ordering::Equal,
-                })
-                .then_with(|| a.id.get().cmp(&b.id.get()))
+        match self.annotation_view {
+            AnnotationListView::ByPage => rows.sort_by(by_page_order),
+            AnnotationListView::Recent => rows.sort_by(recent_order),
+        }
+        let recent = self.annotation_view == AnnotationListView::Recent;
+        let total = rows.len();
+        let mut counts: std::collections::BTreeMap<u32, usize> = std::collections::BTreeMap::new();
+        for row in &rows {
+            *counts.entry(row.page.get()).or_default() += 1;
+        }
+        ui.label(if recent {
+            format!("{total} 条 · 按修改时间")
+        } else {
+            format!("{total} 条")
         });
-        ui.label(format!("{} 条", rows.len()));
         let mut last_page: Option<PageIndex> = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -4052,20 +4550,41 @@ impl PdfReaderApp {
                         external,
                         summary,
                         preview,
+                        author,
+                        created,
+                        modified,
                         ..
                     } = row;
-                    if last_page != Some(page) {
+                    if !recent && last_page != Some(page) {
                         if last_page.is_some() {
                             ui.add_space(6.0);
                         }
-                        ui.label(
-                            RichText::new(format!("第 {} 页", page.display_number()))
-                                .strong()
-                                .color(ui.visuals().weak_text_color()),
-                        );
+                        let collapsed = self.collapsed_annotation_pages.contains(&page.get());
+                        let count = counts.get(&page.get()).copied().unwrap_or(0);
+                        let arrow = if collapsed { "▸" } else { "▾" };
+                        let text = RichText::new(format!(
+                            "{arrow} 第 {} 页（{count} 条）",
+                            page.display_number()
+                        ))
+                        .strong()
+                        .color(ui.visuals().weak_text_color());
+                        if ui.selectable_label(false, text).clicked() {
+                            if collapsed {
+                                self.collapsed_annotation_pages.remove(&page.get());
+                            } else {
+                                self.collapsed_annotation_pages.insert(page.get());
+                            }
+                        }
                         last_page = Some(page);
                     }
-                    let mut text = format!("[{label}] {summary}");
+                    if !recent && self.collapsed_annotation_pages.contains(&page.get()) {
+                        continue;
+                    }
+                    let mut text = if recent {
+                        format!("第 {} 页 · [{label}] {summary}", page.display_number())
+                    } else {
+                        format!("[{label}] {summary}")
+                    };
                     if readonly {
                         text.push_str("  [内联]");
                     }
@@ -4088,12 +4607,20 @@ impl PdfReaderApp {
                                 },
                             )
                             .inner
-                            .on_hover_text(format!(
-                                "{preview}\n\n{label} · 第 {} 页{}{}",
-                                page.display_number(),
-                                if external { " · 外部" } else { " · 自有" },
-                                if readonly { " · 内联" } else { "" }
-                            ));
+                            .on_hover_text({
+                                // 列表已按页分组，"第 N 页"冗余：这里换成作者；时间单独一行。
+                                let mut text = format!(
+                                    "{preview}\n\n{label} · {}{}{}",
+                                    author.as_deref().unwrap_or("未署名"),
+                                    if external { " · 外部" } else { " · 自有" },
+                                    if readonly { " · 内联" } else { "" }
+                                );
+                                if let Some(line) = annotation_time_line(created, modified) {
+                                    text.push('\n');
+                                    text.push_str(&line);
+                                }
+                                text
+                            });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let delete = ui.add_enabled(
                                 !readonly,
@@ -4555,6 +5082,9 @@ impl PdfReaderApp {
 
     /// 进入/退出文本标记模式；进入时自动切到选字工具。
     fn toggle_markup_tool(&mut self, tool: MarkupTool) {
+        // 从便签切回标记也要算"从注释模式进入"，否则会把 A 改写成当前阅读模式。
+        let came_from_annotation = self.note_pin || self.tool == Tool::Ink;
+        self.note_pin = false;
         if self.annotation_tool.is_some() {
             if self.annotation_tool == Some(tool) {
                 self.exit_markup_tool();
@@ -4564,9 +5094,15 @@ impl PdfReaderApp {
             }
             return;
         }
+        // 从墨迹/便签切过来时**保留原来的 A**；只有从阅读模式进入才记录 A。
+        let remembered = self.tool_before_annotation;
         let previous = self.tool;
         self.switch_tool(Tool::Select);
-        self.tool_before_annotation = Some(previous);
+        self.tool_before_annotation = if came_from_annotation {
+            remembered
+        } else {
+            Some(previous)
+        };
         self.annotation_tool = Some(tool);
         self.message = format!("{}模式：拖选文字即可添加，Esc 退出", tool.label());
     }
@@ -4589,6 +5125,8 @@ impl PdfReaderApp {
         self.tool = tool;
         self.annotation_tool = None;
         self.tool_before_annotation = None;
+        self.note_pin = false;
+        self.move_ink_armed = None;
         if pin_exits_on_mode_change(tool == Tool::Select, false) {
             self.custom_pin = None;
         }
@@ -4639,7 +5177,7 @@ impl PdfReaderApp {
                 self.message = "请在页面上开始画墨迹".to_string();
                 return;
             };
-            let mut stroke = InkStroke::start(page, DEFAULT_INK_WIDTH, page_point);
+            let mut stroke = InkStroke::start(page, self.ink_width, page_point);
             // 触发 `drag_started` 需要先移过阈值，所以"按下点"与"当前位置"之间已经有一段了；
             // 把当前位置也采进来，否则一笔的开头会凭空少一段（快速起笔时尤其明显）。
             if let Some(position) = response.interact_pointer_pos() {
@@ -4757,11 +5295,15 @@ impl PdfReaderApp {
         let Some(id) = self.annotations.add(page, kind) else {
             return false;
         };
-        if let Some((color, opacity)) = style {
-            if let Some(annotation) = self.annotations.get_mut(id) {
+        if let Some(annotation) = self.annotations.get_mut(id) {
+            if let Some((color, opacity)) = style {
                 annotation.color = color;
                 annotation.opacity = opacity.clamp(0.0, 1.0);
             }
+            annotation.author = backend_pdfium::pdf_patch::pdf_author();
+            let now = unix_now();
+            annotation.created = Some(now);
+            annotation.modified = Some(now);
         }
         let Some(annotation) = self.annotations.get(id).cloned() else {
             return false;
@@ -4815,38 +5357,63 @@ impl PdfReaderApp {
     ///
     /// 已写入 PDF 的注释通过“旧对象 deletes + 新对象 pages”重建，避免依赖
     /// 各阅读器不同的 AP 颜色字段；外部注释暂不改色，避免把别人的注释变成自有对象。
-    fn recolor_annotation(&mut self, id: AnnotationId, color: [u8; 3]) -> bool {
+    fn restyle_annotation(
+        &mut self,
+        id: AnnotationId,
+        color: Option<[u8; 3]>,
+        opacity: Option<f32>,
+        ink_width: Option<f32>,
+    ) -> bool {
         let Some(before) = self.annotations.get(id).cloned() else {
             return false;
         };
         if self.external_ids.contains(&id) {
-            self.message = "外部注释暂不支持改色".to_string();
+            self.message = "外部注释暂不支持修改样式".to_string();
             return false;
         }
-        if before.color == color {
+        // 墨迹线宽是 kind 的一部分：改它要重建 kind。
+        let mut kind = before.kind.clone();
+        if let (Some(width), AnnotationKind::Ink { points, .. }) = (ink_width, &before.kind) {
+            kind = AnnotationKind::Ink {
+                points: points.clone(),
+                width: width.clamp(0.5, 8.0),
+            };
+        }
+        let color = color.unwrap_or(before.color);
+        let opacity = opacity
+            .map(|value| value.clamp(0.1, 1.0))
+            .unwrap_or(before.opacity);
+        if color == before.color
+            && (opacity - before.opacity).abs() < f32::EPSILON
+            && kind == before.kind
+        {
             return false;
         }
-        let page = before.page;
-        let kind = before.kind.clone();
-        let body = before.body.clone();
-        let opacity = before.opacity;
-        let new_id = match self.annotations.add(page, kind) {
+        let new_id = match self.annotations.add(before.page, kind) {
             Some(id) => id,
             None => return false,
         };
         if let Some(after) = self.annotations.get_mut(new_id) {
             after.color = color;
             after.opacity = opacity;
-            after.body = body;
+            after.body = before.body.clone();
+            after.author = before.author.clone();
+            after.created = before.created;
+            after.modified = Some(unix_now());
         }
         let Some(after) = self.annotations.get(new_id).cloned() else {
             self.annotations.remove(new_id);
             return false;
         };
         self.annotations.remove(new_id);
-        self.apply_edit(AppEdit::RecolorAnnotation { before, after }, true);
-        self.message = "已修改标注颜色（Ctrl+Z 可撤销；外部注释暂不支持）".to_string();
+        self.apply_edit(AppEdit::RestyleAnnotation { before, after }, true);
+        self.message = "已修改标注样式（Ctrl+Z 可撤销；外部注释暂不支持）".to_string();
         true
+    }
+
+    /// 改颜色（旧入口，内部走 [`Self::restyle_annotation`]）。
+    fn recolor_annotation(&mut self, id: AnnotationId, color: [u8; 3]) -> bool {
+        self.restyle_annotation(id, Some(color), None, None)
     }
 
     /// 注释右键菜单（画布与注释列表共用）：颜色、删除。
@@ -4856,8 +5423,11 @@ impl PdfReaderApp {
         };
         let external = self.external_ids.contains(&id);
         let current = annotation.color;
+        let current_opacity = annotation.opacity;
+        let current_width = annotation.kind.ink().map(|(_, width)| width);
+        let is_highlight = matches!(annotation.kind, AnnotationKind::Highlight { .. });
         if external {
-            ui.label("外部注释暂不支持改色（正文/删除可用）");
+            ui.label("外部注释暂不支持改样式（正文/删除可用）");
         } else {
             ui.menu_button("颜色", |ui| {
                 for (name, rgb) in [
@@ -4875,6 +5445,54 @@ impl PdfReaderApp {
                     }
                 }
             });
+            if is_highlight {
+                ui.menu_button("透明度", |ui| {
+                    for (label, value) in [
+                        ("20%", 0.2f32),
+                        ("35%", 0.35),
+                        ("50%", 0.5),
+                        ("75%", 0.75),
+                        ("100%", 1.0),
+                    ] {
+                        let selected = (current_opacity - value).abs() < 0.01;
+                        if ui.selectable_label(selected, label).clicked()
+                            && self.restyle_annotation(id, None, Some(value), None)
+                        {
+                            self.context_annotation = None;
+                            self.context_menu_pos = None;
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            if current_width.is_some()
+                && ui
+                    .button("移动（拖动）")
+                    .on_hover_text("选中后直接拖动这条墨迹；Esc 取消")
+                    .clicked()
+            {
+                self.move_ink_armed = Some(id);
+                self.context_annotation = None;
+                self.context_menu_pos = None;
+                ui.close();
+                self.message = "已选中墨迹：拖动它即可移动（Esc 取消）".to_string();
+            }
+            if let Some(width) = current_width {
+                ui.menu_button("线宽", |ui| {
+                    for value in [1.0f32, 1.5, 2.0, 3.0, 4.0, 6.0] {
+                        let selected = (width - value).abs() < 0.01;
+                        if ui
+                            .selectable_label(selected, format!("{value:.1} pt"))
+                            .clicked()
+                            && self.restyle_annotation(id, None, None, Some(value))
+                        {
+                            self.context_annotation = None;
+                            self.context_menu_pos = None;
+                            ui.close();
+                        }
+                    }
+                });
+            }
         }
         if ui.button("删除注释（可撤销）").clicked() {
             self.delete_annotation(id);
@@ -5213,6 +5831,37 @@ impl PdfReaderApp {
                 .ctx()
                 .pointer_hover_pos()
                 .is_some_and(|position| canvas.contains(position));
+            // Alt 悬停在墨迹上：抓手光标，提示可以拖动。
+            let (alt, ctrl) = ui.ctx().input(|input| (input.modifiers.alt, input.modifiers.ctrl));
+            if (alt || ctrl || self.move_ink_armed.is_some())
+                && self.annotation_tool.is_none()
+                && matches!(self.tool, Tool::Select | Tool::Pan)
+            {
+                if let Some(position) = ui.ctx().pointer_hover_pos() {
+                    if canvas.contains(position) {
+                        let content =
+                            canvas_to_content(canvas, position, session.viewport().scroll);
+                        if self.annotation_at(session, content).is_some_and(|id| {
+                            !self.external_ids.contains(&id)
+                                && self
+                                    .annotations
+                                    .get(id)
+                                    .is_some_and(|annotation| annotation.kind.ink().is_some())
+                        }) {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                        }
+                    }
+                }
+            }
+            // 便签选点：十字光标 + Esc 取消
+            if self.note_pin {
+                if pointer_over_canvas {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                }
+                if ui.ctx().input(|input| input.key_pressed(egui::Key::Escape)) {
+                    self.exit_note_mode();
+                }
+            }
             // Pin 状态（自定义 preview 选点）：十字光标 + 状态栏提示
             if self.custom_pin.is_some() {
                 if pointer_over_canvas {
@@ -5279,10 +5928,10 @@ impl PdfReaderApp {
                     Tool::Pan => inverted_now,
                     Tool::Ink => false,
                 };
-            // 墨迹工具独占指针：拖拽既不滚页也不选字（S4b）
-            if self.tool == Tool::Ink {
+            // 墨迹工具独占指针：拖拽既不滚页也不选字（S4b）；便签模式下不画墨迹。
+            if self.tool == Tool::Ink && !self.note_pin {
                 self.handle_ink_pointer(ui, canvas, &response, session, session.viewport().scroll);
-            } else if self.capture.is_none() && response.drag_started() {
+            } else if self.capture.is_none() && response.drag_started() && !self.note_pin {
                 self.selection_started_on_text = false;
                 self.drag_started_at = Some(self.clock.now());
                 self.last_pan_at = None;
@@ -5292,7 +5941,26 @@ impl PdfReaderApp {
                         self.started_at.elapsed().as_secs_f64()
                     ));
                 }
-                if let Some(position) = response.interact_pointer_pos() {
+                // Alt+拖拽墨迹 = 平移（v1 只支持墨迹）。命中才进入，否则照旧选字/平移。
+                // Alt 在不少 Linux 桌面被窗口管理器抢去拖窗口，所以同时支持 Ctrl；
+                // 也可以先用右键菜单「移动」选中，再直接拖。
+                let (alt, ctrl) = ui.input(|input| (input.modifiers.alt, input.modifiers.ctrl));
+                let armed = self.move_ink_armed;
+                let mut moving = false;
+                if (alt || ctrl || armed.is_some())
+                    && self.annotation_tool.is_none()
+                    && matches!(self.tool, Tool::Select | Tool::Pan)
+                {
+                    if let Some(position) = response.interact_pointer_pos() {
+                        let content =
+                            canvas_to_content(canvas, position, session.viewport().scroll);
+                        moving = self.begin_ink_move(session, content, armed);
+                    }
+                }
+                self.move_ink_armed = None;
+                if moving {
+                    self.drag = Some(DragMode::MoveInk);
+                } else if let Some(position) = response.interact_pointer_pos() {
                     let content =
                         canvas_to_content(canvas, position, session.viewport().scroll);
                     let hit = session.text_position_at(content);
@@ -5376,6 +6044,13 @@ impl PdfReaderApp {
                         }
                     }
                     // 墨迹已在上面由 `handle_ink_pointer` 逐帧累积采样点
+                    Some(DragMode::MoveInk) => {
+                        if let Some(position) = response.interact_pointer_pos() {
+                            let content =
+                                canvas_to_content(canvas, position, session.viewport().scroll);
+                            self.update_ink_move(session, content);
+                        }
+                    }
                     Some(DragMode::Ink) => {}
                     None => {}
                 }
@@ -5775,6 +6450,31 @@ impl PdfReaderApp {
                             }
                             continue;
                         }
+                        // 便签：没有 quads，单独画图标（图标 = 便签矩形；正文在浮窗里）。
+                        if let AnnotationKind::Note { rect } = annotation.kind {
+                            let content = placement.rect_to_content(rect);
+                            let screen = egui::Rect::from_min_size(
+                                canvas.min
+                                    + EVec2::new(content.x - scroll.x, content.y - scroll.y),
+                                EVec2::new(content.width, content.height),
+                            );
+                            paint_note_icon(&painter, screen, color);
+                            if let Some(pointer) = pointer {
+                                if screen.expand(2.0).contains(pointer) {
+                                    self.hovered_annotation = Some(annotation.id);
+                                    if let Some(window) = self
+                                        .floats
+                                        .iter()
+                                        .find(|window| {
+                                            window.owner == FloatOwner::Annotation(annotation.id)
+                                        })
+                                    {
+                                        self.highlight_float = Some(window.id);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                         for quad in annotation.kind.quads() {
                             let content = placement.rect_to_content(*quad);
                             let screen = egui::Rect::from_min_size(
@@ -5838,8 +6538,8 @@ impl PdfReaderApp {
                                         Stroke::new(width, color),
                                     );
                                 }
-                                // 墨迹在上面按折线画完了，且没有 quads，不会进入本循环。
-                                AnnotationKind::Ink { .. } => {}
+                                // 墨迹/便签在上面画完了，且没有 quads，不会进入本循环。
+                                AnnotationKind::Ink { .. } | AnnotationKind::Note { .. } => {}
                             }
                         }
                     }
@@ -6005,6 +6705,13 @@ impl PdfReaderApp {
                             }
                         }
                     }
+                    Some(DragMode::MoveInk) => {
+                        if let Some(position) = response.interact_pointer_pos() {
+                            let content =
+                                canvas_to_content(canvas, position, session.viewport().scroll);
+                            self.update_ink_move(session, content);
+                        }
+                    }
                     Some(DragMode::Pan) | Some(DragMode::Ink) => {
                         // 已在绘制之前当帧处理（见"拖动当帧生效"），这里不再重复提交
                     }
@@ -6048,6 +6755,9 @@ impl PdfReaderApp {
                         total
                     ));
                 }
+                if self.drag == Some(DragMode::MoveInk) {
+                    self.finish_ink_move();
+                }
                 self.drag = None;
                 self.drag_started_at = None;
                 self.last_pan_at = None;
@@ -6064,6 +6774,10 @@ impl PdfReaderApp {
                         ));
                         self.commands.push(ViewerCommand::SelectBegin(text_position));
                     }
+                }
+            } else if self.capture.is_none() && self.note_pin && response.clicked() {
+                if let Some(position) = response.interact_pointer_pos() {
+                    self.finish_note_pin(session, canvas, scroll, position);
                 }
             } else if self.capture.is_none() && self.custom_pin.is_some() && response.clicked() {
                 // Pin 状态：点击页面某处 → 结束选点，弹出输入对话框
@@ -6576,6 +7290,18 @@ impl PdfReaderApp {
         let Some((editing_owner, _)) = self.editing_body.clone() else {
             return;
         };
+        // 编辑框是 `ui.put` 在浮窗**之后**画的，所以只有它自己在上层；浮窗的层级仍由
+        // `self.floats` 顺序决定。进入/保持正文编辑时把该浮窗置顶，否则低位浮窗会出现
+        // "编辑框上去了、窗还在下面"（用户 2026-11-01 反馈）。
+        if let Some(index) = self
+            .floats
+            .iter()
+            .position(|window| window.owner == editing_owner)
+        {
+            if index + 1 != self.floats.len() {
+                move_to_last(&mut self.floats, index);
+            }
+        }
         let Some(window) = self
             .floats
             .iter()
@@ -6893,7 +7619,242 @@ impl PdfReaderApp {
         }
     }
 
-    /// 自定义 preview 的输入对话框（文字：题目+内容；图片：题目）。
+    /// Alt+拖拽：命中一条自有墨迹时开始平移。
+    fn begin_ink_move(
+        &mut self,
+        session: &DocumentSession,
+        content: Point,
+        required: Option<AnnotationId>,
+    ) -> bool {
+        let Some(id) = self.annotation_at(session, content) else {
+            return false;
+        };
+        if required.is_some_and(|required| required != id) {
+            return false;
+        }
+        if self.external_ids.contains(&id) {
+            self.message = "外部注释暂不支持移动".to_string();
+            return false;
+        }
+        let Some(annotation) = self.annotations.get(id).cloned() else {
+            return false;
+        };
+        let AnnotationKind::Ink { points, .. } = &annotation.kind else {
+            return false;
+        };
+        let original = points.clone();
+        let Some(placement) = session.placement(annotation.page) else {
+            return false;
+        };
+        let start = placement.content_to_page(content);
+        self.ink_move = Some(InkMoveState {
+            id,
+            before: annotation,
+            start,
+            original,
+        });
+        self.message = "移动墨迹：拖到新位置，松手提交（Ctrl+Z 可回原位）".to_string();
+        true
+    }
+
+    /// 拖动中：按"当前页面点 − 起点"平移原始点集（每次从原始点算，不累积误差）。
+    fn update_ink_move(&mut self, session: &DocumentSession, content: Point) {
+        let Some(state) = self.ink_move.as_ref() else {
+            return;
+        };
+        let Some(placement) = session.placement(state.before.page) else {
+            return;
+        };
+        let current = placement.content_to_page(content);
+        let dx = current.x - state.start.x;
+        let dy = current.y - state.start.y;
+        let points: Vec<Point> = state
+            .original
+            .iter()
+            .map(|point| Point::new(point.x + dx, point.y + dy))
+            .collect();
+        let width = state
+            .before
+            .kind
+            .ink()
+            .map(|(_, width)| width)
+            .unwrap_or(2.0);
+        if let Some(annotation) = self.annotations.get_mut(state.id) {
+            annotation.kind = AnnotationKind::Ink { points, width };
+        }
+    }
+
+    /// 松手：几何变了就记一条 `MoveAnnotation`；没动就不记历史。
+    fn finish_ink_move(&mut self) {
+        let Some(state) = self.ink_move.take() else {
+            return;
+        };
+        let Some(current) = self.annotations.get(state.id).cloned() else {
+            return;
+        };
+        if current.kind == state.before.kind {
+            return;
+        }
+        let mut after = current;
+        // 几何变了 → 写回必须重建对象（旧对象进 deletes）。
+        after.pdf_ref = None;
+        after.modified = Some(unix_now());
+        self.apply_edit(
+            AppEdit::MoveAnnotation {
+                before: state.before,
+                after,
+            },
+            true,
+        );
+        self.message = "已移动墨迹（Ctrl+Z 可回原位）".to_string();
+    }
+
+    /// 进入便签选点：下一次点击页面时弹出输入框。
+    fn enter_note_mode(&mut self) {
+        // 便签与任何阅读模式都没有关联：**不切换工具**（否则会高亮选字/平移），
+        // 只记录进入前的阅读模式 A，Esc 时回到 A。
+        if self.annotation_tool.is_some() || self.tool == Tool::Ink || self.note_pin {
+            // 从其它注释模式进入：保留原来的 A，退出当前注释模式（丢弃半笔墨迹）。
+            self.annotation_tool = None;
+            self.ink = None;
+            self.drag = None;
+        } else {
+            self.tool_before_annotation = Some(self.tool);
+        }
+        self.note_pin = true;
+        self.custom_pin = None;
+        self.message = "便签：点击页面位置，然后输入正文（Esc 取消）".to_string();
+    }
+
+    /// 退出便签模式：回到进入前的阅读模式 A。
+    fn exit_note_mode(&mut self) {
+        if !self.note_pin {
+            return;
+        }
+        self.note_pin = false;
+        if let Some(previous) = self.tool_before_annotation.take() {
+            self.switch_tool(previous);
+        }
+        self.message = "已取消便签".to_string();
+    }
+
+    /// 进入墨迹模式：只有从阅读模式进入才记录 A；从其它注释模式切过来保留原 A。
+    fn enter_ink_mode(&mut self) {
+        if self.tool == Tool::Ink && self.annotation_tool.is_none() && !self.note_pin {
+            return;
+        }
+        let came_from_annotation =
+            self.annotation_tool.is_some() || self.tool == Tool::Ink || self.note_pin;
+        let remembered = self.tool_before_annotation;
+        let previous = self.tool;
+        self.switch_tool(Tool::Ink);
+        self.tool_before_annotation = if came_from_annotation {
+            remembered
+        } else {
+            Some(previous)
+        };
+        self.note_pin = false;
+        self.annotation_tool = None;
+    }
+
+    /// 便签选点：找到被点中的页与页面坐标，弹出输入框。
+    fn finish_note_pin(
+        &mut self,
+        session: &DocumentSession,
+        canvas: egui::Rect,
+        scroll: Vec2,
+        pointer: egui::Pos2,
+    ) {
+        let content = canvas_to_content(canvas, pointer, scroll);
+        for page in self.visible.clone() {
+            let Some(placement) = session.placement(page).copied() else {
+                continue;
+            };
+            if !placement.rect.contains(content) {
+                continue;
+            }
+            let point = placement.content_to_page(content);
+            let half = NOTE_ICON_SIZE * 0.5;
+            self.note_dialog = Some(NoteDraft {
+                page,
+                rect: Rect::new(
+                    point.x - half,
+                    point.y - half,
+                    NOTE_ICON_SIZE,
+                    NOTE_ICON_SIZE,
+                ),
+                text: String::new(),
+            });
+            self.note_pin = false;
+            return;
+        }
+        self.message = "便签：请点击页面内部".to_string();
+    }
+
+    /// 新建一条便签（正文可空）。返回是否成功；整个创建是**一条**撤销记录。
+    fn add_note_annotation(&mut self, page: PageIndex, rect: Rect, text: &str) -> bool {
+        let body = text.trim().to_string();
+        let Some(id) = self.annotations.add(page, AnnotationKind::Note { rect }) else {
+            return false;
+        };
+        if let Some(annotation) = self.annotations.get_mut(id) {
+            annotation.body = (!body.is_empty()).then_some(body);
+            annotation.author = backend_pdfium::pdf_patch::pdf_author();
+            let now = unix_now();
+            annotation.created = Some(now);
+            annotation.modified = Some(now);
+        }
+        let Some(annotation) = self.annotations.get(id).cloned() else {
+            self.annotations.remove(id);
+            return false;
+        };
+        self.annotations.remove(id);
+        self.apply_edit(AppEdit::AddAnnotation { annotation }, true);
+        true
+    }
+
+    /// 新建便签的输入框。    /// 新建便签的输入框。
+    fn draw_note_dialog(&mut self, ctx: &egui::Context) {
+        let mut decision: Option<bool> = None;
+        if let Some(draft) = self.note_dialog.as_mut() {
+            egui::Modal::new(Id::unique("note-create")).show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.heading("新建便签");
+                ui.label("正文会写进 PDF 的 /Contents；添加后画布上出现便签图标。");
+                ui.add(
+                    egui::TextEdit::multiline(&mut draft.text)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(5),
+                );
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("取消").clicked() {
+                        decision = Some(false);
+                    }
+                    if ui.button("添加").clicked() {
+                        decision = Some(true);
+                    }
+                });
+            });
+        }
+        match decision {
+            Some(false) => {
+                self.note_dialog = None;
+                self.message = "已取消便签".to_string();
+            }
+            Some(true) => {
+                let Some(draft) = self.note_dialog.take() else {
+                    return;
+                };
+                if self.add_note_annotation(draft.page, draft.rect, &draft.text) {
+                    self.message = "已添加便签（Ctrl+Z 可撤销）".to_string();
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// 自定义 preview 的输入对话框（文字：题目+内容；图片：题目）。    /// 自定义 preview 的输入对话框（文字：题目+内容；图片：题目）。
     fn draw_custom_dialog(&mut self, ctx: &egui::Context) {
         let Some(dialog) = self.custom_dialog.as_ref() else {
             return;
@@ -7672,13 +8633,30 @@ impl PdfReaderApp {
 impl eframe::App for PdfReaderApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.apply_pending_window_size(&ctx);
+        if ctx.input(|input| input.viewport().close_requested()) {
+            if self.closing_after_decision || !self.is_dirty() {
+                self.remember_document_view();
+                self.flush_settings(Some(&ctx));
+            } else {
+                // 有未保存改动：取消这次关闭；提示已经开着也不能放行。
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                if self.pending_action.is_none() {
+                    self.pending_action = Some(PendingAction {
+                        kind: PendingActionKind::Quit,
+                    });
+                    self.pending_action_error = None;
+                }
+            }
+        }
 
         // 拖放打开：**空状态下也必须处理**（v1 只在已有会话时读取，导致启动后拖入无反应）
         self.handle_dropped_files(&ctx);
         // 原地写入的确认框必须在借用 session 之前处理：确认后要**关掉会话**才能替换文件
+        self.draw_pending_action_dialog(&ctx);
         self.draw_in_place_dialog(&ctx);
         self.draw_save_as_dialog(&ctx);
-        self.draw_rebuild_dialog(&ctx);
+        self.draw_compact_dialog(&ctx);
         self.apply_pending_view_restore(&ctx);
         self.draw_history_window(&ctx);
 
@@ -7828,8 +8806,21 @@ impl eframe::App for PdfReaderApp {
             ctx.request_repaint();
         }
         self.draw_password_prompt(&ctx);
+        self.draw_note_dialog(&ctx);
         self.draw_custom_dialog(&ctx);
         self.draw_edit_dialogs(&ctx);
+        // 样式/视图改动不抢在拖动中写盘：指针空闲时再落一次。
+        // 这里**不要**再 remember_document_view：刚打开新文档时视图还在等两帧恢复，
+        // 此时记下来会把"第 1 页"写进设置，反而把上次位置覆盖掉。
+        if self.settings_dirty && !ctx.input(|input| input.pointer.any_down()) {
+            self.flush_settings(Some(&ctx));
+        }
+        // 菜单里请求的"打开另一个文件"放在最后：此时 `self.session` 已经放回，
+        // 打开新文档不会被旧 session 覆盖，也不会把新文件的阅读状态写坏。
+        if let Some(path) = self.pending_open.take() {
+            self.open(&path, None);
+            ctx.request_repaint();
+        }
     }
 }
 
@@ -7898,6 +8889,64 @@ fn paint_image(painter: &egui::Painter, texture: &egui::TextureHandle, rect: egu
 }
 
 /// 画"白底页框"占位（D-06：位图未就绪时用它；D-98 起缺块处优先铺整页底料，不再补白）。
+/// 用临时文件替换目标：优先 rename（Unix 原子覆盖）；失败且目标存在时退化为
+/// 删掉目标再 rename（Windows）。失败时临时文件保留，便于排查。
+fn replace_file(
+    temporary: &std::path::Path,
+    target: &std::path::Path,
+) -> std::result::Result<(), String> {
+    match std::fs::rename(temporary, target) {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            if target.exists() {
+                std::fs::remove_file(target).map_err(|error| {
+                    format!(
+                        "替换 {} 失败：{error}（临时文件保留：{}）",
+                        target.display(),
+                        temporary.display()
+                    )
+                })?;
+                std::fs::rename(temporary, target).map_err(|error| {
+                    format!(
+                        "改名到 {} 失败：{error}（临时文件保留：{}）",
+                        target.display(),
+                        temporary.display()
+                    )
+                })
+            } else {
+                Err(format!(
+                    "改名到 {} 失败：{first}（临时文件保留：{}）",
+                    target.display(),
+                    temporary.display()
+                ))
+            }
+        }
+    }
+}
+
+/// 便签图标：填色方块 + 折角。大小为页面空间矩形换算后的屏幕矩形。
+fn paint_note_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let rect = egui::Rect::from_min_size(
+        rect.min,
+        egui::vec2(rect.width().max(10.0), rect.height().max(10.0)),
+    );
+    painter.rect_filled(rect, CornerRadius::same(2), color);
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(2),
+        Stroke::new(1.0, Color32::from_rgb(70, 70, 70)),
+        StrokeKind::Inside,
+    );
+    let corner = 6.0_f32.min(rect.width() * 0.4).min(rect.height() * 0.4);
+    painter.line_segment(
+        [
+            egui::pos2(rect.right() - corner, rect.top()),
+            egui::pos2(rect.right(), rect.top() + corner),
+        ],
+        Stroke::new(1.0, Color32::from_rgb(70, 70, 70)),
+    );
+}
+
 fn paint_placeholder(painter: &egui::Painter, rect: egui::Rect) {
     painter.rect_filled(rect, CornerRadius::ZERO, Color32::WHITE);
     painter.rect_stroke(
@@ -8184,6 +9233,380 @@ mod annotation_body_tests {
         );
     }
 
+    /// 合成读回结果 + 页对象条目：便签必须按对象号配对，外部便签不能被判成"内联只读"；
+    /// 同一 id 出现多次时以最后一版为准。
+    #[test]
+    fn notes_pair_with_objects_and_duplicates_take_the_last() {
+        let mut app = app();
+        let note = |page: PageIndex, id: Option<u64>, body: &str| {
+            backend_pdfium::readback::ReadAnnotation {
+                page,
+                id,
+                kind: AnnotationKind::Note {
+                    rect: Rect::new(10.0, 20.0, 18.0, 18.0),
+                },
+                color: [255, 214, 0],
+                opacity: 1.0,
+                body: Some(body.to_string()),
+                author: None,
+                created: None,
+                modified: None,
+                ink_strokes: Vec::new(),
+            }
+        };
+        let entry = |num: u32| backend_pdfium::pdf_index::PageAnnot {
+            reference: Some(backend_pdfium::pdf_index::PdfObjectRef { num, gen: 0 }),
+            subtype: Some(1),
+            popup: None,
+            hidden: false,
+        };
+        let readback = backend_pdfium::readback::Readback {
+            annotations: vec![
+                note(PageIndex::FIRST, Some(5), "旧正文"),
+                note(PageIndex::FIRST, Some(5), "新正文"),
+                note(PageIndex::new(1), None, "外部便签"),
+            ],
+            skipped: 0,
+            extra_ink_strokes: 0,
+        };
+        let refs = vec![vec![entry(50), entry(60)], vec![entry(70)]];
+        let _ = app.merge_readback(&readback, &refs);
+
+        let own = app
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == AnnotationId(5))
+            .expect("自有便签");
+        assert_eq!(own.body.as_deref(), Some("新正文"), "重复 id 取最后一版");
+        assert_eq!(
+            own.pdf_ref,
+            Some(pdfcore::annotation::PdfObjectRef { num: 60, gen: 0 }),
+            "应配对到最新的对象"
+        );
+
+        let external = app
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id != AnnotationId(5))
+            .expect("外部便签");
+        assert_eq!(
+            external.pdf_ref,
+            Some(pdfcore::annotation::PdfObjectRef { num: 70, gen: 0 }),
+            "外部便签也要拿到对象号"
+        );
+        assert!(
+            !(app.external_ids.contains(&external.id) && external.pdf_ref.is_none()),
+            "外部便签不能被判成内联只读"
+        );
+    }
+
+    #[test]
+    fn note_mode_and_markup_mode_are_exclusive() {
+        let mut app = app();
+        app.note_pin = true;
+        app.toggle_markup_tool(MarkupTool::Highlight);
+        assert!(!app.note_pin, "进入标记模式应清掉便签选点");
+        assert_eq!(app.annotation_tool, Some(MarkupTool::Highlight));
+
+        app.add_note_annotation(PageIndex::FIRST, Rect::new(0.0, 0.0, 18.0, 18.0), "x");
+        app.enter_note_mode();
+        assert!(app.note_pin);
+        assert_eq!(app.annotation_tool, None, "进入便签模式应退掉标记模式");
+    }
+
+    #[test]
+    fn annotation_modes_keep_the_original_reading_mode() {
+        let mut app = app();
+        app.switch_tool(Tool::Pan);
+        // 阅读模式（平移）→ 高亮：记录 A=平移
+        app.toggle_markup_tool(MarkupTool::Highlight);
+        assert_eq!(app.tool, Tool::Select);
+        assert_eq!(app.tool_before_annotation, Some(Tool::Pan));
+        // 高亮 → 墨迹：A 不变
+        app.enter_ink_mode();
+        assert_eq!(app.tool, Tool::Ink);
+        assert_eq!(app.tool_before_annotation, Some(Tool::Pan));
+        // 墨迹 → 删除线：A 仍不变
+        app.toggle_markup_tool(MarkupTool::StrikeOut);
+        assert_eq!(app.tool, Tool::Select);
+        assert_eq!(app.tool_before_annotation, Some(Tool::Pan));
+        // Esc 退出标记：回到最初的平移
+        app.exit_markup_tool();
+        assert_eq!(app.tool, Tool::Pan);
+        assert_eq!(app.tool_before_annotation, None);
+
+        // 便签同样不改变阅读模式，Esc 回原模式
+        app.switch_tool(Tool::Select);
+        app.enter_note_mode();
+        assert_eq!(app.tool, Tool::Select, "便签不切换阅读模式");
+        assert_eq!(app.tool_before_annotation, Some(Tool::Select));
+        app.exit_note_mode();
+        assert_eq!(app.tool, Tool::Select);
+
+        // 从标记模式进便签：保留更早的 A（平移）
+        app.switch_tool(Tool::Pan);
+        app.toggle_markup_tool(MarkupTool::Underline);
+        app.enter_note_mode();
+        assert_eq!(app.tool_before_annotation, Some(Tool::Pan));
+        app.exit_note_mode();
+        assert_eq!(app.tool, Tool::Pan);
+
+        // 便签 → 标记：也不能把 A 改写成选字，Esc 仍回平移
+        app.switch_tool(Tool::Pan);
+        app.enter_note_mode();
+        app.toggle_markup_tool(MarkupTool::Highlight);
+        assert_eq!(app.tool_before_annotation, Some(Tool::Pan));
+        app.exit_markup_tool();
+        assert_eq!(app.tool, Tool::Pan);
+    }
+
+    #[test]
+    fn undo_after_writeback_rebuilds_moved_ink() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Ink {
+                points: vec![Point::new(10.0, 10.0), Point::new(30.0, 20.0)],
+                width: 2.0,
+            },
+        ));
+        let id = app.annotations.iter().next().unwrap().id;
+        let old_ref = pdfcore::annotation::PdfObjectRef { num: 7, gen: 0 };
+        if let Some(annotation) = app.annotations.get_mut(id) {
+            annotation.pdf_ref = Some(old_ref);
+        }
+        app.opened_pdf_refs.insert(old_ref);
+
+        let before = app.annotations.get(id).cloned().unwrap();
+        let mut after = before.clone();
+        after.kind = AnnotationKind::Ink {
+            points: vec![Point::new(50.0, 60.0), Point::new(70.0, 70.0)],
+            width: 2.0,
+        };
+        after.pdf_ref = None;
+        app.apply_edit(AppEdit::MoveAnnotation { before, after }, true);
+
+        // 模拟"写入成功并重开"：该 id 在文件里的对象号变成 new_ref。
+        let new_ref = pdfcore::annotation::PdfObjectRef { num: 99, gen: 0 };
+        app.opened_pdf_refs.insert(new_ref);
+        app.opened_id_by_ref.insert(new_ref, id);
+        if let Some(annotation) = app.annotations.get_mut(id) {
+            annotation.pdf_ref = Some(new_ref);
+        }
+        app.reconcile_history_refs();
+
+        // 撤销：几何回原位，且 pdf_ref 为空（下次保存按重建写）。
+        app.undo_edit();
+        let restored = app.annotations.get(id).expect("撤销后仍在");
+        assert_eq!(restored.kind.ink().unwrap().0[0], Point::new(10.0, 10.0));
+        assert!(restored.pdf_ref.is_none(), "撤销后不能带着已删除的旧对象号");
+        let (_, deletes) = app.pdf_ref_changes();
+        assert!(deletes.contains(&new_ref), "当前对象应进 deletes 等待重建");
+    }
+
+    #[test]
+    fn external_change_is_detected_for_conflict_banner() {
+        let path = std::env::temp_dir().join(format!(
+            "pdf-reader-conflict-{}-{}.pdf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&path, b"pdf").expect("写");
+        let stamp = pdf_file_stamp(&path).expect("stamp");
+        let mut app = app();
+        app.document_path = Some(path.clone());
+        app.pdf_file_stamp = Some(stamp);
+        assert!(!app.pdf_conflict(), "未改动时不应报冲突");
+        std::fs::write(&path, b"pdf changed externally").expect("改");
+        assert!(app.pdf_conflict(), "外部修改后提示框应能提前发现冲突");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn opening_a_clean_sidecar_stays_clean() {
+        let mut app = app();
+        app.document_path = Some(PathBuf::from("/tmp/with-sidecar.pdf"));
+        app.data_dirty = false;
+        app.data_clean_hash = None; // 打开时还没建立基线
+        app.settle_dirty_after_open();
+        assert!(!app.data_dirty, "带 .json 的干净文件打开后不应变脏");
+
+        // 迁移/升级场景：显式置脏后必须保留脏位。
+        app.data_dirty = true;
+        app.data_clean_hash = None;
+        app.settle_dirty_after_open();
+        assert!(app.data_dirty, "迁移中的数据仍应标记为脏");
+    }
+
+    #[test]
+    fn preview_edits_do_not_dirty_the_pdf() {
+        let mut app = app();
+        app.document_path = Some(PathBuf::from("/tmp/preview-only.pdf"));
+        app.mark_pdf_saved();
+        app.apply_edit(
+            AppEdit::MovePreview {
+                key: PreviewKey {
+                    page: PageIndex::FIRST,
+                    id: 0,
+                },
+                from: 0,
+                to: 1,
+            },
+            true,
+        );
+        assert!(!app.pdf_dirty, "preview 编辑只写 .json，不应弄脏 PDF");
+        let annotation = Annotation::new(
+            PageIndex::FIRST,
+            AnnotationKind::Ink {
+                points: vec![Point::new(1.0, 1.0), Point::new(2.0, 2.0)],
+                width: 2.0,
+            },
+        )
+        .unwrap();
+        app.apply_edit(AppEdit::AddAnnotation { annotation }, true);
+        assert!(app.pdf_dirty, "注释编辑应弄脏 PDF");
+    }
+
+    #[test]
+    fn redo_back_to_the_save_point_is_clean() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Ink {
+                points: vec![Point::new(10.0, 10.0), Point::new(30.0, 20.0)],
+                width: 2.0,
+            },
+        ));
+        app.mark_pdf_saved();
+        assert!(!app.pdf_dirty, "保存点之后不应脏");
+        app.undo_edit();
+        assert!(app.pdf_dirty, "撤销离开保存点应变脏");
+        app.redo_edit();
+        assert!(!app.pdf_dirty, "重做回到保存点应变干净");
+    }
+
+    #[test]
+    fn moving_ink_is_undoable_and_drops_the_old_object() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Ink {
+                points: vec![Point::new(10.0, 10.0), Point::new(30.0, 20.0)],
+                width: 2.0,
+            },
+        ));
+        let id = app.annotations.iter().next().unwrap().id;
+        let reference = pdfcore::annotation::PdfObjectRef { num: 7, gen: 0 };
+        if let Some(annotation) = app.annotations.get_mut(id) {
+            annotation.pdf_ref = Some(reference);
+        }
+        app.opened_pdf_refs.insert(reference);
+        app.opened_id_by_ref.insert(reference, id);
+
+        let before = app.annotations.get(id).cloned().unwrap();
+        let mut after = before.clone();
+        after.kind = AnnotationKind::Ink {
+            points: vec![Point::new(50.0, 60.0), Point::new(70.0, 70.0)],
+            width: 2.0,
+        };
+        after.pdf_ref = None;
+        app.apply_edit(AppEdit::MoveAnnotation { before, after }, true);
+
+        let moved = app
+            .annotations
+            .get(id)
+            .expect("同一条注释")
+            .kind
+            .ink()
+            .unwrap();
+        assert_eq!(moved.0[0], Point::new(50.0, 60.0));
+        assert!(app.annotations.get(id).unwrap().pdf_ref.is_none());
+
+        // 旧对象要进 deletes（写回时删掉、再按新几何重建）。
+        let (_, deletes) = app.pdf_ref_changes();
+        assert!(deletes.contains(&reference), "旧对象应被删除");
+
+        app.undo_edit();
+        let restored = app
+            .annotations
+            .get(id)
+            .expect("撤销后仍在")
+            .kind
+            .ink()
+            .unwrap();
+        assert_eq!(restored.0[0], Point::new(10.0, 10.0));
+    }
+
+    #[test]
+    fn adding_a_note_is_one_undo_step() {
+        let mut app = app();
+        let rect = Rect::new(10.0, 20.0, 18.0, 18.0);
+        assert!(app.add_note_annotation(PageIndex::FIRST, rect, "便签正文"));
+        let note = app.annotations.iter().next().expect("一条便签");
+        assert!(matches!(note.kind, AnnotationKind::Note { .. }));
+        assert_eq!(note.body.as_deref(), Some("便签正文"));
+        // 作者来自环境变量/系统用户；测试环境可能没有，只要求时间已填。
+        assert!(note.modified.is_some());
+        assert!(note.created.is_some());
+        app.undo_edit();
+        assert!(
+            app.annotations.iter().next().is_none(),
+            "一条撤销应删掉整条便签"
+        );
+    }
+
+    #[test]
+    fn restyling_opacity_and_ink_width_is_undoable() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        let id = app.annotations.iter().next().unwrap().id;
+        assert!(app.restyle_annotation(id, None, Some(0.5), None));
+        let new_id = app.annotations.iter().next().unwrap().id;
+        assert!((app.annotations.get(new_id).unwrap().opacity - 0.5).abs() < 1e-6);
+        app.undo_edit();
+        assert!((app.annotations.get(id).unwrap().opacity - 0.35).abs() < 1e-6);
+
+        // 墨迹线宽是 kind 的一部分，改完也要能撤销回 2.0。
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Ink {
+                points: vec![Point::new(10.0, 10.0), Point::new(30.0, 20.0)],
+                width: 2.0,
+            },
+        ));
+        let ink_id = app
+            .annotations
+            .iter()
+            .find(|annotation| matches!(annotation.kind, AnnotationKind::Ink { .. }))
+            .unwrap()
+            .id;
+        assert!(app.restyle_annotation(ink_id, None, None, Some(4.0)));
+        let width = app
+            .annotations
+            .iter()
+            .find(|annotation| matches!(annotation.kind, AnnotationKind::Ink { .. }))
+            .and_then(|annotation| annotation.kind.ink())
+            .map(|(_, width)| width)
+            .unwrap();
+        assert!((width - 4.0).abs() < 1e-6);
+        app.undo_edit();
+        let width = app
+            .annotations
+            .get(ink_id)
+            .and_then(|annotation| annotation.kind.ink())
+            .map(|(_, width)| width)
+            .unwrap();
+        assert!((width - 2.0).abs() < 1e-6);
+    }
+
     #[test]
     fn recoloring_saved_annotation_replaces_the_old_object() {
         let mut app = app();
@@ -8220,6 +9643,67 @@ mod annotation_body_tests {
         app.external_ids.insert(id);
         assert!(!app.recolor_annotation(id, [235, 70, 70]));
         assert_eq!(app.annotations.get(id).unwrap().color, [255, 214, 0]);
+    }
+
+    #[test]
+    fn annotation_summary_path_does_not_overwrite() {
+        let dir = std::env::temp_dir().join(format!(
+            "pdf-summary-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join("a.b.pdf");
+        let first = annotation_summary_path(&pdf);
+        assert_eq!(first, dir.join("a.b.annotations.md"));
+        std::fs::write(&first, "x").unwrap();
+        let second = annotation_summary_path(&pdf);
+        assert_eq!(second, dir.join("a.b.annotations-2.md"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn annotation_search_matches_body_and_author() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(0.0, 0.0, 10.0, 10.0)],
+            },
+        ));
+        let id = app.annotations.iter().next().unwrap().id;
+        if let Some(annotation) = app.annotations.get_mut(id) {
+            annotation.body = Some("研究 笔记".to_string());
+            annotation.author = Some("张三".to_string());
+        }
+        let annotation = app.annotations.get(id).unwrap();
+        assert!(annotation_matches_query(annotation, "笔记"));
+        assert!(annotation_matches_query(annotation, "张"));
+        assert!(!annotation_matches_query(annotation, "李四"));
+    }
+
+    #[test]
+    fn recent_order_puts_newest_first_and_unknown_last() {
+        let row = |id: u64, modified: Option<i64>| AnnotationRow {
+            page: PageIndex::FIRST,
+            id: AnnotationId(id),
+            label: "高亮",
+            readonly: false,
+            external: false,
+            summary: String::new(),
+            preview: String::new(),
+            author: None,
+            created: None,
+            modified,
+            bounds: None,
+        };
+        let mut rows = [row(1, Some(100)), row(2, None), row(3, Some(300))];
+        rows.sort_by(recent_order);
+        let ids: Vec<u64> = rows.iter().map(|row| row.id.get()).collect();
+        assert_eq!(ids, vec![3, 1, 2], "按修改时间倒序，未知时间在最后");
     }
 
     #[test]
@@ -8500,14 +9984,17 @@ mod annotation_body_tests {
     }
 
     #[test]
-    fn markup_mode_remembers_ink_as_previous_tool() {
+    fn switching_between_annotation_modes_keeps_the_reading_mode() {
+        // D-214 起取代 D-174 的"回到墨迹"：注释模式之间切换不改写 A，
+        // 退出时回到进入注释模式之前的那一个**阅读模式**。
         let mut app = app();
-        app.switch_tool(Tool::Ink);
+        app.switch_tool(Tool::Pan);
+        app.enter_ink_mode();
         app.toggle_markup_tool(MarkupTool::Highlight);
         assert_eq!(app.tool, Tool::Select);
         app.exit_markup_tool();
         assert_eq!(app.annotation_tool, None);
-        assert_eq!(app.tool, Tool::Ink, "Esc/退出应回到墨迹工具");
+        assert_eq!(app.tool, Tool::Pan, "Esc/退出应回到最初的阅读模式");
     }
 
     #[test]
@@ -8642,7 +10129,8 @@ mod external_annotation_tests {
         app.opened_pdf_refs.insert(reference);
         app.opened_pdf_bodies
             .insert(reference, Some("旧".to_string()));
-        app.pdf_clean_hash = Some(app.pdf_fingerprint());
+        app.saved_pdf_revision = app.history.current_pdf_revision();
+        app.refresh_dirty();
         (app, id, reference)
     }
 
@@ -8699,7 +10187,8 @@ mod external_annotation_tests {
         app.opened_pdf_refs.insert(reference);
         app.opened_pdf_bodies
             .insert(reference, Some("旧".to_string()));
-        app.pdf_clean_hash = Some(app.pdf_fingerprint());
+        app.saved_pdf_revision = app.history.current_pdf_revision();
+        app.refresh_dirty();
         app.apply_edit(
             AppEdit::SetBody {
                 id,
@@ -8755,6 +10244,9 @@ mod external_annotation_tests {
                     color: [255, 255, 0],
                     opacity: 0.35,
                     body: Some(body.to_string()),
+                    author: None,
+                    created: None,
+                    modified: None,
                     ink_strokes: Vec::new(),
                 },
                 PageAnnot {
@@ -8775,7 +10267,7 @@ mod external_annotation_tests {
             ..Readback::default()
         };
         let refs = vec![entries.iter().map(|(_, entry)| *entry).collect()];
-        let (_, _) = app.merge_readback(&readback, false, &refs);
+        let _ = app.merge_readback(&readback, &refs);
         assert_eq!(app.annotations.len(), 3, "三条都要存在，不能被 id 覆盖");
         assert_eq!(app.external_ids.len(), 2, "只有无标记的两条是外部");
         assert_eq!(

@@ -238,6 +238,7 @@ fn subtype_of(dict: &[u8]) -> Option<u32> {
         cursor += 1;
     }
     match &dict[start..cursor] {
+        b"/Text" => Some(1),
         b"/Highlight" => Some(9),
         b"/Underline" => Some(10),
         b"/StrikeOut" => Some(12),
@@ -424,7 +425,7 @@ fn is_flate(dict: &[u8]) -> bool {
     find_from(dict, 0, b"/FlateDecode").is_some()
 }
 
-fn decompress(raw: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn decompress(raw: &[u8]) -> Option<Vec<u8>> {
     let mut decoder = ZlibDecoder::new(raw);
     let mut out = Vec::new();
     decoder.read_to_end(&mut out).ok().map(|_| out)
@@ -514,7 +515,7 @@ fn scan_object_streams(
     }
 }
 
-fn number_value(dict: &[u8], key: &[u8]) -> Option<usize> {
+pub(crate) fn number_value(dict: &[u8], key: &[u8]) -> Option<usize> {
     let index = find_from(dict, 0, key)?;
     let mut cursor = index + key.len();
     skip_space(dict, &mut cursor);
@@ -541,7 +542,7 @@ fn is_delimiter(byte: u8) -> bool {
         )
 }
 
-fn skip_space(bytes: &[u8], index: &mut usize) {
+pub(crate) fn skip_space(bytes: &[u8], index: &mut usize) {
     while *index < bytes.len() {
         if bytes[*index].is_ascii_whitespace() {
             *index += 1;
@@ -555,14 +556,14 @@ fn skip_space(bytes: &[u8], index: &mut usize) {
     }
 }
 
-fn find_from(bytes: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+pub(crate) fn find_from(bytes: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
     bytes[from..]
         .windows(needle.len())
         .position(|window| window == needle)
         .map(|offset| from + offset)
 }
 
-fn balanced_end(bytes: &[u8], start: usize) -> Option<usize> {
+pub(crate) fn balanced_end(bytes: &[u8], start: usize) -> Option<usize> {
     let mut index = start;
     let mut dict_depth = 0i32;
     let mut array_depth = 0i32;

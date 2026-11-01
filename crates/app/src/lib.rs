@@ -15,14 +15,17 @@
 // clippy 建议的 `partial_cmp` 写法更长也更难读；这条 lint 对本项目是噪音。
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
+pub mod annotations_md;
 pub mod app;
 pub mod clock;
+pub mod compact;
 pub mod diag;
 pub mod export;
 pub mod history;
 pub(crate) mod ink;
 pub(crate) mod json;
 pub mod persist;
+pub mod settings;
 pub mod view;
 pub mod writeback;
 

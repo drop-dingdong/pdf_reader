@@ -49,8 +49,12 @@ fn appends_same_generation_update_for_okular_highlight() {
         .iter()
         .find(|reference| reference.num == 11 && reference.gen == 1)
         .expect("Okular highlight 11 1");
-    let output = append_content_updates(&source, &[(reference, Some("P4A 正文".to_string()))])
-        .expect("patch");
+    let output = append_content_updates(
+        &source,
+        &[(reference, Some("P4A 正文".to_string()))],
+        &Default::default(),
+    )
+    .expect("patch");
     assert!(output.len() < source.len() + 1200, "只应追加少量字节");
     assert!(
         output.windows(4).any(|window| window == b"/M ("),
@@ -83,8 +87,12 @@ fn appends_same_generation_update_for_adobe_object_stream_ref() {
     }
     let source = std::fs::read(fixture("adobe.pdf")).expect("读样本");
     let reference = supported_refs(&source)[0];
-    let output = append_content_updates(&source, &[(reference, Some("P4A Adobe".to_string()))])
-        .expect("patch");
+    let output = append_content_updates(
+        &source,
+        &[(reference, Some("P4A Adobe".to_string()))],
+        &Default::default(),
+    )
+    .expect("patch");
     assert!(
         output.windows(7).any(|window| window == b"/ObjStm"),
         "ObjStm 应保留"
@@ -109,10 +117,18 @@ fn same_annotation_can_be_patched_twice() {
         .iter()
         .find(|reference| reference.num == 11 && reference.gen == 1)
         .expect("11 1");
-    let once = append_content_updates(&source, &[(reference, Some("第一次".to_string()))])
-        .expect("第一次 patch");
-    let twice = append_content_updates(&once, &[(reference, Some("第二次".to_string()))])
-        .expect("第二次 patch");
+    let once = append_content_updates(
+        &source,
+        &[(reference, Some("第一次".to_string()))],
+        &Default::default(),
+    )
+    .expect("第一次 patch");
+    let twice = append_content_updates(
+        &once,
+        &[(reference, Some("第二次".to_string()))],
+        &Default::default(),
+    )
+    .expect("第二次 patch");
     let read = read_bytes(&twice);
     assert!(
         read.annotations

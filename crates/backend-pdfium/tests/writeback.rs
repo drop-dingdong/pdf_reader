@@ -1,7 +1,7 @@
 //! S5b-1：写回 PDF 的端到端测试（需要 PDFium）。
 //!
 //! 这些测试直接在**当前进程**里调 `writeback::write` —— 本文件内的测试用一把互斥锁串行，
-//! 因为写回 FFI 绕过 pdfium-render 的全局锁（产品路径是子进程，见 docs/current/writeback.md）。
+//! 因为写回 FFI 绕过 pdfium-render 的全局锁（产品路径是子进程，见 docs/writeback.md）。
 //! 不同测试二进制之间由 cargo 顺序执行，所以不与其它集成测试并发。
 
 use std::sync::Mutex;

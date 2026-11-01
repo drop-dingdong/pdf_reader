@@ -18,6 +18,10 @@ pub struct Entry<T> {
     pub command: T,
     /// 这条记录占多大（用来按字节裁剪）。
     pub weight: usize,
+    /// 单调递增的修订号（保存点按它比较；裁剪不会影响）。
+    revision: u64,
+    /// 该条应用后，PDF 相关修订号（preview/引用点编辑不推进它）。
+    pdf_revision: u64,
 }
 
 /// 单栈历史（撤销 + 重做）。
@@ -29,6 +33,14 @@ pub struct History<T> {
     cap: usize,
     /// 已经裁掉多少条（可视列表里可以提示"更早的记录已丢弃"）。
     dropped: usize,
+    /// 已发出的最大修订号。
+    revision: u64,
+    /// 当前状态对应的修订号（空历史 = 0）。
+    position: u64,
+    /// 已发出的最大 PDF 修订号。
+    pdf_revision: u64,
+    /// 当前状态对应的 PDF 修订号。
+    pdf_position: u64,
 }
 
 impl<T> Default for History<T> {
@@ -48,6 +60,10 @@ impl<T> History<T> {
             redo: Vec::new(),
             cap: Self::DEFAULT_CAP,
             dropped: 0,
+            revision: 0,
+            position: 0,
+            pdf_revision: 0,
+            pdf_position: 0,
         }
     }
 
@@ -59,10 +75,29 @@ impl<T> History<T> {
 
     /// 记录一条新的编辑。**会清空 redo**（新分支开始了）。
     pub fn push(&mut self, description: impl Into<String>, command: T, weight: usize) {
+        self.push_tagged(description, command, weight, true);
+    }
+
+    /// 记录一条编辑；`affects_pdf` 标明它是否改变 PDF 里的内容（注释）。
+    pub fn push_tagged(
+        &mut self,
+        description: impl Into<String>,
+        command: T,
+        weight: usize,
+        affects_pdf: bool,
+    ) {
+        self.revision += 1;
+        self.position = self.revision;
+        if affects_pdf {
+            self.pdf_revision += 1;
+        }
+        self.pdf_position = self.pdf_revision;
         self.undo.push(Entry {
             description: description.into(),
             command,
             weight,
+            revision: self.revision,
+            pdf_revision: self.pdf_revision,
         });
         self.redo.clear();
         self.trim();
@@ -77,6 +112,12 @@ impl<T> History<T> {
         T: Clone,
     {
         let entry = self.undo.pop()?;
+        self.position = self.undo.last().map(|entry| entry.revision).unwrap_or(0);
+        self.pdf_position = self
+            .undo
+            .last()
+            .map(|entry| entry.pdf_revision)
+            .unwrap_or(0);
         self.redo.push(entry.clone());
         Some(entry)
     }
@@ -87,6 +128,8 @@ impl<T> History<T> {
         T: Clone,
     {
         let entry = self.redo.pop()?;
+        self.position = entry.revision;
+        self.pdf_position = entry.pdf_revision;
         self.undo.push(entry.clone());
         Some(entry)
     }
@@ -158,6 +201,20 @@ impl<T> History<T> {
         self.undo.clear();
         self.redo.clear();
         self.dropped = 0;
+        self.revision = 0;
+        self.position = 0;
+        self.pdf_revision = 0;
+        self.pdf_position = 0;
+    }
+
+    /// 当前状态对应的修订号（保存点与它比较判断脏位）。
+    pub fn current_revision(&self) -> u64 {
+        self.position
+    }
+
+    /// 当前状态对应的 PDF 修订号（preview/引用点编辑不影响它）。
+    pub fn current_pdf_revision(&self) -> u64 {
+        self.pdf_position
     }
 
     /// 按字节裁剪：从**最旧**的一端丢。

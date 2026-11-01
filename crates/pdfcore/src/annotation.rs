@@ -82,6 +82,13 @@ pub enum AnnotationKind {
         /// 线宽（页面空间）。
         width: f32,
     },
+    /// 便签：页面上的一个小标记（PDF 的 `/Subtype /Text`），正文在 `/Contents`。
+    ///
+    /// 图标只表达"这里有一条便签"；正文由浮窗/编辑框显示，不参与几何。
+    Note {
+        /// 图标矩形（页面空间）。
+        rect: Rect,
+    },
 }
 
 impl AnnotationKind {
@@ -94,7 +101,7 @@ impl AnnotationKind {
             Self::Highlight { quads } | Self::Underline { quads } | Self::StrikeOut { quads } => {
                 quads
             }
-            Self::Ink { .. } => &[],
+            Self::Ink { .. } | Self::Note { .. } => &[],
         }
     }
 
@@ -114,6 +121,14 @@ impl AnnotationKind {
                     && quads
                         .iter()
                         .all(|quad| quad.width > 0.0 && quad.height > 0.0)
+            }
+            Self::Note { rect } => {
+                rect.width > 0.0
+                    && rect.height > 0.0
+                    && rect.width.is_finite()
+                    && rect.height.is_finite()
+                    && rect.x.is_finite()
+                    && rect.y.is_finite()
             }
             Self::Ink { points, width } => {
                 points.len() >= 2
@@ -164,6 +179,12 @@ pub struct Annotation {
     pub opacity: f32,
     /// 正文（直接属于注释；`None` = 没有正文）。
     pub body: Option<String>,
+    /// 作者（PDF 的 `/T`）。新建时取 `PDF_READER_AUTHOR`/系统用户；读回外部注释时来自文件。
+    pub author: Option<String>,
+    /// 创建时间（Unix 秒，UTC）；`None` = 未知（旧存档、读不到 `/CreationDate`）。
+    pub created: Option<i64>,
+    /// 最后修改时间（Unix 秒，UTC）；`None` = 未知。
+    pub modified: Option<i64>,
     /// 来自 PDF 的对象号；新建未写入 / 内联注释为 `None`。
     pub pdf_ref: Option<PdfObjectRef>,
 }
@@ -176,6 +197,7 @@ impl Annotation {
         }
         let (color, opacity) = match &kind {
             AnnotationKind::Ink { .. } => (INK_COLOR, INK_OPACITY),
+            AnnotationKind::Note { .. } => (TEXT_MARK_COLOR, 1.0),
             AnnotationKind::Highlight { .. } => (TEXT_MARK_COLOR, TEXT_MARK_OPACITY),
             AnnotationKind::Underline { .. } | AnnotationKind::StrikeOut { .. } => {
                 (TEXT_MARK_COLOR, 1.0)
@@ -188,6 +210,9 @@ impl Annotation {
             color,
             opacity,
             body: None,
+            author: None,
+            created: None,
+            modified: None,
             pdf_ref: None,
         })
     }
@@ -197,6 +222,9 @@ impl Annotation {
     /// 墨迹的包围盒按折线点集外扩**半个线宽**——否则一条横线的高度为 0，
     /// 依赖包围盒的浮窗位置、截图与命中预备检查都会退化成一条线。
     pub fn bounds(&self) -> Option<Rect> {
+        if let AnnotationKind::Note { rect } = self.kind {
+            return Some(rect);
+        }
         if let Some((points, width)) = self.kind.ink() {
             let first = *points.first()?;
             let mut min = first;
@@ -227,6 +255,15 @@ impl Annotation {
     /// "点在空白处却选中了墨迹"。
     pub fn contains(&self, point: Point, tolerance: f32) -> bool {
         let tolerance = tolerance.max(0.0);
+        if let AnnotationKind::Note { rect } = self.kind {
+            let expanded = Rect::new(
+                rect.x - tolerance,
+                rect.y - tolerance,
+                rect.width + tolerance * 2.0,
+                rect.height + tolerance * 2.0,
+            );
+            return expanded.contains(point);
+        }
         if let Some((points, width)) = self.kind.ink() {
             let radius = (width * 0.5).max(tolerance);
             return points

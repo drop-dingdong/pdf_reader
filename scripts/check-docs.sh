@@ -24,11 +24,10 @@ for path in sorted(set(docs)):
         if not os.path.exists(resolved):
             bad.append(f"{path} -> {target}")
 # 2) 代码注释里不能再指向已移出工作区的文档（文档本身可以"以史为据"地提到它们）
-retired = ("docs/decision-log.md", "docs/data-flow.md", "docs/trait-definitions.md",
-           "docs/traits.md", "docs/feedback-round", "docs/patch-plan-tiling",
-           "docs/preview-ladder-design", "docs/deep-zoom-design",
-           "docs/framework-selection", "docs/backlog.md",
-           "docs/architecture.md", "docs/custom-data-versions.md")
+retired = ("docs/current/", "docs/decisions/", "docs/decision-log.md", "docs/data-flow.md",
+           "docs/trait-definitions.md", "docs/traits.md", "docs/feedback-round",
+           "docs/patch-plan-tiling", "docs/preview-ladder-design", "docs/deep-zoom-design",
+           "docs/framework-selection", "docs/backlog.md", "docs/custom-data-versions.md")
 for dirpath, _, files in os.walk("crates"):
     for name in files:
         if not name.endswith(".rs"):

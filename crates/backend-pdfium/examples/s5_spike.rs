@@ -1,6 +1,6 @@
 //! **S5a spike（一次性探针）**：验证写回 PDF 的关键假设。
 //!
-//! 不是测试、不进产品代码；结论写进 `docs/decisions/evaluations/s5-writeback.md` 的 §12。
+//! 不是测试、不进产品代码；结论见 `docs/writeback.md`。
 //! 跑法：`cargo run -p backend-pdfium --example s5_spike`（需要 PDFium 动态库）。
 //! 假设：
 //! 1. 墨迹：`CreateAnnot(Ink)` + `AddInkStroke` + `AppendObject(路径)` → 保存后**能渲染**；

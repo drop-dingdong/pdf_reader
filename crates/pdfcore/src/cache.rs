@@ -19,7 +19,7 @@ use crate::ids::PageIndex;
 use crate::image::RasterImage;
 use crate::render::{CacheStats, RenderCache, RenderKey};
 
-/// 默认容量上限：512 MiB（见 `docs/current/architecture.md` §8 的资源与性能要点）。
+/// 默认容量上限：512 MiB（见 `docs/architecture.md` §8 的资源与性能要点）。
 ///
 /// 可用环境变量 `PDF_READER_BITMAP_BUDGET_MB` 覆盖（0 = 不限制）—— 调内存/换机测试时用它，
 /// 不必改代码。

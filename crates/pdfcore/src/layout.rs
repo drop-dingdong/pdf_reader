@@ -429,7 +429,7 @@ pub trait PageLayout: Send + Sync {
 
     /// 把滚动偏移规整到合法范围：**内容比视口小的方向上一律居中**，否则夹取到 `[0, max]`。
     ///
-    /// "居中"这一条来自人工验收发现的缺陷修复（见 docs/decisions/history.md 的"五轮人工验收"）：缩小时内容
+    /// "居中"这一条来自人工验收发现的缺陷修复（见 git 历史中的五轮人工验收记录）：缩小时内容
     /// （页 + 留白）可能比视口窄/矮，若仍把偏移夹到 0，页面就被钉在左上角 ——
     /// 视觉上表现为"缩放时页面中心一直往左上漂"。允许负偏移（内容整体右/下移）即可居中。
     fn clamp_scroll(&self, layout: &DocumentLayout, viewport_size: Size, scroll: Vec2) -> Vec2 {

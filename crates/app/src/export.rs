@@ -2,7 +2,7 @@
 //!
 //! 分工：
 //! * 本模块：目标路径、job JSON、起子进程、写后冒烟校验、`temp → 最终名` 的原子改名；
-//! * 子进程（`app --writeback`）：真正的 FFI 写回（见 [`docs/current/writeback.md`]）。
+//! * 子进程（`app --writeback`）：真正的 FFI 写回（见 [`docs/writeback.md`]）。
 //!
 //! 为什么写回必须在子进程：FFI 绕过 pdfium-render 的全局锁，与后台渲染线程并发会崩（D-124）。
 //! 因此这里只调用"另一个进程"，**绝不**在本进程里调 `writeback::write`。
@@ -32,6 +32,12 @@ pub struct ExportItem {
     pub opacity: f32,
     /// 正文（已按 `#annot:<id>` 从 `custom_texts` 取好）。
     pub body: Option<String>,
+    /// 作者（`/T`）。
+    pub author: Option<String>,
+    /// 创建时间（Unix 秒，UTC；`/CreationDate`）。
+    pub created: Option<i64>,
+    /// 修改时间（Unix 秒，UTC；`/M`）。
+    pub modified: Option<i64>,
 }
 
 /// 按对象号更新外部注释的正文。
@@ -41,6 +47,8 @@ pub struct RefUpdate {
     pub reference: PdfObjectRef,
     /// 新正文。
     pub body: Option<String>,
+    /// 修改时间（Unix 秒，UTC；刷新 `/M`）。
+    pub modified: Option<i64>,
 }
 
 /// 导出结果。
@@ -151,14 +159,18 @@ pub fn job_json_with_refs_and_inline(
         out.push_str(",\n  \"updates\": [\n");
         for (index, update) in updates.iter().enumerate() {
             out.push_str(&format!(
-                "    {{ \"num\": {}, \"gen\": {}, \"body\": {} }}",
+                "    {{ \"num\": {}, \"gen\": {}, \"body\": {}{} }}",
                 update.reference.num,
                 update.reference.gen,
                 update
                     .body
                     .as_deref()
                     .map(quote)
-                    .unwrap_or_else(|| "null".to_string())
+                    .unwrap_or_else(|| "null".to_string()),
+                update
+                    .modified
+                    .map(|seconds| format!(", \"modified\": {seconds}"))
+                    .unwrap_or_default()
             ));
             if index + 1 < updates.len() {
                 out.push(',');
@@ -237,6 +249,13 @@ fn annotation_json(item: &ExportItem) -> String {
             fields.push("\"kind\": \"strike_out\"".to_string());
             fields.push(format!("\"quads\": {}", quads_json(quads)));
         }
+        AnnotationKind::Note { rect } => {
+            fields.push("\"kind\": \"note\"".to_string());
+            fields.push(format!(
+                "\"rect\": [{:.2}, {:.2}, {:.2}, {:.2}]",
+                rect.x, rect.y, rect.width, rect.height
+            ));
+        }
         AnnotationKind::Ink { points, width } => {
             fields.push("\"kind\": \"ink\"".to_string());
             let points: Vec<String> = points
@@ -254,6 +273,15 @@ fn annotation_json(item: &ExportItem) -> String {
     fields.push(format!("\"opacity\": {:.2}", item.opacity));
     if let Some(body) = &item.body {
         fields.push(format!("\"body\": {}", quote(body)));
+    }
+    if let Some(author) = &item.author {
+        fields.push(format!("\"author\": {}", quote(author)));
+    }
+    if let Some(created) = item.created {
+        fields.push(format!("\"created\": {created}"));
+    }
+    if let Some(modified) = item.modified {
+        fields.push(format!("\"modified\": {modified}"));
     }
     format!("{{ {} }}", fields.join(", "))
 }
@@ -292,7 +320,7 @@ fn quote(value: &str) -> String {
 ///
 /// * `expected_pages` 用来确认写回没有改变页数；
 /// * 校验只做"能重开 + 页数一致 + 能渲染一页"的冒烟检查 —— **不比较像素**：
-///   PDFium 的整页渲染在旋转页上对注释有已知的位置偏差（`docs/current/writeback.md` L3）；
+///   PDFium 的整页渲染在旋转页上对注释有已知的位置偏差（`docs/writeback.md` L3）；
 /// * 失败时清理临时文件；目标已存在时不做任何事。
 pub fn export(
     pdf: &Path,
@@ -521,6 +549,15 @@ pub fn stage_in_place_with_refs_and_inline(
     Ok(temporary)
 }
 
+/// 为目标文件准备同目录临时路径（另存为/覆盖保存用，保证 rename 不跨文件系统）。
+pub fn staging_path_for(output: &Path) -> PathBuf {
+    let name = output
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "document.pdf".to_string());
+    output.with_file_name(format!(".{name}.tmp-{}", unique_suffix()))
+}
+
 /// 原地写回前的备份路径：`<pdf>.bak-<nanos>`（不覆盖旧备份）。
 pub fn backup_path(pdf: &Path) -> PathBuf {
     let name = pdf
@@ -619,6 +656,9 @@ mod tests {
             color: [255, 214, 0],
             opacity: 0.35,
             body: Some("第一行\n第二行 \"引号\"".to_string()),
+            author: None,
+            created: None,
+            modified: None,
         }
     }
 
@@ -676,6 +716,7 @@ mod tests {
         let update = RefUpdate {
             reference: PdfObjectRef { num: 16, gen: 0 },
             body: Some("新正文".to_string()),
+            modified: None,
         };
         let delete = PdfObjectRef { num: 18, gen: 1 };
         let job = job_json_with_refs(
@@ -708,6 +749,9 @@ mod tests {
             color: [25, 25, 25],
             opacity: 1.0,
             body: None,
+            author: None,
+            created: None,
+            modified: None,
         };
         let job = job_json(
             Path::new("/tmp/a.pdf"),
@@ -795,6 +839,9 @@ mod tests {
             color: [255, 255, 0],
             opacity: 0.35,
             body: Some("导出校验".to_string()),
+            author: None,
+            created: None,
+            modified: None,
         }];
         let output = dir.join("book.annotated.pdf");
         let report = finalize(&temporary, &output, 2, &items).expect("校验并改名");

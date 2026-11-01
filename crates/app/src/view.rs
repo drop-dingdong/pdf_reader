@@ -840,12 +840,47 @@ pub fn body_size_changed(stored: egui::Vec2, current: egui::Vec2) -> bool {
     (stored.x - current.x).abs() > 0.5 || (stored.y - current.y).abs() > 0.5
 }
 
+/// Unix 秒 → 本地时区 `YYYY-MM-DD HH:MM`。
+pub fn format_local_time(seconds: i64) -> String {
+    let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds.max(0) as u64);
+    let utc: chrono::DateTime<chrono::Utc> = time.into();
+    utc.with_timezone(&chrono::Local)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+
+/// 注释 tooltip 里的时间行；`None` = 没有任何时间可用。
+///
+/// 时间字符串比较长，单独一行；创建与修改相同就只显示一次。
+pub fn annotation_time_line(created: Option<i64>, modified: Option<i64>) -> Option<String> {
+    match (created, modified) {
+        (Some(created), Some(modified)) if created != modified => Some(format!(
+            "创建 {} · 修改 {}",
+            format_local_time(created),
+            format_local_time(modified)
+        )),
+        (Some(created), _) => Some(format!("创建 {}", format_local_time(created))),
+        (None, Some(modified)) => Some(format!("修改 {}", format_local_time(modified))),
+        (None, None) => None,
+    }
+}
+
+/// 「整理副本」对话框里关于"注释还没写进 PDF"的提示；`None` = 不需要提示。/// 「整理副本」对话框里关于"注释还没写进 PDF"的提示；`None` = 不需要提示。
+///
+/// 整理处理的是磁盘上的 PDF 字节，overlay 里未写回的注释不会进副本；这里只**提示**、不拦截
+/// （用户可能只是想先把文件整理小，稍后再写回）。
+pub fn compact_unsaved_hint(pdf_dirty: bool) -> Option<&'static str> {
+    pdf_dirty.then_some(
+        "当前注释改动尚未写入 PDF，不会被整理进副本；需要的话先「写入 PDF」或「导出标注 PDF」。",
+    )
+}
+
 /// "保存自定义数据"按钮的文案：存在未保存修改时加 `*` 前缀。
 pub fn save_button_label(dirty: bool) -> &'static str {
     if dirty {
-        "*保存自定义数据"
+        "*保存"
     } else {
-        "保存自定义数据"
+        "保存"
     }
 }
 
@@ -1801,7 +1836,7 @@ impl<V> KeyedStore<V> {
 
     /// 波段切换时可用的"旧内容"（整页级）。
     ///
-    /// 取舍规则（见 `docs/current/rendering.md` §8 与 D-98/D-99）：
+    /// 取舍规则（见 `docs/rendering.md` §8 ）：
     /// * 只有一种可用 → 用它；
     /// * 两种都有：
     ///   - **缩小方向**（块来自更高波段、整页图来自更低波段）→ 用**整页图**。
@@ -3270,11 +3305,35 @@ mod tests {
         );
     }
 
+    /// 时间行：相同只显示创建；不同显示两条；都没有就不显示。
+    #[test]
+    fn annotation_time_line_omits_duplicates_and_empty() {
+        assert!(annotation_time_line(None, None).is_none());
+        let same = annotation_time_line(Some(1_761_903_600), Some(1_761_903_600)).unwrap();
+        assert!(
+            same.starts_with("创建 ") && !same.contains("修改"),
+            "{same}"
+        );
+        let different = annotation_time_line(Some(1_761_903_600), Some(1_761_907_200)).unwrap();
+        assert!(
+            different.contains("创建 ") && different.contains(" · 修改 "),
+            "{different}"
+        );
+    }
+
+    /// 「整理副本」在注释未写回时的提示。
+    #[test]
+    fn compact_unsaved_hint_only_when_annotations_are_dirty() {
+        assert!(compact_unsaved_hint(false).is_none());
+        let text = compact_unsaved_hint(true).expect("脏时应有提示");
+        assert!(text.contains("不会被整理进副本"), "实际：{text}");
+    }
+
     /// 保存按钮文案随"是否有未保存修改"变化。
     #[test]
     fn save_button_label_marks_unsaved_changes() {
-        assert_eq!(save_button_label(false), "保存自定义数据");
-        assert_eq!(save_button_label(true), "*保存自定义数据");
+        assert_eq!(save_button_label(false), "保存");
+        assert_eq!(save_button_label(true), "*保存");
         assert!(save_button_label(true).starts_with('*'));
     }
 

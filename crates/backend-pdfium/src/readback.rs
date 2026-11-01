@@ -12,8 +12,8 @@ use pdfcore::annotation::{Annotation, AnnotationKind};
 use pdfcore::prelude::{PageIndex, Point, Rect};
 
 use crate::writeback::{
-    read_marker, Ffi, FsPointF, FsQuadPointsF, ANNOT_HIGHLIGHT, ANNOT_INK, ANNOT_STRIKEOUT,
-    ANNOT_UNDERLINE,
+    read_marker, Ffi, FsPointF, FsQuadPointsF, FsRectF, ANNOT_HIGHLIGHT, ANNOT_INK,
+    ANNOT_STRIKEOUT, ANNOT_TEXT, ANNOT_UNDERLINE,
 };
 
 /// 一条从 PDF 读回的注释（与模型解耦：id 可能缺失，由调用方决定合并策略）。
@@ -31,6 +31,12 @@ pub struct ReadAnnotation {
     pub opacity: f32,
     /// `/Contents`（空串视为无正文）。
     pub body: Option<String>,
+    /// `/T` 作者（外部注释可能有）。
+    pub author: Option<String>,
+    /// `/CreationDate`（Unix 秒，UTC）；解析失败为 `None`。
+    pub created: Option<i64>,
+    /// `/M`（Unix 秒，UTC）。
+    pub modified: Option<i64>,
     /// 墨迹的**全部** path（S6b：外部注释可能多条 path；`kind` 里只放第一条）。
     pub ink_strokes: Vec<Vec<Point>>,
 }
@@ -115,7 +121,7 @@ unsafe fn read_annotation(
     let subtype = (ffi.get_subtype)(annot) as c_uint;
     if !matches!(
         subtype,
-        ANNOT_HIGHLIGHT | ANNOT_UNDERLINE | ANNOT_STRIKEOUT | ANNOT_INK
+        ANNOT_HIGHLIGHT | ANNOT_UNDERLINE | ANNOT_STRIKEOUT | ANNOT_INK | ANNOT_TEXT
     ) {
         return None; // 链接、Widget、Popup、Squiggly 等：不读
     }
@@ -132,6 +138,24 @@ unsafe fn read_annotation(
                 ANNOT_HIGHLIGHT => AnnotationKind::Highlight { quads },
                 ANNOT_UNDERLINE => AnnotationKind::Underline { quads },
                 _ => AnnotationKind::StrikeOut { quads },
+            }
+        }
+        ANNOT_TEXT => {
+            let mut rect = FsRectF::default();
+            if (ffi.get_rect)(annot, &mut rect) == 0 {
+                out.skipped += 1;
+                return None;
+            }
+            let left = rect.left.min(rect.right);
+            let right = rect.left.max(rect.right);
+            let bottom = rect.bottom.min(rect.top);
+            let top = rect.bottom.max(rect.top);
+            if !(right > left && top > bottom) {
+                out.skipped += 1;
+                return None;
+            }
+            AnnotationKind::Note {
+                rect: Rect::new(left, bottom, right - left, top - bottom),
             }
         }
         _ => {
@@ -164,6 +188,9 @@ unsafe fn read_annotation(
     let (color, opacity) = read_color_and_opacity(ffi, annot, &model);
 
     Some(ReadAnnotation {
+        author: read_string(ffi, annot, "T"),
+        created: read_string(ffi, annot, "CreationDate").and_then(|text| parse_pdf_date(&text)),
+        modified: read_string(ffi, annot, "M").and_then(|text| parse_pdf_date(&text)),
         page,
         id: read_marker(ffi, annot),
         kind,
@@ -363,6 +390,78 @@ unsafe fn read_string(ffi: &Ffi, annot: *mut c_void, key: &str) -> Option<String
     } else {
         Some(text)
     }
+}
+
+/// 解析 PDF 日期字符串（`D:YYYYMMDDHHmmSS+HH'mm'` / `D:...Z` / 允许 `-` 分隔与缺字段）。
+///
+/// 返回 Unix 秒（UTC）。时区偏移会折进去，所以不同来源的注释可以放在同一条时间轴上。
+pub fn parse_pdf_date(text: &str) -> Option<i64> {
+    let trimmed = text.trim();
+    let body = trimmed.strip_prefix("D:").unwrap_or(trimmed);
+    let bytes = body.as_bytes();
+    let mut date_end = body.len();
+    let mut offset_minutes = 0i64;
+    if let Some(position) = body.find(['Z', 'z']) {
+        date_end = position;
+    } else {
+        // 从第 8 个字符之后找 '+'/'-'：避免把 2026-10-31 里的连字符当成时区。
+        for index in 8..bytes.len() {
+            if bytes[index] == b'+' || bytes[index] == b'-' {
+                date_end = index;
+                let sign = if bytes[index] == b'+' { 1 } else { -1 };
+                let tail = &body[index + 1..];
+                let digits: String = tail.chars().filter(char::is_ascii_digit).collect();
+                if digits.len() >= 2 {
+                    let hours: i64 = digits[0..2].parse().ok()?;
+                    let minutes: i64 = if digits.len() >= 4 {
+                        digits[2..4].parse().ok()?
+                    } else {
+                        0
+                    };
+                    offset_minutes = sign * (hours * 60 + minutes);
+                }
+                break;
+            }
+        }
+    }
+    let digits: String = body[..date_end]
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect();
+    let number = |start: usize, len: usize| -> Option<i64> {
+        if digits.len() < start + len {
+            None
+        } else {
+            digits[start..start + len].parse().ok()
+        }
+    };
+    let year = number(0, 4)?;
+    let month = number(4, 2).unwrap_or(1);
+    let day = number(6, 2).unwrap_or(1);
+    let hour = number(8, 2).unwrap_or(0);
+    let minute = number(10, 2).unwrap_or(0);
+    let second = number(12, 2).unwrap_or(0);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some(
+        days_from_civil(year, month as u32, day as u32) * 86_400
+            + hour * 3_600
+            + minute * 60
+            + second
+            - offset_minutes * 60,
+    )
+}
+
+/// 公历日期 → 距 1970-01-01 的天数（Howard Hinnant 的 `days_from_civil`）。
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let shifted_month = (i64::from(month) + 9) % 12;
+    let day_of_year = (153 * shifted_month + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 fn clamp_byte(value: c_uint) -> u8 {

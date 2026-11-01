@@ -1,8 +1,8 @@
 //! **S5 写回 PDF**：把标注写成真正的 PDF 注释（S5b-1）。
 //!
-//! 背景与决策见 [`docs/decisions/evaluations/s5-writeback.md`](../../../docs/decisions/evaluations/s5-writeback.md)
+//! 背景与契约见 [`docs/writeback.md`](../../../docs/writeback.md)
 //! 与 D-123/D-124；FFI 的完整说明（函数表、ABI、排查步骤）见
-//! [`docs/current/writeback.md`](../../../docs/current/writeback.md)。
+//! [`docs/writeback.md`](../../../docs/writeback.md)。
 //!
 //! ## 为什么有这一层 FFI
 //! `pdfium-render 0.9.4` 没有注释 API，也不暴露 document/page 句柄；而 PDFium 的 C API
@@ -88,6 +88,18 @@ pub struct WritebackAnnotation {
     pub body: Option<String>,
 }
 
+/// 注释的时间/作者补充表（按 id 或对象号查）。
+///
+/// 不塞进 [`WritebackAnnotation`] 是为了不改已有结构体字面量；
+/// 与 [`crate::pdf_patch::InlineChanges`] 一样，属于"旁路"补充数据。
+#[derive(Debug, Clone, Default)]
+pub struct AnnotationMetadata {
+    /// 新注释：按 `/NM` 里的 id。
+    pub by_id: HashMap<u64, crate::pdf_patch::AnnotationMeta>,
+    /// 正文更新：按注释对象号（用来刷新 `/M`）。
+    pub by_ref: HashMap<PdfObjectRef, crate::pdf_patch::AnnotationMeta>,
+}
+
 /// 写回结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WritebackReport {
@@ -155,7 +167,7 @@ pub fn write_with_inline(
     spec: &WritebackSpec,
     inline: &crate::pdf_patch::InlineChanges,
 ) -> WritebackResult<WritebackReport> {
-    write_with_mode(spec, false, inline)
+    write_with_mode(spec, false, inline, &AnnotationMetadata::default())
 }
 
 /// 增量保存：把改动追加到原文件之后（保留原有对象/外部注释的原始结构）。
@@ -173,7 +185,16 @@ pub fn write_incremental_with_inline(
     spec: &WritebackSpec,
     inline: &crate::pdf_patch::InlineChanges,
 ) -> WritebackResult<WritebackReport> {
-    write_with_mode(spec, true, inline)
+    write_incremental_with_meta(spec, inline, &AnnotationMetadata::default())
+}
+
+/// 增量写回：带作者/时间的补充表。
+pub fn write_incremental_with_meta(
+    spec: &WritebackSpec,
+    inline: &crate::pdf_patch::InlineChanges,
+    meta: &AnnotationMetadata,
+) -> WritebackResult<WritebackReport> {
+    write_with_mode(spec, true, inline, meta)
 }
 
 fn inline_deleted_counts(
@@ -194,7 +215,7 @@ fn inline_deleted_counts(
             .ok_or_else(|| WritebackError::Invalid(format!("页号 {} 越界", delete.page)))?;
         let supported = page
             .iter()
-            .filter(|entry| !entry.hidden && matches!(entry.subtype, Some(9 | 10 | 12 | 15)))
+            .filter(|entry| !entry.hidden && matches!(entry.subtype, Some(1 | 9 | 10 | 12 | 15)))
             .count();
         if delete.position >= supported {
             return Err(WritebackError::Invalid(format!(
@@ -218,6 +239,7 @@ fn only_objectified(spec: &WritebackSpec) -> bool {
                         | AnnotationKind::Underline { .. }
                         | AnnotationKind::StrikeOut { .. }
                         | AnnotationKind::Ink { .. }
+                        | AnnotationKind::Note { .. }
                 )
             })
         })
@@ -227,6 +249,7 @@ fn write_with_mode(
     spec: &WritebackSpec,
     incremental: bool,
     inline: &crate::pdf_patch::InlineChanges,
+    meta: &AnnotationMetadata,
 ) -> WritebackResult<WritebackReport> {
     if spec.source == spec.output {
         return Err(WritebackError::Invalid(
@@ -381,10 +404,24 @@ fn write_with_mode(
             }
             let mut new_markups = Vec::new();
             let mut new_inks = Vec::new();
+            let mut new_notes = Vec::new();
             let mut new_per_page = vec![0usize; page_count];
             for page in &spec.pages {
                 for annotation in &page.annotations {
+                    if let AnnotationKind::Note { rect } = &annotation.kind {
+                        new_notes.push(crate::pdf_patch::NewNote {
+                            page: page.page.get(),
+                            id: annotation.id,
+                            rect: *rect,
+                            color: annotation.color,
+                            body: annotation.body.clone(),
+                        });
+                        new_per_page[page.page.get() as usize] += 1;
+                        continue;
+                    }
                     let (kind, quads) = match &annotation.kind {
+                        // 便签在上面单独收集，不会到这里。
+                        AnnotationKind::Note { .. } => continue,
                         AnnotationKind::Highlight { quads } => {
                             (crate::pdf_patch::MarkupKind::Highlight, quads.clone())
                         }
@@ -464,8 +501,10 @@ fn write_with_mode(
                 .iter()
                 .map(|update| (update.reference, update.body.clone()))
                 .collect();
-            let mut bytes = crate::pdf_patch::append_content_updates(&source_bytes, &updates)
-                .map_err(WritebackError::Invalid)?;
+            let modified = modified_by_ref(meta);
+            let mut bytes =
+                crate::pdf_patch::append_content_updates(&source_bytes, &updates, &modified)
+                    .map_err(WritebackError::Invalid)?;
             if !spec.deletes.is_empty() {
                 bytes = crate::pdf_patch::append_deletes(&bytes, &spec.deletes)
                     .map_err(WritebackError::Invalid)?;
@@ -494,9 +533,15 @@ fn write_with_mode(
                     }
                 }
             }
-            if !new_markups.is_empty() || !new_inks.is_empty() {
-                bytes = crate::pdf_patch::append_new_annotations(&bytes, &new_markups, &new_inks)
-                    .map_err(WritebackError::Invalid)?;
+            if !new_markups.is_empty() || !new_inks.is_empty() || !new_notes.is_empty() {
+                bytes = crate::pdf_patch::append_new_annotations(
+                    &bytes,
+                    &new_markups,
+                    &new_inks,
+                    &new_notes,
+                    &meta.by_id,
+                )
+                .map_err(WritebackError::Invalid)?;
             }
             if !inline.is_empty() {
                 bytes = crate::pdf_patch::append_inline_changes(&bytes, inline)
@@ -606,7 +651,8 @@ fn write_with_mode(
                 .iter()
                 .map(|update| (update.reference, update.body.clone()))
                 .collect();
-            bytes = crate::pdf_patch::append_content_updates(&bytes, &updates)
+            let modified = modified_by_ref(meta);
+            bytes = crate::pdf_patch::append_content_updates(&bytes, &updates, &modified)
                 .map_err(WritebackError::Invalid)?;
         }
         if !spec.deletes.is_empty() {
@@ -644,6 +690,14 @@ fn write_with_mode(
             .map(|metadata| metadata.len())
             .unwrap_or(0),
     })
+}
+
+/// 把"按对象号的元数据"压成 `对象号 → 修改时间`（写 `/M` 用）。
+fn modified_by_ref(meta: &AnnotationMetadata) -> HashMap<PdfObjectRef, i64> {
+    meta.by_ref
+        .iter()
+        .filter_map(|(reference, info)| info.modified.map(|value| (*reference, value)))
+        .collect()
 }
 
 /// 读回输出文件的逐页注释数（供调用方校验；**不渲染**）。
@@ -710,6 +764,7 @@ unsafe fn add_annotation(
         AnnotationKind::Underline { .. } => ANNOT_UNDERLINE,
         AnnotationKind::StrikeOut { .. } => ANNOT_STRIKEOUT,
         AnnotationKind::Ink { .. } => ANNOT_INK,
+        AnnotationKind::Note { .. } => ANNOT_TEXT,
     };
     let handle = (ffi.create_annot)(page, subtype);
     if handle.is_null() {
@@ -882,6 +937,7 @@ fn appearance_content(kind: &AnnotationKind, color: [u8; 3], opacity: f32) -> Op
         // 高亮不写 AP：写了就是不透明填充，会盖住文字；让阅读器按 /QuadPoints 合成
         AnnotationKind::Highlight { .. } => None,
         AnnotationKind::Ink { .. } => None,
+        AnnotationKind::Note { .. } => None,
         AnnotationKind::Underline { quads } => Some(lines_at(quads, false, &stroke, opacity)),
         AnnotationKind::StrikeOut { quads } => Some(lines_at(quads, true, &stroke, opacity)),
     }
@@ -1085,7 +1141,7 @@ fn verify_counts(spec: &WritebackSpec, expected: &[usize], ffi: &Ffi) -> Writeba
     Ok(())
 }
 
-// ============================================================ FFI（详见 docs/current/writeback.md）
+// ============================================================ FFI（详见 docs/writeback.md）
 
 /// 写回标记的前缀：`/NM` = `pd-fr:<id>`。
 ///
@@ -1130,6 +1186,8 @@ pub(crate) const ANNOT_HIGHLIGHT: c_uint = 9;
 pub(crate) const ANNOT_UNDERLINE: c_uint = 10;
 pub(crate) const ANNOT_STRIKEOUT: c_uint = 12;
 pub(crate) const ANNOT_INK: c_uint = 15;
+/// PDFium 的 `FPDF_ANNOT_TEXT`（便签图标）。
+pub(crate) const ANNOT_TEXT: c_uint = 1;
 const ANNOT_FLAG_PRINT: c_int = 4;
 const FPDF_NO_INCREMENTAL: c_uint = 2;
 const FPDF_INCREMENTAL: c_uint = 1;
@@ -1157,10 +1215,10 @@ pub(crate) struct FsQuadPointsF {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct FsRectF {
-    left: c_float,
-    top: c_float,
-    right: c_float,
-    bottom: c_float,
+    pub(crate) left: c_float,
+    pub(crate) top: c_float,
+    pub(crate) right: c_float,
+    pub(crate) bottom: c_float,
 }
 
 #[repr(C)]
@@ -1200,6 +1258,7 @@ pub(crate) struct Ffi {
     pub(crate) create_annot: unsafe extern "C" fn(*mut c_void, c_uint) -> *mut c_void,
     pub(crate) close_annot: unsafe extern "C" fn(*mut c_void),
     pub(crate) set_rect: unsafe extern "C" fn(*mut c_void, *const FsRectF) -> c_int,
+    pub(crate) get_rect: unsafe extern "C" fn(*mut c_void, *mut FsRectF) -> c_int,
     pub(crate) set_color:
         unsafe extern "C" fn(*mut c_void, c_uint, c_uint, c_uint, c_uint, c_uint) -> c_int,
     pub(crate) set_flags: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
@@ -1296,6 +1355,10 @@ impl Ffi {
             set_rect: sym!(
                 "FPDFAnnot_SetRect",
                 unsafe extern "C" fn(*mut c_void, *const FsRectF) -> c_int
+            ),
+            get_rect: sym!(
+                "FPDFAnnot_GetRect",
+                unsafe extern "C" fn(*mut c_void, *mut FsRectF) -> c_int
             ),
             set_color: sym!(
                 "FPDFAnnot_SetColor",

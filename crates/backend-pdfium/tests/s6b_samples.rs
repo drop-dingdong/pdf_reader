@@ -53,6 +53,7 @@ fn assert_common(name: &str, read: &readback::Readback, has_body: bool) {
             assert_eq!(annotation.body, None, "{name}: 不应有 /Contents");
         }
         match &annotation.kind {
+            AnnotationKind::Note { .. } => continue,
             AnnotationKind::Ink { points, width } => {
                 assert!(points.len() >= 2, "{name}: 墨迹点太少");
                 assert!(*width > 0.0 && width.is_finite(), "{name}: 墨迹线宽异常");
