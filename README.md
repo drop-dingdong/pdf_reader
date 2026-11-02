@@ -22,12 +22,13 @@ crates/app              egui 界面 + 回放器 + 设置/存档/摘要
 - **整理副本**：去掉历史修订、生成更小的单段 PDF（`--compact`）；不覆盖源文件。
 - **自定义数据**：文字/图片 preview、链接、引用点尺寸 → 同目录 `<pdf>.json`。
 - **文字浮窗 Markdown**：顶栏全局开关；注释/便签/文字 preview 的阅读视图，正文可滚动、
-  链接只提示；单换行按笔记语义保留，图片浮窗与写回路径不变。
+  链接只提示；单换行按笔记语义保留；`$...$` / `$$...$$` LaTeX 数学按 PNG 纹理渲染；
+  图片浮窗与写回路径不变。
 - **设置**：窗口/侧栏、注释默认样式、每文件阅读状态/最近文件、顶栏显示开关、原地保存备份。
 
 ## 快速开始
 
-依赖：Rust ≥ 1.95，以及 PDFium 动态库（仓库不提交二进制，用脚本下载）。
+依赖：Rust ≥ 1.99（LaTeX 数学的 `latex-rust` 要求），以及 PDFium 动态库（仓库不提交二进制，用脚本下载）。
 
 ```bash
 ./scripts/fetch-pdfium.sh          # → vendor/pdfium-<平台>/lib/
@@ -61,7 +62,7 @@ cargo build --release -p app           # target/release/app
 ```
 
 `fmt --check` → `clippy -D warnings` → `cargo test --workspace` → 回放结构基线比较 → 文档链接检查。
-当前约 **466 个测试**；PDFium 就绪时会跑真实样本。
+当前约 **470 个测试**；PDFium 就绪时会跑真实样本。
 
 单独跑回放：
 
@@ -105,3 +106,6 @@ cargo run -p app -- --compact in.pdf out.pdf
 ## 许可
 
 MIT OR Apache-2.0
+
+LaTeX 数学使用 [latex-rust](https://crates.io/crates/latex-rust)（MIT OR Apache-2.0），
+其内嵌的 STIX Two Math 字体为 SIL OFL 1.1；发布包需一并保留其许可声明。

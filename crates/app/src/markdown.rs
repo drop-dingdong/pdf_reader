@@ -16,6 +16,7 @@ fn parser_options() -> Options {
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_DEFINITION_LIST
+        | Options::ENABLE_MATH
 }
 
 /// 把段落内的单个换行转成硬换行（行尾补两个空格）。

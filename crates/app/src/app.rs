@@ -1193,6 +1193,8 @@ pub struct PdfReaderApp {
     markdown_floats: bool,
     /// egui_commonmark 的排版/图片缓存（每个浮窗用稳定的 `Id` 区分）。
     markdown_cache: egui_commonmark::CommonMarkCache,
+    /// LaTeX 公式的 PNG 纹理缓存与内嵌字体（全局共用）。
+    math_cache: std::rc::Rc<std::cell::RefCell<crate::math::MathCache>>,
     /// 本帧是否有 Markdown 浮窗渲染过；用于把外部链接的 `OpenUrl` 改成状态栏提示。
     markdown_rendered: bool,
     /// 侧栏 Pin 列表里正在被悬浮的条目（下标 + 该行的屏幕矩形，用于定位临时浮窗）。
@@ -1433,6 +1435,7 @@ impl PdfReaderApp {
             pin_hover_enabled: ui_settings.pin_hover_enabled,
             markdown_floats: ui_settings.markdown_floats,
             markdown_cache: egui_commonmark::CommonMarkCache::default(),
+            math_cache: std::rc::Rc::new(std::cell::RefCell::new(crate::math::MathCache::new())),
             markdown_rendered: false,
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
@@ -8642,11 +8645,12 @@ impl PdfReaderApp {
                                 visuals.hyperlink_color = Color32::from_rgb(120, 180, 255);
                                 *ui.visuals_mut() = visuals;
                                 ui.spacing_mut().item_spacing = EVec2::new(0.0, 4.0);
-                                // 外层自己给 ScrollArea 固定填满 body：
-                                // * 短内容也占满高度，横向滚动条固定在浮窗底部；
-                                // * 不用 `show_scrollable(viewport_cache)`：它会把表格
-                                //   渲染到视口右侧（0.26.0 的表格 + 视口切片路径问题），
-                                //   这里改为整篇 `show`，由外层 ScrollArea 滚动。
+                                // 数学公式走 render_math_fn（egui_commonmark 会在
+                                // 有回调时启用 ENABLE_MATH）；缓存按公式/行内/DPI。
+                                let math_cache = self.math_cache.clone();
+                                let math_fn = move |ui: &mut egui::Ui, tex: &str, inline: bool| {
+                                    crate::math::paint(ui, &math_cache, tex, inline);
+                                };
                                 egui::ScrollArea::both()
                                     .id_salt(view_id.with("scroll"))
                                     .auto_shrink([false, false])
@@ -8654,6 +8658,7 @@ impl PdfReaderApp {
                                     .show(ui, |ui| {
                                         egui_commonmark::CommonMarkViewer::new()
                                             .default_width(default_width)
+                                            .render_math_fn(Some(&math_fn))
                                             .show(ui, &mut self.markdown_cache, &text);
                                     });
                             },
@@ -9437,6 +9442,39 @@ mod annotation_body_tests {
             max_x <= rect.right() + 2.0,
             "表格不应被推到浮窗右侧：max_x={max_x}, rect_right={}",
             rect.right()
+        );
+    }
+
+    #[test]
+    fn markdown_math_renders_into_the_float() {
+        let mut app = app();
+        app.markdown_floats = true;
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 40.0), egui::vec2(320.0, 240.0));
+        app.floats.push(Float {
+            id: 1,
+            title: "数学".to_string(),
+            content: FloatContent::Text(
+                "行内 $x^2 + y^2$ 与块级：\n\n$$\\frac{1}{2}$$".to_string(),
+            ),
+            rect,
+            owner: FloatOwner::None,
+            body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
+            origin: None,
+        });
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let input = egui::RawInput {
+            screen_rect: Some(canvas),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            app.draw_floats(ui, canvas);
+        });
+        output.drop_without_applying_deltas();
+        assert!(
+            !app.math_cache.borrow().is_empty(),
+            "公式应生成至少一张纹理或失败占位"
         );
     }
 

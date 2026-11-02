@@ -25,6 +25,7 @@ pub mod history;
 pub(crate) mod ink;
 pub(crate) mod json;
 pub mod markdown;
+pub mod math;
 pub mod persist;
 pub mod settings;
 pub mod view;
