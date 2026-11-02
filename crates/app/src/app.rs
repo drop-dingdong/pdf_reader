@@ -1195,6 +1195,8 @@ pub struct PdfReaderApp {
     markdown_cache: egui_commonmark::CommonMarkCache,
     /// LaTeX 公式的 PNG 纹理缓存与内嵌字体（全局共用）。
     math_cache: std::rc::Rc<std::cell::RefCell<crate::math::MathCache>>,
+    /// 数学公式支持/限制帮助窗口是否打开。
+    math_help: bool,
     /// 本帧是否有 Markdown 浮窗渲染过；用于把外部链接的 `OpenUrl` 改成状态栏提示。
     markdown_rendered: bool,
     /// 侧栏 Pin 列表里正在被悬浮的条目（下标 + 该行的屏幕矩形，用于定位临时浮窗）。
@@ -1436,6 +1438,7 @@ impl PdfReaderApp {
             markdown_floats: ui_settings.markdown_floats,
             markdown_cache: egui_commonmark::CommonMarkCache::default(),
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(crate::math::MathCache::new())),
+            math_help: false,
             markdown_rendered: false,
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
@@ -3442,6 +3445,10 @@ impl PdfReaderApp {
         if ctx.memory(|memory| memory.focused().is_some()) {
             return;
         }
+        // 正文编辑窗口打开时，键盘归编辑窗口（Esc 取消、Ctrl+Enter 保存）。
+        if self.editing_body.is_some() {
+            return;
+        }
         // 截图模式下不采集任何"影响主视图显示内容"的命令（滚动/缩放/翻页/复制…）：
         // 键盘的 Enter/Esc 与框选都在 `draw_canvas` 里处理（那里才有画布矩形与滚动量）。
         if self.capture.is_some() {
@@ -3967,6 +3974,13 @@ impl PdfReaderApp {
                     // 顶栏开关立即写回设置（与样式菜单同一套脏位）。
                     self.settings.ui.markdown_floats = self.markdown_floats;
                     self.settings_dirty = true;
+                }
+                if ui
+                    .small_button("?")
+                    .on_hover_text("数学公式支持与限制")
+                    .clicked()
+                {
+                    self.math_help = true;
                 }
             });
 
@@ -6907,13 +6921,14 @@ impl PdfReaderApp {
                 // 会一直空着（D-101 把初次生成改成了"提交渲染 + 等待"，必须有重试入口）。
                 self.ensure_pending_custom_snapshots(ui, session);
                 self.draw_floats(ui, canvas);
-                // 正文原位编辑：先检测双击，再绘制编辑框（两者都在浮窗之后，层级正确）
+                // 正文编辑：只检测双击并打开正式编辑窗口（编辑窗口在 draw_edit_dialogs 里）
                 self.detect_body_double_click(ui);
-                self.draw_float_body_editing(ui);
                 // 临时预览**最后**绘制 → 真正位于最上层（用户要求）
                 self.draw_hover_preview(ui, canvas);
                 // 侧栏条目悬浮 → 主视图右侧的临时浮窗
                 self.draw_sidebar_hover_float(ui, canvas);
+                // 公式失败只做短暂状态提示；下一条消息会直接顶替。
+                self.take_math_error();
                 // Markdown 链接只提示，不打开浏览器（与 PDF URI 的行为一致）。
                 self.consume_markdown_links(ui.ctx());
             } else if self.capture.is_some() {
@@ -7319,86 +7334,121 @@ impl PdfReaderApp {
         }
     }
 
-    /// 浮窗正文的原位编辑：双击进入，失焦提交。
+    /// 浮窗正文的正式编辑窗口：双击/✎ 打开，显式保存或取消。
     ///
-    /// * 自定义 preview：沿用旧行为（直接写 preview.text，不进撤销栈）；
-    /// * 注释：写入 `Annotation.body`，走 `AppEdit::SetBody`（可撤销）。
-    fn draw_float_body_editing(&mut self, ui: &mut egui::Ui) {
-        let Some((editing_owner, _)) = self.editing_body.clone() else {
+    /// 不再使用 `ui.put(TextEdit)` 塞进浮窗 body：body 尺寸由用户决定，
+    /// 长文本会被截断且无法滚动。这里用可调整大小的 `Window` + 内部
+    /// `ScrollArea`，编辑区独立于浮窗尺寸；保存仍走 `SetBody`/`SetPreviewBody`。
+    fn draw_body_editor(&mut self, ctx: &egui::Context) {
+        let Some((owner, _)) = self.editing_body.clone() else {
             return;
         };
-        // 编辑框是 `ui.put` 在浮窗**之后**画的，所以只有它自己在上层；浮窗的层级仍由
-        // `self.floats` 顺序决定。进入/保持正文编辑时把该浮窗置顶，否则低位浮窗会出现
-        // "编辑框上去了、窗还在下面"（用户 2026-11-01 反馈）。
-        if let Some(index) = self
-            .floats
-            .iter()
-            .position(|window| window.owner == editing_owner)
-        {
-            if index + 1 != self.floats.len() {
-                move_to_last(&mut self.floats, index);
+        let title = match owner {
+            FloatOwner::Custom(index) => match self.custom_previews.get(index) {
+                Some(preview) if preview.title.is_empty() => "自定义preview".to_string(),
+                Some(preview) => preview.title.clone(),
+                None => {
+                    self.editing_body = None;
+                    return;
+                }
+            },
+            FloatOwner::Annotation(id) => match self.annotations.get(id) {
+                Some(_) => format!("标注 #{}", id.get()),
+                None => {
+                    self.editing_body = None;
+                    return;
+                }
+            },
+            FloatOwner::None => {
+                self.editing_body = None;
+                return;
             }
-        }
-        let Some(window) = self
-            .floats
-            .iter()
-            .find(|window| window.owner == editing_owner)
-        else {
-            self.editing_body = None;
-            return;
         };
-        let body_rect = egui::Rect::from_min_max(
-            window.rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 4.0),
-            window.rect.max - EVec2::new(8.0, 8.0),
-        );
         let Some((_, draft)) = self.editing_body.take() else {
             return;
         };
         let mut text = draft;
-        let response = ui.put(
-            body_rect,
-            egui::TextEdit::multiline(&mut text)
-                .desired_width(body_rect.width())
-                .desired_rows(6),
-        );
-        if self.focus_body_edit {
-            response.request_focus();
-            self.focus_body_edit = false;
-        }
-        if response.lost_focus() {
-            match editing_owner {
-                FloatOwner::Custom(index) => {
-                    if let Some(preview) = self.custom_previews.get(index) {
-                        let before = preview.text.clone();
-                        let after = Some(text);
-                        if before != after {
-                            self.apply_edit(
-                                AppEdit::SetPreviewBody {
-                                    key: PreviewKey {
-                                        page: preview.page,
-                                        id: preview.id,
-                                    },
-                                    before,
-                                    after,
-                                },
-                                true,
-                            );
+        let mut open = true;
+        let mut save = false;
+        let mut cancel = false;
+        let mut focus = self.focus_body_edit;
+        egui::Window::new(format!("编辑正文 · {title}"))
+            .id(Id::unique("edit-body"))
+            .resizable(true)
+            .collapsible(false)
+            .default_width(560.0)
+            .default_height(420.0)
+            .min_width(360.0)
+            .min_height(240.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("原始 Markdown；保存后按现有路径写回注释或 preview。");
+                let editor_height = (ui.available_height() - 42.0).max(120.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("edit-body-scroll")
+                    .auto_shrink([false, false])
+                    .max_height(editor_height)
+                    .show(ui, |ui| {
+                        let response = ui.add(
+                            egui::TextEdit::multiline(&mut text)
+                                .code_editor()
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(18),
+                        );
+                        if focus {
+                            response.request_focus();
+                            focus = false;
                         }
-                    }
+                    });
+                if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    cancel = true;
                 }
-                FloatOwner::Annotation(id) => {
-                    let before = self.annotations.get(id).and_then(|a| a.body.clone());
-                    let after = if text.is_empty() { None } else { Some(text) };
+                if ui.input(|input| {
+                    (input.modifiers.command || input.modifiers.ctrl)
+                        && input.key_pressed(egui::Key::Enter)
+                }) {
+                    save = true;
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("保存").clicked() {
+                        save = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        self.focus_body_edit = focus;
+        if !open {
+            cancel = true;
+        }
+        if save {
+            self.commit_body_edit(owner, text);
+            self.editing_body = None;
+            self.message = "已更新内容".to_string();
+        } else if cancel {
+            self.editing_body = None;
+            self.message = "已取消编辑".to_string();
+        } else {
+            self.editing_body = Some((owner, text));
+        }
+    }
+
+    /// 提交正文编辑；注释走 `SetBody`（可撤销），preview 走 `SetPreviewBody`。
+    fn commit_body_edit(&mut self, owner: FloatOwner, text: String) {
+        match owner {
+            FloatOwner::Custom(index) => {
+                if let Some(preview) = self.custom_previews.get(index) {
+                    let before = preview.text.clone();
+                    let after = Some(text);
                     if before != after {
-                        let page = self
-                            .annotations
-                            .get(id)
-                            .map(|a| a.page)
-                            .unwrap_or(PageIndex::FIRST);
                         self.apply_edit(
-                            AppEdit::SetBody {
-                                id,
-                                page,
+                            AppEdit::SetPreviewBody {
+                                key: PreviewKey {
+                                    page: preview.page,
+                                    id: preview.id,
+                                },
                                 before,
                                 after,
                             },
@@ -7406,12 +7456,28 @@ impl PdfReaderApp {
                         );
                     }
                 }
-                FloatOwner::None => {}
             }
-            self.editing_body = None;
-            self.message = "已更新内容".to_string();
-        } else {
-            self.editing_body = Some((editing_owner, text));
+            FloatOwner::Annotation(id) => {
+                let before = self.annotations.get(id).and_then(|a| a.body.clone());
+                let after = if text.is_empty() { None } else { Some(text) };
+                if before != after {
+                    let page = self
+                        .annotations
+                        .get(id)
+                        .map(|a| a.page)
+                        .unwrap_or(PageIndex::FIRST);
+                    self.apply_edit(
+                        AppEdit::SetBody {
+                            id,
+                            page,
+                            before,
+                            after,
+                        },
+                        true,
+                    );
+                }
+            }
+            FloatOwner::None => {}
         }
     }
 
@@ -7474,8 +7540,78 @@ impl PdfReaderApp {
         }
     }
 
+    /// 数学公式支持/限制说明。内容按当前后端能力生成，避免文档与实现脱节。
+    fn draw_math_help(&mut self, ctx: &egui::Context) {
+        if !self.math_help {
+            return;
+        }
+        let caps = self.math_cache.borrow().capabilities();
+        let mut open = true;
+        egui::Window::new("数学公式支持")
+            .id(Id::unique("math-help"))
+            .resizable(true)
+            .collapsible(false)
+            .default_width(560.0)
+            .default_height(420.0)
+            .min_width(360.0)
+            .min_height(240.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("math-help-scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.heading("语法");
+                        ui.monospace("行内：$...$    块级：$$...$$");
+                        ui.label("只支持数学模式，不是完整的 LaTeX 文档。");
+                        ui.separator();
+                        ui.heading("当前后端");
+                        ui.label(format!(
+                            "{}（CJK 文本：{}；化学式：{}；矢量 SVG：{}）",
+                            caps.backend,
+                            if caps.cjk_text { "支持" } else { "不支持" },
+                            if caps.chemistry {
+                                "支持"
+                            } else {
+                                "不支持"
+                            },
+                            if caps.vector_svg {
+                                "支持"
+                            } else {
+                                "不支持"
+                            },
+                        ));
+                        ui.separator();
+                        ui.heading("支持");
+                        ui.label(
+                            "分式、根号、积分/求和、矩阵/array、align/gather/multline/cases、\
+                             希腊字母/AMS 符号/箭头/运算符、重音、\\left...\\right、颜色、\
+                             \\text{拉丁文本}。",
+                        );
+                        ui.separator();
+                        ui.heading("不支持 / 限制");
+                        ui.label(
+                            "化学式（\\ce/\\pu）、TikZ、完整文档排版、任意自定义宏；\
+                             STIX Two Math 没有 CJK 字形，\\text{中文} 会回退原文；\
+                             公式源码 ≤ 4096 字节；单张纹理 ≤ 8MP。",
+                        );
+                        ui.separator();
+                        ui.label("失败时显示原文，并在状态栏短暂提示原因；其他消息会直接顶替。");
+                        ui.label(format!(
+                            "当前缓存 {} 条；超过 64 条会整体清空。",
+                            self.math_cache.borrow().len()
+                        ));
+                    });
+            });
+        self.math_help = open;
+    }
+
     /// 编辑题目 / 正文的对话框（✎ 按钮与"固定浮窗内双击文字"共用）。
     fn draw_edit_dialogs(&mut self, ctx: &egui::Context) {
+        // ---- 正文编辑（正式窗口）----
+        self.draw_body_editor(ctx);
+        self.draw_math_help(ctx);
+
         // ---- 题目 ----
         if let Some((index, draft)) = self.editing_title.clone() {
             let mut text = draft;
@@ -8583,15 +8719,6 @@ impl PdfReaderApp {
                     ui.ctx().request_repaint();
                 }
             }
-            // 正在原位编辑的浮窗：跳过正文绘制（编辑框由
-            // `draw_float_body_editing` 单独绘制，见下）
-            let editing_inline = self
-                .editing_body
-                .as_ref()
-                .is_some_and(|(owner, _)| *owner == self.floats[index].owner);
-            if editing_inline {
-                continue;
-            }
             match &self.floats[index].content {
                 FloatContent::Text(text) if markdown_active => {
                     // Markdown 正文：子 Ui + 内部 ScrollArea（可滚动、可点链接）。
@@ -8716,6 +8843,13 @@ impl PdfReaderApp {
             if let Some(index) = self.floats.iter().position(|window| window.id == id) {
                 move_to_last(&mut self.floats, index);
             }
+        }
+    }
+
+    /// 取走公式后端的首次失败错误，写入状态栏（短暂提示，后续消息可顶替）。
+    fn take_math_error(&mut self) {
+        if let Some(error) = self.math_cache.borrow_mut().take_error() {
+            self.message = error.status_line();
         }
     }
 
@@ -9442,6 +9576,28 @@ mod annotation_body_tests {
             max_x <= rect.right() + 2.0,
             "表格不应被推到浮窗右侧：max_x={max_x}, rect_right={}",
             rect.right()
+        );
+    }
+
+    #[test]
+    fn body_editor_commit_writes_annotation_and_is_undoable() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        let id = app.annotations.iter().next().expect("一条").id;
+        app.commit_body_edit(FloatOwner::Annotation(id), "正式窗口内容".to_string());
+        assert_eq!(
+            app.annotations.get(id).and_then(|a| a.body.as_deref()),
+            Some("正式窗口内容")
+        );
+        app.undo_edit();
+        assert_eq!(
+            app.annotations.get(id).and_then(|a| a.body.as_deref()),
+            None
         );
     }
 

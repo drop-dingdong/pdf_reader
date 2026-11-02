@@ -55,6 +55,8 @@
 - `view.rs`：坐标换算、输入映射、`KeyedStore`、画法决策 `plan_page`、快照拼合、浮窗几何、
  摘要文案；**能脱离窗口验证的逻辑一律在这里**。
 - `app.rs`：面板/画布/交互/浮窗/侧栏/对话框/保存与未保存提示状态机。
+- `markdown.rs`：浮窗 Markdown 预处理（单换行→硬换行、最小内容宽度测量）。
+- `math.rs`：LaTeX `MathBackend` trait、PNG 后端、公式纹理缓存与错误类型。
 - `persist.rs`：`.pdf.json` 手写 JSON + 版本迁移（未知字段不保留）。
 - `settings.rs`：`settings.json`（缺字段默认、坏文件改名 `.bad-*`、原子写）。
 - `annotations_md.rs`：注释摘要（Markdown）。

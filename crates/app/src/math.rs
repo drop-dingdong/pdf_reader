@@ -1,10 +1,13 @@
-//! 浮窗 Markdown 里的 LaTeX 数学（P1.5：`latex-rust` + PNG 纹理）。
+//! 浮窗 Markdown 里的 LaTeX 数学。
 //!
-//! 只做“公式 → 透明 PNG → egui 纹理”，不引入 SVG/浏览器。解析或排版失败时
-//! 回退成原文 `$...$`，不 panic；纹理有数量上限，避免连续编辑把显存吃满。
+//! 渲染后端通过 [`MathBackend`] 抽象：当前是 `latex-rust` + 透明 PNG；
+//! 以后可以换 RaTeX 等实现，而不改动缓存/错误/纹理上传这条链。
+//!
+//! 失败时回退成原文 `$...$`，不 panic；错误由 [`MathCache::take_error`] 交给状态栏。
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use egui::{Color32, Sense, TextureHandle, TextureOptions, Vec2};
@@ -18,10 +21,234 @@ const MAX_MATH_ENTRIES: usize = 64;
 const MAX_TEXTURE_PIXELS: f32 = 8_000_000.0;
 /// 与浮窗正文一致的字号（egui 逻辑点）。
 const LOGICAL_FONT_SIZE: f32 = 13.0;
-/// 9.75pt ≈ 13px @96dpi；latex-rust 的 SVG/PNG 用 pt。
+/// 9.75pt ≈ 13px @96dpi；latex-rust 的 PNG 用 pt。
 const PT_PER_EM: (i64, i64) = (39, 4);
 /// 纹理超采样倍率（按设备像素再乘 pixels_per_point）。
 const SUPERSAMPLE: f32 = 2.0;
+
+/// 公式的逻辑尺寸（em）。
+#[derive(Clone, Debug, Default)]
+pub struct MathMetrics {
+    /// 宽度（em）
+    pub width_em: f32,
+    /// 基线以上高度（em）
+    pub height_em: f32,
+    /// 基线以下深度（em）
+    pub depth_em: f32,
+}
+
+/// 后端产出的 RGBA 光栅（非预乘）。
+#[derive(Clone, Debug)]
+pub struct MathRaster {
+    /// 像素宽
+    pub width: u32,
+    /// 像素高
+    pub height: u32,
+    /// RGBA8 像素
+    pub rgba: Vec<u8>,
+}
+
+/// 公式失败类别；用于状态栏/帮助窗口。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MathErrorKind {
+    /// 语法错误
+    Parse,
+    /// 字体/缺字形
+    Font,
+    /// 后端明确不支持
+    Unsupported,
+    /// 超过长度或纹理限制
+    TooLarge,
+    /// 解码/内部错误
+    Internal,
+}
+
+impl MathErrorKind {
+    /// 状态栏用的短标签。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Parse => "语法",
+            Self::Font => "字形",
+            Self::Unsupported => "不支持",
+            Self::TooLarge => "过大",
+            Self::Internal => "内部错误",
+        }
+    }
+}
+
+/// 一条公式的失败信息。
+#[derive(Clone, Debug)]
+pub struct MathError {
+    /// 类别
+    pub kind: MathErrorKind,
+    /// 后端原始错误
+    pub message: String,
+    /// 出错公式（用于定位）
+    pub formula: String,
+}
+
+impl MathError {
+    fn new(kind: MathErrorKind, formula: &str, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            formula: formula.to_string(),
+        }
+    }
+
+    fn internal(formula: &str, message: impl Into<String>) -> Self {
+        Self::new(MathErrorKind::Internal, formula, message)
+    }
+
+    /// 状态栏的一行提示（截断公式和错误）。
+    pub fn status_line(&self) -> String {
+        let formula: String = self.formula.chars().take(48).collect();
+        let mut message: String = self.message.chars().take(160).collect();
+        if message.is_empty() {
+            message = self.kind.label().to_string();
+        }
+        format!(
+            "数学公式：{}（{}）",
+            message,
+            if formula.is_empty() {
+                self.kind.label().to_string()
+            } else {
+                formula
+            }
+        )
+    }
+}
+
+impl fmt::Display for MathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}（{}）", self.message, self.formula)
+    }
+}
+
+/// 后端能力；帮助窗口用它说明“支持什么”。
+#[derive(Clone, Debug)]
+pub struct MathCapabilities {
+    /// 后端名称
+    pub backend: &'static str,
+    /// 是否支持 `\text{中文}` 这类 CJK 文本
+    pub cjk_text: bool,
+    /// 是否支持化学式（`\ce`/`\pu`）
+    pub chemistry: bool,
+    /// 是否原生输出矢量 SVG
+    pub vector_svg: bool,
+}
+
+/// LaTeX 数学渲染后端。
+///
+/// 只负责“测量 + 光栅化”，不碰 egui 纹理；纹理缓存/DPI/错误提示由
+/// [`MathCache`] 统一处理。这样测试可以替换成假后端，未来也能接 RaTeX。
+pub trait MathBackend {
+    /// 后端名称
+    fn name(&self) -> &'static str;
+    /// 后端能力
+    fn capabilities(&self) -> MathCapabilities;
+    /// 排版并返回 em 尺寸；失败返回可展示的错误
+    fn measure(&mut self, tex: &str, display: bool) -> Result<MathMetrics, MathError>;
+    /// 按 `dpi` 光栅化；返回透明 RGBA
+    fn rasterize(&mut self, tex: &str, display: bool, dpi: f32) -> Result<MathRaster, MathError>;
+}
+
+/// `latex-rust` 后端（内嵌 STIX Two Math）。
+struct LatexRustBackend {
+    font: Option<MathFont>,
+}
+
+impl LatexRustBackend {
+    fn new() -> Self {
+        Self {
+            font: MathFont::stix_two_math().ok(),
+        }
+    }
+}
+
+impl MathBackend for LatexRustBackend {
+    fn name(&self) -> &'static str {
+        "latex-rust 3.0.1"
+    }
+
+    fn capabilities(&self) -> MathCapabilities {
+        MathCapabilities {
+            backend: self.name(),
+            cjk_text: false,
+            chemistry: false,
+            vector_svg: false,
+        }
+    }
+
+    fn measure(&mut self, tex: &str, display: bool) -> Result<MathMetrics, MathError> {
+        let font = self
+            .font
+            .as_ref()
+            .ok_or_else(|| MathError::internal(tex, "STIX Two Math 未加载"))?;
+        let style = if display {
+            MathStyle::Display
+        } else {
+            MathStyle::Text
+        };
+        let ast = latex_rust::parse(tex)
+            .map_err(|error| MathError::new(MathErrorKind::Parse, tex, error.to_string()))?;
+        let boxed =
+            latex_rust::layout(&ast, font, style).map_err(|error| map_latex_error(tex, error))?;
+        Ok(MathMetrics {
+            width_em: dim_f32(boxed.width.clone()),
+            height_em: dim_f32(boxed.height.clone()),
+            depth_em: dim_f32(boxed.depth.clone()),
+        })
+    }
+
+    fn rasterize(&mut self, tex: &str, display: bool, dpi: f32) -> Result<MathRaster, MathError> {
+        let font = self
+            .font
+            .as_ref()
+            .ok_or_else(|| MathError::internal(tex, "STIX Two Math 未加载"))?;
+        let mut options = PngOptions::new();
+        options.font_size_pt = Dim::ratio(PT_PER_EM.0, PT_PER_EM.1);
+        options.dpi = Dim::from_i64(dpi.round().clamp(96.0, 2400.0) as i64);
+        options.color = latex_rust::Color::rgb(225, 225, 225);
+        options.display = display;
+        let png = latex_rust::latex_to_png(tex, font, &options)
+            .map_err(|error| map_latex_error(tex, error))?;
+        let decoded = image::load_from_memory(&png)
+            .map_err(|error| MathError::internal(tex, format!("PNG 解码失败：{error}")))?
+            .into_rgba8();
+        let (width, height) = decoded.dimensions();
+        if width == 0 || height == 0 {
+            return Err(MathError::internal(tex, "PNG 尺寸为 0"));
+        }
+        Ok(MathRaster {
+            width,
+            height,
+            rgba: decoded.into_raw(),
+        })
+    }
+}
+
+fn map_latex_error(tex: &str, error: latex_rust::Error) -> MathError {
+    let kind = match &error {
+        latex_rust::Error::Parse(_) | latex_rust::Error::Malformed { .. } => MathErrorKind::Parse,
+        latex_rust::Error::Font(_) => MathErrorKind::Font,
+        latex_rust::Error::Unsupported { .. } => MathErrorKind::Unsupported,
+        latex_rust::Error::InvalidOption { .. } => MathErrorKind::Internal,
+    };
+    MathError::new(kind, tex, error.to_string())
+}
+
+fn dim_f32(dim: Dim) -> f32 {
+    f32::from_bits(dim.to_ieee32_bits())
+}
+
+fn key_hash(tex: &str, display: bool, dpi: i64) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tex.hash(&mut hasher);
+    display.hash(&mut hasher);
+    dpi.hash(&mut hasher);
+    hasher.finish()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct MathKey {
@@ -30,7 +257,7 @@ struct MathKey {
     pixels_per_point_milli: u32,
 }
 
-/// 一张已上传的数学纹理及其在 egui 中的逻辑尺寸。
+/// 一张已上传的数学纹理及其逻辑尺寸。
 #[derive(Clone)]
 pub struct MathImage {
     /// 纹理
@@ -39,21 +266,37 @@ pub struct MathImage {
     pub size: Vec2,
 }
 
-/// 数学纹理缓存 + 字体。整个应用共用一份。
+/// 数学纹理缓存 + 后端。整个应用共用一份。
 pub struct MathCache {
-    font: Option<MathFont>,
-    entries: HashMap<MathKey, Option<MathImage>>,
+    backend: Box<dyn MathBackend>,
+    entries: HashMap<MathKey, Result<MathImage, MathError>>,
+    last_error: Option<MathError>,
     next_id: u64,
 }
 
 impl MathCache {
-    /// 加载内嵌的 STIX Two Math（失败则所有公式回退原文）。
+    /// 使用当前默认后端（`latex-rust`）。
     pub fn new() -> Self {
+        Self::with_backend(Box::new(LatexRustBackend::new()))
+    }
+
+    fn with_backend(backend: Box<dyn MathBackend>) -> Self {
         Self {
-            font: MathFont::stix_two_math().ok(),
+            backend,
             entries: HashMap::new(),
+            last_error: None,
             next_id: 1,
         }
+    }
+
+    /// 当前后端名称。
+    pub fn backend_name(&self) -> &'static str {
+        self.backend.name()
+    }
+
+    /// 当前后端能力。
+    pub fn capabilities(&self) -> MathCapabilities {
+        self.backend.capabilities()
     }
 
     /// 当前缓存的公式条数（含失败占位），主要用于测试/诊断。
@@ -66,10 +309,27 @@ impl MathCache {
         self.entries.is_empty()
     }
 
-    /// 取缓存或渲染一张公式纹理。失败返回 `None`（调用方回退原文）。
-    pub fn render(&mut self, ctx: &egui::Context, tex: &str, inline: bool) -> Option<MathImage> {
-        if tex.is_empty() || tex.len() > MAX_MATH_TEXT {
-            return None;
+    /// 取走最近一次“首次失败”的错误，供状态栏短暂提示。
+    pub fn take_error(&mut self) -> Option<MathError> {
+        self.last_error.take()
+    }
+
+    /// 取缓存或渲染一张公式纹理。失败返回错误（调用方回退原文）。
+    pub fn render(
+        &mut self,
+        ctx: &egui::Context,
+        tex: &str,
+        inline: bool,
+    ) -> Result<MathImage, MathError> {
+        if tex.is_empty() {
+            return Err(MathError::new(MathErrorKind::Parse, tex, "空公式"));
+        }
+        if tex.len() > MAX_MATH_TEXT {
+            return Err(MathError::new(
+                MathErrorKind::TooLarge,
+                tex,
+                format!("公式超过 {MAX_MATH_TEXT} 字节"),
+            ));
         }
         let key = MathKey {
             tex: tex.to_string(),
@@ -79,12 +339,16 @@ impl MathCache {
         if let Some(entry) = self.entries.get(&key) {
             return entry.clone();
         }
-        let image = self.render_uncached(ctx, tex, inline);
+        let result = self.render_uncached(ctx, tex, inline);
+        if let Err(error) = &result {
+            // 只在首次失败时提示；后续命中缓存错误不反复刷状态栏。
+            self.last_error = Some(error.clone());
+        }
         if self.entries.len() >= MAX_MATH_ENTRIES {
             self.entries.clear();
         }
-        self.entries.insert(key, image.clone());
-        image
+        self.entries.insert(key, result.clone());
+        result
     }
 
     fn render_uncached(
@@ -92,25 +356,16 @@ impl MathCache {
         ctx: &egui::Context,
         tex: &str,
         inline: bool,
-    ) -> Option<MathImage> {
-        let font = self.font.as_ref()?;
-        let style = if inline {
-            MathStyle::Text
-        } else {
-            MathStyle::Display
-        };
-        let ast = latex_rust::parse(tex).ok()?;
-        let boxed = latex_rust::layout(&ast, font, style).ok()?;
-        let width_em = dim_f32(boxed.width.clone());
-        let height_em = dim_f32(boxed.height.clone() + boxed.depth.clone());
-        if !(width_em > 0.0 && height_em > 0.0) {
-            return None;
+    ) -> Result<MathImage, MathError> {
+        let display = !inline;
+        let metrics = self.backend.measure(tex, display)?;
+        if !(metrics.width_em > 0.0 && metrics.height_em + metrics.depth_em > 0.0) {
+            return Err(MathError::internal(tex, "排版尺寸为 0"));
         }
         let size = egui::vec2(
-            (width_em * LOGICAL_FONT_SIZE).max(1.0),
-            (height_em * LOGICAL_FONT_SIZE).max(1.0),
+            (metrics.width_em * LOGICAL_FONT_SIZE).max(1.0),
+            ((metrics.height_em + metrics.depth_em) * LOGICAL_FONT_SIZE).max(1.0),
         );
-
         let ppp = ctx.pixels_per_point().max(0.1);
         let mut scale = SUPERSAMPLE;
         let mut pixels = size.x * size.y * ppp * ppp * scale * scale;
@@ -119,31 +374,36 @@ impl MathCache {
             pixels = size.x * size.y * ppp * ppp;
         }
         if pixels > MAX_TEXTURE_PIXELS {
-            return None;
+            return Err(MathError::new(
+                MathErrorKind::TooLarge,
+                tex,
+                "公式纹理超过像素上限",
+            ));
         }
-        let dpi = (96.0 * ppp * scale).round().clamp(96.0, 2400.0) as i64;
-        let mut options = PngOptions::new();
-        options.font_size_pt = Dim::ratio(PT_PER_EM.0, PT_PER_EM.1);
-        options.dpi = Dim::from_i64(dpi);
-        options.color = latex_rust::Color::rgb(225, 225, 225);
-        options.display = !inline;
-        let png = latex_rust::latex_to_png(tex, font, &options).ok()?;
-        let decoded = image::load_from_memory(&png).ok()?.into_rgba8();
-        let (pixel_width, pixel_height) = decoded.dimensions();
-        if pixel_width == 0 || pixel_height == 0 {
-            return None;
+        let dpi = (96.0 * ppp * scale).round().clamp(96.0, 2400.0);
+        let raster = self.backend.rasterize(tex, display, dpi)?;
+        if u64::from(raster.width) * u64::from(raster.height) > MAX_TEXTURE_PIXELS as u64 {
+            return Err(MathError::new(
+                MathErrorKind::TooLarge,
+                tex,
+                "公式 PNG 超过像素上限",
+            ));
         }
         let color_image = egui::ColorImage::from_rgba_unmultiplied(
-            [pixel_width as usize, pixel_height as usize],
-            decoded.as_raw(),
+            [raster.width as usize, raster.height as usize],
+            &raster.rgba,
         );
         let texture = ctx.load_texture(
-            format!("latex-{}-{}", self.next_id, key_hash(tex, inline, dpi)),
+            format!(
+                "latex-{}-{}",
+                self.next_id,
+                key_hash(tex, display, dpi.round() as i64)
+            ),
             color_image,
             TextureOptions::LINEAR,
         );
         self.next_id = self.next_id.wrapping_add(1).max(1);
-        Some(MathImage { texture, size })
+        Ok(MathImage { texture, size })
     }
 }
 
@@ -153,50 +413,38 @@ impl Default for MathCache {
     }
 }
 
-fn dim_f32(dim: Dim) -> f32 {
-    f32::from_bits(dim.to_ieee32_bits())
-}
-
-fn key_hash(tex: &str, inline: bool, dpi: i64) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    tex.hash(&mut hasher);
-    inline.hash(&mut hasher);
-    dpi.hash(&mut hasher);
-    hasher.finish()
-}
-
 /// 在 `egui_commonmark` 的 math 回调里绘制公式。
 pub fn paint(ui: &mut egui::Ui, cache: &RefCell<MathCache>, tex: &str, inline: bool) {
-    let image = cache.borrow_mut().render(ui.ctx(), tex, inline);
-    let Some(image) = image else {
-        // 解析失败/缺字形（例如 `\text{中文}` 在 STIX 里没有 CJK）：
-        // 保留原文，用户仍能看懂；不 panic。
-        let fallback = if inline {
-            format!("${tex}$")
-        } else {
-            format!("$${tex}$$")
-        };
-        ui.label(egui::RichText::new(fallback).monospace());
-        return;
-    };
-    // 行内公式按图片尺寸占位；块级公式占满当前可用宽度并在其中居中。
-    let width = if inline {
-        image.size.x
-    } else {
-        ui.available_width().max(image.size.x)
-    };
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, image.size.y), Sense::hover());
-    let target = if inline {
-        rect
-    } else {
-        egui::Rect::from_center_size(rect.center(), image.size)
-    };
-    ui.painter().image(
-        image.texture.id(),
-        target,
-        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-        Color32::WHITE,
-    );
+    match cache.borrow_mut().render(ui.ctx(), tex, inline) {
+        Ok(image) => {
+            // 行内公式按图片尺寸占位；块级公式占满当前可用宽度并居中。
+            let width = if inline {
+                image.size.x
+            } else {
+                ui.available_width().max(image.size.x)
+            };
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(width, image.size.y), Sense::hover());
+            let target = if inline {
+                rect
+            } else {
+                egui::Rect::from_center_size(rect.center(), image.size)
+            };
+            ui.painter().image(
+                image.texture.id(),
+                target,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        Err(_) => {
+            let fallback = if inline {
+                format!("${tex}$")
+            } else {
+                format!("$${tex}$$")
+            };
+            ui.label(egui::RichText::new(fallback).monospace());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -209,18 +457,70 @@ mod tests {
         ctx
     }
 
+    struct FakeBackend;
+
+    impl MathBackend for FakeBackend {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+
+        fn capabilities(&self) -> MathCapabilities {
+            MathCapabilities {
+                backend: self.name(),
+                cjk_text: true,
+                chemistry: false,
+                vector_svg: false,
+            }
+        }
+
+        fn measure(&mut self, tex: &str, _display: bool) -> Result<MathMetrics, MathError> {
+            if tex == "bad" {
+                return Err(MathError::new(
+                    MathErrorKind::Unsupported,
+                    tex,
+                    "假后端的失败",
+                ));
+            }
+            Ok(MathMetrics {
+                width_em: 1.0,
+                height_em: 1.0,
+                depth_em: 0.25,
+            })
+        }
+
+        fn rasterize(
+            &mut self,
+            _tex: &str,
+            _display: bool,
+            _dpi: f32,
+        ) -> Result<MathRaster, MathError> {
+            Ok(MathRaster {
+                width: 2,
+                height: 2,
+                rgba: vec![255; 16],
+            })
+        }
+    }
+
     #[test]
-    fn invalid_formula_falls_back_without_a_texture() {
+    fn invalid_formula_reports_an_error_without_a_texture() {
         let ctx = ctx();
         let mut cache = MathCache::new();
-        assert!(cache.render(&ctx, r"\frac{1}{", true).is_none());
+        assert!(cache.render(&ctx, r"\frac{1}{", true).is_err());
+        let error = cache.take_error().expect("首次失败应留下错误");
+        assert_eq!(error.kind, MathErrorKind::Parse);
+        assert!(error.status_line().contains("数学公式"));
     }
 
     #[test]
     fn cjk_text_mode_is_reported_as_missing_glyphs() {
         let ctx = ctx();
         let mut cache = MathCache::new();
-        assert!(cache.render(&ctx, r"\text{中文}", true).is_none());
+        let error = cache
+            .render(&ctx, r"\text{中文}", true)
+            .err()
+            .expect("STIX 没有 CJK 字形");
+        assert_eq!(error.kind, MathErrorKind::Font);
     }
 
     #[test]
@@ -237,15 +537,31 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                image = cache.render(ui.ctx(), r"x^2 + y^2", true);
+                image = cache.render(ui.ctx(), r"x^2 + y^2", true).ok();
             },
         );
         output.drop_without_applying_deltas();
         let image = image.expect("简单公式应能渲染");
         assert!(image.size.x > 0.0 && image.size.y > 0.0);
-        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.take_error().is_none());
         let again = cache.render(&ctx, r"x^2 + y^2", true);
-        assert!(again.is_some());
-        assert_eq!(cache.entries.len(), 1, "相同公式应命中缓存");
+        assert!(again.is_ok());
+        assert_eq!(cache.len(), 1, "相同公式应命中缓存");
+    }
+
+    #[test]
+    fn a_custom_backend_can_be_plugged_in() {
+        let ctx = ctx();
+        let mut cache = MathCache::with_backend(Box::new(FakeBackend));
+        let image = cache.render(&ctx, r"\frac{1}{2}", true).expect("假后端");
+        assert!(image.size.x > 0.0);
+        assert_eq!(cache.backend_name(), "fake");
+        assert!(cache.capabilities().cjk_text);
+        assert!(cache.render(&ctx, "bad", true).is_err());
+        assert_eq!(
+            cache.take_error().map(|error| error.kind),
+            Some(MathErrorKind::Unsupported)
+        );
     }
 }
