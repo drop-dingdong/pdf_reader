@@ -87,6 +87,49 @@ mod tests {
     }
 }
 
+/// 去掉 `$$` 显示公式块内部的空行。
+///
+/// CommonMark 在空行处断段：`$$` 后如果紧跟空行，`pulldown-cmark` 会把 `$$` 当普通文本，
+/// 后面的 `~...~` 还可能被当成删除线。LaTeX 数学模式里的空行没有语义，去掉是安全的。
+/// 只处理**独占一行**的 `$$` 围栏；行内 `$$...$$` 和代码围栏不受影响。
+pub fn normalize_display_math(text: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out = Vec::with_capacity(lines.len());
+    let mut in_code = false;
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code = !in_code;
+            out.push(line);
+            index += 1;
+            continue;
+        }
+        if !in_code && line.trim() == "$$" {
+            // 找配对的结束围栏；找不到就原样保留。
+            let mut close = index + 1;
+            while close < lines.len() && lines[close].trim() != "$$" {
+                close += 1;
+            }
+            if close < lines.len() {
+                out.push(line);
+                for body in &lines[index + 1..close] {
+                    if !body.trim().is_empty() {
+                        out.push(body);
+                    }
+                }
+                out.push(lines[close]);
+                index = close + 1;
+                continue;
+            }
+        }
+        out.push(line);
+        index += 1;
+    }
+    out.join("\n")
+}
+
 /// 估算 Markdown 正文中**不方便重排**内容的最小宽度（单位与 `measure` 一致）。
 ///
 /// 只统计：
@@ -198,5 +241,24 @@ mod width_tests {
             min_unwrapped_width("see https://example.com/a/long/path", fake),
             217.0
         );
+    }
+}
+
+#[cfg(test)]
+mod math_fence_tests {
+    use super::normalize_display_math;
+
+    #[test]
+    fn removes_blank_lines_inside_display_math() {
+        let source = "$$\n\n~，\n1~\n$$";
+        assert_eq!(normalize_display_math(source), "$$\n~，\n1~\n$$");
+    }
+
+    #[test]
+    fn leaves_inline_and_code_fences_alone() {
+        let inline = "a $$x$$ b";
+        assert_eq!(normalize_display_math(inline), inline);
+        let code = "```\n$$\n\n1\n$$\n```";
+        assert_eq!(normalize_display_math(code), code);
     }
 }

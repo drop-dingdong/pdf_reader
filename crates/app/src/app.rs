@@ -390,6 +390,8 @@ struct PendingAction {
 /// 正文编辑草稿未保存时，用户又要求关闭浮窗/切换文件，先挂起该动作。
 #[derive(Clone, Debug)]
 enum EditDiscardAction {
+    /// 关闭正文编辑窗口
+    CloseEditor,
     /// 关闭指定浮窗
     CloseFloat(u64),
     /// 打开另一个文件
@@ -7428,9 +7430,11 @@ impl PdfReaderApp {
                 ui.label("原始 Markdown；保存后按现有路径写回注释或 preview。");
                 // 编辑区跟随窗口：按剩余高度算行数，窗口拉大/拉小都填满，
                 // 单行短文本也不会出现无意义的滚动条。
-                let row_height = ui.text_style_height(&egui::TextStyle::Monospace).max(10.0) + 2.0;
+                // TextEdit 的实际行高就是字体行高；不要再加 item_spacing，
+                // 否则窗口越大，算出的行数越少，底部空白越明显。
+                let line_height = ui.text_style_height(&egui::TextStyle::Monospace).max(10.0);
                 let editor_height = (ui.available_height() - 46.0).max(60.0);
-                let rows = (((editor_height - 8.0) / row_height).floor() as usize).max(1);
+                let rows = (((editor_height - 8.0) / line_height).floor() as usize).max(1);
                 let session = self.body_edit_session;
                 egui::ScrollArea::vertical()
                     .id_salt(("edit-body-scroll", session))
@@ -7468,15 +7472,24 @@ impl PdfReaderApp {
                 });
             });
         self.focus_body_edit = focus;
-        if !open {
-            cancel = true;
-        }
         if save {
             self.commit_body_edit(owner, text);
             self.editing_body = None;
             self.math_recheck_pending = true;
             self.message = "已更新内容".to_string();
-        } else if cancel {
+            return;
+        }
+        // 点窗口右上角 X：如果草稿有改动，先确认，不静默丢弃。
+        // Esc/「取消」按钮是明确的放弃操作，不弹二次确认。
+        if !open {
+            if self.body_text_dirty(owner, &text) {
+                self.pending_edit_action = Some(EditDiscardAction::CloseEditor);
+                self.editing_body = Some((owner, text));
+                return;
+            }
+            cancel = true;
+        }
+        if cancel {
             self.editing_body = None;
             self.message = "已取消编辑".to_string();
         } else {
@@ -7534,25 +7547,30 @@ impl PdfReaderApp {
         self.editing_body.as_ref().map(|(owner, _)| *owner)
     }
 
+    /// 给定草稿是否与已保存正文不同。
+    fn body_text_dirty(&self, owner: FloatOwner, draft: &str) -> bool {
+        let saved = match owner {
+            FloatOwner::Custom(index) => self
+                .custom_previews
+                .get(index)
+                .and_then(|preview| preview.text.clone())
+                .unwrap_or_default(),
+            FloatOwner::Annotation(id) => self
+                .annotations
+                .get(id)
+                .and_then(|annotation| annotation.body.clone())
+                .unwrap_or_default(),
+            FloatOwner::None => return false,
+        };
+        draft != saved
+    }
+
     /// 编辑草稿是否与已保存正文不同。
     fn body_edit_dirty(&self) -> bool {
         let Some((owner, draft)) = self.editing_body.as_ref() else {
             return false;
         };
-        let saved = match owner {
-            FloatOwner::Custom(index) => self
-                .custom_previews
-                .get(*index)
-                .and_then(|preview| preview.text.clone())
-                .unwrap_or_default(),
-            FloatOwner::Annotation(id) => self
-                .annotations
-                .get(*id)
-                .and_then(|annotation| annotation.body.clone())
-                .unwrap_or_default(),
-            FloatOwner::None => return false,
-        };
-        *draft != saved
+        self.body_text_dirty(*owner, draft)
     }
 
     /// 关闭浮窗并清理正文编辑状态（如果编辑的正是这个浮窗）。
@@ -7571,6 +7589,7 @@ impl PdfReaderApp {
 
     fn run_edit_action(&mut self, action: EditDiscardAction) {
         match action {
+            EditDiscardAction::CloseEditor => self.editing_body = None,
             EditDiscardAction::CloseFloat(id) => self.close_float(id),
             EditDiscardAction::Open(path) => self.request_open(path),
         }
@@ -7713,6 +7732,14 @@ impl PdfReaderApp {
                         ui.heading("数学语法");
                         ui.monospace("行内：$...$    块级：$$...$$");
                         ui.label("只支持数学模式，不是完整的 LaTeX 文档。");
+                        ui.label(
+                            "`~` 是不断行空格，后端接受；但 STIX 没有中文全角标点\
+                             （如 `，`），缺字形会回退原文。",
+                        );
+                        ui.label(
+                            "显示公式的 `$$` 独占一行；块内空行会在渲染前去掉，\
+                             避免被 CommonMark 当作段落结束。",
+                        );
                         ui.separator();
                         ui.heading("当前后端");
                         ui.label(format!(
@@ -8883,7 +8910,9 @@ impl PdfReaderApp {
                         rect.max - EVec2::new(18.0, 16.0),
                     );
                     if body_area.width() > 0.0 && body_area.height() > 0.0 {
-                        let text = crate::markdown::preserve_single_line_breaks(text);
+                        let text = crate::markdown::normalize_display_math(
+                            &crate::markdown::preserve_single_line_breaks(text),
+                        );
                         let view_id = Id::unique(("float-md", id));
                         // 代码块/表格/长 URL 不应当被硬折成 body 宽度：测一个最小内容
                         // 宽度，超过 body 时由 commonmark 的横向 ScrollArea 承载。
