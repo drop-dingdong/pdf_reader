@@ -316,6 +316,13 @@ impl MathCache {
         self.last_error.take()
     }
 
+    /// 清空纹理与错误状态；正文被编辑后调用，让公式重新检查/重新提示。
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.last_error = None;
+        self.early_reported.clear();
+    }
+
     /// 取缓存或渲染一张公式纹理。失败返回错误（调用方回退原文）。
     pub fn render(
         &mut self,

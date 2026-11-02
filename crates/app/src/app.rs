@@ -387,6 +387,15 @@ struct PendingAction {
     kind: PendingActionKind,
 }
 
+/// 正文编辑草稿未保存时，用户又要求关闭浮窗/切换文件，先挂起该动作。
+#[derive(Clone, Debug)]
+enum EditDiscardAction {
+    /// 关闭指定浮窗
+    CloseFloat(u64),
+    /// 打开另一个文件
+    Open(PathBuf),
+}
+
 /// 一次写回请求：保存 / 另存为 / 覆盖保存共用。
 struct WriteRequest {
     /// 目标地址（等于当前文档就是原地保存）。
@@ -1027,6 +1036,8 @@ pub struct PdfReaderApp {
     backup_before_inplace: bool,
     /// 关闭/切换文件前的未保存提示。
     pending_action: Option<PendingAction>,
+    /// 正文编辑尚未保存时挂起的关闭/切换动作。
+    pending_edit_action: Option<EditDiscardAction>,
     /// 提示里的错误（保存失败/冲突等）。
     pending_action_error: Option<String>,
     /// 用户已经决定关闭：下一次 close_requested 不再拦截。
@@ -1197,6 +1208,10 @@ pub struct PdfReaderApp {
     math_cache: std::rc::Rc<std::cell::RefCell<crate::math::MathCache>>,
     /// 数学公式支持/限制帮助窗口是否打开。
     math_help: bool,
+    /// 保存正文后，下一帧把公式错误合并到“已更新内容”提示里。
+    math_recheck_pending: bool,
+    /// 正文编辑会话号：每次打开换一个 ScrollArea id，避免不同文本继承滚动位置。
+    body_edit_session: u64,
     /// 本帧是否有 Markdown 浮窗渲染过；用于把外部链接的 `OpenUrl` 改成状态栏提示。
     markdown_rendered: bool,
     /// 侧栏 Pin 列表里正在被悬浮的条目（下标 + 该行的屏幕矩形，用于定位临时浮窗）。
@@ -1360,6 +1375,7 @@ impl PdfReaderApp {
             saved_pdf_revision: 0,
             backup_before_inplace: save_settings.backup_in_place,
             pending_action: None,
+            pending_edit_action: None,
             pending_action_error: None,
             closing_after_decision: false,
             data_clean_hash: None,
@@ -1439,6 +1455,8 @@ impl PdfReaderApp {
             markdown_cache: egui_commonmark::CommonMarkCache::default(),
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(crate::math::MathCache::new())),
             math_help: false,
+            math_recheck_pending: false,
+            body_edit_session: 1,
             markdown_rendered: false,
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
@@ -1540,6 +1558,8 @@ impl PdfReaderApp {
                 if let Some(annotation) = self.annotations.get_mut(*id) {
                     annotation.modified = Some(unix_now());
                 }
+                // 正文变化可能带来新的公式错误；让下一帧重新渲染/提示。
+                self.math_cache.borrow_mut().clear();
             }
             AppEdit::DeletePreview { key, .. } => {
                 if let Some(index) = self.preview_index(*key) {
@@ -1577,6 +1597,7 @@ impl PdfReaderApp {
                         preview.text = after.clone();
                     }
                 }
+                self.math_cache.borrow_mut().clear();
             }
             AppEdit::ResizePreview { key, after, .. } => {
                 if let Some(index) = self.preview_index(*key) {
@@ -1980,6 +2001,10 @@ impl PdfReaderApp {
     /// 请求打开另一个文件：脏就先弹提示，干净就直接延后打开。
     fn request_open(&mut self, path: PathBuf) {
         if self.document_path.as_ref() == Some(&path) {
+            return;
+        }
+        if self.body_edit_dirty() {
+            self.pending_edit_action = Some(EditDiscardAction::Open(path));
             return;
         }
         if self.is_dirty() {
@@ -3977,7 +4002,7 @@ impl PdfReaderApp {
                 }
                 if ui
                     .small_button("?")
-                    .on_hover_text("数学公式支持与限制")
+                    .on_hover_text("Markdown 与数学公式支持/限制")
                     .clicked()
                 {
                     self.math_help = true;
@@ -5880,6 +5905,14 @@ impl PdfReaderApp {
                         .and_then(|tip| tip.rect)
                         .is_some_and(|rect| rect.contains(position))
             });
+            // 指针在编辑窗口/帮助窗口等 Area 上时，滚轮归该窗口（例如编辑区的
+            // ScrollArea），不能先被画布消费。`layer_id_at` 用的是上一帧的图层，
+            // 对正在打开的窗口最多晚一帧，可接受。
+            let over_window = ui.ctx().pointer_hover_pos().is_some_and(|position| {
+                ui.ctx()
+                    .layer_id_at(position)
+                    .is_some_and(|layer| layer != egui::LayerId::background())
+            });
             // Alt 悬停在墨迹上：抓手光标，提示可以拖动。
             let (alt, ctrl) = ui.ctx().input(|input| (input.modifiers.alt, input.modifiers.ctrl));
             if (alt || ctrl || self.move_ink_armed.is_some())
@@ -5921,7 +5954,9 @@ impl PdfReaderApp {
                     self.message = "已退出自定义preview".to_string();
                 }
             }
-            if self.capture.is_none() && wheel_targets_canvas_with_float(pointer_over_canvas, over_float) {
+            if self.capture.is_none()
+                && wheel_targets_canvas_with_float(pointer_over_canvas && !over_window, over_float)
+            {
                 let (scroll_delta, zoom_delta, modifiers) = ui.input(|input| {
                     (input.smooth_scroll_delta, input.zoom_delta(), input.modifiers)
                 });
@@ -7334,6 +7369,14 @@ impl PdfReaderApp {
         }
     }
 
+    /// 打开正文编辑窗口；每次换一个会话号，使编辑区滚动位置从顶部开始。
+    fn open_body_editor(&mut self, owner: FloatOwner, text: String, ctx: &egui::Context) {
+        self.body_edit_session = self.body_edit_session.wrapping_add(1).max(1);
+        self.editing_body = Some((owner, text));
+        self.focus_body_edit = true;
+        ctx.request_repaint();
+    }
+
     /// 浮窗正文的正式编辑窗口：双击/✎ 打开，显式保存或取消。
     ///
     /// 不再使用 `ui.put(TextEdit)` 塞进浮窗 body：body 尺寸由用户决定，
@@ -7383,9 +7426,14 @@ impl PdfReaderApp {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.label("原始 Markdown；保存后按现有路径写回注释或 preview。");
-                let editor_height = (ui.available_height() - 42.0).max(120.0);
+                // 编辑区跟随窗口：按剩余高度算行数，窗口拉大/拉小都填满，
+                // 单行短文本也不会出现无意义的滚动条。
+                let row_height = ui.text_style_height(&egui::TextStyle::Monospace).max(10.0) + 2.0;
+                let editor_height = (ui.available_height() - 46.0).max(60.0);
+                let rows = (((editor_height - 8.0) / row_height).floor() as usize).max(1);
+                let session = self.body_edit_session;
                 egui::ScrollArea::vertical()
-                    .id_salt("edit-body-scroll")
+                    .id_salt(("edit-body-scroll", session))
                     .auto_shrink([false, false])
                     .max_height(editor_height)
                     .show(ui, |ui| {
@@ -7393,7 +7441,7 @@ impl PdfReaderApp {
                             egui::TextEdit::multiline(&mut text)
                                 .code_editor()
                                 .desired_width(f32::INFINITY)
-                                .desired_rows(18),
+                                .desired_rows(rows),
                         );
                         if focus {
                             response.request_focus();
@@ -7426,6 +7474,7 @@ impl PdfReaderApp {
         if save {
             self.commit_body_edit(owner, text);
             self.editing_body = None;
+            self.math_recheck_pending = true;
             self.message = "已更新内容".to_string();
         } else if cancel {
             self.editing_body = None;
@@ -7481,6 +7530,97 @@ impl PdfReaderApp {
         }
     }
 
+    fn body_edit_owner(&self) -> Option<FloatOwner> {
+        self.editing_body.as_ref().map(|(owner, _)| *owner)
+    }
+
+    /// 编辑草稿是否与已保存正文不同。
+    fn body_edit_dirty(&self) -> bool {
+        let Some((owner, draft)) = self.editing_body.as_ref() else {
+            return false;
+        };
+        let saved = match owner {
+            FloatOwner::Custom(index) => self
+                .custom_previews
+                .get(*index)
+                .and_then(|preview| preview.text.clone())
+                .unwrap_or_default(),
+            FloatOwner::Annotation(id) => self
+                .annotations
+                .get(*id)
+                .and_then(|annotation| annotation.body.clone())
+                .unwrap_or_default(),
+            FloatOwner::None => return false,
+        };
+        *draft != saved
+    }
+
+    /// 关闭浮窗并清理正文编辑状态（如果编辑的正是这个浮窗）。
+    fn close_float(&mut self, id: u64) {
+        let owner = self
+            .floats
+            .iter()
+            .find(|window| window.id == id)
+            .map(|w| w.owner);
+        self.floats.retain(|window| window.id != id);
+        if owner.is_some() && self.body_edit_owner() == owner {
+            self.editing_body = None;
+        }
+        self.message = format!("已关闭浮窗 #{id}");
+    }
+
+    fn run_edit_action(&mut self, action: EditDiscardAction) {
+        match action {
+            EditDiscardAction::CloseFloat(id) => self.close_float(id),
+            EditDiscardAction::Open(path) => self.request_open(path),
+        }
+    }
+
+    /// 正文草稿未保存时，关闭浮窗/切换文件前的确认框。
+    fn draw_edit_discard_dialog(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.pending_edit_action.clone() else {
+            return;
+        };
+        let mut save = false;
+        let mut discard = false;
+        let mut cancel = false;
+        egui::Modal::new(Id::unique("edit-discard")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.heading("正文编辑尚未保存");
+            ui.label("关闭浮窗或切换文件前，是否保存当前正文？");
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("保存并继续").clicked() {
+                    save = true;
+                }
+                if ui.button("放弃修改").clicked() {
+                    discard = true;
+                }
+                if ui.button("取消").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if cancel {
+            self.pending_edit_action = None;
+            return;
+        }
+        if save {
+            if let Some((owner, text)) = self.editing_body.take() {
+                self.commit_body_edit(owner, text);
+                self.math_recheck_pending = true;
+                self.message = "已更新内容".to_string();
+            }
+        } else if discard {
+            self.editing_body = None;
+            self.message = "已放弃正文修改".to_string();
+        }
+        if save || discard {
+            self.pending_edit_action = None;
+            self.run_edit_action(action);
+        }
+    }
+
     /// 双击浮窗正文 → 进入原位编辑（自定义文字 preview 或注释正文）。
     fn detect_body_double_click(&mut self, ui: &mut egui::Ui) {
         if self.editing_body.is_some() {
@@ -7532,9 +7672,7 @@ impl PdfReaderApp {
                         .unwrap_or_default(),
                     FloatOwner::None => String::new(),
                 };
-                self.editing_body = Some((owner, text));
-                self.focus_body_edit = true;
-                ui.ctx().request_repaint();
+                self.open_body_editor(owner, text, ui.ctx());
                 return;
             }
         }
@@ -7547,7 +7685,7 @@ impl PdfReaderApp {
         }
         let caps = self.math_cache.borrow().capabilities();
         let mut open = true;
-        egui::Window::new("数学公式支持")
+        egui::Window::new("Markdown 与数学支持")
             .id(Id::unique("math-help"))
             .resizable(true)
             .collapsible(false)
@@ -7561,7 +7699,18 @@ impl PdfReaderApp {
                     .id_salt("math-help-scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.heading("语法");
+                        ui.heading("Markdown");
+                        ui.label(
+                            "CommonMark/GFM：标题、列表、表格、任务列表、删除线、脚注、\
+                             定义列表、代码块、引用；原始 HTML 不执行；图片不加载；\
+                             外部链接只提示；单换行按硬换行保留。",
+                        );
+                        ui.label(
+                            "表格走完整渲染路径；代码块/表格/长 URL 会测最小内容宽度，\
+                             超过 body 时横向滚动。",
+                        );
+                        ui.separator();
+                        ui.heading("数学语法");
                         ui.monospace("行内：$...$    块级：$$...$$");
                         ui.label("只支持数学模式，不是完整的 LaTeX 文档。");
                         ui.separator();
@@ -7610,6 +7759,7 @@ impl PdfReaderApp {
     fn draw_edit_dialogs(&mut self, ctx: &egui::Context) {
         // ---- 正文编辑（正式窗口）----
         self.draw_body_editor(ctx);
+        self.draw_edit_discard_dialog(ctx);
         self.draw_math_help(ctx);
 
         // ---- 题目 ----
@@ -8597,7 +8747,12 @@ impl PdfReaderApp {
                 Color32::WHITE,
             );
             if close_response.on_hover_text("关闭浮窗").clicked() {
-                close = Some(id);
+                let owner = self.floats[index].owner;
+                if self.body_edit_owner() == Some(owner) && self.body_edit_dirty() {
+                    self.pending_edit_action = Some(EditDiscardAction::CloseFloat(id));
+                } else {
+                    close = Some(id);
+                }
             }
 
             // ---- 绘制 ----
@@ -8702,9 +8857,9 @@ impl PdfReaderApp {
                 );
                 if edit_response.on_hover_text("编辑正文").clicked() {
                     if let FloatContent::Text(text) = &self.floats[index].content {
-                        self.editing_body = Some((self.floats[index].owner, text.clone()));
-                        self.focus_body_edit = true;
-                        ui.ctx().request_repaint();
+                        let owner = self.floats[index].owner;
+                        let text = text.clone();
+                        self.open_body_editor(owner, text, ui.ctx());
                     }
                 }
             }
@@ -8714,9 +8869,9 @@ impl PdfReaderApp {
                 && matches!(&self.floats[index].content, FloatContent::Text(text) if !text.is_empty());
             if markdown_active && body.double_clicked() && self.editing_body.is_none() {
                 if let FloatContent::Text(text) = &self.floats[index].content {
-                    self.editing_body = Some((self.floats[index].owner, text.clone()));
-                    self.focus_body_edit = true;
-                    ui.ctx().request_repaint();
+                    let owner = self.floats[index].owner;
+                    let text = text.clone();
+                    self.open_body_editor(owner, text, ui.ctx());
                 }
             }
             match &self.floats[index].content {
@@ -8836,8 +8991,7 @@ impl PdfReaderApp {
             }
         }
         if let Some(id) = close {
-            self.floats.retain(|window| window.id != id);
-            self.message = format!("已关闭浮窗 #{id}");
+            self.close_float(id);
         } else if let Some(id) = raise {
             // 关闭按钮优先；否则把被点击的浮窗移到末尾（最上层），其余顺序不变
             if let Some(index) = self.floats.iter().position(|window| window.id == id) {
@@ -8848,8 +9002,14 @@ impl PdfReaderApp {
 
     /// 取走公式后端的首次失败错误，写入状态栏（短暂提示，后续消息可顶替）。
     fn take_math_error(&mut self) {
+        let after_save = std::mem::take(&mut self.math_recheck_pending);
         if let Some(error) = self.math_cache.borrow_mut().take_error() {
-            self.message = error.status_line();
+            let line = error.status_line();
+            self.message = if after_save {
+                format!("已更新内容；{line}")
+            } else {
+                line
+            };
         }
     }
 
@@ -9598,6 +9758,25 @@ mod annotation_body_tests {
         assert_eq!(
             app.annotations.get(id).and_then(|a| a.body.as_deref()),
             None
+        );
+    }
+
+    #[test]
+    fn dirty_body_editor_blocks_switching_files_until_decided() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        let id = app.annotations.iter().next().expect("一条").id;
+        app.editing_body = Some((FloatOwner::Annotation(id), "未保存".to_string()));
+        assert!(app.body_edit_dirty());
+        app.request_open(PathBuf::from("/tmp/another.pdf"));
+        assert!(
+            matches!(app.pending_edit_action, Some(EditDiscardAction::Open(_))),
+            "有未保存正文时应先挂起切换动作"
         );
     }
 
