@@ -6,7 +6,7 @@
 //! 失败时回退成原文 `$...$`，不 panic；错误由 [`MathCache::take_error`] 交给状态栏。
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -271,6 +271,7 @@ pub struct MathCache {
     backend: Box<dyn MathBackend>,
     entries: HashMap<MathKey, Result<MathImage, MathError>>,
     last_error: Option<MathError>,
+    early_reported: HashSet<u64>,
     next_id: u64,
 }
 
@@ -285,6 +286,7 @@ impl MathCache {
             backend,
             entries: HashMap::new(),
             last_error: None,
+            early_reported: HashSet::new(),
             next_id: 1,
         }
     }
@@ -325,11 +327,22 @@ impl MathCache {
             return Err(MathError::new(MathErrorKind::Parse, tex, "空公式"));
         }
         if tex.len() > MAX_MATH_TEXT {
-            return Err(MathError::new(
+            let error = MathError::new(
                 MathErrorKind::TooLarge,
                 tex,
                 format!("公式超过 {MAX_MATH_TEXT} 字节"),
-            ));
+            );
+            // 长公式不进 entries（避免缓存超长源码）；同一源码只提示一次。
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            tex.hash(&mut hasher);
+            let hash = hasher.finish();
+            if self.early_reported.len() >= 64 {
+                self.early_reported.clear();
+            }
+            if self.early_reported.insert(hash) {
+                self.last_error = Some(error.clone());
+            }
+            return Err(error);
         }
         let key = MathKey {
             tex: tex.to_string(),
@@ -510,6 +523,17 @@ mod tests {
         let error = cache.take_error().expect("首次失败应留下错误");
         assert_eq!(error.kind, MathErrorKind::Parse);
         assert!(error.status_line().contains("数学公式"));
+    }
+
+    #[test]
+    fn too_long_formula_is_reported_once() {
+        let ctx = ctx();
+        let mut cache = MathCache::new();
+        let long = "x".repeat(MAX_MATH_TEXT + 1);
+        assert!(cache.render(&ctx, &long, true).is_err());
+        assert!(cache.take_error().is_some());
+        assert!(cache.render(&ctx, &long, true).is_err());
+        assert!(cache.take_error().is_none(), "同一超长公式只提示一次");
     }
 
     #[test]

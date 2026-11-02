@@ -7596,7 +7596,7 @@ impl PdfReaderApp {
                              公式源码 ≤ 4096 字节；单张纹理 ≤ 8MP。",
                         );
                         ui.separator();
-                        ui.label("失败时显示原文，并在状态栏短暂提示原因；其他消息会直接顶替。");
+                        ui.label("失败时显示原文，并在状态栏提示原因；其他消息会直接顶替。");
                         ui.label(format!(
                             "当前缓存 {} 条；超过 64 条会整体清空。",
                             self.math_cache.borrow().len()
