@@ -8776,6 +8776,15 @@ impl PdfReaderApp {
                 .then(|| input.pointer.interact_pos())
                 .flatten()
         });
+        // 多个浮窗重叠时，滚轮只归 z 轴最高的那个；否则先注册的下层
+        // ScrollArea 会先消费滚轮，看起来像“滚了下面的窗口”。
+        let topmost_under_pointer = ui.ctx().pointer_hover_pos().and_then(|position| {
+            self.floats
+                .iter()
+                .rev()
+                .find(|window| window.rect.contains(position))
+                .map(|window| window.id)
+        });
         for index in 0..self.floats.len() {
             // 每帧夹取回视图区域内（用户要求：浮窗始终在视图区域内部）
             let rect = clamp_float_rect(self.floats[index].rect, canvas, FLOAT_MIN_SIZE);
@@ -8784,6 +8793,7 @@ impl PdfReaderApp {
             let has_text =
                 matches!(&self.floats[index].content, FloatContent::Text(text) if !text.is_empty());
             let markdown_active = self.markdown_floats && has_text;
+            let wheel_owner = topmost_under_pointer == Some(id);
 
             // 主体：占住点击（避免"点在浮窗上却给文档落了光标"）。
             // 纯文本模式沿用"整个主体可拖动"；Markdown 模式只允许标题栏拖动，
@@ -9078,8 +9088,13 @@ impl PdfReaderApp {
                                 let math_fn = move |ui: &mut egui::Ui, tex: &str, inline: bool| {
                                     crate::math::paint(ui, &math_cache, tex, inline);
                                 };
+                                let scroll_source = egui::scroll_area::ScrollSource {
+                                    mouse_wheel: wheel_owner,
+                                    ..Default::default()
+                                };
                                 let scroll_output = egui::ScrollArea::both()
                                     .id_salt(view_id.with("scroll"))
+                                    .scroll_source(scroll_source)
                                     .auto_shrink([false, false])
                                     .content_margin(egui::Margin::same(4))
                                     .show(ui, |ui| {

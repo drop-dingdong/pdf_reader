@@ -97,6 +97,7 @@ cargo run -p app -- --replay scripts/replay/tiling_800.json --timing
 | 10h | 顶栏「?」Markdown/数学帮助 | 显示 Markdown 与数学语法/支持/限制/当前后端；错误信息与帮助描述一致 |
 | 10j | 两个 Markdown 浮窗都写 `## 标题 {#my-id}` + `[跳转](#my-id)` | 各自在当前浮窗内滚动到自己的标题，互不串；不打开浏览器 |
 | 10k | 双击正文中段/底部打开编辑器 | 纯文本光标落在点击处附近；Markdown 大致滚到对应区域；✎ 从开头打开 |
+| 10m | 两个可滚动 Markdown 浮窗重叠，指针在重叠区滚动 | 只有 z 轴最高的浮窗滚动，下层不动 |
 
 ### 6.3 注释
 
