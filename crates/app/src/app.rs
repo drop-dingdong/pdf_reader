@@ -1212,8 +1212,6 @@ pub struct PdfReaderApp {
     math_cache: std::rc::Rc<std::cell::RefCell<crate::math::MathCache>>,
     /// 数学公式支持/限制帮助窗口是否打开。
     math_help: bool,
-    /// 会话内临时图片库（Markdown `pd-img://`）。
-    internal_images: crate::images::InternalImages,
     /// 保存正文后，下一帧把公式错误合并到“已更新内容”提示里。
     math_recheck_pending: bool,
     /// 正文编辑会话号：每次打开换一个 ScrollArea id，避免不同文本继承滚动位置。
@@ -1461,7 +1459,6 @@ impl PdfReaderApp {
             markdown_cache: egui_commonmark::CommonMarkCache::default(),
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(crate::math::MathCache::new())),
             math_help: false,
-            internal_images: crate::images::InternalImages::default(),
             math_recheck_pending: false,
             body_edit_session: 1,
             markdown_rendered: false,
@@ -3223,10 +3220,6 @@ impl PdfReaderApp {
                         self.custom_hover = None;
                         self.editing_title = None;
                         self.editing_body = None;
-                        // 会话内图片跟着当前文档走；保存后原地重开同一文档时保留。
-                        if !preserve_history {
-                            self.internal_images.clear();
-                        }
                         self.click_highlight = None;
                         self.hover_tip = None;
                         self.floats.clear();
@@ -4894,8 +4887,6 @@ impl PdfReaderApp {
         scale: f32,
         texture_name: String,
         tag: &str,
-        internal_id: Option<String>,
-        label: &str,
     ) -> Option<egui::TextureHandle> {
         let placement = session.placement(page).copied()?;
         if page_rect.width.is_nan()
@@ -5015,12 +5006,6 @@ impl PdfReaderApp {
                 image.size[1]
             ));
         }
-        if let Some(id) = internal_id {
-            if let Some(png) = crate::images::encode_png(&image) {
-                self.internal_images.insert(id.clone(), label, png);
-                ui.ctx().forget_image(&format!("pd-img://{id}"));
-            }
-        }
         Some(
             ui.ctx()
                 .load_texture(texture_name, image, egui::TextureOptions::LINEAR),
@@ -5067,18 +5052,14 @@ impl PdfReaderApp {
             return;
         }
         let (page, page_rect, scale) = (preview.page, preview.rect, preview.scale);
-        let preview_id = preview.id;
-        let title = preview.title.clone();
         let Some(texture) = self.preview_texture(
             ui,
             session,
             page,
             page_rect,
             scale,
-            format!("custom-image-{preview_id}"),
+            format!("custom-image-{index}"),
             "自定义图片",
-            Some(format!("custom-{preview_id}")),
-            &title,
         ) else {
             return;
         };
@@ -7181,8 +7162,6 @@ impl PdfReaderApp {
                 scale,
                 format!("dest-hover-{}-{}", page.get(), index),
                 "被引用点",
-                Some(format!("dest-{}-{}", page.get(), index)),
-                "被引用点",
             );
             if let Some(texture) = texture {
                 if let Some(mark) = self
@@ -7400,16 +7379,6 @@ impl PdfReaderApp {
         }
     }
 
-    /// 安装内部图片 loader（只 PNG；不启用 file/http loader）。
-    fn ensure_image_loaders(&self, ctx: &egui::Context) {
-        if !ctx.is_loader_installed(crate::images::InternalImageLoader::ID) {
-            ctx.add_bytes_loader(std::sync::Arc::new(
-                crate::images::InternalImageLoader::new(self.internal_images.clone()),
-            ));
-        }
-        egui_extras::install_image_loaders(ctx);
-    }
-
     /// 打开正文编辑窗口；每次换一个会话号，使编辑区滚动位置从顶部开始。
     fn open_body_editor(&mut self, owner: FloatOwner, text: String, ctx: &egui::Context) {
         self.body_edit_session = self.body_edit_session.wrapping_add(1).max(1);
@@ -7467,29 +7436,6 @@ impl PdfReaderApp {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.label("原始 Markdown；保存后按现有路径写回注释或 preview。");
-                let internal_images = self.internal_images.list();
-                ui.collapsing("插入内部图片（会话内，重启失效）", |ui| {
-                    if internal_images.is_empty() {
-                        ui.label("还没有已生成的内部图片：先打开一张截图/图片 preview。");
-                    } else {
-                        for (id, label) in &internal_images {
-                            if ui
-                                .small_button(format!("{label}  [{id}]"))
-                                .on_hover_text("追加到正文末尾")
-                                .clicked()
-                            {
-                                let alt: String = label
-                                    .chars()
-                                    .map(|ch| match ch {
-                                        '[' | ']' | '\n' | '\r' => ' ',
-                                        _ => ch,
-                                    })
-                                    .collect();
-                                text.push_str(&format!("\n![{alt}](pd-img://{id})\n"));
-                            }
-                        }
-                    }
-                });
                 // 编辑区跟随窗口：按剩余高度算行数，窗口拉大/拉小都填满，
                 // 单行短文本也不会出现无意义的滚动条。
                 // TextEdit 的实际行高就是字体行高；不要再加 item_spacing，
@@ -7813,11 +7759,6 @@ impl PdfReaderApp {
                         ui.label(
                             "表格走完整渲染路径；代码块/表格/长 URL 会测最小内容宽度，\
                              超过 body 时横向滚动。",
-                        );
-                        ui.label(
-                            "内部图片（仅当前会话）：先显示截图/图片 preview，再在编辑窗口\
-                             「插入内部图片」；源码形式为 ![说明](pd-img://custom-3)。\
-                             重启软件后引用失效。",
                         );
                         ui.separator();
                         ui.heading("数学语法");
@@ -8729,11 +8670,6 @@ impl PdfReaderApp {
 
         let id = self.next_float_id;
         self.next_float_id += 1;
-        let label = format!("截图 #{id}");
-        if let Some(png) = crate::images::encode_png(&snapshot) {
-            self.internal_images
-                .insert(format!("shot-{id}"), &label, png);
-        }
         let texture = ui.ctx().load_texture(
             format!("snapshot-{id}"),
             snapshot,
@@ -9261,7 +9197,6 @@ impl PdfReaderApp {
 impl eframe::App for PdfReaderApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.ensure_image_loaders(&ctx);
         self.apply_pending_window_size(&ctx);
         if ctx.input(|input| input.viewport().close_requested()) {
             if self.closing_after_decision {
@@ -9840,41 +9775,6 @@ mod annotation_body_tests {
         });
         output.drop_without_applying_deltas();
         assert!(app.markdown_rendered, "文字浮窗应走 Markdown 渲染分支");
-    }
-
-    #[test]
-    fn markdown_internal_image_uri_reaches_egui_commonmark() {
-        let mut app = app();
-        app.markdown_floats = true;
-        let image = egui::ColorImage::new([2, 2], vec![egui::Color32::RED; 4]);
-        let png = crate::images::encode_png(&image).expect("PNG");
-        app.internal_images.insert("test-image", "测试图", png);
-        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
-        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 40.0), egui::vec2(320.0, 240.0));
-        app.floats.push(Float {
-            id: 1,
-            title: "图片".to_string(),
-            content: FloatContent::Text("![测试图](pd-img://test-image)".to_string()),
-            rect,
-            owner: FloatOwner::None,
-            body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
-            origin: None,
-        });
-        let ctx = egui::Context::default();
-        ctx.set_fonts(egui::FontDefinitions::default());
-        ctx.add_bytes_loader(std::sync::Arc::new(
-            crate::images::InternalImageLoader::new(app.internal_images.clone()),
-        ));
-        egui_extras::install_image_loaders(&ctx);
-        let input = egui::RawInput {
-            screen_rect: Some(canvas),
-            ..Default::default()
-        };
-        let output = ctx.run_ui(input, |ui| {
-            app.draw_floats(ui, canvas);
-        });
-        output.drop_without_applying_deltas();
-        assert!(app.markdown_rendered, "图片 URI 应进入 Markdown 渲染分支");
     }
 
     #[test]

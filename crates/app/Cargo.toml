@@ -24,8 +24,6 @@ eframe = { version = "0.37", default-features = false, features = [
     "wayland",
 ] }
 egui = "0.37"
-# 只安装 PNG image loader；不开启 file/http，避免 Markdown 读本地/网络图片。
-egui_extras = { version = "0.37", default-features = false, features = ["image"] }
 # 文字浮窗的 Markdown 阅读视图。默认特性会带图片加载/正则/语法高亮，
 # 这里全部关掉：注释正文来自外部 PDF，不允许读本地图片，也不需要搜索高亮。
 egui_commonmark = { version = "0.26.0", default-features = false, features = ["pulldown_cmark"] }
