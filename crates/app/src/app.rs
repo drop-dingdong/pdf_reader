@@ -1209,6 +1209,8 @@ pub struct PdfReaderApp {
     /// egui_commonmark 的排版/图片缓存（每个浮窗用稳定的 `Id` 区分）。
     /// 每个浮窗独立的 Markdown 缓存：锚点位置不能跨浮窗共享。
     markdown_caches: std::collections::HashMap<u64, egui_commonmark::CommonMarkCache>,
+    /// 每个 Markdown 浮窗上一帧的滚动偏移/内容尺寸，用于把双击位置映射回源码。
+    markdown_viewports: std::collections::HashMap<u64, (egui::Vec2, egui::Vec2)>,
     /// LaTeX 公式的 PNG 纹理缓存与内嵌字体（全局共用）。
     math_cache: std::rc::Rc<std::cell::RefCell<crate::math::MathCache>>,
     /// 数学公式支持/限制帮助窗口是否打开。
@@ -1460,6 +1462,7 @@ impl PdfReaderApp {
             pin_hover_enabled: ui_settings.pin_hover_enabled,
             markdown_floats: ui_settings.markdown_floats,
             markdown_caches: std::collections::HashMap::new(),
+            markdown_viewports: std::collections::HashMap::new(),
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(crate::math::MathCache::new())),
             math_help: false,
             math_recheck_pending: false,
@@ -3228,6 +3231,7 @@ impl PdfReaderApp {
                         self.hover_tip = None;
                         self.floats.clear();
                         self.markdown_caches.clear();
+                        self.markdown_viewports.clear();
                         self.data_dirty = false;
                         self.sidecar_migrated = false;
                         self.sidecar_locked = None;
@@ -7631,6 +7635,7 @@ impl PdfReaderApp {
             .map(|w| w.owner);
         self.floats.retain(|window| window.id != id);
         self.markdown_caches.remove(&id);
+        self.markdown_viewports.remove(&id);
         if owner.is_some() && self.body_edit_owner() == owner {
             self.editing_body = None;
         }
@@ -7766,7 +7771,15 @@ impl PdfReaderApp {
                     FloatOwner::None => String::new(),
                 };
                 let cursor = hit.interact_pointer_pos().map(|position| {
-                    body_cursor_from_pointer(ui.ctx(), &text, body_rect, position, false)
+                    body_cursor_from_pointer(
+                        ui.ctx(),
+                        &text,
+                        body_rect,
+                        position,
+                        false,
+                        egui::Vec2::ZERO,
+                        None,
+                    )
                 });
                 self.open_body_editor(owner, text, cursor, ui.ctx());
                 return;
@@ -8984,8 +8997,21 @@ impl PdfReaderApp {
                         rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 6.0),
                         rect.max - EVec2::new(18.0, 16.0),
                     );
+                    let viewport = self
+                        .markdown_viewports
+                        .get(&self.floats[index].id)
+                        .copied()
+                        .unwrap_or((egui::Vec2::ZERO, egui::Vec2::ZERO));
                     let cursor = body.interact_pointer_pos().map(|position| {
-                        body_cursor_from_pointer(ui.ctx(), &text, body_area, position, true)
+                        body_cursor_from_pointer(
+                            ui.ctx(),
+                            &text,
+                            body_area,
+                            position,
+                            true,
+                            viewport.0,
+                            Some(viewport.1),
+                        )
                     });
                     self.open_body_editor(owner, text, cursor, ui.ctx());
                 }
@@ -9052,7 +9078,7 @@ impl PdfReaderApp {
                                 let math_fn = move |ui: &mut egui::Ui, tex: &str, inline: bool| {
                                     crate::math::paint(ui, &math_cache, tex, inline);
                                 };
-                                egui::ScrollArea::both()
+                                let scroll_output = egui::ScrollArea::both()
                                     .id_salt(view_id.with("scroll"))
                                     .auto_shrink([false, false])
                                     .content_margin(egui::Margin::same(4))
@@ -9063,6 +9089,13 @@ impl PdfReaderApp {
                                             .render_math_fn(Some(&math_fn))
                                             .show(ui, &mut md_cache, &text);
                                     });
+                                self.markdown_viewports.insert(
+                                    id,
+                                    (
+                                        scroll_output.state.clamped_offset(),
+                                        scroll_output.content_size,
+                                    ),
+                                );
                             },
                         );
                         self.markdown_caches.insert(id, md_cache);
@@ -9522,6 +9555,8 @@ fn body_cursor_from_pointer(
     body: egui::Rect,
     pointer: egui::Pos2,
     markdown: bool,
+    scroll: egui::Vec2,
+    content_size: Option<egui::Vec2>,
 ) -> usize {
     if text.is_empty() || body.width() <= 0.0 || body.height() <= 0.0 {
         return 0;
@@ -9538,8 +9573,14 @@ fn body_cursor_from_pointer(
         ctx.fonts_mut(|fonts| fonts.layout_job(job))
     };
     let position = if markdown {
-        let y_ratio = (local.y / body.height()).clamp(0.0, 1.0);
-        egui::vec2(local.x.max(0.0), y_ratio * galley.size().y)
+        let content_height = content_size
+            .map(|size| size.y)
+            .filter(|height| *height > 0.0)
+            .unwrap_or(body.height());
+        let content_y = (scroll.y + local.y).max(0.0);
+        let y_ratio = (content_y / content_height).clamp(0.0, 1.0);
+        let content_x = (scroll.x + local.x).max(0.0);
+        egui::vec2(content_x, y_ratio * galley.size().y)
     } else {
         egui::vec2(local.x.max(0.0), local.y.max(0.0))
     };
@@ -9891,17 +9932,63 @@ mod annotation_body_tests {
         };
         let output = ctx.run_ui(input, |ui| {
             let body = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(300.0, 120.0));
-            let start =
-                body_cursor_from_pointer(ui.ctx(), "hello\nworld", body, body.left_top(), false);
+            let start = body_cursor_from_pointer(
+                ui.ctx(),
+                "hello\nworld",
+                body,
+                body.left_top(),
+                false,
+                egui::Vec2::ZERO,
+                None,
+            );
             let end = body_cursor_from_pointer(
                 ui.ctx(),
                 "hello\nworld",
                 body,
                 body.right_bottom(),
                 false,
+                egui::Vec2::ZERO,
+                None,
             );
             assert_eq!(start, 0);
             assert!(end > start, "底端应映射到后面的字符");
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn markdown_cursor_mapping_accounts_for_scroll_offset() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 300.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            let body = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(300.0, 100.0));
+            let source = "## 标题\n\n第一段\n\n第二段\n\n第三段\n\n第四段";
+            let top = body_cursor_from_pointer(
+                ui.ctx(),
+                source,
+                body,
+                body.left_top(),
+                true,
+                egui::Vec2::ZERO,
+                Some(egui::vec2(300.0, 400.0)),
+            );
+            let scrolled = body_cursor_from_pointer(
+                ui.ctx(),
+                source,
+                body,
+                body.left_top(),
+                true,
+                egui::vec2(0.0, 200.0),
+                Some(egui::vec2(300.0, 400.0)),
+            );
+            assert!(scrolled > top, "滚动后同一屏幕位置应映射到更后面的源码");
         });
         output.drop_without_applying_deltas();
     }
