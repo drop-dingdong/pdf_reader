@@ -1216,6 +1216,8 @@ pub struct PdfReaderApp {
     math_recheck_pending: bool,
     /// 正文编辑会话号：每次打开换一个 ScrollArea id，避免不同文本继承滚动位置。
     body_edit_session: u64,
+    /// 首次打开编辑器时要放置的字符光标（双击位置映射；✎ 为 0）。
+    body_edit_cursor: Option<usize>,
     /// 本帧是否有 Markdown 浮窗渲染过；用于把外部链接的 `OpenUrl` 改成状态栏提示。
     markdown_rendered: bool,
     /// 侧栏 Pin 列表里正在被悬浮的条目（下标 + 该行的屏幕矩形，用于定位临时浮窗）。
@@ -1461,6 +1463,7 @@ impl PdfReaderApp {
             math_help: false,
             math_recheck_pending: false,
             body_edit_session: 1,
+            body_edit_cursor: None,
             markdown_rendered: false,
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
@@ -7380,8 +7383,15 @@ impl PdfReaderApp {
     }
 
     /// 打开正文编辑窗口；每次换一个会话号，使编辑区滚动位置从顶部开始。
-    fn open_body_editor(&mut self, owner: FloatOwner, text: String, ctx: &egui::Context) {
+    fn open_body_editor(
+        &mut self,
+        owner: FloatOwner,
+        text: String,
+        cursor: Option<usize>,
+        ctx: &egui::Context,
+    ) {
         self.body_edit_session = self.body_edit_session.wrapping_add(1).max(1);
+        self.body_edit_cursor = Some(cursor.unwrap_or(0));
         self.editing_body = Some((owner, text));
         self.focus_body_edit = true;
         ctx.request_repaint();
@@ -7425,6 +7435,7 @@ impl PdfReaderApp {
         let mut save = false;
         let mut cancel = false;
         let mut focus = self.focus_body_edit;
+        let mut initial_cursor = self.body_edit_cursor.take();
         egui::Window::new(format!("编辑正文 · {title}"))
             .id(Id::unique("edit-body"))
             .resizable(true)
@@ -7449,8 +7460,23 @@ impl PdfReaderApp {
                     .auto_shrink([false, false])
                     .max_height(editor_height)
                     .show(ui, |ui| {
+                        let text_edit_id = Id::unique(("edit-body-text", session));
+                        if let Some(index) = initial_cursor.take() {
+                            let mut state =
+                                egui::text_edit::TextEditState::load(ui.ctx(), text_edit_id)
+                                    .unwrap_or_default();
+                            state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::one(
+                                    egui::text::CCursor::new(index),
+                                )));
+                            state.store(ui.ctx(), text_edit_id);
+                            focus = true;
+                        }
                         let response = ui.add(
                             egui::TextEdit::multiline(&mut text)
+                                .id(text_edit_id)
+                                .cursor_at_end(false)
                                 .code_editor()
                                 .desired_width(f32::INFINITY)
                                 .desired_rows(rows),
@@ -7701,8 +7727,8 @@ impl PdfReaderApp {
             .collect();
         for (id, owner, rect) in targets {
             let body_rect = egui::Rect::from_min_max(
-                rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 4.0),
-                rect.max - EVec2::new(8.0, 8.0),
+                rect.min + EVec2::new(10.0, FLOAT_TITLE_HEIGHT + 8.0),
+                rect.max - EVec2::new(10.0, 8.0),
             );
             let hit = ui.interact(
                 body_rect,
@@ -7723,7 +7749,10 @@ impl PdfReaderApp {
                         .unwrap_or_default(),
                     FloatOwner::None => String::new(),
                 };
-                self.open_body_editor(owner, text, ui.ctx());
+                let cursor = hit.interact_pointer_pos().map(|position| {
+                    body_cursor_from_pointer(ui.ctx(), &text, body_rect, position, false)
+                });
+                self.open_body_editor(owner, text, cursor, ui.ctx());
                 return;
             }
         }
@@ -7760,6 +7789,7 @@ impl PdfReaderApp {
                             "表格走完整渲染路径；代码块/表格/长 URL 会测最小内容宽度，\
                              超过 body 时横向滚动。",
                         );
+                        ui.monospace("标题：## 标题 {#id}    跳转：[文字](#id)");
                         ui.separator();
                         ui.heading("数学语法");
                         ui.monospace("行内：$...$    块级：$$...$$");
@@ -8922,7 +8952,7 @@ impl PdfReaderApp {
                     if let FloatContent::Text(text) = &self.floats[index].content {
                         let owner = self.floats[index].owner;
                         let text = text.clone();
-                        self.open_body_editor(owner, text, ui.ctx());
+                        self.open_body_editor(owner, text, None, ui.ctx());
                     }
                 }
             }
@@ -8934,7 +8964,14 @@ impl PdfReaderApp {
                 if let FloatContent::Text(text) = &self.floats[index].content {
                     let owner = self.floats[index].owner;
                     let text = text.clone();
-                    self.open_body_editor(owner, text, ui.ctx());
+                    let body_area = egui::Rect::from_min_max(
+                        rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 6.0),
+                        rect.max - EVec2::new(18.0, 16.0),
+                    );
+                    let cursor = body.interact_pointer_pos().map(|position| {
+                        body_cursor_from_pointer(ui.ctx(), &text, body_area, position, true)
+                    });
+                    self.open_body_editor(owner, text, cursor, ui.ctx());
                 }
             }
             match &self.floats[index].content {
@@ -9005,6 +9042,7 @@ impl PdfReaderApp {
                                     .show(ui, |ui| {
                                         egui_commonmark::CommonMarkViewer::new()
                                             .default_width(default_width)
+                                            .enable_scroll_to_heading(true)
                                             .render_math_fn(Some(&math_fn))
                                             .show(ui, &mut self.markdown_cache, &text);
                                     });
@@ -9456,6 +9494,41 @@ impl PdfReaderApp {
     }
 }
 
+/// 把浮窗正文上的双击位置映射成源码字符下标。
+///
+/// 纯文本用与绘制相同的 `overflow_layout`，命中精确；Markdown 的渲染结果与
+/// 源码行结构不同，只能按纵向比例估算（打开后仍可继续用滚动条精确定位）。
+fn body_cursor_from_pointer(
+    ctx: &egui::Context,
+    text: &str,
+    body: egui::Rect,
+    pointer: egui::Pos2,
+    markdown: bool,
+) -> usize {
+    if text.is_empty() || body.width() <= 0.0 || body.height() <= 0.0 {
+        return 0;
+    }
+    let font = egui::FontId::proportional(13.0);
+    let color = Color32::from_gray(225);
+    let local = pointer - body.min;
+    let galley = if markdown {
+        ctx.fonts_mut(|fonts| fonts.layout(text.to_owned(), font, color, body.width()))
+    } else {
+        let row_height = 13.0 * 1.3;
+        let rows = ((body.height() / row_height).floor() as usize).max(1);
+        let job = overflow_layout(text, font, color, body.width(), rows);
+        ctx.fonts_mut(|fonts| fonts.layout_job(job))
+    };
+    let position = if markdown {
+        let y_ratio = (local.y / body.height()).clamp(0.0, 1.0);
+        egui::vec2(local.x.max(0.0), y_ratio * galley.size().y)
+    } else {
+        egui::vec2(local.x.max(0.0), local.y.max(0.0))
+    };
+    let index: usize = galley.cursor_from_pos(position).index.into();
+    index.min(text.chars().count())
+}
+
 /// 画一张纹理（UV 取满）。
 fn paint_image(painter: &egui::Painter, texture: &egui::TextureHandle, rect: egui::Rect) {
     painter.image(
@@ -9747,6 +9820,34 @@ mod annotation_body_tests {
             crate::diag::diagnostics_for_tests(),
             None,
         )
+    }
+
+    #[test]
+    fn body_cursor_mapping_moves_from_start_to_end() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 300.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            let body = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(300.0, 120.0));
+            let start =
+                body_cursor_from_pointer(ui.ctx(), "hello\nworld", body, body.left_top(), false);
+            let end = body_cursor_from_pointer(
+                ui.ctx(),
+                "hello\nworld",
+                body,
+                body.right_bottom(),
+                false,
+            );
+            assert_eq!(start, 0);
+            assert!(end > start, "底端应映射到后面的字符");
+        });
+        output.drop_without_applying_deltas();
     }
 
     #[test]
