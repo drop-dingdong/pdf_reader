@@ -7492,6 +7492,8 @@ impl PdfReaderApp {
             canvas,
             FLOAT_MIN_SIZE,
         );
+        // 临时预览也要能点击/拖动固定；之前只画不注册交互，点击会落回画布。
+        let response = ui.interact(rect, Id::unique("custom-hover"), Sense::click_and_drag());
         let painter = ui.painter();
         painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(30, 32, 36));
         painter.rect_stroke(
@@ -7560,6 +7562,16 @@ impl PdfReaderApp {
                     Color32::from_gray(160),
                 );
             }
+        }
+        if response.clicked() || response.drag_started() {
+            let target = clamp_float_rect(
+                rect.translate(response.drag_delta()),
+                canvas,
+                FLOAT_MIN_SIZE,
+            );
+            self.spawn_custom_float(index, target);
+            self.custom_hover = None;
+            ui.ctx().request_repaint();
         }
     }
 
@@ -9133,7 +9145,7 @@ impl PdfReaderApp {
                 &self.floats[index].title,
                 title_font,
                 Color32::WHITE,
-                title_rect.width() - if has_text { 54.0 } else { 30.0 },
+                title_rect.width() - 54.0,
                 1,
             );
             let title_galley = painter.layout_job(title_job);
