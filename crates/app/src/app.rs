@@ -9223,9 +9223,9 @@ impl PdfReaderApp {
                 }
             }
             // 图片 preview 浮窗：@ 复制内部图片引用，便于粘进注释正文。
-            if let FloatOwner::Custom(index) = self.floats[index].owner {
+            if let FloatOwner::Custom(custom_index) = self.floats[index].owner {
                 if matches!(&self.floats[index].content, FloatContent::Image(_)) {
-                    if let Some(preview) = self.custom_previews.get(index) {
+                    if let Some(preview) = self.custom_previews.get(custom_index) {
                         if !preview.image_id.is_empty() {
                             let uri = crate::image_store::image_uri(
                                 &preview.image_id,
@@ -10268,6 +10268,53 @@ mod annotation_body_tests {
                 Some(egui::vec2(300.0, 400.0)),
             );
             assert!(scrolled > top, "滚动后同一屏幕位置应映射到更后面的源码");
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn image_ref_button_does_not_use_custom_index_for_float_lookup() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let texture = ctx.load_texture(
+            "test-image",
+            egui::ColorImage::new([2, 2], vec![egui::Color32::RED; 4]),
+            egui::TextureOptions::LINEAR,
+        );
+        let mut app = app();
+        for index in 0..5 {
+            app.custom_previews.push(CustomPreview {
+                id: index as u64,
+                page: PageIndex::FIRST,
+                point: Point::new(0.0, 0.0),
+                rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+                kind: CustomKind::Text,
+                title: format!("p{index}"),
+                text: Some(String::new()),
+                snapshot: None,
+                body_size: DEFAULT_CUSTOM_TEXT_BODY,
+                scale: 1.0,
+                image_id: format!("custom-{index}"),
+                image_revision: 0,
+            });
+        }
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 40.0), egui::vec2(320.0, 240.0));
+        app.floats.push(Float {
+            id: 1,
+            title: "图片".to_string(),
+            content: FloatContent::Image(texture),
+            rect,
+            owner: FloatOwner::Custom(4),
+            body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
+            origin: None,
+        });
+        let input = egui::RawInput {
+            screen_rect: Some(canvas),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            app.draw_floats(ui, canvas);
         });
         output.drop_without_applying_deltas();
     }
