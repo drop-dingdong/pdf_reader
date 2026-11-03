@@ -7772,6 +7772,10 @@ impl PdfReaderApp {
                             "显示公式的 `$$` 独占一行；块内空行会在渲染前去掉，\
                              避免被 CommonMark 当作段落结束。",
                         );
+                        ui.label(
+                            "如果公式没有正确识别，请将行内公式 `$...$` 更换为\
+                             块级公式 `$$...$$` 重试。",
+                        );
                         ui.separator();
                         ui.heading("当前后端");
                         ui.label(format!(
