@@ -1207,7 +1207,8 @@ pub struct PdfReaderApp {
     /// 文字浮窗是否以 Markdown 渲染（`settings.json`，默认关闭）。
     markdown_floats: bool,
     /// egui_commonmark 的排版/图片缓存（每个浮窗用稳定的 `Id` 区分）。
-    markdown_cache: egui_commonmark::CommonMarkCache,
+    /// 每个浮窗独立的 Markdown 缓存：锚点位置不能跨浮窗共享。
+    markdown_caches: std::collections::HashMap<u64, egui_commonmark::CommonMarkCache>,
     /// LaTeX 公式的 PNG 纹理缓存与内嵌字体（全局共用）。
     math_cache: std::rc::Rc<std::cell::RefCell<crate::math::MathCache>>,
     /// 数学公式支持/限制帮助窗口是否打开。
@@ -1458,7 +1459,7 @@ impl PdfReaderApp {
             context_menu_pos: None,
             pin_hover_enabled: ui_settings.pin_hover_enabled,
             markdown_floats: ui_settings.markdown_floats,
-            markdown_cache: egui_commonmark::CommonMarkCache::default(),
+            markdown_caches: std::collections::HashMap::new(),
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(crate::math::MathCache::new())),
             math_help: false,
             math_recheck_pending: false,
@@ -3226,6 +3227,7 @@ impl PdfReaderApp {
                         self.click_highlight = None;
                         self.hover_tip = None;
                         self.floats.clear();
+                        self.markdown_caches.clear();
                         self.data_dirty = false;
                         self.sidecar_migrated = false;
                         self.sidecar_locked = None;
@@ -7461,18 +7463,6 @@ impl PdfReaderApp {
                     .max_height(editor_height)
                     .show(ui, |ui| {
                         let text_edit_id = Id::unique(("edit-body-text", session));
-                        if let Some(index) = initial_cursor.take() {
-                            let mut state =
-                                egui::text_edit::TextEditState::load(ui.ctx(), text_edit_id)
-                                    .unwrap_or_default();
-                            state
-                                .cursor
-                                .set_char_range(Some(egui::text::CCursorRange::one(
-                                    egui::text::CCursor::new(index),
-                                )));
-                            state.store(ui.ctx(), text_edit_id);
-                            focus = true;
-                        }
                         let response = ui.add(
                             egui::TextEdit::multiline(&mut text)
                                 .id(text_edit_id)
@@ -7484,6 +7474,31 @@ impl PdfReaderApp {
                         if focus {
                             response.request_focus();
                             focus = false;
+                        }
+                        // 在控件绘制之后再写入光标状态：TextEdit 本帧先按旧状态
+                        // 绘制，下一帧会加载这里写入的 cursor，并保持滚动可见。
+                        if let Some(index) = initial_cursor.take() {
+                            let mut state =
+                                egui::text_edit::TextEditState::load(ui.ctx(), text_edit_id)
+                                    .unwrap_or_default();
+                            state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::one(
+                                    egui::text::CCursor::new(index),
+                                )));
+                            state.store(ui.ctx(), text_edit_id);
+                            response.request_focus();
+                            let galley = ui.ctx().fonts_mut(|fonts| {
+                                fonts.layout(
+                                    text.clone(),
+                                    egui::FontId::monospace(13.0),
+                                    Color32::from_gray(225),
+                                    ui.available_width(),
+                                )
+                            });
+                            let cursor_rect =
+                                galley.pos_from_cursor(egui::text::CCursor::new(index));
+                            ui.scroll_to_rect(cursor_rect, Some(egui::Align::Center));
                         }
                     });
                 if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
@@ -7615,6 +7630,7 @@ impl PdfReaderApp {
             .find(|window| window.id == id)
             .map(|w| w.owner);
         self.floats.retain(|window| window.id != id);
+        self.markdown_caches.remove(&id);
         if owner.is_some() && self.body_edit_owner() == owner {
             self.editing_body = None;
         }
@@ -9018,6 +9034,7 @@ impl PdfReaderApp {
                         } else {
                             None
                         };
+                        let mut md_cache = self.markdown_caches.remove(&id).unwrap_or_default();
                         ui.scope_builder(
                             egui::UiBuilder::new().max_rect(body_area).id_salt(view_id),
                             |ui| {
@@ -9044,10 +9061,11 @@ impl PdfReaderApp {
                                             .default_width(default_width)
                                             .enable_scroll_to_heading(true)
                                             .render_math_fn(Some(&math_fn))
-                                            .show(ui, &mut self.markdown_cache, &text);
+                                            .show(ui, &mut md_cache, &text);
                                     });
                             },
                         );
+                        self.markdown_caches.insert(id, md_cache);
                         self.markdown_rendered = true;
                     }
                 }
@@ -9823,6 +9841,44 @@ mod annotation_body_tests {
     }
 
     #[test]
+    fn editor_applies_requested_initial_cursor() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        let id = app.annotations.iter().next().expect("一条").id;
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        app.open_body_editor(
+            FloatOwner::Annotation(id),
+            "hello world".to_string(),
+            Some(5),
+            &ctx,
+        );
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(700.0, 500.0),
+            )),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let output = ctx.run_ui(input(), |ui| {
+                let _ = ui;
+                app.draw_body_editor(&ctx);
+            });
+            output.drop_without_applying_deltas();
+        }
+        let text_id = Id::unique(("edit-body-text", app.body_edit_session));
+        let state = egui::text_edit::TextEditState::load(&ctx, text_id).expect("编辑器状态");
+        let range = state.cursor.char_range().expect("光标范围");
+        assert_eq!(usize::from(range.primary.index), 5);
+    }
+
+    #[test]
     fn body_cursor_mapping_moves_from_start_to_end() {
         let ctx = egui::Context::default();
         ctx.set_fonts(egui::FontDefinitions::default());
@@ -9876,6 +9932,36 @@ mod annotation_body_tests {
         });
         output.drop_without_applying_deltas();
         assert!(app.markdown_rendered, "文字浮窗应走 Markdown 渲染分支");
+    }
+
+    #[test]
+    fn markdown_heading_cache_is_isolated_per_float() {
+        let mut app = app();
+        app.markdown_floats = true;
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 600.0));
+        for (id, x) in [(1u64, 20.0f32), (2, 480.0)] {
+            let rect = egui::Rect::from_min_size(egui::pos2(x, 30.0), egui::vec2(320.0, 240.0));
+            app.floats.push(Float {
+                id,
+                title: format!("浮窗 {id}"),
+                content: FloatContent::Text(format!("## 标题 {id} {{#h{id}}}\n\n[跳转](#h{id})")),
+                rect,
+                owner: FloatOwner::None,
+                body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
+                origin: None,
+            });
+        }
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let input = egui::RawInput {
+            screen_rect: Some(canvas),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            app.draw_floats(ui, canvas);
+        });
+        output.drop_without_applying_deltas();
+        assert_eq!(app.markdown_caches.len(), 2, "每个浮窗必须有独立缓存");
     }
 
     #[test]
