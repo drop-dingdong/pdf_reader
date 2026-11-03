@@ -166,6 +166,31 @@ impl LatexRustBackend {
     }
 }
 
+/// `latex-rust` 把 `~` 解析成字面量 `~`，而 LaTeX 语义是不断行空格。
+/// 这里在进入后端前把未转义的 `~` 换成 `\ `；`\~`（重音）保留。
+fn normalize_tilde(tex: &str) -> String {
+    let mut out = String::with_capacity(tex.len());
+    let mut backslashes = 0usize;
+    for ch in tex.chars() {
+        if ch == '~' {
+            if backslashes.is_multiple_of(2) {
+                out.push_str("\\ ");
+            } else {
+                out.push('~');
+            }
+            backslashes = 0;
+        } else {
+            if ch == '\\' {
+                backslashes += 1;
+            } else {
+                backslashes = 0;
+            }
+            out.push(ch);
+        }
+    }
+    out
+}
+
 impl MathBackend for LatexRustBackend {
     fn name(&self) -> &'static str {
         "latex-rust 3.0.1"
@@ -190,7 +215,8 @@ impl MathBackend for LatexRustBackend {
         } else {
             MathStyle::Text
         };
-        let ast = latex_rust::parse(tex)
+        let normalized = normalize_tilde(tex);
+        let ast = latex_rust::parse(&normalized)
             .map_err(|error| MathError::new(MathErrorKind::Parse, tex, error.to_string()))?;
         let boxed =
             latex_rust::layout(&ast, font, style).map_err(|error| map_latex_error(tex, error))?;
@@ -211,7 +237,8 @@ impl MathBackend for LatexRustBackend {
         options.dpi = Dim::from_i64(dpi.round().clamp(96.0, 2400.0) as i64);
         options.color = latex_rust::Color::rgb(225, 225, 225);
         options.display = display;
-        let png = latex_rust::latex_to_png(tex, font, &options)
+        let normalized = normalize_tilde(tex);
+        let png = latex_rust::latex_to_png(&normalized, font, &options)
             .map_err(|error| map_latex_error(tex, error))?;
         let decoded = image::load_from_memory(&png)
             .map_err(|error| MathError::internal(tex, format!("PNG 解码失败：{error}")))?
@@ -520,6 +547,13 @@ mod tests {
                 rgba: vec![255; 16],
             })
         }
+    }
+
+    #[test]
+    fn tilde_becomes_a_space_but_escaped_tilde_is_kept() {
+        assert_eq!(normalize_tilde("~1~"), "\\ 1\\ ");
+        assert_eq!(normalize_tilde(r"\~n"), r"\~n");
+        assert_eq!(normalize_tilde(r"a~~b"), r"a\ \ b");
     }
 
     #[test]

@@ -396,6 +396,8 @@ enum EditDiscardAction {
     CloseFloat(u64),
     /// 打开另一个文件
     Open(PathBuf),
+    /// 关闭整个应用
+    Quit,
 }
 
 /// 一次写回请求：保存 / 另存为 / 覆盖保存共用。
@@ -7587,11 +7589,24 @@ impl PdfReaderApp {
         self.message = format!("已关闭浮窗 #{id}");
     }
 
-    fn run_edit_action(&mut self, action: EditDiscardAction) {
+    fn run_edit_action(&mut self, action: EditDiscardAction, ctx: &egui::Context) {
         match action {
             EditDiscardAction::CloseEditor => self.editing_body = None,
             EditDiscardAction::CloseFloat(id) => self.close_float(id),
             EditDiscardAction::Open(path) => self.request_open(path),
+            EditDiscardAction::Quit => {
+                if self.is_dirty() {
+                    // 正文保存后可能让文档变脏；交给已有的未保存文档提示。
+                    self.pending_action = Some(PendingAction {
+                        kind: PendingActionKind::Quit,
+                    });
+                } else {
+                    self.closing_after_decision = true;
+                    self.remember_document_view();
+                    self.flush_settings(Some(ctx));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
         }
     }
 
@@ -7600,13 +7615,24 @@ impl PdfReaderApp {
         let Some(action) = self.pending_edit_action.clone() else {
             return;
         };
+        let what = match self.body_edit_owner() {
+            Some(FloatOwner::Annotation(_)) => "注释正文",
+            Some(FloatOwner::Custom(_)) => "文字 preview 正文",
+            _ => "正文",
+        };
+        let reason = match &action {
+            EditDiscardAction::CloseEditor => "关闭编辑窗口前",
+            EditDiscardAction::CloseFloat(_) => "关闭浮窗或切换文件前",
+            EditDiscardAction::Open(_) => "关闭浮窗或切换文件前",
+            EditDiscardAction::Quit => "关闭软件前",
+        };
         let mut save = false;
         let mut discard = false;
         let mut cancel = false;
         egui::Modal::new(Id::unique("edit-discard")).show(ctx, |ui| {
             ui.set_width(420.0);
-            ui.heading("正文编辑尚未保存");
-            ui.label("关闭浮窗或切换文件前，是否保存当前正文？");
+            ui.heading(format!("{what}尚未保存"));
+            ui.label(format!("{reason}，是否保存当前{what}？"));
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("保存并继续").clicked() {
@@ -7636,7 +7662,7 @@ impl PdfReaderApp {
         }
         if save || discard {
             self.pending_edit_action = None;
-            self.run_edit_action(action);
+            self.run_edit_action(action, ctx);
         }
     }
 
@@ -7733,8 +7759,8 @@ impl PdfReaderApp {
                         ui.monospace("行内：$...$    块级：$$...$$");
                         ui.label("只支持数学模式，不是完整的 LaTeX 文档。");
                         ui.label(
-                            "`~` 是不断行空格，后端接受；但 STIX 没有中文全角标点\
-                             （如 `，`），缺字形会回退原文。",
+                            "`~` 会按 LaTeX 的不断行空格处理（渲染前换成空格）；\
+                             但 STIX 没有中文全角标点（如 `，`），缺字形会回退原文。",
                         );
                         ui.label(
                             "显示公式的 `$$` 独占一行；块内空行会在渲染前去掉，\
@@ -9163,7 +9189,16 @@ impl eframe::App for PdfReaderApp {
         let ctx = ui.ctx().clone();
         self.apply_pending_window_size(&ctx);
         if ctx.input(|input| input.viewport().close_requested()) {
-            if self.closing_after_decision || !self.is_dirty() {
+            if self.closing_after_decision {
+                self.remember_document_view();
+                self.flush_settings(Some(&ctx));
+            } else if self.body_edit_dirty() {
+                // 正文窗口里有未保存草稿：先取消关闭，交给编辑确认框。
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                if self.pending_edit_action.is_none() {
+                    self.pending_edit_action = Some(EditDiscardAction::Quit);
+                }
+            } else if !self.is_dirty() {
                 self.remember_document_view();
                 self.flush_settings(Some(&ctx));
             } else {
