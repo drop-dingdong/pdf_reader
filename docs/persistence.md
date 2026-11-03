@@ -12,18 +12,19 @@
 自定义数据**不存像素**：只存"页号 + 页面空间矩形 + 浮窗正文尺寸 + 题目/文字 + **分辨率**"，
 载入后按分辨率重新请求渲染并合成（见 §4）。旧 `.annot.json` 不再读取/创建，遗留文件忽略。
 
-## 2. 文件格式（v3）
+## 2. 文件格式（v4）
 
 ```jsonc
 {
- "version": 3,
+ "version": 4,
  "links":    [ [ {"rect":[x,y,w,h], "dest":{"kind":"page","page":3,"offset":[x,y]}} ], … ],
- "dest_marks": [ [ {"point":[x,y], "rect":[x,y,w,h], "body":[w,h], "scale":8.0} ], … ],
+ "dest_marks": [ [ {"point":[x,y], "rect":[x,y,w,h], "body":[w,h], "scale":8.0,
+                   "image_id":"dest-…", "image_revision":0} ], … ],
  "custom_previews": [
   {"kind":"image", "page":1, "point":[x,y], "rect":[x,y,w,h], "body":[w,h], "scale":2.5,
-   "title":"…"},
+   "title":"…", "image_id":"custom-…", "image_revision":0},
   {"kind":"text", "page":2, "point":[x,y], "rect":[x,y,w,h], "body":[w,h], "scale":1,
-   "title":"…", "text":"…"}
+   "title":"…", "text":"…", "image_id":"", "image_revision":0}
  ]
 }
 ```
@@ -37,6 +38,8 @@
 | `scale` | ▲v2 截图时的**显示比例**（`1.0` = 100%）；决定预览图按什么分辨率重建 |
 | `kind` | ▲v3 `image` / `text`；统一列表按当前显示顺序保存 |
 | `title` / `text` | 题目 / 文字预览的正文 |
+| `image_id` | ▲v4 稳定图片记录 id；文字 preview 为空 |
+| `image_revision` | ▲v4 图片内容版本；影响像素的修改递增 |
 
 v3 不再写 `custom_images` / `custom_texts`，也不使用 `order` 字段；
 旧 v1/v2 的两个数组仍可读入，并按“先图片后文字”的顺序迁移成 `custom_previews`。
@@ -54,7 +57,8 @@ v3 不再写 `custom_images` / `custom_texts`，也不使用 `order` 字段；
 | **v1** | 没有 `version` 字段（或写 `1`）；**没有 `scale`** | 缺 `version` 按 v1 读 |
 | **v2** | `dest_marks[]` 与 `custom_images[]` 增加 `scale` | v1 → v2：缺失/非法（≤0、非有限）的 `scale` 填 `DEFAULT_SCALE = 1.0`，并**置脏** |
 | **v3** | preview 改为单一有序 `custom_previews[]`（每条带 `kind`） | v1/v2 读入后迁移为统一列表，置脏 |
-| **v4+** | 未定义 | **拒绝读取**（见下面第 6 条）：不加载、不保存、不覆盖 |
+| **v4** | dest_marks 与图片 preview 增加 `image_id` / `image_revision` | v1–v3 读取后按页/下标生成 `legacy-*` id，置脏 |
+| **v5+** | 未定义 | **拒绝读取**（见下面第 6 条）：不加载、不保存、不覆盖 |
 
 规则（新增版本时必须遵守）：
 
@@ -71,7 +75,7 @@ v3 不再写 `custom_images` / `custom_texts`，也不使用 `order` 字段；
   * 理由：旧程序只认识一部分字段，读一半再保存就是用残缺数据覆盖完整数据，
    比"什么都不做"更糟；而"读进来但不许保存"又会让用户的编辑被静默丢弃。
 
-可观测：stderr `[存档] v1 → v2：…` / `v2 → v3：…`；
+可观测：stderr `[存档] v1 → v2：…` / `v2 → v3：…` / `v3 → v4：…`；
 打开后状态栏提示"存档已升级到 v3，请保存"。守它的测试：
 `persist::tests::v1_…` / `v2_…` / `newer_…` / `invalid_scale_…`。
 

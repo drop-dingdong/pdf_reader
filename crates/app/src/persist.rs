@@ -26,7 +26,9 @@ use crate::json::{Json, JsonLookup, Parsed};
 ///   缓存里没有那块像素，初次生成会只剩白的/干脆没有图。
 /// * **v3**：preview 改为单一有序数组 `custom_previews`（每项带 `kind`），
 ///   不再拆成 `custom_images` / `custom_texts`，也不再需要 `order` 字段。
-pub const CURRENT_VERSION: u32 = 3;
+/// * **v4**：被引用点与图片 preview 增加稳定 `image_id` / `image_revision`，
+///   供 Markdown 内部图片引用；旧档迁移时按页/下标生成 legacy id。
+pub const CURRENT_VERSION: u32 = 4;
 
 /// 旧存档缺 `scale` 时的默认分辨率（用户要求：按 100% 处理）。
 pub const DEFAULT_SCALE: f32 = 1.0;
@@ -66,6 +68,10 @@ pub struct SavedMark {
     pub body: [f32; 2],
     /// ▲v2 截图时的**显示比例**（`1.0` = 100%）。预览图按它请求渲染。
     pub scale: f32,
+    /// ▲v4 稳定图片记录 id（旧档迁移时生成）。
+    pub image_id: String,
+    /// ▲v4 图片内容版本；影响像素的修改递增。
+    pub image_revision: u64,
 }
 
 /// 一条自定义 preview 的可持久化数据（不含截图）。
@@ -85,6 +91,10 @@ pub struct SavedCustom {
     pub text: Option<String>,
     /// ▲v2 截图时的**显示比例**（`1.0` = 100%）。文字预览用不到，写 1.0。
     pub scale: f32,
+    /// ▲v4 稳定图片记录 id（图片 preview 才有）。
+    pub image_id: String,
+    /// ▲v4 图片内容版本。
+    pub image_revision: u64,
 }
 
 /// preview 的类型；v3 统一列表里显式保存。
@@ -179,10 +189,12 @@ impl SavedData {
                 write_rect(&mut out, "rect", mark.rect);
                 let _ = write!(
                     out,
-                    ", \"body\": [{}, {}], \"scale\": {}",
+                    ", \"body\": [{}, {}], \"scale\": {}, \"image_id\": {:?}, \"image_revision\": {}",
                     num(mark.body[0]),
                     num(mark.body[1]),
-                    num(mark.scale)
+                    num(mark.scale),
+                    mark.image_id,
+                    mark.image_revision
                 );
                 out.push('}');
             }
@@ -390,6 +402,36 @@ pub fn migrate(data: &mut SavedData) -> Migration {
         notes.push("v2 → v3：preview 改为单一有序列表（保存后写回 v3）".to_string());
     }
 
+    if data.version < 4 {
+        let mut generated = 0usize;
+        for (page, marks) in data.dest_marks.iter_mut().enumerate() {
+            for (index, mark) in marks.iter_mut().enumerate() {
+                if mark.image_id.is_empty() {
+                    mark.image_id = format!("legacy-dest-{page}-{index}");
+                    mark.image_revision = 0;
+                    generated += 1;
+                }
+            }
+        }
+        for (index, preview) in data.custom_previews.iter_mut().enumerate() {
+            if preview.kind == SavedCustomKind::Image && preview.item.image_id.is_empty() {
+                preview.item.image_id = format!("legacy-custom-{index}");
+                preview.item.image_revision = 0;
+                generated += 1;
+            }
+        }
+        for (index, item) in data.custom_images.iter_mut().enumerate() {
+            if item.image_id.is_empty() {
+                item.image_id = format!("legacy-custom-{index}");
+                item.image_revision = 0;
+            }
+        }
+        data.version = 4;
+        notes.push(format!(
+            "v3 → v4：{generated} 张图片生成稳定 id（保存后写回 v{CURRENT_VERSION}）"
+        ));
+    }
+
     Migration {
         from,
         to: data.version,
@@ -460,11 +502,13 @@ fn write_custom_fields(out: &mut String, item: &SavedCustom) {
     write_rect(out, "rect", item.rect);
     let _ = write!(
         out,
-        ", \"body\": [{}, {}], \"scale\": {}, \"title\": {}",
+        ", \"body\": [{}, {}], \"scale\": {}, \"title\": {}, \"image_id\": {}, \"image_revision\": {}",
         num(item.body[0]),
         num(item.body[1]),
         num(item.scale),
-        json_string(&item.title)
+        json_string(&item.title),
+        json_string(&item.image_id),
+        item.image_revision
     );
     if let Some(text) = &item.text {
         let _ = write!(out, ", \"text\": {}", json_string(text));
@@ -533,6 +577,16 @@ fn parse_mark(value: &Json) -> Parsed<SavedMark> {
         rect: parse_rect(object.field("rect").ok_or("mark 缺 rect")?)?,
         body: parse_pair(object.field("body").ok_or("mark 缺 body")?)?,
         scale: parse_scale(object),
+        image_id: object
+            .field("image_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        image_revision: object
+            .field("image_revision")
+            .and_then(|v| v.as_number())
+            .map(|v| v.max(0.0) as u64)
+            .unwrap_or(0),
     })
 }
 
@@ -583,6 +637,16 @@ fn parse_custom(value: &Json) -> Parsed<SavedCustom> {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
         scale: parse_scale(object),
+        image_id: object
+            .field("image_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        image_revision: object
+            .field("image_revision")
+            .and_then(|v| v.as_number())
+            .map(|v| v.max(0.0) as u64)
+            .unwrap_or(0),
     })
 }
 
@@ -643,6 +707,8 @@ mod tests {
                     rect: Rect::new(40.0, 170.0, 120.0, 60.0),
                     body: [120.0, 60.0],
                     scale: 8.0,
+                    image_id: "dest-test".to_string(),
+                    image_revision: 0,
                 }],
                 Vec::new(),
             ],
@@ -654,6 +720,8 @@ mod tests {
                 title: "图 \"一\"".into(),
                 text: None,
                 scale: 2.5,
+                image_id: "custom-image-test".to_string(),
+                image_revision: 3,
             }],
             custom_texts: vec![SavedCustom {
                 page: PageIndex::new(2),
@@ -663,6 +731,8 @@ mod tests {
                 title: "题\n目".into(),
                 text: Some("内容\\带转义".into()),
                 scale: DEFAULT_SCALE,
+                image_id: String::new(),
+                image_revision: 0,
             }],
             custom_previews: vec![
                 SavedPreview {
@@ -675,6 +745,8 @@ mod tests {
                         title: "图 \"一\"".into(),
                         text: None,
                         scale: 2.5,
+                        image_id: "custom-image-test".to_string(),
+                        image_revision: 3,
                     },
                 },
                 SavedPreview {
@@ -687,6 +759,8 @@ mod tests {
                         title: "题\n目".into(),
                         text: Some("内容\\带转义".into()),
                         scale: DEFAULT_SCALE,
+                        image_id: String::new(),
+                        image_revision: 0,
                     },
                 },
             ],

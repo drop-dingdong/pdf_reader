@@ -581,6 +581,18 @@ struct NoteDraft {
     text: String,
 }
 
+/// 生成一个跨会话唯一的图片记录 id（无需额外依赖）。
+fn new_image_id(prefix: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{nanos:x}-{seq:x}")
+}
+
 /// 已保存的自定义 preview。
 ///
 /// 按用户要求记录：Pin 结束时的**页号 + 页内坐标**、以该坐标为中心的**零尺寸矩形**
@@ -608,6 +620,10 @@ struct CustomPreview {
     /// ▲v2 截图时的**显示比例**（`1.0` = 100%）：预览图按它请求渲染，
     /// 因此预览分辨率与"当前缩放"解耦（D-100）。文字预览用不到，填 1.0。
     scale: f32,
+    /// ▲v4 稳定图片记录 id；文字 preview 为空。
+    image_id: String,
+    /// ▲v4 图片内容版本。
+    image_revision: u64,
 }
 
 /// 截图模式产出的去向。
@@ -652,6 +668,10 @@ struct DestMark {
     body_size: egui::Vec2,
     /// ▲v2 截图时的**显示比例**（`1.0` = 100%）：预览图按它请求渲染（D-100）。
     scale: f32,
+    /// ▲v4 稳定图片记录 id。
+    image_id: String,
+    /// ▲v4 图片内容版本。
+    image_revision: u64,
 }
 
 /// 截图模式的状态。
@@ -2924,6 +2944,8 @@ impl PdfReaderApp {
                         rect: mark.rect,
                         body: [mark.body_size.x, mark.body_size.y],
                         scale: mark.scale,
+                        image_id: mark.image_id.clone(),
+                        image_revision: mark.image_revision,
                     })
                     .collect()
             })
@@ -2944,6 +2966,8 @@ impl PdfReaderApp {
                     title: preview.title.clone(),
                     text: preview.text.clone(),
                     scale: preview.scale,
+                    image_id: preview.image_id.clone(),
+                    image_revision: preview.image_revision,
                 },
             })
             .collect();
@@ -3295,6 +3319,8 @@ impl PdfReaderApp {
                                                 body_size: egui::vec2(rect.width, rect.height),
                                                 // 默认 rect 是按 pt 给的（相当于 100%）：分辨率记 1.0
                                                 scale: 1.0,
+                                                image_id: new_image_id("dest"),
+                                                image_revision: 0,
                                             }
                                         })
                                         .collect()
@@ -3346,6 +3372,10 @@ impl PdfReaderApp {
                                         mark.body_size =
                                             egui::vec2(saved_mark.body[0], saved_mark.body[1]);
                                         mark.scale = saved_mark.scale;
+                                        if !saved_mark.image_id.is_empty() {
+                                            mark.image_id = saved_mark.image_id.clone();
+                                        }
+                                        mark.image_revision = saved_mark.image_revision;
                                     }
                                 }
                             }
@@ -3388,6 +3418,16 @@ impl PdfReaderApp {
                                     snapshot: None,
                                     body_size: egui::vec2(item.body[0], item.body[1]),
                                     scale: item.scale,
+                                    image_id: if kind == CustomKind::Image {
+                                        if item.image_id.is_empty() {
+                                            new_image_id("custom")
+                                        } else {
+                                            item.image_id.clone()
+                                        }
+                                    } else {
+                                        String::new()
+                                    },
+                                    image_revision: item.image_revision,
                                 });
                             }
                         }
@@ -8014,6 +8054,7 @@ impl PdfReaderApp {
         after.snapshot = Some(texture);
         after.rect = page_rect;
         after.body_size = egui::vec2(overlap.width, overlap.height);
+        after.image_revision = before.image_revision.saturating_add(1);
         // ▲v2：记录这张图的分辨率（截图时的显示比例）—— 之后重建预览时按它请求渲染
         after.scale = session.state().zoom;
         self.apply_edit(
@@ -8383,6 +8424,8 @@ impl PdfReaderApp {
                     snapshot: None,
                     body_size,
                     scale: 1.0,
+                    image_id: String::new(),
+                    image_revision: 0,
                 };
                 let position = self.custom_previews.len();
                 self.apply_edit(
@@ -8416,6 +8459,8 @@ impl PdfReaderApp {
                     body_size: DEFAULT_CUSTOM_TEXT_BODY,
                     // 占位：截图完成时写入当时的显示比例
                     scale: 1.0,
+                    image_id: new_image_id("custom"),
+                    image_revision: 0,
                 };
                 self.apply_edit(
                     AppEdit::AddPreview {
@@ -8622,6 +8667,7 @@ impl PdfReaderApp {
             after.rect = page_rect;
             after.snapshot = Some(texture.clone());
             after.body_size = egui::vec2(overlap.width, overlap.height);
+            after.image_revision = old.image_revision.saturating_add(1);
             // ▲v2：记录这张图的分辨率（截图时的显示比例）
             after.scale = session.state().zoom;
             self.apply_edit(
@@ -10847,6 +10893,8 @@ mod annotation_body_tests {
             snapshot: None,
             body_size: DEFAULT_CUSTOM_TEXT_BODY,
             scale: 1.0,
+            image_id: String::new(),
+            image_revision: 0,
         };
         let key = PreviewKey {
             page: preview.page,
@@ -10909,6 +10957,8 @@ mod annotation_body_tests {
             snapshot: None,
             body_size: DEFAULT_CUSTOM_TEXT_BODY,
             scale: 1.0,
+            image_id: String::new(),
+            image_revision: 0,
         };
         let key = PreviewKey {
             page: preview.page,
@@ -10958,6 +11008,8 @@ mod annotation_body_tests {
                 snapshot: None,
                 body_size: DEFAULT_CUSTOM_TEXT_BODY,
                 scale: 1.0,
+                image_id: String::new(),
+                image_revision: 0,
             };
             app.apply_edit(
                 AppEdit::AddPreview {
