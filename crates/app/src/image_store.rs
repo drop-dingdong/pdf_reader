@@ -189,6 +189,63 @@ impl BytesLoader for InternalImageLoader {
     }
 }
 
+/// 把 Markdown 里的 `pd-img` 图片 URI 替换成 `data:image/png;base64,...`。
+///
+/// 只用于**导出到外部**；内部注释/JSON 始终保留稳定的 `pd-img` 引用。
+/// 缓存里暂时没有的图片保留原引用，不阻塞导出。
+pub fn materialize_markdown(text: &str, images: &ImageStore) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(position) = rest.find("](pd-img://") {
+        let start = position + 2;
+        let Some(close) = rest[start..].find(')') else {
+            break;
+        };
+        let close = start + close;
+        let uri = &rest[start..close];
+        let Some(reference) = parse_ref(uri) else {
+            out.push_str(&rest[..close + 1]);
+            rest = &rest[close + 1..];
+            continue;
+        };
+        let Some(png) = images.get(&reference) else {
+            out.push_str(&rest[..close + 1]);
+            rest = &rest[close + 1..];
+            continue;
+        };
+        out.push_str(&rest[..start]);
+        out.push_str("data:image/png;base64,");
+        out.push_str(&base64(&png));
+        rest = &rest[close..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn base64(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let value = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((value >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((value >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((value >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(value & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /// 把 egui 的 `ColorImage` 编码成 PNG。
 pub fn encode_png(image: &ColorImage) -> Option<Arc<[u8]>> {
     let width = u32::try_from(image.size[0]).ok()?;
@@ -244,6 +301,25 @@ mod tests {
                 revision: 2
             }]
         );
+    }
+
+    #[test]
+    fn materializes_cached_images_as_base64() {
+        let store = ImageStore::default();
+        let image = ColorImage::new([2, 2], vec![egui::Color32::RED; 4]);
+        let png = encode_png(&image).expect("PNG");
+        store.insert(
+            &ImageRef {
+                record_id: "custom-1".to_string(),
+                revision: 1,
+            },
+            png.clone(),
+        );
+        let markdown = "![a](pd-img://custom-1?rev=1)";
+        let exported = materialize_markdown(markdown, &store);
+        assert!(exported.starts_with("![a](data:image/png;base64,"));
+        assert!(!exported.contains("pd-img"));
+        assert_eq!(base64(b"hello"), "aGVsbG8=");
     }
 
     #[test]

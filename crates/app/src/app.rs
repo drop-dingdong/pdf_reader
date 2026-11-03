@@ -2215,28 +2215,30 @@ impl PdfReaderApp {
             self.message = "先打开一个 PDF 再导出".to_string();
             return;
         };
-        let rows: Vec<crate::annotations_md::Row> = self
-            .annotations
-            .iter()
-            .map(|annotation| {
-                let (kind, _) = annotation_kind_label(&annotation.kind);
-                let bounds = annotation.bounds();
-                let external = self.external_ids.contains(&annotation.id);
-                crate::annotations_md::Row {
-                    page: annotation.page.get(),
-                    y: bounds.map(|rect| rect.y).unwrap_or(0.0),
-                    x: bounds.map(|rect| rect.x).unwrap_or(0.0),
-                    id: annotation.id.get(),
-                    kind,
-                    author: annotation.author.clone(),
-                    created: annotation.created,
-                    modified: annotation.modified,
-                    body: annotation.body.clone(),
-                    external,
-                    readonly: external && annotation.pdf_ref.is_none(),
-                }
-            })
-            .collect();
+        let rows: Vec<crate::annotations_md::Row> =
+            self.annotations
+                .iter()
+                .map(|annotation| {
+                    let (kind, _) = annotation_kind_label(&annotation.kind);
+                    let bounds = annotation.bounds();
+                    let external = self.external_ids.contains(&annotation.id);
+                    crate::annotations_md::Row {
+                        page: annotation.page.get(),
+                        y: bounds.map(|rect| rect.y).unwrap_or(0.0),
+                        x: bounds.map(|rect| rect.x).unwrap_or(0.0),
+                        id: annotation.id.get(),
+                        kind,
+                        author: annotation.author.clone(),
+                        created: annotation.created,
+                        modified: annotation.modified,
+                        body: annotation.body.as_ref().map(|body| {
+                            crate::image_store::materialize_markdown(body, &self.images)
+                        }),
+                        external,
+                        readonly: external && annotation.pdf_ref.is_none(),
+                    }
+                })
+                .collect();
         if rows.is_empty() {
             self.message = "没有可导出的注释".to_string();
             return;
@@ -5091,9 +5093,6 @@ impl PdfReaderApp {
             }
         }
         for reference in refs {
-            if self.images.get(&reference).is_some() {
-                continue;
-            }
             // 自定义图片 preview
             if let Some(index) = self
                 .custom_previews
@@ -5103,9 +5102,21 @@ impl PdfReaderApp {
                 let Some(preview) = self.custom_previews.get(index) else {
                     continue;
                 };
-                if preview.kind != CustomKind::Image || preview.image_revision != reference.revision
-                {
+                if preview.kind != CustomKind::Image {
                     continue;
+                }
+                let current = crate::image_store::ImageRef {
+                    record_id: preview.image_id.clone(),
+                    revision: preview.image_revision,
+                };
+                if current == reference && self.images.get(&reference).is_some() {
+                    continue;
+                }
+                if current != reference {
+                    if let Some(png) = self.images.get(&current) {
+                        self.images.insert(&reference, png);
+                        continue;
+                    }
                 }
                 if preview.snapshot.is_some() {
                     // 字节被 LRU 淘汰：丢弃显示纹理，重新生成并登记。
@@ -5114,6 +5125,13 @@ impl PdfReaderApp {
                     }
                 }
                 self.ensure_custom_snapshot(ui, session, index);
+                // 旧 Markdown 引用可能还带旧 revision：把当前图作为别名登记，
+                // 避免改正文；下次编辑/导出时可再迁移 URI。
+                if current != reference {
+                    if let Some(png) = self.images.get(&current) {
+                        self.images.insert(&reference, png);
+                    }
+                }
                 continue;
             }
             // 被引用点
@@ -5135,15 +5153,25 @@ impl PdfReaderApp {
                 else {
                     continue;
                 };
-                if mark.image_revision != reference.revision {
-                    continue;
-                }
                 let (rect, scale, image_id, revision) = (
                     mark.rect,
                     mark.scale,
                     mark.image_id.clone(),
                     mark.image_revision,
                 );
+                let current = crate::image_store::ImageRef {
+                    record_id: image_id.clone(),
+                    revision,
+                };
+                if current == reference && self.images.get(&reference).is_some() {
+                    continue;
+                }
+                if current != reference {
+                    if let Some(png) = self.images.get(&current) {
+                        self.images.insert(&reference, png);
+                        continue;
+                    }
+                }
                 if mark.snapshot.is_some() {
                     if let Some(mark) = self
                         .dest_marks
@@ -5161,10 +5189,7 @@ impl PdfReaderApp {
                     scale,
                     format!("dest-ref-{page_index}-{index}"),
                     "被引用点",
-                    Some(crate::image_store::ImageRef {
-                        record_id: image_id,
-                        revision,
-                    }),
+                    Some(current.clone()),
                 );
                 if let Some(texture) = texture {
                     if let Some(mark) = self
@@ -5173,6 +5198,11 @@ impl PdfReaderApp {
                         .and_then(|marks| marks.get_mut(index))
                     {
                         mark.snapshot = Some(texture);
+                    }
+                }
+                if current != reference {
+                    if let Some(png) = self.images.get(&current) {
+                        self.images.insert(&reference, png);
                     }
                 }
             }
@@ -6904,6 +6934,18 @@ impl PdfReaderApp {
                         if response.clicked() {
                             clicked = Some((page, index));
                         }
+                        if !mark.image_id.is_empty() {
+                            let record_id = mark.image_id.clone();
+                            let revision = mark.image_revision;
+                            response.context_menu(|ui| {
+                                if ui.button("复制图片引用").clicked() {
+                                    ui.ctx().copy_text(crate::image_store::image_uri(
+                                        &record_id, revision,
+                                    ));
+                                    ui.close();
+                                }
+                            });
+                        }
                     }
                 }
                 if let Some(target) = clicked {
@@ -7575,6 +7617,34 @@ impl PdfReaderApp {
         }
     }
 
+    /// 可插入 Markdown 的内部图片记录（来自 preview/被引用点，不要求已生成快照）。
+    fn image_choices(&self) -> Vec<(String, String)> {
+        let mut choices = Vec::new();
+        for preview in &self.custom_previews {
+            if preview.kind == CustomKind::Image && !preview.image_id.is_empty() {
+                choices.push((
+                    if preview.title.is_empty() {
+                        "图片 preview".to_string()
+                    } else {
+                        preview.title.clone()
+                    },
+                    crate::image_store::image_uri(&preview.image_id, preview.image_revision),
+                ));
+            }
+        }
+        for (page, marks) in self.dest_marks.iter().enumerate() {
+            for (index, mark) in marks.iter().enumerate() {
+                if !mark.image_id.is_empty() {
+                    choices.push((
+                        format!("引用点 第{}页 #{}", page + 1, index + 1),
+                        crate::image_store::image_uri(&mark.image_id, mark.image_revision),
+                    ));
+                }
+            }
+        }
+        choices
+    }
+
     /// 安装 `pd-img` bytes loader 与 PNG image loader。
     fn ensure_image_loaders(&self, ctx: &egui::Context) {
         if !ctx.is_loader_installed(crate::image_store::InternalImageLoader::ID) {
@@ -7639,6 +7709,7 @@ impl PdfReaderApp {
         let mut cancel = false;
         let mut focus = self.focus_body_edit;
         let mut initial_cursor = self.body_edit_cursor.take();
+        let image_choices = self.image_choices();
         egui::Window::new(format!("编辑正文 · {title}"))
             .id(Id::unique("edit-body"))
             .resizable(true)
@@ -7650,6 +7721,28 @@ impl PdfReaderApp {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.label("原始 Markdown；保存后按现有路径写回注释或 preview。");
+                ui.collapsing("插入内部图片", |ui| {
+                    if image_choices.is_empty() {
+                        ui.label("还没有可引用的图片 preview 或引用点。");
+                    } else {
+                        for (label, uri) in &image_choices {
+                            if ui
+                                .small_button(label)
+                                .on_hover_text("追加到正文末尾")
+                                .clicked()
+                            {
+                                let alt: String = label
+                                    .chars()
+                                    .map(|ch| match ch {
+                                        '[' | ']' | '\n' | '\r' => ' ',
+                                        _ => ch,
+                                    })
+                                    .collect();
+                                text.push_str(&format!("\n![{alt}]({uri})\n"));
+                            }
+                        }
+                    }
+                });
                 // 编辑区跟随窗口：按剩余高度算行数，窗口拉大/拉小都填满，
                 // 单行短文本也不会出现无意义的滚动条。
                 // TextEdit 的实际行高就是字体行高；不要再加 item_spacing，
@@ -8017,8 +8110,8 @@ impl PdfReaderApp {
                         );
                         ui.monospace("标题：## 标题 {#id}    跳转：[文字](#id)");
                         ui.label(
-                            "内部图片：在图片 preview 浮窗点 @ 复制引用，粘到正文；\
-                             只有打开的文字浮窗会解析/渲染引用。",
+                            "内部图片：图片 preview 浮窗点 @，或在引用点标记右键复制引用；\
+                             也可在正文编辑窗口「插入内部图片」。只有打开的文字浮窗会渲染引用。",
                         );
                         ui.separator();
                         ui.heading("数学语法");
@@ -10270,6 +10363,39 @@ mod annotation_body_tests {
             assert!(scrolled > top, "滚动后同一屏幕位置应映射到更后面的源码");
         });
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn image_choices_include_previews_and_dest_marks() {
+        let mut app = app();
+        app.custom_previews.push(CustomPreview {
+            id: 1,
+            page: PageIndex::FIRST,
+            point: Point::new(0.0, 0.0),
+            rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+            kind: CustomKind::Image,
+            title: "截图".to_string(),
+            text: None,
+            snapshot: None,
+            body_size: DEFAULT_CUSTOM_TEXT_BODY,
+            scale: 1.0,
+            image_id: "custom-1".to_string(),
+            image_revision: 2,
+        });
+        app.dest_marks = vec![vec![DestMark {
+            point: Point::new(10.0, 10.0),
+            rect: Rect::new(5.0, 5.0, 10.0, 10.0),
+            snapshot: None,
+            body_size: DEFAULT_CUSTOM_TEXT_BODY,
+            scale: 1.0,
+            image_id: "dest-1".to_string(),
+            image_revision: 3,
+        }]];
+        let choices = app.image_choices();
+        assert!(choices
+            .iter()
+            .any(|(_, uri)| uri.contains("custom-1?rev=2")));
+        assert!(choices.iter().any(|(_, uri)| uri.contains("dest-1?rev=3")));
     }
 
     #[test]
