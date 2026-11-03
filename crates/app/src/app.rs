@@ -5067,6 +5067,10 @@ impl PdfReaderApp {
         if let Some(image_ref) = image_ref {
             if let Some(png) = crate::image_store::encode_png(&image) {
                 self.images.insert(&image_ref, png);
+                ui.ctx().forget_image(&crate::image_store::image_uri(
+                    &image_ref.record_id,
+                    image_ref.revision,
+                ));
             }
         }
         Some(
@@ -5115,6 +5119,10 @@ impl PdfReaderApp {
                 if current != reference {
                     if let Some(png) = self.images.get(&current) {
                         self.images.insert(&reference, png);
+                        ui.ctx().forget_image(&crate::image_store::image_uri(
+                            &reference.record_id,
+                            reference.revision,
+                        ));
                         continue;
                     }
                 }
@@ -5130,6 +5138,10 @@ impl PdfReaderApp {
                 if current != reference {
                     if let Some(png) = self.images.get(&current) {
                         self.images.insert(&reference, png);
+                        ui.ctx().forget_image(&crate::image_store::image_uri(
+                            &reference.record_id,
+                            reference.revision,
+                        ));
                     }
                 }
                 continue;
@@ -5169,6 +5181,10 @@ impl PdfReaderApp {
                 if current != reference {
                     if let Some(png) = self.images.get(&current) {
                         self.images.insert(&reference, png);
+                        ui.ctx().forget_image(&crate::image_store::image_uri(
+                            &reference.record_id,
+                            reference.revision,
+                        ));
                         continue;
                     }
                 }
@@ -5203,6 +5219,10 @@ impl PdfReaderApp {
                 if current != reference {
                     if let Some(png) = self.images.get(&current) {
                         self.images.insert(&reference, png);
+                        ui.ctx().forget_image(&crate::image_store::image_uri(
+                            &reference.record_id,
+                            reference.revision,
+                        ));
                     }
                 }
             }
@@ -8311,13 +8331,15 @@ impl PdfReaderApp {
         after.body_size = egui::vec2(overlap.width, overlap.height);
         after.image_revision = before.image_revision.saturating_add(1);
         if let Some(png) = png {
-            self.images.insert(
-                &crate::image_store::ImageRef {
-                    record_id: after.image_id.clone(),
-                    revision: after.image_revision,
-                },
-                png,
-            );
+            let image_ref = crate::image_store::ImageRef {
+                record_id: after.image_id.clone(),
+                revision: after.image_revision,
+            };
+            self.images.insert(&image_ref, png);
+            ui.ctx().forget_image(&crate::image_store::image_uri(
+                &image_ref.record_id,
+                image_ref.revision,
+            ));
         }
         // ▲v2：记录这张图的分辨率（截图时的显示比例）—— 之后重建预览时按它请求渲染
         after.scale = session.state().zoom;
@@ -8934,13 +8956,15 @@ impl PdfReaderApp {
             after.body_size = egui::vec2(overlap.width, overlap.height);
             after.image_revision = old.image_revision.saturating_add(1);
             if let Some(png) = png.clone() {
-                self.images.insert(
-                    &crate::image_store::ImageRef {
-                        record_id: after.image_id.clone(),
-                        revision: after.image_revision,
-                    },
-                    png,
-                );
+                let image_ref = crate::image_store::ImageRef {
+                    record_id: after.image_id.clone(),
+                    revision: after.image_revision,
+                };
+                self.images.insert(&image_ref, png);
+                ui.ctx().forget_image(&crate::image_store::image_uri(
+                    &image_ref.record_id,
+                    image_ref.revision,
+                ));
             }
             // ▲v2：记录这张图的分辨率（截图时的显示比例）
             after.scale = session.state().zoom;
