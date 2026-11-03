@@ -1,7 +1,7 @@
 # 内部图片引用（设计基线）
 
-> 状态：**B1 数据层部分实现**。A 阶段会话内原型已撤销；sidecar v4 已加入 `image_id`/`image_revision`，
-> 图片 loader/懒渲染尚未接入。
+> 状态：**B1 进行中**。sidecar v4 已加入 `image_id`/`image_revision`；`ImageStore`、`pd-img` loader、
+> 打开文字浮窗时的 owner 懒渲染已接入；DestMark 的复制入口/导出尚未完成。
 > 目标：让 Markdown 正文引用软件内部生成的截图/图片，不读取本地或网络图片。
 
 ## 1. 目标与边界

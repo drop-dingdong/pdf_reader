@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-03　分支：`feat/markdown-floats`　门禁：`./scripts/check.sh` 通过（482 个测试）。
+> 快照：2026-11-03　分支：`feat/markdown-floats`　门禁：`./scripts/check.sh` 通过（485 个测试）。
 
 ## 1. 它是什么
 
@@ -23,8 +23,8 @@
   单换行按笔记语义保留为硬换行；代码块/表格/长 URL 会测最小内容宽度并横向滚动；
   标题栏 ✎/双击打开正式的可调整编辑窗口（高度跟随窗口、每次打开重置滚动、未保存时确认）；表格走完整渲染路径，避免视口切片把表格推到右侧；
   图片浮窗与 PDF 写回路径不变。多个浮窗重叠时滚轮只归 z 最高者。
-  内部图片 B1 数据层已起步：sidecar v4 为被引用点/图片 preview 增加 `image_id`/`image_revision`，
-  旧档按页/下标生成 legacy id。Markdown 锚点：`## 标题 {#id}` + `[文字](#id)` 在当前浮窗内滚动；每个浮窗独立缓存，多浮窗相同 id 不串；
+  内部图片 B1：sidecar v4 增加 `image_id`/`image_revision`；`ImageStore` + `pd-img` loader；
+  只扫描打开的文字浮窗引用，缺图时由 preview/被引用点 owner 懒渲染；图片浮窗 @ 复制引用。Markdown 锚点：`## 标题 {#id}` + `[文字](#id)` 在当前浮窗内滚动；每个浮窗独立缓存，多浮窗相同 id 不串；
   正文双击打开编辑器时按点击位置放置光标/滚动（纯文本精确，Markdown 近似）。
 - **LaTeX 数学（P1.5）**：`MathBackend` trait + `latex-rust 3.0.1` PNG 后端；按公式/行内/DPI
   缓存（64 条上限，超宽降采样/回退）；错误类型区分语法/字形/不支持/过大；

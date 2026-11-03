@@ -22,6 +22,7 @@ pub mod compact;
 pub mod diag;
 pub mod export;
 pub mod history;
+pub mod image_store;
 pub(crate) mod ink;
 pub(crate) mod json;
 pub mod markdown;

@@ -1235,6 +1235,8 @@ pub struct PdfReaderApp {
     math_cache: std::rc::Rc<std::cell::RefCell<crate::math::MathCache>>,
     /// 数学公式支持/限制帮助窗口是否打开。
     math_help: bool,
+    /// Markdown 内部图片的 PNG 字节缓存。
+    images: crate::image_store::ImageStore,
     /// 保存正文后，下一帧把公式错误合并到“已更新内容”提示里。
     math_recheck_pending: bool,
     /// 正文编辑会话号：每次打开换一个 ScrollArea id，避免不同文本继承滚动位置。
@@ -1485,6 +1487,7 @@ impl PdfReaderApp {
             markdown_viewports: std::collections::HashMap::new(),
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(crate::math::MathCache::new())),
             math_help: false,
+            images: crate::image_store::ImageStore::default(),
             math_recheck_pending: false,
             body_edit_session: 1,
             body_edit_cursor: None,
@@ -3256,6 +3259,9 @@ impl PdfReaderApp {
                         self.floats.clear();
                         self.markdown_caches.clear();
                         self.markdown_viewports.clear();
+                        if !preserve_history {
+                            self.images.clear();
+                        }
                         self.data_dirty = false;
                         self.sidecar_migrated = false;
                         self.sidecar_locked = None;
@@ -4936,6 +4942,7 @@ impl PdfReaderApp {
         scale: f32,
         texture_name: String,
         tag: &str,
+        image_ref: Option<crate::image_store::ImageRef>,
     ) -> Option<egui::TextureHandle> {
         let placement = session.placement(page).copied()?;
         if page_rect.width.is_nan()
@@ -5055,10 +5062,121 @@ impl PdfReaderApp {
                 image.size[1]
             ));
         }
+        if let Some(image_ref) = image_ref {
+            if let Some(png) = crate::image_store::encode_png(&image) {
+                self.images.insert(&image_ref, png);
+            }
+        }
         Some(
             ui.ctx()
                 .load_texture(texture_name, image, egui::TextureOptions::LINEAR),
         )
+    }
+
+    /// 只为**当前打开的文字浮窗**解析 Markdown 里的 `pd-img`，缺图时让 owner 懒渲染。
+    fn ensure_markdown_image_owners(&mut self, ui: &mut egui::Ui, session: &mut DocumentSession) {
+        if !self.markdown_floats {
+            return;
+        }
+        let mut refs = Vec::new();
+        for window in &self.floats {
+            if let FloatContent::Text(text) = &window.content {
+                if !text.is_empty() {
+                    for reference in crate::image_store::markdown_refs(text) {
+                        if !refs.contains(&reference) {
+                            refs.push(reference);
+                        }
+                    }
+                }
+            }
+        }
+        for reference in refs {
+            if self.images.get(&reference).is_some() {
+                continue;
+            }
+            // 自定义图片 preview
+            if let Some(index) = self
+                .custom_previews
+                .iter()
+                .position(|preview| preview.image_id == reference.record_id)
+            {
+                let Some(preview) = self.custom_previews.get(index) else {
+                    continue;
+                };
+                if preview.kind != CustomKind::Image || preview.image_revision != reference.revision
+                {
+                    continue;
+                }
+                if preview.snapshot.is_some() {
+                    // 字节被 LRU 淘汰：丢弃显示纹理，重新生成并登记。
+                    if let Some(preview) = self.custom_previews.get_mut(index) {
+                        preview.snapshot = None;
+                    }
+                }
+                self.ensure_custom_snapshot(ui, session, index);
+                continue;
+            }
+            // 被引用点
+            let found = self
+                .dest_marks
+                .iter()
+                .enumerate()
+                .find_map(|(page, marks)| {
+                    marks
+                        .iter()
+                        .position(|mark| mark.image_id == reference.record_id)
+                        .map(|index| (page, index))
+                });
+            if let Some((page_index, index)) = found {
+                let Some(mark) = self
+                    .dest_marks
+                    .get(page_index)
+                    .and_then(|marks| marks.get(index))
+                else {
+                    continue;
+                };
+                if mark.image_revision != reference.revision {
+                    continue;
+                }
+                let (rect, scale, image_id, revision) = (
+                    mark.rect,
+                    mark.scale,
+                    mark.image_id.clone(),
+                    mark.image_revision,
+                );
+                if mark.snapshot.is_some() {
+                    if let Some(mark) = self
+                        .dest_marks
+                        .get_mut(page_index)
+                        .and_then(|marks| marks.get_mut(index))
+                    {
+                        mark.snapshot = None;
+                    }
+                }
+                let texture = self.preview_texture(
+                    ui,
+                    session,
+                    PageIndex::new(page_index as u32),
+                    rect,
+                    scale,
+                    format!("dest-ref-{page_index}-{index}"),
+                    "被引用点",
+                    Some(crate::image_store::ImageRef {
+                        record_id: image_id,
+                        revision,
+                    }),
+                );
+                if let Some(texture) = texture {
+                    if let Some(mark) = self
+                        .dest_marks
+                        .get_mut(page_index)
+                        .and_then(|marks| marks.get_mut(index))
+                    {
+                        mark.snapshot = Some(texture);
+                    }
+                }
+            }
+        }
     }
 
     /// 为"**正在显示**、但还缺预览图"的自定义图片 preview 重试生成。
@@ -5101,14 +5219,20 @@ impl PdfReaderApp {
             return;
         }
         let (page, page_rect, scale) = (preview.page, preview.rect, preview.scale);
+        let preview_id = preview.id;
+        let image_ref = (!preview.image_id.is_empty()).then(|| crate::image_store::ImageRef {
+            record_id: preview.image_id.clone(),
+            revision: preview.image_revision,
+        });
         let Some(texture) = self.preview_texture(
             ui,
             session,
             page,
             page_rect,
             scale,
-            format!("custom-image-{index}"),
+            format!("custom-image-{preview_id}"),
             "自定义图片",
+            image_ref,
         ) else {
             return;
         };
@@ -7014,6 +7138,7 @@ impl PdfReaderApp {
                 // 旧实现只在"悬浮/点击侧栏条目"时重试，于是"点了但渲染还没好"的浮窗
                 // 会一直空着（D-101 把初次生成改成了"提交渲染 + 等待"，必须有重试入口）。
                 self.ensure_pending_custom_snapshots(ui, session);
+                self.ensure_markdown_image_owners(ui, session);
                 self.draw_floats(ui, canvas);
                 // 正文编辑：只检测双击并打开正式编辑窗口（编辑窗口在 draw_edit_dialogs 里）
                 self.detect_body_double_click(ui);
@@ -7203,6 +7328,15 @@ impl PdfReaderApp {
             .filter(|mark| mark.snapshot.is_none())
             .map(|mark| (mark.rect, mark.scale));
         if let Some((saved_rect, scale)) = pending {
+            let image_ref = self
+                .dest_marks
+                .get(page.get() as usize)
+                .and_then(|marks| marks.get(index))
+                .filter(|mark| !mark.image_id.is_empty())
+                .map(|mark| crate::image_store::ImageRef {
+                    record_id: mark.image_id.clone(),
+                    revision: mark.image_revision,
+                });
             let texture = self.preview_texture(
                 ui,
                 session,
@@ -7211,6 +7345,7 @@ impl PdfReaderApp {
                 scale,
                 format!("dest-hover-{}-{}", page.get(), index),
                 "被引用点",
+                image_ref,
             );
             if let Some(texture) = texture {
                 if let Some(mark) = self
@@ -7426,6 +7561,16 @@ impl PdfReaderApp {
                 );
             }
         }
+    }
+
+    /// 安装 `pd-img` bytes loader 与 PNG image loader。
+    fn ensure_image_loaders(&self, ctx: &egui::Context) {
+        if !ctx.is_loader_installed(crate::image_store::InternalImageLoader::ID) {
+            ctx.add_bytes_loader(std::sync::Arc::new(
+                crate::image_store::InternalImageLoader::new(self.images.clone()),
+            ));
+        }
+        egui_extras::install_image_loaders(ctx);
     }
 
     /// 打开正文编辑窗口；每次换一个会话号，使编辑区滚动位置从顶部开始。
@@ -7859,6 +8004,10 @@ impl PdfReaderApp {
                              超过 body 时横向滚动。",
                         );
                         ui.monospace("标题：## 标题 {#id}    跳转：[文字](#id)");
+                        ui.label(
+                            "内部图片：在图片 preview 浮窗点 @ 复制引用，粘到正文；\
+                             只有打开的文字浮窗会解析/渲染引用。",
+                        );
                         ui.separator();
                         ui.heading("数学语法");
                         ui.monospace("行内：$...$    块级：$$...$$");
@@ -8025,6 +8174,7 @@ impl PdfReaderApp {
             self.message = "该区域还没有已渲染的像素（请稍候再试）".to_string();
             return;
         };
+        let png = crate::image_store::encode_png(&snapshot);
         let texture = ui.ctx().load_texture(
             format!("custom-image-{index}"),
             snapshot,
@@ -8055,6 +8205,15 @@ impl PdfReaderApp {
         after.rect = page_rect;
         after.body_size = egui::vec2(overlap.width, overlap.height);
         after.image_revision = before.image_revision.saturating_add(1);
+        if let Some(png) = png {
+            self.images.insert(
+                &crate::image_store::ImageRef {
+                    record_id: after.image_id.clone(),
+                    revision: after.image_revision,
+                },
+                png,
+            );
+        }
         // ▲v2：记录这张图的分辨率（截图时的显示比例）—— 之后重建预览时按它请求渲染
         after.scale = session.state().zoom;
         self.apply_edit(
@@ -8649,6 +8808,7 @@ impl PdfReaderApp {
             self.message = "该区域还没有已渲染的像素（请稍候再试）".to_string();
             return;
         };
+        let png = crate::image_store::encode_png(&snapshot);
         let texture = ui.ctx().load_texture(
             format!("dest-{}-{}", page.get(), index),
             snapshot,
@@ -8668,6 +8828,15 @@ impl PdfReaderApp {
             after.snapshot = Some(texture.clone());
             after.body_size = egui::vec2(overlap.width, overlap.height);
             after.image_revision = old.image_revision.saturating_add(1);
+            if let Some(png) = png.clone() {
+                self.images.insert(
+                    &crate::image_store::ImageRef {
+                        record_id: after.image_id.clone(),
+                        revision: after.image_revision,
+                    },
+                    png,
+                );
+            }
             // ▲v2：记录这张图的分辨率（截图时的显示比例）
             after.scale = session.state().zoom;
             self.apply_edit(
@@ -9041,6 +9210,42 @@ impl PdfReaderApp {
                     }
                 }
             }
+            // 图片 preview 浮窗：@ 复制内部图片引用，便于粘进注释正文。
+            if let FloatOwner::Custom(index) = self.floats[index].owner {
+                if matches!(&self.floats[index].content, FloatContent::Image(_)) {
+                    if let Some(preview) = self.custom_previews.get(index) {
+                        if !preview.image_id.is_empty() {
+                            let uri = crate::image_store::image_uri(
+                                &preview.image_id,
+                                preview.image_revision,
+                            );
+                            let center = egui::pos2(close_center.x - 26.0, title_rect.center().y);
+                            let button_rect =
+                                egui::Rect::from_center_size(center, EVec2::splat(18.0));
+                            let response = ui.interact(
+                                button_rect,
+                                Id::unique(("float-image-ref", id)),
+                                Sense::click(),
+                            );
+                            ui.painter().text(
+                                center,
+                                Align2::CENTER_CENTER,
+                                "@",
+                                egui::FontId::proportional(13.0),
+                                if response.hovered() {
+                                    Color32::from_gray(235)
+                                } else {
+                                    Color32::from_gray(190)
+                                },
+                            );
+                            if response.on_hover_text("复制 Markdown 图片引用").clicked() {
+                                ui.ctx().copy_text(uri);
+                                self.message = "已复制图片引用，可粘到正文".to_string();
+                            }
+                        }
+                    }
+                }
+            }
             // Markdown 模式：正文的 body 先于内容控件注册，双击普通文字会落到 body；
             // 链接/滚动条的单次点击由它们自己优先，不会被双击层吞掉。
             let markdown_active = self.markdown_floats
@@ -9347,6 +9552,7 @@ impl PdfReaderApp {
 impl eframe::App for PdfReaderApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.ensure_image_loaders(&ctx);
         self.apply_pending_window_size(&ctx);
         if ctx.input(|input| input.viewport().close_requested()) {
             if self.closing_after_decision {
