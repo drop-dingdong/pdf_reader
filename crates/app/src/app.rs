@@ -5834,11 +5834,17 @@ impl PdfReaderApp {
                 }
                 if !self.message.is_empty() {
                     ui.separator();
-                    ui.label(&self.message);
+                    // 状态栏最多一行：长文本用省略号，不能让消息把窗口撑高。
+                    ui.add(egui::Label::new(&self.message).truncate());
                 }
                 if let Some(error) = &self.error {
                     ui.separator();
-                    ui.colored_label(Color32::from_rgb(200, 60, 60), error);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(error).color(Color32::from_rgb(200, 60, 60)),
+                        )
+                        .truncate(),
+                    );
                 }
             });
         });
@@ -9435,7 +9441,12 @@ impl PdfReaderApp {
         });
         if let Some(error) = &self.error {
             egui::Panel::bottom("empty-status").show(ui, |ui| {
-                ui.colored_label(Color32::from_rgb(200, 60, 60), error);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(error).color(Color32::from_rgb(200, 60, 60)),
+                    )
+                    .truncate(),
+                );
             });
         }
     }

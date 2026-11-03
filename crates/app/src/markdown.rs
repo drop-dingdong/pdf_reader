@@ -89,45 +89,80 @@ mod tests {
 
 /// 去掉 `$$` 显示公式块内部的空行。
 ///
-/// CommonMark 在空行处断段：`$$` 后如果紧跟空行，`pulldown-cmark` 会把 `$$` 当普通文本，
+/// CommonMark 在空行处断段：`$$` 后如果出现空行，`pulldown-cmark` 会把 `$$` 当普通文本，
 /// 后面的 `~...~` 还可能被当成删除线。LaTeX 数学模式里的空行没有语义，去掉是安全的。
-/// 只处理**独占一行**的 `$$` 围栏；行内 `$$...$$` 和代码围栏不受影响。
+///
+/// 与只认“独占一行的 `$$`”不同，这里允许 `$$\begin{cases}` 这种**开定界符同行**的写法；
+/// 只处理跨行的 `$$...$$` 对，代码围栏/行内 code 内的 `$$` 不动。
 pub fn normalize_display_math(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut out = Vec::with_capacity(lines.len());
     let mut in_code = false;
-    let mut index = 0;
-    while index < lines.len() {
-        let line = lines[index];
+    let mut in_display = false;
+    for line in lines {
         let trimmed = line.trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_code = !in_code;
             out.push(line);
-            index += 1;
             continue;
         }
-        if !in_code && line.trim() == "$$" {
-            // 找配对的结束围栏；找不到就原样保留。
-            let mut close = index + 1;
-            while close < lines.len() && lines[close].trim() != "$$" {
-                close += 1;
-            }
-            if close < lines.len() {
-                out.push(line);
-                for body in &lines[index + 1..close] {
-                    if !body.trim().is_empty() {
-                        out.push(body);
-                    }
-                }
-                out.push(lines[close]);
-                index = close + 1;
+        if !in_code {
+            let (count, _) = display_delimiters(line);
+            let toggles = count % 2 == 1;
+            // 行首处于显示公式内时，空行直接跳过；闭合定界符所在行不会被跳过。
+            if in_display && line.trim().is_empty() {
                 continue;
+            }
+            if toggles {
+                in_display = !in_display;
             }
         }
         out.push(line);
-        index += 1;
     }
     out.join("\n")
+}
+
+/// 统计一行里未被转义、且不在反引号 code span 内的 `$$` 数量。
+fn display_delimiters(line: &str) -> (usize, bool) {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    let mut count = 0;
+    let mut in_code_span = false;
+    let mut backticks = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'`' => {
+                let start = index;
+                while index < bytes.len() && bytes[index] == b'`' {
+                    index += 1;
+                }
+                let run = index - start;
+                if in_code_span && run == backticks {
+                    in_code_span = false;
+                } else if !in_code_span {
+                    in_code_span = true;
+                    backticks = run;
+                }
+                continue;
+            }
+            b'$' if index + 1 < bytes.len() && bytes[index + 1] == b'$' && !in_code_span => {
+                let mut backslashes: usize = 0;
+                let mut cursor = index;
+                while cursor > 0 && bytes[cursor - 1] == b'\\' {
+                    backslashes += 1;
+                    cursor -= 1;
+                }
+                if backslashes.is_multiple_of(2) {
+                    count += 1;
+                    index += 2;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    (count, in_code_span)
 }
 
 /// 估算 Markdown 正文中**不方便重排**内容的最小宽度（单位与 `measure` 一致）。
@@ -247,11 +282,25 @@ mod width_tests {
 #[cfg(test)]
 mod math_fence_tests {
     use super::normalize_display_math;
+    use pulldown_cmark::{Event, Options, Parser};
 
     #[test]
     fn removes_blank_lines_inside_display_math() {
         let source = "$$\n\n~，\n1~\n$$";
         assert_eq!(normalize_display_math(source), "$$\n~，\n1~\n$$");
+    }
+
+    #[test]
+    fn removes_blank_lines_when_delimiters_share_a_line_with_content() {
+        let source =
+            "$$\\begin{cases} \n\n\\frac{2}{1}~, & 0.2, \\\\ \\frac{1}{3}~, & \n\\end{cases}$$";
+        let normalized = normalize_display_math(source);
+        assert!(!normalized.contains("\n\n"), "块内空行应被去掉");
+        let mut opts = Options::empty();
+        opts.insert(Options::ENABLE_MATH);
+        let has_display_math =
+            Parser::new_ext(&normalized, opts).any(|event| matches!(event, Event::DisplayMath(_)));
+        assert!(has_display_math, "去掉空行后应识别为 DisplayMath");
     }
 
     #[test]
