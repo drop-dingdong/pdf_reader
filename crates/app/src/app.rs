@@ -5201,13 +5201,7 @@ impl PdfReaderApp {
                         mark.snapshot = None;
                     }
                 }
-                // 若当前 revision 还没有字节，直接把这次渲染登记到旧 ref 上，
-                // 避免旧引用一直 Loading；否则登记当前 revision 再别名。
-                let register = if current != reference && self.images.get(&current).is_none() {
-                    reference.clone()
-                } else {
-                    current.clone()
-                };
+                let register = current.clone();
                 let texture = self.preview_texture(
                     ui,
                     session,
@@ -9429,6 +9423,7 @@ impl PdfReaderApp {
                         let text = crate::markdown::normalize_display_math(
                             &crate::markdown::preserve_single_line_breaks(text),
                         );
+                        let text = crate::image_store::canonicalize_markdown(&text, &self.images);
                         let view_id = Id::unique(("float-md", id));
                         // 代码块/表格/长 URL 不应当被硬折成 body 宽度：测一个最小内容
                         // 宽度，超过 body 时由 commonmark 的横向 ScrollArea 承载。

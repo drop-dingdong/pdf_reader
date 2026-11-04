@@ -246,6 +246,38 @@ impl BytesLoader for InternalImageLoader {
     }
 }
 
+/// 渲染前把 Markdown 里旧的 `rev` 规范化为 record 当前 revision。
+///
+/// 只改传给渲染器的文本，不改源正文；旧引用因此和新引用使用同一个 URI，
+/// 不会出现同一 record 的旧 URI 一直 Loading。
+pub fn canonicalize_markdown(text: &str, images: &ImageStore) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(position) = rest.find("](pd-img://") {
+        let start = position + 2;
+        let Some(close) = rest[start..].find(')') else {
+            break;
+        };
+        let close = start + close;
+        let uri = &rest[start..close];
+        let Some(reference) = parse_ref(uri) else {
+            out.push_str(&rest[..close + 1]);
+            rest = &rest[close + 1..];
+            continue;
+        };
+        let Some(latest) = images.latest_revision(&reference.record_id) else {
+            out.push_str(&rest[..close + 1]);
+            rest = &rest[close + 1..];
+            continue;
+        };
+        out.push_str(&rest[..start]);
+        out.push_str(&image_uri(&reference.record_id, latest));
+        rest = &rest[close..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// 把 Markdown 里的 `pd-img` 图片 URI 替换成 `data:image/png;base64,...`。
 ///
 /// 只用于**导出到外部**；内部注释/JSON 始终保留稳定的 `pd-img` 引用。
@@ -350,13 +382,32 @@ mod tests {
 
     #[test]
     fn extracts_image_refs_from_markdown() {
-        let refs = markdown_refs("![a](pd-img://custom-1?rev=2)\n![b](https://x/y.png)");
+        let refs = markdown_refs(
+            "![old](pd-img://custom-1?rev=1)\n![new](pd-img://custom-1?rev=2)\n![x](https://x/y.png)",
+        );
         assert_eq!(
             refs,
-            vec![ImageRef {
-                record_id: "custom-1".to_string(),
-                revision: 2
-            }]
+            vec![
+                ImageRef {
+                    record_id: "custom-1".to_string(),
+                    revision: 1
+                },
+                ImageRef {
+                    record_id: "custom-1".to_string(),
+                    revision: 2
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn canonicalizes_old_revision_to_latest() {
+        let store = ImageStore::default();
+        store.set_revision("custom-1", 3);
+        let text = "![old](pd-img://custom-1?rev=1)";
+        assert_eq!(
+            canonicalize_markdown(text, &store),
+            "![old](pd-img://custom-1?rev=3)"
         );
     }
 
