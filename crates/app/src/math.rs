@@ -550,6 +550,15 @@ pub fn paint(ui: &mut egui::Ui, cache: &RefCell<MathCache>, tex: &str, inline: b
                 ui.available_width().max(image.size.x)
             };
             let (rect, _) = ui.allocate_exact_size(Vec2::new(width, image.size.y), Sense::hover());
+            if inline {
+                // CommonMark 的 left_to_right 行只在行首由图片撑高；在行中图片
+                // 高度不会更新行高，导致同样的公式在行首/行中行距不同。这里
+                // 显式把当前行高设为“正文行高与公式高度取大”，两种情况一致。
+                let row_height = ui
+                    .text_style_height(&egui::TextStyle::Body)
+                    .max(image.size.y);
+                ui.set_row_height(row_height);
+            }
             let target = if inline {
                 rect
             } else {
