@@ -69,6 +69,8 @@ pub fn markdown_refs(text: &str) -> Vec<ImageRef> {
 #[derive(Default)]
 struct Inner {
     map: HashMap<String, Arc<[u8]>>,
+    /// record_id → 当前 revision；URI 里的 rev 只是观察值，不作为主键。
+    latest: HashMap<String, u64>,
     order: VecDeque<String>,
     bytes: usize,
 }
@@ -98,6 +100,11 @@ impl ImageStore {
             inner.order.retain(|existing| existing != &key);
         }
         inner.bytes = inner.bytes.saturating_add(png.len());
+        inner
+            .latest
+            .entry(reference.record_id.clone())
+            .and_modify(|current| *current = (*current).max(reference.revision))
+            .or_insert(reference.revision);
         inner.order.push_back(key.clone());
         inner.map.insert(key, png);
         while inner.map.len() > MAX_IMAGES || inner.bytes > MAX_TOTAL_BYTES {
@@ -110,12 +117,61 @@ impl ImageStore {
         }
     }
 
-    /// 取一张图片的 PNG 字节。
+    /// 取指定 revision 的 PNG 字节。
     pub fn get(&self, reference: &ImageRef) -> Option<Arc<[u8]>> {
         self.inner
             .lock()
             .ok()
             .and_then(|inner| inner.map.get(&Self::key(reference)).cloned())
+    }
+
+    /// 记录某个 record_id 的当前 revision（即使 PNG 已被淘汰）。
+    pub fn set_revision(&self, record_id: &str, revision: u64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner
+                .latest
+                .entry(record_id.to_string())
+                .and_modify(|current| *current = (*current).max(revision))
+                .or_insert(revision);
+        }
+    }
+
+    /// 当前 revision（没有记录时 `None`）。
+    pub fn latest_revision(&self, record_id: &str) -> Option<u64> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.latest.get(record_id).copied())
+    }
+
+    /// 按 record_id 取当前 revision 的 PNG；URI 里的 rev 不参与主键。
+    ///
+    /// 如果最新 revision 的字节已被淘汰、但同 record 的旧 revision 还有字节，
+    /// 回退到“有字节的最新 revision”。字节是按当前来源渲染的，内容仍然正确。
+    pub fn get_latest(&self, record_id: &str) -> Option<(u64, Arc<[u8]>)> {
+        let inner = self.inner.lock().ok()?;
+        if let Some(revision) = inner.latest.get(record_id).copied() {
+            let key = format!("{record_id}@{revision}");
+            if let Some(png) = inner.map.get(&key) {
+                return Some((revision, png.clone()));
+            }
+        }
+        let mut best: Option<(u64, Arc<[u8]>)> = None;
+        for (key, png) in &inner.map {
+            let Some((stored_id, revision)) = key.rsplit_once('@') else {
+                continue;
+            };
+            if stored_id != record_id {
+                continue;
+            }
+            let Ok(revision) = revision.parse::<u64>() else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(current, _)| revision > *current) {
+                best = Some((revision, png.clone()));
+            }
+        }
+        best
     }
 
     /// 当前图片张数。
@@ -137,6 +193,7 @@ impl ImageStore {
     pub fn clear(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.map.clear();
+            inner.latest.clear();
             inner.order.clear();
             inner.bytes = 0;
         }
@@ -167,7 +224,7 @@ impl BytesLoader for InternalImageLoader {
         let Some(reference) = parse_ref(uri) else {
             return Err(LoadError::NotSupported);
         };
-        let Some(png) = self.images.get(&reference) else {
+        let Some((_revision, png)) = self.images.get_latest(&reference.record_id) else {
             return Err(LoadError::Loading(format!(
                 "内部图片尚未生成：{}@{}",
                 reference.record_id, reference.revision
@@ -208,7 +265,7 @@ pub fn materialize_markdown(text: &str, images: &ImageStore) -> String {
             rest = &rest[close + 1..];
             continue;
         };
-        let Some(png) = images.get(&reference) else {
+        let Some((_revision, png)) = images.get_latest(&reference.record_id) else {
             out.push_str(&rest[..close + 1]);
             rest = &rest[close + 1..];
             continue;
@@ -333,14 +390,21 @@ mod tests {
         };
         store.insert(&reference, png);
         assert!(store.get(&reference).is_some());
-        let loader = InternalImageLoader::new(store);
+        let loader = InternalImageLoader::new(store.clone());
         assert!(matches!(
             loader.load(&egui::Context::default(), "pd-img://custom-1?rev=1"),
             Ok(BytesPoll::Ready { .. })
         ));
+        // URI 的 rev 只作观察值；loader 按 record_id 返回当前 revision。
         assert!(matches!(
             loader.load(&egui::Context::default(), "pd-img://custom-1?rev=2"),
-            Err(LoadError::Loading(_))
+            Ok(BytesPoll::Ready { .. })
         ));
+        assert_eq!(store.latest_revision("custom-1"), Some(1));
+
+        // 最新 revision 还没有字节时，回退到同 record 的已有字节。
+        store.set_revision("custom-1", 2);
+        let (revision, _) = store.get_latest("custom-1").expect("回退到已有字节");
+        assert_eq!(revision, 1);
     }
 }

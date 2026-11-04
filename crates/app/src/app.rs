@@ -5113,6 +5113,8 @@ impl PdfReaderApp {
                     record_id: preview.image_id.clone(),
                     revision: preview.image_revision,
                 };
+                self.images
+                    .set_revision(&current.record_id, current.revision);
                 if current == reference && self.images.get(&reference).is_some() {
                     continue;
                 }
@@ -5175,6 +5177,8 @@ impl PdfReaderApp {
                     record_id: image_id.clone(),
                     revision,
                 };
+                self.images
+                    .set_revision(&current.record_id, current.revision);
                 if current == reference && self.images.get(&reference).is_some() {
                     continue;
                 }
