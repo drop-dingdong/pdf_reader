@@ -5197,6 +5197,13 @@ impl PdfReaderApp {
                         mark.snapshot = None;
                     }
                 }
+                // 若当前 revision 还没有字节，直接把这次渲染登记到旧 ref 上，
+                // 避免旧引用一直 Loading；否则登记当前 revision 再别名。
+                let register = if current != reference && self.images.get(&current).is_none() {
+                    reference.clone()
+                } else {
+                    current.clone()
+                };
                 let texture = self.preview_texture(
                     ui,
                     session,
@@ -5205,7 +5212,7 @@ impl PdfReaderApp {
                     scale,
                     format!("dest-ref-{page_index}-{index}"),
                     "被引用点",
-                    Some(current.clone()),
+                    Some(register.clone()),
                 );
                 if let Some(texture) = texture {
                     if let Some(mark) = self
@@ -5217,7 +5224,7 @@ impl PdfReaderApp {
                     }
                 }
                 if current != reference {
-                    if let Some(png) = self.images.get(&current) {
+                    if let Some(png) = self.images.get(&register) {
                         self.images.insert(&reference, png);
                         ui.ctx().forget_image(&crate::image_store::image_uri(
                             &reference.record_id,
