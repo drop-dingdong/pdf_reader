@@ -412,6 +412,35 @@ mod tests {
     }
 
     #[test]
+    fn old_and_new_refs_share_the_current_image_after_canonicalize() {
+        let store = ImageStore::default();
+        let image = ColorImage::new([2, 2], vec![egui::Color32::RED; 4]);
+        let png = encode_png(&image).expect("PNG");
+        store.insert(
+            &ImageRef {
+                record_id: "dest-1".to_string(),
+                revision: 2,
+            },
+            png,
+        );
+        let markdown = "![old](pd-img://dest-1?rev=1)\n![new](pd-img://dest-1?rev=2)";
+        let canonical = canonicalize_markdown(markdown, &store);
+        let refs = markdown_refs(&canonical);
+        assert_eq!(refs.len(), 1, "规范化后同一 record 只保留一个当前引用");
+        assert_eq!(refs[0].revision, 2);
+        let loader = InternalImageLoader::new(store);
+        for reference in refs {
+            assert!(matches!(
+                loader.load(
+                    &egui::Context::default(),
+                    &image_uri(&reference.record_id, reference.revision)
+                ),
+                Ok(BytesPoll::Ready { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn materializes_cached_images_as_base64() {
         let store = ImageStore::default();
         let image = ColorImage::new([2, 2], vec![egui::Color32::RED; 4]);

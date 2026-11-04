@@ -1,7 +1,8 @@
 # 内部图片引用（设计基线）
 
-> 状态：**B1 完成，B2 进行中**。sidecar v4、`ImageStore`、`pd-img` loader、打开文字浮窗时的 owner
-> 懒渲染已接入；图片 @、DestMark 右键、编辑窗口列表、摘要导出 base64 已接入；hover Markdown 开关待做。
+> 状态：**B1 / B2 完成（2026-11-04）**。sidecar v4、`ImageStore` + latest revision 字典、`pd-img`
+> loader、打开文字浮窗时的 owner 懒渲染、旧 rev 渲染前规范化、图片 @、DestMark 右键、编辑窗口列表、
+> 摘要导出 base64 均已接入。侧栏 hover 临时预览的 Markdown 开关作为独立后续项。
 > 目标：让 Markdown 正文引用软件内部生成的截图/图片，不读取本地或网络图片。
 
 ## 1. 目标与边界
@@ -159,10 +160,10 @@ Markdown 图片 URI
    - sidecar 加 `image_id`/`revision`，版本升级与迁移；
    - `ImageStore`、`pd-img` loader、`Pending` 流程；
    - 自定义图片 preview 与 DestMark 的 owner 渲染接入。
-2. **B2 UI 与导出**
-   - `@` 复制包装器、右键菜单、编辑窗口插入；
-   - 导出时 base64/资源替换；
-   - 占位尺寸、错误提示、内存上限。
+2. **B2 UI 与导出（已完成）**
+   - `@` 复制包装器、DestMark 右键、编辑窗口插入；
+   - 导出时把已缓存图片替换为 base64；内部仍保留 `pd-img`；
+   - 旧 revision 在渲染前 canonicalize 成当前 revision，owner 懒渲染/纹理失效已接好。
 3. **测试**
    - id 持久化/迁移；
    - 缓存未命中 → owner 渲染 → Markdown 完成；
