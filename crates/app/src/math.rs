@@ -153,15 +153,43 @@ pub trait MathBackend {
     fn rasterize(&mut self, tex: &str, display: bool, dpi: f32) -> Result<MathRaster, MathError>;
 }
 
+/// 公式后端的光栅来源。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RasterMode {
+    /// 旧 PNG 后端（保留作 fallback/对照）
+    Png,
+    /// 矢量 SVG → 按目标像素光栅化
+    Svg,
+}
+
 /// `latex-rust` 后端（内嵌 STIX Two Math）。
 struct LatexRustBackend {
     font: Option<MathFont>,
+    mode: RasterMode,
 }
 
 impl LatexRustBackend {
     fn new() -> Self {
+        // 对照用：PDF_READER_MATH_BACKEND=png 可临时回退旧 PNG 路径。
+        // 默认 SVG：按目标像素缩放矢量，缩放/高 DPI 下更清晰。
+        let mode = if std::env::var("PDF_READER_MATH_BACKEND")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("png"))
+        {
+            RasterMode::Png
+        } else {
+            RasterMode::Svg
+        };
         Self {
             font: MathFont::stix_two_math().ok(),
+            mode,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn new_png() -> Self {
+        Self {
+            font: MathFont::stix_two_math().ok(),
+            mode: RasterMode::Png,
         }
     }
 }
@@ -201,7 +229,7 @@ impl MathBackend for LatexRustBackend {
             backend: self.name(),
             cjk_text: false,
             chemistry: false,
-            vector_svg: false,
+            vector_svg: self.mode == RasterMode::Svg,
         }
     }
 
@@ -228,6 +256,15 @@ impl MathBackend for LatexRustBackend {
     }
 
     fn rasterize(&mut self, tex: &str, display: bool, dpi: f32) -> Result<MathRaster, MathError> {
+        match self.mode {
+            RasterMode::Png => self.rasterize_png(tex, display, dpi),
+            RasterMode::Svg => self.rasterize_svg(tex, display, dpi),
+        }
+    }
+}
+
+impl LatexRustBackend {
+    fn rasterize_png(&self, tex: &str, display: bool, dpi: f32) -> Result<MathRaster, MathError> {
         let font = self
             .font
             .as_ref()
@@ -251,6 +288,48 @@ impl MathBackend for LatexRustBackend {
             width,
             height,
             rgba: decoded.into_raw(),
+        })
+    }
+
+    fn rasterize_svg(&self, tex: &str, display: bool, dpi: f32) -> Result<MathRaster, MathError> {
+        let font = self
+            .font
+            .as_ref()
+            .ok_or_else(|| MathError::internal(tex, "STIX Two Math 未加载"))?;
+        let mut options = latex_rust::SvgOptions::new();
+        options.font_size_pt = Dim::ratio(PT_PER_EM.0, PT_PER_EM.1);
+        options.color = latex_rust::Color::rgb(225, 225, 225);
+        options.display = display;
+        let normalized = normalize_tilde(tex);
+        let svg = latex_rust::latex_to_svg(&normalized, font, &options)
+            .map_err(|error| map_latex_error(tex, error))?;
+        let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default())
+            .map_err(|error| MathError::internal(tex, format!("SVG 解析失败：{error}")))?;
+        let base = tree.size();
+        if !(base.width() > 0.0 && base.height() > 0.0) {
+            return Err(MathError::internal(tex, "SVG 尺寸为 0"));
+        }
+        // SVG 以 pt 生成；resvg 在 96dpi 下把 1pt 当作 1.333px。
+        // 这里直接用 dpi/96 缩放矢量，得到目标像素尺寸。
+        let scale = (dpi / 96.0).max(f32::MIN_POSITIVE);
+        let width = (base.width() * scale).ceil().max(1.0) as u32;
+        let height = (base.height() * scale).ceil().max(1.0) as u32;
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+            .ok_or_else(|| MathError::new(MathErrorKind::TooLarge, tex, "SVG 纹理超过像素上限"))?;
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::from_scale(scale, scale),
+            &mut pixmap.as_mut(),
+        );
+        let mut rgba = Vec::with_capacity((width as usize) * (height as usize) * 4);
+        for pixel in pixmap.pixels() {
+            let color = pixel.demultiply();
+            rgba.extend_from_slice(&[color.red(), color.green(), color.blue(), color.alpha()]);
+        }
+        Ok(MathRaster {
+            width,
+            height,
+            rgba,
         })
     }
 }
@@ -586,6 +665,16 @@ mod tests {
             .err()
             .expect("STIX 没有 CJK 字形");
         assert_eq!(error.kind, MathErrorKind::Font);
+    }
+
+    #[test]
+    fn svg_backend_reports_vector_and_renders_a_texture() {
+        let mut cache = MathCache::new();
+        assert!(cache.capabilities().vector_svg);
+        let image = cache
+            .render(&ctx(), "\\frac{1}{2}", true)
+            .expect("SVG 公式应能渲染");
+        assert!(image.size.x > 0.0 && image.size.y > 0.0);
     }
 
     #[test]

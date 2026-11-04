@@ -32,6 +32,7 @@ egui_commonmark = { version = "0.26.0", default-features = false, features = ["p
 # 把注释正文里的单个换行改写成硬换行（见 src/markdown.rs）。
 pulldown-cmark = "0.13"
 # LaTeX 数学：纯 Rust 排版 + PNG 光栅（P1.5 先用 PNG 原型，后续再评估 SVG）。
+resvg = { version = "0.49", default-features = false }
 latex-rust = { version = "3.0.1", default-features = false, features = ["std", "png"] }
 # 解码 latex-rust 输出的透明 PNG；只保留 PNG 格式。
 image = { version = "0.25", default-features = false, features = ["png"] }
