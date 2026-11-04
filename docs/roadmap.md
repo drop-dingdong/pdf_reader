@@ -26,8 +26,7 @@
 - **注释正文参与页面搜索**：当前刻意不索引（`/Contents` 不在页面内容流里），侧栏搜索才覆盖。
 - **LaTeX 数学后续**：P1.5 已用 `latex-rust 3.0.1` + PNG 纹理跑通；后续再评估 SVG 矢量、
   公式纹理按 key 缓存/淘汰、行内基线微调（CJK `\text{}` 仍回退原文）。
-- **侧栏 hover 临时预览的 Markdown 开关**：顶栏 checkbox，默认关闭；开启后临时预览也走
-  Markdown/数学/图片引用，tooltip 提示性能与交互风险。内部图片 B1/B2 已完成，
+- **内部截图 B3（可选）**：批量管理图片记录/清理旧 revision；当前按 32 张、64MB 自动淘汰。
   见 [internal-images.md](internal-images.md)。
 - **长词强制按字符换行**：当前长连续英文按不可断 token 走横向滚动；可选做“超长 token 强制断行”
   （会破坏 URL/代码可读性，默认关闭）。

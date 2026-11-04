@@ -67,6 +67,8 @@ pub struct UiSettings {
     pub show_annotations: bool,
     /// 文字浮窗是否默认以 Markdown 渲染（默认关闭：升级后不改变既有文字显示）。
     pub markdown_floats: bool,
+    /// 侧栏 hover 临时预览是否也按 Markdown 渲染（默认关闭，避免 hover 触发重工作）。
+    pub hover_preview_markdown: bool,
 }
 
 impl Default for UiSettings {
@@ -80,6 +82,7 @@ impl Default for UiSettings {
             show_dest_points: false,
             show_annotations: true,
             markdown_floats: false,
+            hover_preview_markdown: false,
         }
     }
 }
@@ -140,7 +143,7 @@ impl Settings {
     pub fn to_json(&self) -> String {
         let mut out = String::from("{\n  \"version\": 1,\n");
         out.push_str(&format!(
-            "  \"ui\": {{ \"window_size\": [{:.0}, {:.0}], \"sidebar_width\": {:.0},              \"pin_hover_enabled\": {}, \"horizontal_scroll\": {}, \"show_links\": {},              \"show_dest_points\": {}, \"show_annotations\": {}, \"markdown_floats\": {} }},\n",
+            "  \"ui\": {{ \"window_size\": [{:.0}, {:.0}], \"sidebar_width\": {:.0},              \"pin_hover_enabled\": {}, \"horizontal_scroll\": {}, \"show_links\": {},              \"show_dest_points\": {}, \"show_annotations\": {}, \"markdown_floats\": {},              \"hover_preview_markdown\": {} }},\n",
             self.ui.window_size[0],
             self.ui.window_size[1],
             self.ui.sidebar_width,
@@ -149,7 +152,8 @@ impl Settings {
             self.ui.show_links,
             self.ui.show_dest_points,
             self.ui.show_annotations,
-            self.ui.markdown_floats
+            self.ui.markdown_floats,
+            self.ui.hover_preview_markdown
         ));
         out.push_str(&format!(
             "  \"save\": {{ \"backup_in_place\": {} }},\n",
@@ -245,6 +249,10 @@ impl Settings {
                 .unwrap_or(true);
             settings.ui.markdown_floats = ui
                 .field("markdown_floats")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            settings.ui.hover_preview_markdown = ui
+                .field("hover_preview_markdown")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false);
         }
@@ -526,6 +534,7 @@ mod tests {
         settings.ui.show_dest_points = true;
         settings.ui.show_annotations = false;
         settings.ui.markdown_floats = true;
+        settings.ui.hover_preview_markdown = true;
         settings.save.backup_in_place = true;
         let parsed = Settings::from_json(&settings.to_json()).expect("应能解析");
         assert!(!parsed.ui.pin_hover_enabled);
@@ -534,6 +543,7 @@ mod tests {
         assert!(parsed.ui.show_dest_points);
         assert!(!parsed.ui.show_annotations);
         assert!(parsed.ui.markdown_floats);
+        assert!(parsed.ui.hover_preview_markdown);
         assert!(parsed.save.backup_in_place);
     }
 
@@ -547,6 +557,7 @@ mod tests {
     fn legacy_ui_without_markdown_defaults_to_plain_text() {
         let parsed = Settings::from_json(r#"{"ui":{"sidebar_width":300}}"#).expect("应能解析");
         assert!(!parsed.ui.markdown_floats, "旧设置文件应保持纯文本显示");
+        assert!(!parsed.ui.hover_preview_markdown);
     }
 
     #[test]

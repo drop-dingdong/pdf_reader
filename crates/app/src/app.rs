@@ -1226,6 +1226,12 @@ pub struct PdfReaderApp {
     pin_hover_enabled: bool,
     /// 文字浮窗是否以 Markdown 渲染（`settings.json`，默认关闭）。
     markdown_floats: bool,
+    /// 侧栏 hover 临时预览是否也按 Markdown 渲染（设置项）。
+    hover_preview_markdown: bool,
+    /// hover Markdown 专用的解析/标题缓存。
+    hover_markdown_cache: egui_commonmark::CommonMarkCache,
+    /// 当前 hover Markdown 对应的 preview 下标；变化时清缓存。
+    hover_markdown_index: Option<usize>,
     /// egui_commonmark 的排版/图片缓存（每个浮窗用稳定的 `Id` 区分）。
     /// 每个浮窗独立的 Markdown 缓存：锚点位置不能跨浮窗共享。
     markdown_caches: std::collections::HashMap<u64, egui_commonmark::CommonMarkCache>,
@@ -1483,6 +1489,9 @@ impl PdfReaderApp {
             context_menu_pos: None,
             pin_hover_enabled: ui_settings.pin_hover_enabled,
             markdown_floats: ui_settings.markdown_floats,
+            hover_preview_markdown: ui_settings.hover_preview_markdown,
+            hover_markdown_cache: egui_commonmark::CommonMarkCache::default(),
+            hover_markdown_index: None,
             markdown_caches: std::collections::HashMap::new(),
             markdown_viewports: std::collections::HashMap::new(),
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(crate::math::MathCache::new())),
@@ -1892,6 +1901,7 @@ impl PdfReaderApp {
             show_dest_points: self.show_dest_points,
             show_annotations: self.show_annotations,
             markdown_floats: self.markdown_floats,
+            hover_preview_markdown: self.hover_preview_markdown,
         };
         if ui != self.settings.ui {
             self.settings.ui = ui;
@@ -4062,6 +4072,18 @@ impl PdfReaderApp {
                     self.settings_dirty = true;
                 }
                 if ui
+                    .checkbox(&mut self.hover_preview_markdown, "hover MD")
+                    .on_hover_text(
+                        "侧栏 hover 临时预览也按 Markdown 渲染。\n\
+                         会触发公式/图片 owner 渲染，可能造成 hover 卡顿；\n\
+                         临时预览中的链接/滚动交互也可能与“点击固定”竞争。",
+                    )
+                    .changed()
+                {
+                    self.settings.ui.hover_preview_markdown = self.hover_preview_markdown;
+                    self.settings_dirty = true;
+                }
+                if ui
                     .small_button("?")
                     .on_hover_text("Markdown 与数学公式支持/限制")
                     .clicked()
@@ -4790,6 +4812,8 @@ impl PdfReaderApp {
                     CustomKind::Text => CUSTOM_SYMBOL_TEXT,
                     CustomKind::Image => CUSTOM_SYMBOL_IMAGE,
                 };
+                let image_ref = (preview.kind == CustomKind::Image && !preview.image_id.is_empty())
+                    .then(|| (preview.image_id.clone(), preview.image_revision));
                 let title = format!(
                     "{} {}",
                     symbol,
@@ -4829,9 +4853,15 @@ impl PdfReaderApp {
                 let go_width = 24.0;
                 let edit_width = 20.0;
                 let delete_width = 20.0;
-                let title_width =
-                    (rect.width() - page_width - go_width - edit_width - delete_width - 8.0)
-                        .max(24.0);
+                let ref_width = if image_ref.is_some() { 20.0 } else { 0.0 };
+                let title_width = (rect.width()
+                    - page_width
+                    - go_width
+                    - edit_width
+                    - delete_width
+                    - ref_width
+                    - 8.0)
+                    .max(24.0);
                 let job = overflow_layout(
                     &title,
                     egui::FontId::proportional(13.0),
@@ -4899,6 +4929,28 @@ impl PdfReaderApp {
                     .clicked()
                 {
                     self.delete_custom_preview(index);
+                }
+                if let Some((record_id, revision)) = &image_ref {
+                    let ref_rect = egui::Rect::from_center_size(
+                        egui::pos2(
+                            go_rect.min.x
+                                - edit_width
+                                - delete_width
+                                - page_width
+                                - ref_width * 0.5,
+                            rect.center().y,
+                        ),
+                        EVec2::new(ref_width, row_height),
+                    );
+                    if ui
+                        .put(ref_rect, egui::Button::new("@").frame(false))
+                        .on_hover_text("复制 Markdown 图片引用")
+                        .clicked()
+                    {
+                        ui.ctx()
+                            .copy_text(crate::image_store::image_uri(record_id, *revision));
+                        self.message = "已复制图片引用，可粘到正文".to_string();
+                    }
                 }
                 if ui
                     .put(go_rect, egui::Button::new("\u{2192}").frame(false))
@@ -5091,6 +5143,20 @@ impl PdfReaderApp {
                     for reference in crate::image_store::markdown_refs(text) {
                         if !refs.contains(&reference) {
                             refs.push(reference);
+                        }
+                    }
+                }
+            }
+        }
+        // hover Markdown 也按用户开关参与图片解析；这是明确的 opt-in 路径。
+        if self.hover_preview_markdown {
+            if let Some((index, _)) = self.custom_hover {
+                if let Some(preview) = self.custom_previews.get(index) {
+                    if let Some(text) = &preview.text {
+                        for reference in crate::image_store::markdown_refs(text) {
+                            if !refs.contains(&reference) {
+                                refs.push(reference);
+                            }
                         }
                     }
                 }
@@ -7561,7 +7627,7 @@ impl PdfReaderApp {
         );
         // 临时预览也要能点击/拖动固定；之前只画不注册交互，点击会落回画布。
         let response = ui.interact(rect, Id::unique("custom-hover"), Sense::click_and_drag());
-        let painter = ui.painter();
+        let painter = ui.painter().clone();
         painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(30, 32, 36));
         painter.rect_stroke(
             rect,
@@ -7606,19 +7672,23 @@ impl PdfReaderApp {
                 );
             }
             (None, Some(text)) => {
-                let row_height = 13.0 * 1.3;
-                let rows = ((body.height() / row_height).floor() as usize).max(1);
-                let job = overflow_layout(
-                    &text,
-                    egui::FontId::proportional(13.0),
-                    Color32::from_gray(225),
-                    body.width(),
-                    rows,
-                );
-                let galley = painter.layout_job(job);
-                painter
-                    .with_clip_rect(body)
-                    .galley(body.min, galley, Color32::from_gray(225));
+                if self.markdown_floats && self.hover_preview_markdown {
+                    self.show_hover_markdown(ui, body, index, &text);
+                } else {
+                    let row_height = 13.0 * 1.3;
+                    let rows = ((body.height() / row_height).floor() as usize).max(1);
+                    let job = overflow_layout(
+                        &text,
+                        egui::FontId::proportional(13.0),
+                        Color32::from_gray(225),
+                        body.width(),
+                        rows,
+                    );
+                    let galley = painter.layout_job(job);
+                    painter
+                        .with_clip_rect(body)
+                        .galley(body.min, galley, Color32::from_gray(225));
+                }
             }
             (None, None) => {
                 painter.text(
@@ -7668,6 +7738,48 @@ impl PdfReaderApp {
             }
         }
         choices
+    }
+
+    /// hover 临时预览的 Markdown 渲染（设置开启时）。
+    fn show_hover_markdown(
+        &mut self,
+        ui: &mut egui::Ui,
+        body: egui::Rect,
+        index: usize,
+        text: &str,
+    ) {
+        if self.hover_markdown_index != Some(index) {
+            self.hover_markdown_cache = egui_commonmark::CommonMarkCache::default();
+            self.hover_markdown_index = Some(index);
+        }
+        self.markdown_rendered = true;
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(body)
+                .id_salt(("hover-md", index)),
+            |ui| {
+                ui.set_clip_rect(body.intersect(ui.clip_rect()));
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                let mut visuals = egui::Visuals::dark();
+                visuals.override_text_color = Some(Color32::from_gray(225));
+                visuals.hyperlink_color = Color32::from_rgb(120, 180, 255);
+                *ui.visuals_mut() = visuals;
+                ui.spacing_mut().item_spacing = EVec2::new(0.0, 4.0);
+                let math_cache = self.math_cache.clone();
+                let math_fn = move |ui: &mut egui::Ui, tex: &str, inline: bool| {
+                    crate::math::paint(ui, &math_cache, tex, inline);
+                };
+                egui::ScrollArea::both()
+                    .id_salt(("hover-md-scroll", index))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui_commonmark::CommonMarkViewer::new()
+                            .enable_scroll_to_heading(true)
+                            .render_math_fn(Some(&math_fn))
+                            .show(ui, &mut self.hover_markdown_cache, text);
+                    });
+            },
+        );
     }
 
     /// 安装 `pd-img` bytes loader 与 PNG image loader。
@@ -10393,6 +10505,43 @@ mod annotation_body_tests {
             assert!(scrolled > top, "滚动后同一屏幕位置应映射到更后面的源码");
         });
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn hover_preview_can_render_markdown_when_enabled() {
+        let mut app = app();
+        app.markdown_floats = true;
+        app.hover_preview_markdown = true;
+        app.custom_previews.push(CustomPreview {
+            id: 1,
+            page: PageIndex::FIRST,
+            point: Point::new(0.0, 0.0),
+            rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+            kind: CustomKind::Text,
+            title: "hover".to_string(),
+            text: Some("## 标题\n\n[跳转](#h)\n\n## 标题 {#h}".to_string()),
+            snapshot: None,
+            body_size: DEFAULT_CUSTOM_TEXT_BODY,
+            scale: 1.0,
+            image_id: String::new(),
+            image_revision: 0,
+        });
+        app.custom_hover = Some((
+            0,
+            egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(160.0, 20.0)),
+        ));
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let input = egui::RawInput {
+            screen_rect: Some(canvas),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            app.draw_sidebar_hover_float(ui, canvas);
+        });
+        output.drop_without_applying_deltas();
+        assert!(app.markdown_rendered, "开启后 hover 临时预览应走 Markdown");
     }
 
     #[test]

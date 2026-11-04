@@ -2,7 +2,8 @@
 
 > 状态：**B1 / B2 完成（2026-11-04）**。sidecar v4、`ImageStore` + latest revision 字典、`pd-img`
 > loader、打开文字浮窗时的 owner 懒渲染、旧 rev 渲染前规范化、图片 @、DestMark 右键、编辑窗口列表、
-> 摘要导出 base64 均已接入。侧栏 hover 临时预览的 Markdown 开关作为独立后续项。
+> 摘要导出 base64 均已接入。侧栏 hover 临时预览的 Markdown 开关也已接入（顶栏「hover MD」，
+> 默认关闭，设置持久化）。
 > 目标：让 Markdown 正文引用软件内部生成的截图/图片，不读取本地或网络图片。
 
 ## 1. 目标与边界

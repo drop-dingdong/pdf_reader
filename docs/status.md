@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-04　分支：`feat/markdown-floats`　门禁：`./scripts/check.sh` 通过（490 个测试）。
+> 快照：2026-11-04　分支：`feat/markdown-floats`　门禁：`./scripts/check.sh` 通过（491 个测试）。
 
 ## 1. 它是什么
 
@@ -26,7 +26,8 @@
   内部图片 B1：sidecar v4 增加 `image_id`/`image_revision`；`ImageStore` + `pd-img` loader；
   只扫描打开的文字浮窗引用，缺图时由 preview/被引用点 owner 懒渲染；图片浮窗 @、引用点右键复制引用；
   编辑窗口「插入内部图片」；导出摘要时已缓存图片转 base64；同一来源的旧 rev 在渲染前规范化，
-  重开 PDF / 重选目的地后旧引用也能显示当前图。Markdown 锚点：`## 标题 {#id}` + `[文字](#id)` 在当前浮窗内滚动；每个浮窗独立缓存，多浮窗相同 id 不串；
+  重开 PDF / 重选目的地后旧引用也能显示当前图。顶栏「hover MD」开关持久化，
+  开启后侧栏文字临时预览也走 Markdown/数学/图片引用。Markdown 锚点：`## 标题 {#id}` + `[文字](#id)` 在当前浮窗内滚动；每个浮窗独立缓存，多浮窗相同 id 不串；
   正文双击打开编辑器时按点击位置放置光标/滚动（纯文本精确，Markdown 近似）。
 - **LaTeX 数学（P1.5）**：`MathBackend` trait + `latex-rust 3.0.1` PNG 后端；按公式/行内/DPI
   缓存（64 条上限，超宽降采样/回退）；错误类型区分语法/字形/不支持/过大；
