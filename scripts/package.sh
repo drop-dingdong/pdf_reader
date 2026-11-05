@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # 打一个"自带 PDFium"的发布目录。**只能打包当前平台**。
-#   ./scripts/package.sh                 # 自动识别当前平台
+#   ./scripts/package.sh                 # 自动识别当前平台，默认 latex-svg 后端
 #   ./scripts/package.sh linux-x64       # 显式写出来（必须与当前平台一致，只是个自检）
+#   ./scripts/package.sh --backend ratex # 打包默认 RaTeX 后端的二进制
+#   ./scripts/package.sh --backend latex-png
 #
 # 为什么不接受"打包别的平台"：这个脚本调用的是宿主的 `cargo build`，产出的是**宿主格式**
 # 的可执行文件。在 Linux 上 `./scripts/package.sh win-x64` 会得到一个 ELF 却命名为 Windows 包 ——
@@ -19,6 +21,27 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+backend=latex-svg
+platform=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --backend|--math-backend)
+      backend="${2:?--backend 需要 latex-svg|latex-png|ratex}"
+      shift 2
+      ;;
+    *)
+      platform="$1"
+      shift
+      ;;
+  esac
+done
+case "$backend" in
+  latex-svg) features=() ;;
+  latex-png) features=(--features math-latex-png) ;;
+  ratex) features=(--features math-ratex) ;;
+  *) echo "未知数学后端：$backend（可用 latex-svg / latex-png / ratex）" >&2; exit 2 ;;
+esac
+
 host="$(uname -s 2>/dev/null || echo unknown)-$(uname -m 2>/dev/null || echo unknown)"
 case "$host" in
   Linux-x86_64)   host_tag=linux-x64 ;;
@@ -29,7 +52,7 @@ case "$host" in
   *) echo "无法识别当前平台：$host（本脚本只能打包当前平台）" >&2; exit 2 ;;
 esac
 
-target="${1:-$host_tag}"
+target="${platform:-$host_tag}"
 if [ "$target" != "$host_tag" ]; then
   echo "拒绝打包：本脚本只能产出**当前平台**的可执行文件。" >&2
   echo "  当前平台：$host_tag（$host）" >&2
@@ -60,11 +83,14 @@ if [ ! -f "$vendor" ]; then
 fi
 
 out="dist/pdf_reader_${target//-/_}"
+if [ "$backend" != "latex-svg" ]; then
+  out="${out}_${backend//-/_}"
+fi
 rm -rf "$out"
 mkdir -p "$out/lib"
 
-echo "== cargo build --release =="
-cargo build --release -p app --offline
+echo "== cargo build --release（数学后端：$backend） =="
+cargo build --release -p app --offline "${features[@]}"
 
 exe="target/release/app"
 [ -f "$exe" ] || exe="target/release/app.exe"
@@ -75,6 +101,7 @@ cp "$vendor" "$out/lib/$libname"
 # 附一份来源与校验信息，便于排查"用户机器上加载了别的 pdfium"
 {
   echo "platform: $target"
+  echo "math_backend: $backend"
   echo "binary:   $(basename "$exe")  sha256=$(sha256sum "$exe" 2>/dev/null | cut -d' ' -f1)"
   echo "pdfium:   $libname  sha256=$(sha256sum "$vendor" | cut -d' ' -f1)"
   echo "built:    $(date -u +%Y-%m-%dT%H:%M:%SZ)"

@@ -1,6 +1,7 @@
 # 在 Windows 上构建并打包（自带 pdfium.dll）。只能在**当前平台**打包 —— 交叉编译不在此脚本范围内。
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\package.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\package.ps1 -Backend ratex
 #
 # 产物：
 #   dist\pdf_reader_win_x64\
@@ -9,7 +10,11 @@
 #     BUILD-INFO.txt
 #
 # 这个布局能被加载，是因为 library.rs 会按绝对路径尝试 {exe}\、{exe}\lib\、{exe}\bin\。
-param([string]$Platform = "")
+param(
+    [string]$Platform = "",
+    [ValidateSet("latex-svg", "latex-png", "ratex")]
+    [string]$Backend = "latex-svg"
+)
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -33,11 +38,19 @@ if (-not (Test-Path $dll)) {
     & (Join-Path $PSScriptRoot "fetch-pdfium.ps1") $Platform
 }
 
-Write-Host "== cargo build --release =="
-cargo build --release -p app
+$features = @()
+switch ($Backend) {
+    "latex-png" { $features = @("--features", "math-latex-png") }
+    "ratex" { $features = @("--features", "math-ratex") }
+    default { $features = @() }
+}
+Write-Host "== cargo build --release（数学后端：$Backend） =="
+cargo build --release -p app @features
 if ($LASTEXITCODE -ne 0) { throw "cargo build 失败" }
 
-$out = Join-Path $root ("dist\pdf_reader_" + ($Platform -replace "-", "_"))
+$outName = "pdf_reader_" + ($Platform -replace "-", "_")
+if ($Backend -ne "latex-svg") { $outName += "_" + ($Backend -replace "-", "_") }
+$out = Join-Path $root ("dist\" + $outName)
 if (Test-Path $out) { Remove-Item $out -Recurse -Force }
 New-Item -ItemType Directory -Force -Path (Join-Path $out "lib") | Out-Null
 
@@ -54,6 +67,7 @@ $sha = {
 }
 @(
     "platform: $Platform",
+    "math_backend: $Backend",
     "binary:   app.exe  sha256=$(& $sha (Join-Path $out 'app.exe'))",
     "pdfium:   pdfium.dll  sha256=$(& $sha (Join-Path $out 'lib\pdfium.dll'))",
     "built:    $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"

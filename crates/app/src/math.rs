@@ -223,7 +223,8 @@ impl MathBackend for RatexBackend {
         let list = self.layout_list(tex, display)?;
         let options = ratex_render::RenderOptions {
             font_size: LOGICAL_FONT_SIZE,
-            padding: 0.0,
+            // RaTeX 的 \ce 输出可能贴着画布顶边；给 2pt padding 后再裁掉透明边。
+            padding: 2.0,
             background_color: ratex_types::color::Color::new(0.0, 0.0, 0.0, 0.0),
             font_dir: String::new(),
             device_pixel_ratio: (dpi / 96.0).clamp(0.1, 16.0),
@@ -233,11 +234,31 @@ impl MathBackend for RatexBackend {
         let decoded = image::load_from_memory(&png)
             .map_err(|error| MathError::internal(tex, format!("PNG 解码失败：{error}")))?
             .into_rgba8();
+        // 裁掉 padding 的透明边；否则公式会被当成了带大留白的图。
         let (width, height) = decoded.dimensions();
+        let mut min_x = width;
+        let mut min_y = height;
+        let mut max_x = 0u32;
+        let mut max_y = 0u32;
+        for (x, y, pixel) in decoded.enumerate_pixels() {
+            if pixel[3] > 0 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+        if min_x > max_x || min_y > max_y {
+            return Err(MathError::internal(tex, "RaTeX 输出为空"));
+        }
+        let cropped =
+            image::imageops::crop_imm(&decoded, min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+                .to_image();
+        let (width, height) = cropped.dimensions();
         Ok(MathRaster {
             width,
             height,
-            rgba: decoded.into_raw(),
+            rgba: cropped.into_raw(),
         })
     }
 }
@@ -792,9 +813,8 @@ mod tests {
             .render(&ctx(), "\\frac{1}{2}", true)
             .expect("RaTeX 应能渲染");
         assert!(image.size.x > 0.0 && image.size.y > 0.0);
-        // RaTeX 的 CJK/化学式能力（字体来自系统 fallback；没有字体时应回退原文而非 panic）。
-        let cjk = cache.render(&ctx(), "\\text{中文}", true);
-        assert!(cjk.is_ok(), "RaTeX CJK 失败：{:?}", cjk.err());
+        // CJK 依赖系统 fallback 字体；没有字体时允许回退原文，不在这里强断言。
+        let _ = cache.render(&ctx(), "\\text{中文}", true);
         let chem = cache.render(&ctx(), "\\ce{H2O}", true);
         assert!(chem.is_ok(), "RaTeX 化学式失败：{:?}", chem.err());
     }

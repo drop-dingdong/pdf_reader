@@ -48,12 +48,16 @@ cargo run -p app -- some.pdf
 ## 构建与打包
 
 ```bash
-cargo build --release -p app           # target/release/app
+cargo build --release -p app           # target/release/app（不带 lib/pdfium）
 ./scripts/package.sh                   # → dist/pdf_reader_<平台>/{app, lib/pdfium, BUILD-INFO.txt}
+./scripts/package.sh --backend ratex   # → dist/pdf_reader_<平台>_ratex/...
 ```
 
+`cargo build` / `scripts/build.sh` 只产出可执行文件；**`scripts/package.sh` / `package.ps1`
+才负责复制 `libpdfium` 到 `lib/` 并做自检**。所以前者不会显式带动态库是正常的。
+
 打包产物自带 PDFium（`lib/` 与可执行文件同级），不需要 rpath / `LD_LIBRARY_PATH`。
-只能在目标平台上打包（Windows 用 `scripts\package.ps1`）。
+只能在目标平台上打包（Windows 用 `scripts\package.ps1 -Backend ratex`）。
 
 ## 质量门禁
 
@@ -73,9 +77,18 @@ cargo build --release -p app           # target/release/app
 ./scripts/build.sh --backend ratex --release --output dist/app-ratex
 ```
 
+打包（自动带 PDFium）：
+
+```bash
+./scripts/package.sh --backend latex-svg
+./scripts/package.sh --backend latex-png
+./scripts/package.sh --backend ratex
+```
+
 运行时仍可用 `PDF_READER_MATH_BACKEND=svg|png|ratex` 覆盖（`ratex` 需要 `math-ratex` feature）。
 
-当前约 **494 个测试**。数学默认 `latex-rust` SVG；可选构建 `--features math-ratex` 启用 RaTeX 后端（该 feature 默认选 RaTeX）。；PDFium 就绪时会跑真实样本。
+当前约 **494 个测试**。数学默认 `latex-rust` SVG；`math-ratex` feature 启用后默认 RaTeX。
+PDFium 就绪时会跑真实样本。
 
 单独跑回放：
 
