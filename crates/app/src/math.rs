@@ -162,6 +162,38 @@ enum RasterMode {
     Svg,
 }
 
+/// 是否含 CJK/假名/韩文等需要 Unicode fallback 的字符。
+#[cfg(feature = "math-ratex")]
+fn contains_cjk(text: &str) -> bool {
+    text.chars().any(|ch| {
+        matches!(
+            ch as u32,
+            0x2E80..=0x2FFF
+                | 0x3000..=0x303F
+                | 0x3040..=0x30FF
+                | 0x3400..=0x4DBF
+                | 0x4E00..=0x9FFF
+                | 0xAC00..=0xD7AF
+                | 0xF900..=0xFAFF
+                | 0x20000..=0x2FA1F
+        )
+    })
+}
+
+/// 系统 Unicode 字体是否真的覆盖“中”；仅有 DejaVu 等拉丁字体不算。
+#[cfg(feature = "math-ratex")]
+fn cjk_font_available() -> bool {
+    let Some(data) = ratex_unicode_font::unicode_font_data_ref() else {
+        return false;
+    };
+    let face = ratex_unicode_font::unicode_font_face_index().unwrap_or(0);
+    let Ok(font) = ab_glyph::FontRef::try_from_slice_and_index(data.as_slice(), face) else {
+        return false;
+    };
+    use ab_glyph::Font;
+    font.glyph_id('中').0 != 0
+}
+
 /// 可选 RaTeX 后端（KaTeX 兼容，纯 Rust；不参与默认编译）。
 #[cfg(feature = "math-ratex")]
 struct RatexBackend;
@@ -177,6 +209,13 @@ impl RatexBackend {
         tex: &str,
         display: bool,
     ) -> Result<ratex_types::display_item::DisplayList, MathError> {
+        if contains_cjk(tex) && !cjk_font_available() {
+            return Err(MathError::new(
+                MathErrorKind::Font,
+                tex,
+                "CJK 需要系统 Unicode 字体或 RATEX_UNICODE_FONT",
+            ));
+        }
         let ast = ratex_parser::parser::parse(tex)
             .map_err(|error| MathError::new(MathErrorKind::Parse, tex, error.to_string()))?;
         let options = ratex_layout::LayoutOptions {
@@ -205,7 +244,7 @@ impl MathBackend for RatexBackend {
         MathCapabilities {
             backend: self.name(),
             // Ratex 通过系统 Unicode 字体/CJK fallback 支持中文；没有字体时如实报告。
-            cjk_text: ratex_unicode_font::unicode_font_data_ref().is_some(),
+            cjk_text: cjk_font_available(),
             chemistry: true,
             vector_svg: false,
         }
@@ -799,12 +838,27 @@ mod tests {
 
     #[test]
     fn svg_backend_reports_vector_and_renders_a_texture() {
-        let mut cache = MathCache::new();
+        let mut cache = MathCache::with_backend(Box::new(LatexRustBackend::new()));
         assert!(cache.capabilities().vector_svg);
         let image = cache
             .render(&ctx(), "\\frac{1}{2}", true)
             .expect("SVG 公式应能渲染");
         assert!(image.size.x > 0.0 && image.size.y > 0.0);
+    }
+
+    #[cfg(feature = "math-ratex")]
+    #[test]
+    fn ratex_without_cjk_font_falls_back_instead_of_stretching() {
+        if cjk_font_available() {
+            return;
+        }
+        let mut cache = MathCache::with_backend(Box::new(RatexBackend::new()));
+        let error = match cache.render(&ctx(), "\\text{允许中文text}", true) {
+            Ok(_) => panic!("无 CJK 字体时不应返回空白/拉伸纹理"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, MathErrorKind::Font);
+        assert!(error.message.contains("RATEX_UNICODE_FONT"));
     }
 
     #[cfg(feature = "math-ratex")]

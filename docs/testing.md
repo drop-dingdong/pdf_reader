@@ -102,7 +102,7 @@ cargo run -p app -- --replay scripts/replay/tiling_800.json --timing
 | 10o | 引用点标记右键、正文编辑窗口「插入内部图片」、导出摘要 | 右键/列表都能插入引用；导出后的 Markdown 中图片为 base64，内部 `.pdf.json` 仍保留 `pd-img` |
 | 10p | 顶栏「hover MD」开/关，重新启动后检查 | 开启时侧栏文字临时预览渲染 Markdown/数学/图片；关闭时纯文本缩略；开关状态持久化 |
 | 10q | 修改 Markdown 正文、切换 Markdown 开关、重开 PDF | 预处理缓存随源文本失效；公式/图片引用仍正常；缓存不跨浮窗串用 |
-| 10r | `./scripts/build.sh --backend ratex` 后运行；再用 `PDF_READER_MATH_BACKEND=svg` 对照 | 分式/上下标/矩阵/化学式按 RaTeX 渲染；`\text{中文}` 在系统有 CJK 字体或设 `RATEX_UNICODE_FONT` 时正常；`--backend latex-svg/latex-png` 默认后端正确 |
+| 10r | `./scripts/build.sh --backend ratex` 后运行；再用 `PDF_READER_MATH_BACKEND=svg` 对照 | 分式/上下标/矩阵/化学式按 RaTeX 渲染；`\text{中文}` 在系统有 CJK 字体或设 `RATEX_UNICODE_FONT` 时正常，缺字体时回退原文而不拉伸；`--backend latex-svg/latex-png` 默认后端正确 |
 
 ### 6.3 注释
 

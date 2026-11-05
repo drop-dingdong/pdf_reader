@@ -183,7 +183,8 @@
   `--backend ratex` 可编译默认 RaTeX 的二进制（可选 feature，不进入默认构建）。
   运行时仍可用 `PDF_READER_MATH_BACKEND=svg|png` 覆盖。
   RaTeX 的 `\text{中文}` 依赖系统 Unicode/CJK 字体；没有系统字体时设置
-  `RATEX_UNICODE_FONT=/path/to/CJK.otf`。
+  `RATEX_UNICODE_FONT=/path/to/CJK.otf`。若字体不覆盖汉字，会回退原文并提示，
+  不再用缺字形占位把同一行文字拉宽。
   应用**不自行**设置系统缩放/UI zoom，`pixels_per_point` 由 eframe/winit 从窗口系统继承；
   Linux 可用 `WINIT_X11_SCALE_FACTOR=2` 验证高 DPI 路径。
   行内公式会显式把当前行高设为“正文行高与公式高度取大”；同一行内公式前后文本的基线

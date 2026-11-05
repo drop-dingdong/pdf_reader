@@ -15,6 +15,7 @@ math-ratex = [
     "dep:ratex-render",
     "dep:ratex-types",
     "dep:ratex-unicode-font",
+    "dep:ab_glyph",
 ]
 
 [dependencies]
@@ -54,3 +55,4 @@ ratex-layout = { version = "0.1.15", optional = true }
 ratex-render = { version = "0.1.15", default-features = false, features = ["embed-fonts"], optional = true }
 ratex-types = { version = "0.1.15", optional = true }
 ratex-unicode-font = { version = "0.1.15", optional = true }
+ab_glyph = { version = "0.2", optional = true }
