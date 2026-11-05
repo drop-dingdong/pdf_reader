@@ -593,6 +593,26 @@ fn new_image_id(prefix: &str) -> String {
     format!("{prefix}-{nanos:x}-{seq:x}")
 }
 
+/// 每个浮窗缓存的 Markdown 预处理结果（不缓存 egui_commonmark 的排版）。
+struct PreparedMarkdown {
+    /// 源文本哈希；变化时重建。
+    source_hash: u64,
+    /// 换行/公式块规范化后的文本。
+    normalized: String,
+    /// 图片引用（用于 owner 懒渲染，不必每帧重新解析）。
+    image_refs: Vec<crate::image_store::ImageRef>,
+    /// 不可重排内容的最小宽度。
+    min_width: f32,
+}
+
+/// Markdown 源文本哈希（预处理缓存 key）。
+fn markdown_source_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// 已保存的自定义 preview。
 ///
 /// 按用户要求记录：Pin 结束时的**页号 + 页内坐标**、以该坐标为中心的**零尺寸矩形**
@@ -1237,6 +1257,8 @@ pub struct PdfReaderApp {
     markdown_caches: std::collections::HashMap<u64, egui_commonmark::CommonMarkCache>,
     /// 每个 Markdown 浮窗上一帧的滚动偏移/内容尺寸，用于把双击位置映射回源码。
     markdown_viewports: std::collections::HashMap<u64, (egui::Vec2, egui::Vec2)>,
+    /// 每个浮窗的 Markdown 预处理缓存（按源文本哈希失效）。
+    markdown_prepared: std::collections::HashMap<u64, PreparedMarkdown>,
     /// LaTeX 公式的 PNG 纹理缓存与内嵌字体（全局共用）。
     math_cache: std::rc::Rc<std::cell::RefCell<crate::math::MathCache>>,
     /// 数学公式支持/限制帮助窗口是否打开。
@@ -1494,6 +1516,7 @@ impl PdfReaderApp {
             hover_markdown_index: None,
             markdown_caches: std::collections::HashMap::new(),
             markdown_viewports: std::collections::HashMap::new(),
+            markdown_prepared: std::collections::HashMap::new(),
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(crate::math::MathCache::new())),
             math_help: false,
             images: crate::image_store::ImageStore::default(),
@@ -3271,6 +3294,7 @@ impl PdfReaderApp {
                         self.floats.clear();
                         self.markdown_caches.clear();
                         self.markdown_viewports.clear();
+                        self.markdown_prepared.clear();
                         if !preserve_history {
                             self.images.clear();
                         }
@@ -5140,7 +5164,14 @@ impl PdfReaderApp {
         for window in &self.floats {
             if let FloatContent::Text(text) = &window.content {
                 if !text.is_empty() {
-                    for reference in crate::image_store::markdown_refs(text) {
+                    let cached = self
+                        .markdown_prepared
+                        .get(&window.id)
+                        .filter(|prepared| prepared.source_hash == markdown_source_hash(text));
+                    let image_refs = cached
+                        .map(|prepared| prepared.image_refs.clone())
+                        .unwrap_or_else(|| crate::image_store::markdown_refs(text));
+                    for reference in image_refs {
                         if !refs.contains(&reference) {
                             refs.push(reference);
                         }
@@ -8063,6 +8094,7 @@ impl PdfReaderApp {
         self.floats.retain(|window| window.id != id);
         self.markdown_caches.remove(&id);
         self.markdown_viewports.remove(&id);
+        self.markdown_prepared.remove(&id);
         if owner.is_some() && self.body_edit_owner() == owner {
             self.editing_body = None;
         }
@@ -9532,33 +9564,50 @@ impl PdfReaderApp {
                         rect.max - EVec2::new(18.0, 16.0),
                     );
                     if body_area.width() > 0.0 && body_area.height() > 0.0 {
-                        let text = crate::markdown::normalize_display_math(
-                            &crate::markdown::preserve_single_line_breaks(text),
-                        );
-                        let text = crate::image_store::canonicalize_markdown(&text, &self.images);
-                        let view_id = Id::unique(("float-md", id));
-                        // 代码块/表格/长 URL 不应当被硬折成 body 宽度：测一个最小内容
-                        // 宽度，超过 body 时由 commonmark 的横向 ScrollArea 承载。
-                        let min_width = {
-                            let mut measure = |line: &str, monospace: bool| {
-                                let font = if monospace {
-                                    egui::FontId::monospace(13.0)
-                                } else {
-                                    egui::FontId::proportional(13.0)
+                        let source_hash = markdown_source_hash(text);
+                        let prepared = self.markdown_prepared.remove(&id);
+                        let prepared = match prepared {
+                            Some(prepared) if prepared.source_hash == source_hash => prepared,
+                            _ => {
+                                let normalized = crate::markdown::normalize_display_math(
+                                    &crate::markdown::preserve_single_line_breaks(text),
+                                );
+                                let image_refs = crate::image_store::markdown_refs(&normalized);
+                                let min_width = {
+                                    let mut measure = |line: &str, monospace: bool| {
+                                        let font = if monospace {
+                                            egui::FontId::monospace(13.0)
+                                        } else {
+                                            egui::FontId::proportional(13.0)
+                                        };
+                                        ui.fonts_mut(|fonts| {
+                                            fonts
+                                                .layout_no_wrap(
+                                                    line.to_owned(),
+                                                    font,
+                                                    Color32::from_gray(225),
+                                                )
+                                                .size()
+                                                .x
+                                        })
+                                    };
+                                    crate::markdown::min_unwrapped_width(&normalized, &mut measure)
                                 };
-                                ui.fonts_mut(|fonts| {
-                                    fonts
-                                        .layout_no_wrap(
-                                            line.to_owned(),
-                                            font,
-                                            Color32::from_gray(225),
-                                        )
-                                        .size()
-                                        .x
-                                })
-                            };
-                            crate::markdown::min_unwrapped_width(&text, &mut measure)
+                                PreparedMarkdown {
+                                    source_hash,
+                                    normalized,
+                                    image_refs,
+                                    min_width,
+                                }
+                            }
                         };
+                        let min_width = prepared.min_width;
+                        let text = crate::image_store::canonicalize_markdown(
+                            &prepared.normalized,
+                            &self.images,
+                        );
+                        self.markdown_prepared.insert(id, prepared);
+                        let view_id = Id::unique(("float-md", id));
                         let default_width = if min_width > body_area.width() {
                             Some(
                                 (min_width.ceil() as usize)
@@ -10650,6 +10699,40 @@ mod annotation_body_tests {
         });
         output.drop_without_applying_deltas();
         assert!(app.markdown_rendered, "文字浮窗应走 Markdown 渲染分支");
+    }
+
+    #[test]
+    fn markdown_preprocessing_is_cached_by_source() {
+        let mut app = app();
+        app.markdown_floats = true;
+        let source = "第一行\n\n$$\n\n\\frac{1}{2}\n$$\n\n![图](pd-img://x?rev=1)";
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 40.0), egui::vec2(320.0, 240.0));
+        app.floats.push(Float {
+            id: 1,
+            title: "缓存".to_string(),
+            content: FloatContent::Text(source.to_string()),
+            rect,
+            owner: FloatOwner::None,
+            body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
+            origin: None,
+        });
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let input = egui::RawInput {
+            screen_rect: Some(canvas),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            app.draw_floats(ui, canvas);
+        });
+        output.drop_without_applying_deltas();
+        let prepared = app.markdown_prepared.get(&1).expect("应缓存预处理结果");
+        assert!(
+            !prepared.normalized.contains("\n\n\\frac"),
+            "块内空行应已规范化"
+        );
+        assert_eq!(prepared.image_refs.len(), 1);
     }
 
     #[test]

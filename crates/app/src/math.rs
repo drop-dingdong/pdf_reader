@@ -370,8 +370,6 @@ pub struct MathImage {
     pub texture: TextureHandle,
     /// 逻辑尺寸（egui 点）
     pub size: Vec2,
-    /// 基线以下深度（逻辑点），行内对齐用。
-    pub depth: f32,
 }
 
 /// 数学纹理缓存 + 后端。整个应用共用一份。
@@ -531,11 +529,7 @@ impl MathCache {
             TextureOptions::LINEAR,
         );
         self.next_id = self.next_id.wrapping_add(1).max(1);
-        Ok(MathImage {
-            texture,
-            size,
-            depth: metrics.depth_em * LOGICAL_FONT_SIZE,
-        })
+        Ok(MathImage { texture, size })
     }
 }
 
@@ -566,23 +560,7 @@ pub fn paint(ui: &mut egui::Ui, cache: &RefCell<MathCache>, tex: &str, inline: b
                 ui.set_row_height(row_height);
             }
             let target = if inline {
-                // 行内公式按“公式基线 = 文本基线”下移：
-                // 文本基线在行底 - descent，公式基线在图片底 - depth。
-                let descent = ui.fonts_mut(|fonts| {
-                    let galley = fonts.layout(
-                        "x".to_owned(),
-                        egui::FontId::proportional(LOGICAL_FONT_SIZE),
-                        Color32::PLACEHOLDER,
-                        f32::INFINITY,
-                    );
-                    galley
-                        .rows
-                        .first()
-                        .and_then(|row| row.glyphs.first())
-                        .map(|glyph| (glyph.font_height - glyph.font_ascent).max(0.0))
-                        .unwrap_or(0.0)
-                });
-                rect.translate(Vec2::new(0.0, descent - image.depth))
+                rect
             } else {
                 egui::Rect::from_center_size(rect.center(), image.size)
             };
