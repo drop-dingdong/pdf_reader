@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use backend_pdfium::pdf_patch::InlineChanges;
 use backend_pdfium::PdfiumBackend;
 use pdfcore::annotation::{AnnotationKind, PdfObjectRef};
-use pdfcore::prelude::{PageIndex, PdfBackend, RenderRequest, Rotation, Scale, Source};
+use pdfcore::prelude::{PageIndex, PdfBackend, Point, RenderRequest, Rotation, Scale, Source};
 
 /// 一条要导出的标注（已从 overlay 与正文表里取好）。
 #[derive(Debug, Clone)]
@@ -26,6 +26,8 @@ pub struct ExportItem {
     pub page: PageIndex,
     /// 种类与几何（页面空间）。
     pub kind: AnnotationKind,
+    /// 该页渲染盒原点；写回时加回 MediaBox 坐标。
+    pub origin: Point,
     /// RGB。
     pub color: [u8; 3],
     /// 不透明度（PDF 侧不表达，仅随 job 传递）。
@@ -139,7 +141,11 @@ pub fn job_json_with_refs_and_inline(
     }
     out.push_str("  \"pages\": [\n");
     for (page_index, (page, group)) in pages.iter().enumerate() {
-        out.push_str(&format!("    {{ \"page\": {page}, \"annotations\": [\n"));
+        let origin = group.first().map(|item| item.origin).unwrap_or_default();
+        out.push_str(&format!(
+            "    {{ \"page\": {page}, \"origin\": [{}, {}], \"annotations\": [\n",
+            origin.x, origin.y
+        ));
         for (item_index, item) in group.iter().enumerate() {
             out.push_str("      ");
             out.push_str(&annotation_json(item));
@@ -648,6 +654,7 @@ mod tests {
 
     fn highlight() -> ExportItem {
         ExportItem {
+            origin: Point::ORIGIN,
             id: Some(1),
             page: PageIndex::FIRST,
             kind: AnnotationKind::Highlight {
@@ -672,6 +679,30 @@ mod tests {
             default_output_path(Path::new("no-extension")),
             PathBuf::from("no-extension.annotated.pdf"),
         );
+    }
+
+    #[test]
+    fn job_json_keeps_the_page_origin_for_writeback() {
+        let mut item = highlight();
+        item.origin = Point::new(36.0, 36.0);
+        let job = job_json(
+            Path::new("/tmp/in.pdf"),
+            Path::new("/tmp/out.pdf"),
+            &[item],
+            false,
+        );
+        let root = crate::json::Json::parse(&job).expect("合法 JSON");
+        let origin = root
+            .as_object()
+            .and_then(|root| root.field("pages"))
+            .and_then(|pages| pages.as_array())
+            .and_then(|pages| pages.first())
+            .and_then(|page| page.as_object())
+            .and_then(|page| page.field("origin"))
+            .and_then(|origin| origin.as_array())
+            .expect("origin");
+        assert_eq!(origin[0].as_number(), Some(36.0));
+        assert_eq!(origin[1].as_number(), Some(36.0));
     }
 
     #[test]
@@ -737,6 +768,7 @@ mod tests {
     #[test]
     fn job_json_groups_multiple_annotations_by_page() {
         let ink = ExportItem {
+            origin: Point::ORIGIN,
             id: Some(2),
             page: PageIndex::new(2),
             kind: AnnotationKind::Ink {
@@ -816,6 +848,7 @@ mod tests {
             source,
             output: temporary.clone(),
             pages: vec![backend_pdfium::writeback::WritebackPage {
+                origin: Point::ORIGIN,
                 page: PageIndex::FIRST,
                 annotations: vec![backend_pdfium::writeback::WritebackAnnotation {
                     id: Some(1),
@@ -831,6 +864,7 @@ mod tests {
         backend_pdfium::writeback::write(&spec).expect("先写一份真实 PDF");
 
         let items = [ExportItem {
+            origin: Point::ORIGIN,
             id: Some(1),
             page: PageIndex::FIRST,
             kind: AnnotationKind::Highlight {

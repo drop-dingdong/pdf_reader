@@ -71,6 +71,7 @@ fn spec_for_all_kinds(dir: &std::path::Path) -> WritebackSpec {
         output: dir.join("out.pdf"),
         pages: vec![
             WritebackPage {
+                origin: pdfcore::prelude::Point::ORIGIN,
                 page: PageIndex::FIRST,
                 annotations: vec![
                     WritebackAnnotation {
@@ -114,6 +115,7 @@ fn spec_for_all_kinds(dir: &std::path::Path) -> WritebackSpec {
             },
             // 第 2 页带 /Rotate 90（200×400）
             WritebackPage {
+                origin: pdfcore::prelude::Point::ORIGIN,
                 page: PageIndex::new(1),
                 annotations: vec![WritebackAnnotation {
                     id: Some(5),
@@ -278,6 +280,7 @@ fn a_thick_right_angle_has_no_gap_at_the_joint() {
         source,
         output: dir.join("out.pdf"),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
                 id: Some(6), // 从下往上，再向右：顶点 (100,760)，线宽 10 → 半径 5
@@ -377,10 +380,12 @@ fn writing_again_without_new_pages_keeps_existing_marked_annotations() {
 
     let pages = vec![
         WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![highlight(1, 50.0), highlight(2, 200.0)],
         },
         WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::new(1),
             annotations: vec![highlight(3, 50.0)],
         },
@@ -452,6 +457,7 @@ fn rewriting_updates_contents_of_existing_annotations() {
         source: source.clone(),
         output: first.clone(),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
                 id: Some(7),
@@ -526,6 +532,7 @@ fn annotations_are_not_baked_into_the_bitmap_by_default() {
         source,
         output: dir.join("out.pdf"),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
                 id: Some(1),
@@ -585,6 +592,7 @@ fn empty_pages_keep_marked_annotations_until_explicit_deletes() {
         source,
         output: annotated.clone(),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
                 id: Some(1),
@@ -700,6 +708,7 @@ fn annotations_are_written_as_indirect_objects() {
         source,
         output: dir.join("out.pdf"),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
                 id: Some(1),
@@ -802,6 +811,7 @@ fn content_only_edit_keeps_the_annots_ref() {
         source: source.clone(),
         output: first.clone(),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
                 id: Some(7),
@@ -857,6 +867,7 @@ fn refuses_to_overwrite_the_source_file() {
         source: path.clone(),
         output: path,
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
                 id: Some(7),
@@ -892,6 +903,7 @@ fn rejects_geometry_that_the_model_would_reject() {
         source,
         output: dir.join("out.pdf"),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
                 id: Some(8), // 单点墨迹：模型不变量应当拒绝
@@ -1219,6 +1231,7 @@ fn mixed_new_and_delete_uses_page_patch_after_save() {
         source: source.clone(),
         output: old.clone(),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
                 id: Some(7),
@@ -1246,6 +1259,7 @@ fn mixed_new_and_delete_uses_page_patch_after_save() {
         source: old,
         output: output.clone(),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
                 id: Some(8),
@@ -1287,6 +1301,7 @@ fn new_highlight_uses_object_patch_and_one_revision() {
         source: source.clone(),
         output: output.clone(),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
                 id: Some(1),
@@ -1350,6 +1365,7 @@ fn new_underline_and_strike_use_object_patch() {
         source: source.clone(),
         output: output.clone(),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![
                 WritebackAnnotation {
@@ -1412,6 +1428,7 @@ fn new_ink_uses_object_patch_with_form_ap() {
         source: source.clone(),
         output: output.clone(),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
                 id: Some(9),
@@ -1508,6 +1525,7 @@ fn new_markups_on_rotated_page_without_annots_are_saved() {
         source,
         output: output.clone(),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::new(1),
             annotations: markups,
         }],
@@ -1542,6 +1560,7 @@ fn new_markup_and_ink_share_one_incremental_revision() {
         source: source.clone(),
         output: output.clone(),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![
                 WritebackAnnotation {

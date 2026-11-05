@@ -101,6 +101,7 @@ fn annotations_are_recovered_from_the_pdf_when_the_overlay_is_missing() {
         source: pdf.clone(),
         output: staged.clone(),
         pages: vec![backend_pdfium::writeback::WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: pdfcore::prelude::PageIndex::FIRST,
             annotations: vec![backend_pdfium::writeback::WritebackAnnotation {
                 id: Some(7),

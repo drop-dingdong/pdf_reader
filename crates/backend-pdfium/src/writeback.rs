@@ -66,6 +66,8 @@ pub struct WritebackUpdate {
 pub struct WritebackPage {
     /// 页号（0 起）。
     pub page: PageIndex,
+    /// 渲染盒左下角在 PDF MediaBox 坐标系中的原点；写回时加回。
+    pub origin: Point,
     /// 该页的标注（顺序即写入顺序）。
     pub annotations: Vec<WritebackAnnotation>,
 }
@@ -408,7 +410,8 @@ fn write_with_mode(
             let mut new_per_page = vec![0usize; page_count];
             for page in &spec.pages {
                 for annotation in &page.annotations {
-                    if let AnnotationKind::Note { rect } = &annotation.kind {
+                    let kind = shifted_kind(&annotation.kind, page.origin);
+                    if let AnnotationKind::Note { rect } = &kind {
                         new_notes.push(crate::pdf_patch::NewNote {
                             page: page.page.get(),
                             id: annotation.id,
@@ -419,7 +422,7 @@ fn write_with_mode(
                         new_per_page[page.page.get() as usize] += 1;
                         continue;
                     }
-                    let (kind, quads) = match &annotation.kind {
+                    let (kind, quads) = match &kind {
                         // 便签在上面单独收集，不会到这里。
                         AnnotationKind::Note { .. } => continue,
                         AnnotationKind::Highlight { quads } => {
@@ -634,7 +637,7 @@ fn write_with_mode(
                             continue; // 内容已原地更新或完全没变
                         }
                     }
-                    add_annotation(&ffi, handle, annotation)?;
+                    add_annotation(&ffi, handle, annotation, page.origin)?;
                     added += 1;
                 }
             }
@@ -754,10 +757,37 @@ fn validate(spec: &WritebackSpec) -> WritebackResult<()> {
 }
 
 /// 创建一条注释并写完语义字段与外观。
+/// 应用层坐标是“渲染盒坐标系”；写 PDF 时必须加回 MediaBox 原点。
+fn shifted_kind(kind: &AnnotationKind, origin: Point) -> AnnotationKind {
+    let mut kind = kind.clone();
+    match &mut kind {
+        AnnotationKind::Highlight { quads }
+        | AnnotationKind::Underline { quads }
+        | AnnotationKind::StrikeOut { quads } => {
+            for quad in quads {
+                quad.x += origin.x;
+                quad.y += origin.y;
+            }
+        }
+        AnnotationKind::Ink { points, .. } => {
+            for point in points {
+                point.x += origin.x;
+                point.y += origin.y;
+            }
+        }
+        AnnotationKind::Note { rect } => {
+            rect.x += origin.x;
+            rect.y += origin.y;
+        }
+    }
+    kind
+}
+
 unsafe fn add_annotation(
     ffi: &Ffi,
     page: *mut c_void,
     annotation: &WritebackAnnotation,
+    origin: Point,
 ) -> WritebackResult<()> {
     let subtype = match &annotation.kind {
         AnnotationKind::Highlight { .. } => ANNOT_HIGHLIGHT,
@@ -774,7 +804,8 @@ unsafe fn add_annotation(
         });
     }
 
-    let model = Annotation::new(PageIndex::FIRST, annotation.kind.clone())
+    let kind = shifted_kind(&annotation.kind, origin);
+    let model = Annotation::new(PageIndex::FIRST, kind.clone())
         .ok_or_else(|| WritebackError::Invalid("几何无效".to_string()))?;
     let bounds = model
         .bounds()
@@ -853,12 +884,12 @@ unsafe fn add_annotation(
     }
 
     // 线宽写进 /BS（编辑器要知道笔宽；PDFium 不会替我们补）
-    if let AnnotationKind::Ink { width, .. } = &annotation.kind {
+    if let AnnotationKind::Ink { width, .. } = &kind {
         let _ = (ffi.set_border)(handle, 0.0, 0.0, *width);
     }
 
     // 语义字段：墨迹写 /InkList；文本类写 /QuadPoints
-    match &annotation.kind {
+    match &kind {
         AnnotationKind::Ink { points, .. } => {
             if points.len() < 2 {
                 (ffi.close_annot)(handle);
@@ -880,7 +911,7 @@ unsafe fn add_annotation(
             }
         }
         _ => {
-            for quad in annotation.kind.quads() {
+            for quad in kind.quads() {
                 let points = quad_points(*quad);
                 if (ffi.append_quad)(handle, &points) == 0 {
                     (ffi.close_annot)(handle);
@@ -898,14 +929,12 @@ unsafe fn add_annotation(
     //   Okular 保存时对只有 /BBox 的 Form 会报错，见 D-132）；
     // * 下划线/删除线只能 `SetAP`（AppendObject 文档明确只支持 ink/stamp）；
     // * 高亮不写（见模块文档）。
-    match &annotation.kind {
+    match &kind {
         AnnotationKind::Ink { points, width } => {
             append_ink_object(ffi, handle, points, *width, annotation.color)?;
         }
         _ => {
-            if let Some(content) =
-                appearance_content(&annotation.kind, annotation.color, annotation.opacity)
-            {
+            if let Some(content) = appearance_content(&kind, annotation.color, annotation.opacity) {
                 let wide = wide_string(&content);
                 if (ffi.set_ap)(handle, 0, wide.as_ptr()) == 0 {
                     (ffi.close_annot)(handle);

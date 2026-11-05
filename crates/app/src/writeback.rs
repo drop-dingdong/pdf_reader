@@ -97,8 +97,18 @@ fn read_spec_mode(
             let context = format!("pages[{page_index}].annotations[{index}]");
             annotations.push(parse_annotation(annotation, &context)?);
         }
+        let origin = object
+            .field("origin")
+            .and_then(|value| value.as_array())
+            .and_then(|coords| {
+                let x = coords.first()?.as_number()?;
+                let y = coords.get(1)?.as_number()?;
+                Some(Point::new(x, y))
+            })
+            .unwrap_or(Point::ORIGIN);
         pages.push(WritebackPage {
             page: PageIndex::new(page),
+            origin,
             annotations,
         });
     }

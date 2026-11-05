@@ -217,7 +217,9 @@ fn main() -> eframe::Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 900.0])
             .with_min_inner_size([600.0, 400.0])
-            .with_title("PDF Reader"),
+            .with_title("PDF Reader")
+            // Windows 上 winit 默认可能关闭拖放；显式打开，Linux/Wayland 无副作用。
+            .with_drag_and_drop(true),
         ..Default::default()
     };
 

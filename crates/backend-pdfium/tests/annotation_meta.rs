@@ -60,6 +60,7 @@ fn new_annotation_writes_author_and_dates() {
         source: source.clone(),
         output: output.clone(),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![highlight(7, "正文")],
         }],
@@ -126,6 +127,7 @@ fn note_round_trips_with_rect_and_body() {
             source,
             output: output.clone(),
             pages: vec![WritebackPage {
+                origin: pdfcore::prelude::Point::ORIGIN,
                 page: PageIndex::FIRST,
                 annotations: vec![WritebackAnnotation {
                     id: Some(9),
@@ -187,6 +189,7 @@ fn body_update_refreshes_only_modified() {
             source: source.clone(),
             output: first.clone(),
             pages: vec![WritebackPage {
+                origin: pdfcore::prelude::Point::ORIGIN,
                 page: PageIndex::FIRST,
                 annotations: vec![highlight(7, "旧正文")],
             }],

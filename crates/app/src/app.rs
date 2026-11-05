@@ -177,6 +177,11 @@ fn body_summary(body: Option<&str>) -> String {
     }
 }
 
+/// 文字浮窗是否应提供正文编辑入口（空正文同样需要）。
+fn text_float_is_editable(owner: FloatOwner, content: &FloatContent) -> bool {
+    matches!(content, FloatContent::Text(_)) && !matches!(owner, FloatOwner::None)
+}
+
 /// 当前 Unix 秒（UTC）。
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
@@ -2548,6 +2553,12 @@ impl PdfReaderApp {
             .map(|annotation| crate::export::ExportItem {
                 id: Some(annotation.id.get()),
                 page: annotation.page,
+                origin: self
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.page_geometry(annotation.page))
+                    .map(|geometry| geometry.origin)
+                    .unwrap_or(Point::ORIGIN),
                 kind: annotation.kind.clone(),
                 color: annotation.color,
                 opacity: annotation.opacity,
@@ -3097,6 +3108,47 @@ impl PdfReaderApp {
             .map_err(|error| format!("写入数据文件 {} 失败：{error}", target.display()))
     }
 
+    /// 读回注释的坐标也按 `MediaBox` 给出；PDF 渲染用的是 `MediaBox ∩ CropBox`。
+    /// 文本/链接已在后端归一化，注释必须在进入模型前做同样处理，否则会整体偏移。
+    fn normalize_readback_geometry(
+        readback: &mut backend_pdfium::readback::Readback,
+        origins: &[Point],
+    ) {
+        use pdfcore::annotation::AnnotationKind;
+        let shift_rect = |rect: &mut Rect, origin: Point| {
+            rect.x -= origin.x;
+            rect.y -= origin.y;
+        };
+        for annotation in &mut readback.annotations {
+            let origin = origins
+                .get(annotation.page.get() as usize)
+                .copied()
+                .unwrap_or(Point::ORIGIN);
+            match &mut annotation.kind {
+                AnnotationKind::Highlight { quads }
+                | AnnotationKind::Underline { quads }
+                | AnnotationKind::StrikeOut { quads } => {
+                    for quad in quads {
+                        shift_rect(quad, origin);
+                    }
+                }
+                AnnotationKind::Ink { points, .. } => {
+                    for point in points {
+                        point.x -= origin.x;
+                        point.y -= origin.y;
+                    }
+                }
+                AnnotationKind::Note { rect } => shift_rect(rect, origin),
+            }
+            for stroke in &mut annotation.ink_strokes {
+                for point in stroke {
+                    point.x -= origin.x;
+                    point.y -= origin.y;
+                }
+            }
+        }
+    }
+
     /// 把 PDF 读回的注释并进内存集合，并把对象号配对好。
     fn merge_readback(
         &mut self,
@@ -3285,13 +3337,19 @@ impl PdfReaderApp {
                 // S6a：读回 PDF 注释。裸 FFI 不经过 pdfium-render 的全局锁，
                 // 所以**必须先放掉旧会话**（它的渲染 worker 可能还在跑）——D-134 选择的方案。
                 self.session = None;
-                let readback = match backend_pdfium::readback::read(path, password) {
+                let origins: Vec<Point> = opened
+                    .document
+                    .page_geometries()
+                    .map(|geometries| geometries.iter().map(|page| page.origin).collect())
+                    .unwrap_or_default();
+                let mut readback = match backend_pdfium::readback::read(path, password) {
                     Ok(readback) => readback,
                     Err(error) => {
                         eprintln!("[readback] {error}");
                         backend_pdfium::readback::Readback::default()
                     }
                 };
+                Self::normalize_readback_geometry(&mut readback, &origins);
                 self.pdf_marked_annotations = readback
                     .annotations
                     .iter()
@@ -9318,8 +9376,9 @@ impl PdfReaderApp {
             let rect = clamp_float_rect(self.floats[index].rect, canvas, FLOAT_MIN_SIZE);
             self.floats[index].rect = rect;
             let id = self.floats[index].id;
-            let has_text =
-                matches!(&self.floats[index].content, FloatContent::Text(text) if !text.is_empty());
+            // 空正文也要保留“可编辑”语义：标题栏 ✎ / 双击进入编辑器，不能因为
+            // 文本为空就把命中区域或入口一起省掉。
+            let has_text = matches!(&self.floats[index].content, FloatContent::Text(_));
             let markdown_active = self.markdown_floats && has_text;
             let wheel_owner = topmost_under_pointer == Some(id);
 
@@ -9496,8 +9555,8 @@ impl PdfReaderApp {
             }
             // 标题栏编辑按钮：双击正文在 Markdown 模式下可能被文字选择/链接抢走，
             // 这里提供一个稳定入口；图标与侧栏 Pin 条目的「编辑标题」一致。
-            let editable = matches!(&self.floats[index].content, FloatContent::Text(text) if !text.is_empty())
-                && !matches!(self.floats[index].owner, FloatOwner::None);
+            let editable =
+                text_float_is_editable(self.floats[index].owner, &self.floats[index].content);
             if editable && self.editing_body.is_none() {
                 let edit_center = egui::pos2(close_center.x - 26.0, title_rect.center().y);
                 let edit_rect = egui::Rect::from_center_size(edit_center, EVec2::splat(18.0));
@@ -9920,6 +9979,12 @@ impl eframe::App for PdfReaderApp {
         self.apply_pending_view_restore(&ctx);
         self.draw_history_window(&ctx);
 
+        // 拖放/菜单请求的文件必须在“空状态提前返回”之前真正打开；否则
+        // pending_open 只会在已有 session 的帧末尾消费，启动后拖入 PDF 没反应。
+        if let Some(path) = self.pending_open.take() {
+            self.open(&path, None);
+            ctx.request_repaint();
+        }
         // 把会话临时取出，避免与 `self` 的其它字段发生借用冲突
         let Some(mut session) = self.session.take() else {
             self.draw_empty(ui);
@@ -10756,6 +10821,51 @@ mod annotation_body_tests {
         });
         output.drop_without_applying_deltas();
         assert!(app.markdown_rendered, "文字浮窗应走 Markdown 渲染分支");
+    }
+
+    #[test]
+    fn empty_text_float_still_has_an_edit_affordance() {
+        assert!(text_float_is_editable(
+            FloatOwner::Custom(0),
+            &FloatContent::Text(String::new())
+        ));
+        assert!(text_float_is_editable(
+            FloatOwner::Annotation(AnnotationId(1)),
+            &FloatContent::Text(String::new())
+        ));
+        assert!(!text_float_is_editable(
+            FloatOwner::None,
+            &FloatContent::Text(String::new())
+        ));
+    }
+
+    #[test]
+    fn readback_geometry_is_normalized_to_the_rendered_box() {
+        use backend_pdfium::readback::{ReadAnnotation, Readback};
+        use pdfcore::annotation::AnnotationKind;
+        let mut readback = Readback {
+            annotations: vec![ReadAnnotation {
+                page: PageIndex::FIRST,
+                id: Some(1),
+                kind: AnnotationKind::Highlight {
+                    quads: vec![Rect::new(179.0, 572.0, 173.0, 14.0)],
+                },
+                color: [255, 255, 0],
+                opacity: 0.35,
+                body: None,
+                author: None,
+                created: None,
+                modified: None,
+                ink_strokes: Vec::new(),
+            }],
+            skipped: 0,
+            extra_ink_strokes: 0,
+        };
+        PdfReaderApp::normalize_readback_geometry(&mut readback, &[Point::new(36.0, 36.0)]);
+        let quad = readback.annotations[0].kind.quads()[0];
+        assert!((quad.x - 143.0).abs() < 0.01);
+        assert!((quad.y - 536.0).abs() < 0.01);
+        assert!((quad.width - 173.0).abs() < 0.01);
     }
 
     #[test]

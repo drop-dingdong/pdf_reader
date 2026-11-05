@@ -95,6 +95,7 @@ fn four_kinds_round_trip_with_ids_bodies_and_opacity() {
         source,
         output: dir.join("out.pdf"),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: expected.clone(),
         }],
@@ -165,6 +166,7 @@ fn reading_again_after_rewrite_is_stable() {
         source,
         output: first.clone(),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: annotations.clone(),
         }],
@@ -177,6 +179,7 @@ fn reading_again_after_rewrite_is_stable() {
         source: first.clone(),
         output: second.clone(),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations,
         }],
@@ -210,6 +213,7 @@ fn rotated_page_keeps_unrotated_page_space() {
         source,
         output: dir.join("out.pdf"),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
                 id: Some(9),
@@ -249,6 +253,7 @@ fn annotations_without_our_marker_have_no_id() {
         source,
         output: dir.join("out.pdf"),
         pages: vec![WritebackPage {
+            origin: pdfcore::prelude::Point::ORIGIN,
             page: PageIndex::FIRST,
             annotations: vec![WritebackAnnotation {
                 id: None, // 模拟外部注释：没有 /NM 标记
