@@ -27,7 +27,7 @@
 - **LaTeX 数学后续**：P1.5 已用 `latex-rust 3.0.1` + PNG 纹理跑通；后续再评估 SVG 矢量、
   公式纹理按 key 缓存/淘汰、行内基线微调（CJK `\text{}` 仍回退原文）。
 - **RaTeX 后端评估（已起步）**：`math-ratex` 可选 feature 启用后默认用 RaTeX；`PDF_READER_MATH_BACKEND=svg/png`
-  可回 latex-rust 对照。已跑通分式/CJK/化学式，后续再比较排版/性能/字体体积，不默认启用。
+  可回 latex-rust 对照。已跑通分式/CJK/化学式；`scripts/build.sh` 可按后端编译。后续再比较排版/性能/字体体积，不默认启用。
 - **内部截图 B3（可选）**：批量管理图片记录/清理旧 revision；当前按 32 张、64MB 自动淘汰。
   见 [internal-images.md](internal-images.md)。
 - **系统缩放/UI 缩放适配**：当前应用不设置 `pixels_per_point`，由 eframe/winit 继承系统值；

@@ -252,12 +252,12 @@ impl LatexRustBackend {
     fn new() -> Self {
         // 对照用：PDF_READER_MATH_BACKEND=png 可临时回退旧 PNG 路径。
         // 默认 SVG：按目标像素缩放矢量，缩放/高 DPI 下更清晰。
-        let mode = if std::env::var("PDF_READER_MATH_BACKEND")
-            .is_ok_and(|value| value.eq_ignore_ascii_case("png"))
-        {
-            RasterMode::Png
-        } else {
-            RasterMode::Svg
+        let requested = std::env::var("PDF_READER_MATH_BACKEND").ok();
+        let mode = match requested.as_deref() {
+            Some(value) if value.eq_ignore_ascii_case("png") => RasterMode::Png,
+            Some(value) if value.eq_ignore_ascii_case("svg") => RasterMode::Svg,
+            None if cfg!(feature = "math-latex-png") => RasterMode::Png,
+            _ => RasterMode::Svg,
         };
         Self {
             font: MathFont::stix_two_math().ok(),
@@ -640,11 +640,16 @@ pub fn paint(ui: &mut egui::Ui, cache: &RefCell<MathCache>, tex: &str, inline: b
             } else {
                 ui.available_width().max(image.size.x)
             };
+            if inline {
+                // 先预留行高再分配图片；只在分配后设置时，图片本身仍可能被
+                // CommonMark 当前行高裁剪。
+                let row_height = ui
+                    .text_style_height(&egui::TextStyle::Body)
+                    .max(image.size.y);
+                ui.set_row_height(row_height);
+            }
             let (rect, _) = ui.allocate_exact_size(Vec2::new(width, image.size.y), Sense::hover());
             if inline {
-                // CommonMark 的 left_to_right 行只在行首由图片撑高；在行中图片
-                // 高度不会更新行高，导致同样的公式在行首/行中行距不同。这里
-                // 显式把当前行高设为“正文行高与公式高度取大”，两种情况一致。
                 let row_height = ui
                     .text_style_height(&egui::TextStyle::Body)
                     .max(image.size.y);

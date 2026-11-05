@@ -8,6 +8,7 @@ license.workspace = true
 
 [features]
 # 可选：RaTeX 后端，不参与默认编译。
+math-latex-png = []
 math-ratex = [
     "dep:ratex-parser",
     "dep:ratex-layout",
