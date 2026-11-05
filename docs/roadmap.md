@@ -28,6 +28,10 @@
   公式纹理按 key 缓存/淘汰、行内基线微调（CJK `\text{}` 仍回退原文）。
 - **内部截图 B3（可选）**：批量管理图片记录/清理旧 revision；当前按 32 张、64MB 自动淘汰。
   见 [internal-images.md](internal-images.md)。
+- **系统缩放/UI 缩放适配**：当前应用不设置 `pixels_per_point`，由 eframe/winit 继承系统值；
+  实现应用级 UI 缩放时一并验证 SVG 高 DPI 清晰度与数学目标像素。
+- **行内公式行高/基线根治**：`math::paint` 侧只能做局部补偿，实际不一致来自
+  `egui_commonmark` 的 wrapping row 在行中由图片撑高；需要 patch/vendored 行布局。
 - **长词强制按字符换行**：当前长连续英文按不可断 token 走横向滚动；可选做“超长 token 强制断行”
   （会破坏 URL/代码可读性，默认关闭）。
 - **PDF 文档链接**：浮窗内 Markdown 锚点已完成（`{#id}`/`#id`）；PDF 页内/外部文档链接仍未做。
