@@ -1293,6 +1293,8 @@ pub struct PdfReaderApp {
     markdown_viewports: std::collections::HashMap<u64, (egui::Vec2, egui::Vec2)>,
     /// 每个浮窗的 Markdown 预处理缓存（按源文本哈希失效）。
     markdown_prepared: std::collections::HashMap<u64, PreparedMarkdown>,
+    /// 拖入文件 hover 日志只打一次，避免 Wayland 调度每帧刷屏。
+    drag_hover_logged: bool,
     /// LaTeX 公式的 PNG 纹理缓存与内嵌字体（全局共用）。
     math_cache: std::rc::Rc<std::cell::RefCell<crate::math::MathCache>>,
     /// 数学公式支持/限制帮助窗口是否打开。
@@ -1551,6 +1553,7 @@ impl PdfReaderApp {
             markdown_caches: std::collections::HashMap::new(),
             markdown_viewports: std::collections::HashMap::new(),
             markdown_prepared: std::collections::HashMap::new(),
+            drag_hover_logged: false,
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(crate::math::MathCache::new())),
             math_help: false,
             images: crate::image_store::ImageStore::default(),
@@ -3646,6 +3649,29 @@ impl PdfReaderApp {
 
     /// 采集输入 → 命令。
     fn collect_commands(&mut self, ctx: &egui::Context, session: &DocumentSession) {
+        // 保存是全局动作：不能被“输入框有焦点”或截图模式吞掉。
+        // 正文编辑有未提交草稿时先提示，避免 Ctrl+S 保存了旧内容却让用户以为草稿已落盘。
+        let save_shortcut = ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: Key::S,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.ctrl || modifiers.command
+                )
+            })
+        });
+        if save_shortcut {
+            if self.editing_body.is_none() {
+                self.save_all();
+            } else {
+                self.message = "正文编辑器有未保存草稿：请用 Ctrl+Enter 保存正文".to_string();
+            }
+            return;
+        }
         // **文本输入获得焦点时，键盘归输入框**：否则在编辑框里敲空格/方向键会同时滚动页面
         // （用户反馈）。`Memory::focused()` 在有 TextEdit 聚焦时返回其 Id，
         // 覆盖搜索框、题目/正文编辑框等所有输入控件。
@@ -3698,10 +3724,6 @@ impl PdfReaderApp {
             let command_modifier = modifiers.ctrl || modifiers.command;
             // 文本框有焦点时把按键让给文本框（它自己的撤销/删除更贴合当前输入）
             let text_focused = ctx.memory(|memory| memory.focused().is_some());
-            if key == Key::S && command_modifier {
-                self.save_all();
-                continue;
-            }
             if key == Key::Z && command_modifier && !text_focused {
                 if modifiers.shift {
                     self.redo_edit();
@@ -3764,14 +3786,32 @@ impl PdfReaderApp {
     /// **必须在没有文档时也执行**：v1 把它放在"已有会话"的分支里，
     /// 导致启动后（空状态）拖入 PDF 毫无反应 —— 人工验收反馈的缺陷之一。
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        let dropped = ctx.input(|input| {
-            input
-                .raw
-                .dropped_files
-                .first()
-                .map(|file| file.path().to_path_buf())
+        let (hovered, dropped) = ctx.input(|input| {
+            (
+                input
+                    .raw
+                    .hovered_files
+                    .iter()
+                    .map(|file| (file.path.clone(), file.mime.clone()))
+                    .collect::<Vec<_>>(),
+                input
+                    .raw
+                    .dropped_files
+                    .iter()
+                    .map(|file| file.path().to_path_buf())
+                    .collect::<Vec<_>>(),
+            )
         });
-        if let Some(path) = dropped {
+        if !hovered.is_empty() && !self.drag_hover_logged {
+            eprintln!("[drag] hovered files: {hovered:?}");
+            self.drag_hover_logged = true;
+        } else if hovered.is_empty() {
+            self.drag_hover_logged = false;
+        }
+        if !dropped.is_empty() {
+            eprintln!("[drag] dropped files: {dropped:?}");
+        }
+        if let Some(path) = dropped.into_iter().next() {
             self.request_open(path);
         }
     }
@@ -9756,6 +9796,20 @@ impl PdfReaderApp {
                         );
                         self.markdown_caches.insert(id, md_cache);
                         self.markdown_rendered = true;
+                        // Markdown 的 ScrollArea 会注册覆盖正文的响应，空正文时连
+                        // double-click 都被它吞掉；这里最后补一个空正文专用命中层。
+                        if text.is_empty() && !matches!(self.floats[index].owner, FloatOwner::None)
+                        {
+                            let hit = ui.interact(
+                                body_area,
+                                Id::unique(("float-md-empty-edit", id)),
+                                Sense::click(),
+                            );
+                            if hit.double_clicked() && self.editing_body.is_none() {
+                                let owner = self.floats[index].owner;
+                                self.open_body_editor(owner, String::new(), None, ui.ctx());
+                            }
+                        }
                     }
                 }
                 FloatContent::Text(text) => {

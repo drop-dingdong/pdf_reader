@@ -78,7 +78,11 @@
  墨迹默认不透明深色（`pdfcore::annotation::{TEXT_MARK_*, INK_*}`）。
 * 墨迹绘制（`paint_ink`）：**按页面矩形裁剪**（跨页拖拽时不会画到相邻页的空白上，与 PDF 阅读器一致）；
  折角补半径 = 半线宽的圆点（egui 的折线逐段四边形，直角处会漏缝）。
-* 空正文浮窗仍保留标题栏 **✎** 和正文双击入口，不会因为 `Text("")` 省掉命中区域。
+* 空正文浮窗仍保留标题栏 **✎** 和正文双击入口，不会因为 `Text("")` 省掉命中区域；
+  Markdown 模式额外在 ScrollArea 之后补空正文双击命中层。
+* 拖放打开前会打印 `[drag] hovered/dropped files: ...`；Linux Wayland 的 winit 0.30
+  后端不实现外部文件 DnD（指针显示禁止），可临时用 `WINIT_UNIX_BACKEND=x11` 走 XWayland。
+* 保存快捷键 `Ctrl+S` 在焦点/截图判断之前处理；正文编辑器有草稿时提示用 `Ctrl+Enter`。
 * 注释几何进入模型前按页面的 `MediaBox ∩ CropBox` 原点归一化；写回 job 再带回该原点，
   避免原点非 0 的 PDF 上注释整体偏移。
 * 注释正文**直接属于注释**（`Annotation.body`），点击注释打开独立浮窗（`FloatOwner::Annotation`），
