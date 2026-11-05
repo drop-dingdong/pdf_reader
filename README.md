@@ -62,7 +62,7 @@ cargo build --release -p app           # target/release/app
 ```
 
 `fmt --check` → `clippy -D warnings` → `cargo test --workspace` → 回放结构基线比较 → 文档链接检查。
-当前约 **494 个测试**。数学默认 `latex-rust` SVG；可选构建 `--features math-ratex` 试用 RaTeX 后端。；PDFium 就绪时会跑真实样本。
+当前约 **494 个测试**。数学默认 `latex-rust` SVG；可选构建 `--features math-ratex` 启用 RaTeX 后端（该 feature 默认选 RaTeX）。；PDFium 就绪时会跑真实样本。
 
 单独跑回放：
 

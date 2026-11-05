@@ -465,10 +465,15 @@ impl MathCache {
     /// 使用当前默认后端（`latex-rust`）。
     pub fn new() -> Self {
         #[cfg(feature = "math-ratex")]
-        if std::env::var("PDF_READER_MATH_BACKEND")
-            .is_ok_and(|value| value.eq_ignore_ascii_case("ratex"))
         {
-            return Self::with_backend(Box::new(RatexBackend::new()));
+            // 启用可选 feature 时默认用 RaTeX；显式设 svg/png 可回 latex-rust 对照。
+            let selection = std::env::var("PDF_READER_MATH_BACKEND").unwrap_or_default();
+            if !selection.eq_ignore_ascii_case("svg")
+                && !selection.eq_ignore_ascii_case("png")
+                && !selection.eq_ignore_ascii_case("latex")
+            {
+                return Self::with_backend(Box::new(RatexBackend::new()));
+            }
         }
         Self::with_backend(Box::new(LatexRustBackend::new()))
     }

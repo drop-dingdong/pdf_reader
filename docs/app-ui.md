@@ -179,8 +179,8 @@
   生成矢量 SVG，再按目标像素光栅化成 egui 纹理；按公式/行内/DPI 缓存（最多 64 条，超宽降采样/回退）。
   目标像素由公式逻辑尺寸 × `pixels_per_point` × 质量倍率决定；高 DPI/缩放更清晰。
   `PDF_READER_MATH_BACKEND=png` 可临时回退旧 PNG 后端做对照；
-  构建时加 `--features math-ratex` 并设 `PDF_READER_MATH_BACKEND=ratex` 可试用可选 RaTeX 后端
-  （KaTeX 兼容、化学式/CJK fallback；不进入默认编译）。
+  构建时加 `--features math-ratex` 即默认选择可选 RaTeX 后端（KaTeX 兼容、化学式/CJK fallback；
+  不进入默认编译）；设 `PDF_READER_MATH_BACKEND=svg` 或 `png` 可回 latex-rust 对照。
   应用**不自行**设置系统缩放/UI zoom，`pixels_per_point` 由 eframe/winit 从窗口系统继承；
   Linux 可用 `WINIT_X11_SCALE_FACTOR=2` 验证高 DPI 路径。
   行内公式会显式把当前行高设为“正文行高与公式高度取大”；同一行内公式前后文本的基线
