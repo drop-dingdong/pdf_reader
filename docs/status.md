@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-04　分支：`feat/markdown-floats`　门禁：`./scripts/check.sh` 通过（493 个测试）。
+> 快照：2026-11-04　分支：`feat/markdown-floats`　门禁：`./scripts/check.sh` 通过（494 个测试）。
 
 ## 1. 它是什么
 

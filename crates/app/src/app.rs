@@ -613,6 +613,35 @@ fn markdown_source_hash(text: &str) -> u64 {
     hasher.finish()
 }
 
+/// 在 TextEdit 当前光标/选区处插入文本，并把光标放到插入内容之后。
+fn insert_at_text_cursor(ctx: &egui::Context, id: Id, text: &mut String, snippet: &str) {
+    let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+    let char_len = text.chars().count();
+    let (start, end) = state
+        .cursor
+        .char_range()
+        .map(|range| {
+            let a = usize::from(range.primary.index).min(char_len);
+            let b = usize::from(range.secondary.index).min(char_len);
+            (a.min(b), a.max(b))
+        })
+        .unwrap_or((0, 0));
+    let byte_at = |index: usize| {
+        text.char_indices()
+            .nth(index)
+            .map(|(byte, _)| byte)
+            .unwrap_or(text.len())
+    };
+    text.replace_range(byte_at(start)..byte_at(end), snippet);
+    let next = (start + snippet.chars().count()).min(text.chars().count());
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(next),
+        )));
+    state.store(ctx, id);
+}
+
 /// 已保存的自定义 preview。
 ///
 /// 按用户要求记录：Pin 结束时的**页号 + 页内坐标**、以该坐标为中心的**零尺寸矩形**
@@ -7878,6 +7907,8 @@ impl PdfReaderApp {
         let mut focus = self.focus_body_edit;
         let mut initial_cursor = self.body_edit_cursor.take();
         let image_choices = self.image_choices();
+        let session = self.body_edit_session;
+        let text_edit_id = Id::unique(("edit-body-text", session));
         egui::Window::new(format!("编辑正文 · {title}"))
             .id(Id::unique("edit-body"))
             .resizable(true)
@@ -7896,7 +7927,7 @@ impl PdfReaderApp {
                         for (label, uri) in &image_choices {
                             if ui
                                 .small_button(label)
-                                .on_hover_text("追加到正文末尾")
+                                .on_hover_text("插入到当前光标位置")
                                 .clicked()
                             {
                                 let alt: String = label
@@ -7906,7 +7937,13 @@ impl PdfReaderApp {
                                         _ => ch,
                                     })
                                     .collect();
-                                text.push_str(&format!("\n![{alt}]({uri})\n"));
+                                insert_at_text_cursor(
+                                    ui.ctx(),
+                                    text_edit_id,
+                                    &mut text,
+                                    &format!("\n![{alt}]({uri})\n"),
+                                );
+                                focus = true;
                             }
                         }
                     }
@@ -7918,13 +7955,11 @@ impl PdfReaderApp {
                 let line_height = ui.text_style_height(&egui::TextStyle::Monospace).max(10.0);
                 let editor_height = (ui.available_height() - 46.0).max(60.0);
                 let rows = (((editor_height - 8.0) / line_height).floor() as usize).max(1);
-                let session = self.body_edit_session;
                 egui::ScrollArea::vertical()
                     .id_salt(("edit-body-scroll", session))
                     .auto_shrink([false, false])
                     .max_height(editor_height)
                     .show(ui, |ui| {
-                        let text_edit_id = Id::unique(("edit-body-text", session));
                         let response = ui.add(
                             egui::TextEdit::multiline(&mut text)
                                 .id(text_edit_id)
@@ -10554,6 +10589,28 @@ mod annotation_body_tests {
             assert!(scrolled > top, "滚动后同一屏幕位置应映射到更后面的源码");
         });
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn internal_image_inserts_at_editor_cursor() {
+        let ctx = egui::Context::default();
+        let id = Id::unique("cursor-insert-test");
+        let mut state = egui::text_edit::TextEditState::load(&ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(5),
+            )));
+        state.store(&ctx, id);
+        let mut text = "hello world".to_string();
+        insert_at_text_cursor(&ctx, id, &mut text, "![图](pd-img://x?rev=1)");
+        assert_eq!(text, "hello![图](pd-img://x?rev=1) world");
+        let state = egui::text_edit::TextEditState::load(&ctx, id).expect("state");
+        let cursor = state.cursor.char_range().expect("cursor");
+        assert_eq!(
+            usize::from(cursor.primary.index),
+            5 + "![图](pd-img://x?rev=1)".chars().count()
+        );
     }
 
     #[test]

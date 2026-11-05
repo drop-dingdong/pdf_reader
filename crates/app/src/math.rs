@@ -162,6 +162,86 @@ enum RasterMode {
     Svg,
 }
 
+/// 可选 RaTeX 后端（KaTeX 兼容，纯 Rust；不参与默认编译）。
+#[cfg(feature = "math-ratex")]
+struct RatexBackend;
+
+#[cfg(feature = "math-ratex")]
+impl RatexBackend {
+    fn new() -> Self {
+        Self
+    }
+
+    fn layout_list(
+        &self,
+        tex: &str,
+        display: bool,
+    ) -> Result<ratex_types::display_item::DisplayList, MathError> {
+        let ast = ratex_parser::parser::parse(tex)
+            .map_err(|error| MathError::new(MathErrorKind::Parse, tex, error.to_string()))?;
+        let options = ratex_layout::LayoutOptions {
+            style: if display {
+                ratex_types::math_style::MathStyle::Display
+            } else {
+                ratex_types::math_style::MathStyle::Text
+            },
+            color: ratex_types::color::Color::new(225.0 / 255.0, 225.0 / 255.0, 225.0 / 255.0, 1.0),
+            ..Default::default()
+        };
+        let layout = ratex_layout::layout(&ast, &options);
+        ratex_layout::validate_layout(&layout)
+            .map_err(|error| MathError::new(MathErrorKind::Internal, tex, error))?;
+        Ok(ratex_layout::to_display_list(&layout))
+    }
+}
+
+#[cfg(feature = "math-ratex")]
+impl MathBackend for RatexBackend {
+    fn name(&self) -> &'static str {
+        "RaTeX 0.1.15"
+    }
+
+    fn capabilities(&self) -> MathCapabilities {
+        MathCapabilities {
+            backend: self.name(),
+            cjk_text: true,
+            chemistry: true,
+            vector_svg: false,
+        }
+    }
+
+    fn measure(&mut self, tex: &str, display: bool) -> Result<MathMetrics, MathError> {
+        let list = self.layout_list(tex, display)?;
+        Ok(MathMetrics {
+            width_em: list.width as f32,
+            height_em: list.height as f32,
+            depth_em: list.depth as f32,
+        })
+    }
+
+    fn rasterize(&mut self, tex: &str, display: bool, dpi: f32) -> Result<MathRaster, MathError> {
+        let list = self.layout_list(tex, display)?;
+        let options = ratex_render::RenderOptions {
+            font_size: LOGICAL_FONT_SIZE,
+            padding: 0.0,
+            background_color: ratex_types::color::Color::new(0.0, 0.0, 0.0, 0.0),
+            font_dir: String::new(),
+            device_pixel_ratio: (dpi / 96.0).clamp(0.1, 16.0),
+        };
+        let png = ratex_render::render_to_png(&list, &options)
+            .map_err(|error| MathError::new(MathErrorKind::Internal, tex, error))?;
+        let decoded = image::load_from_memory(&png)
+            .map_err(|error| MathError::internal(tex, format!("PNG 解码失败：{error}")))?
+            .into_rgba8();
+        let (width, height) = decoded.dimensions();
+        Ok(MathRaster {
+            width,
+            height,
+            rgba: decoded.into_raw(),
+        })
+    }
+}
+
 /// `latex-rust` 后端（内嵌 STIX Two Math）。
 struct LatexRustBackend {
     font: Option<MathFont>,
@@ -384,6 +464,12 @@ pub struct MathCache {
 impl MathCache {
     /// 使用当前默认后端（`latex-rust`）。
     pub fn new() -> Self {
+        #[cfg(feature = "math-ratex")]
+        if std::env::var("PDF_READER_MATH_BACKEND")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("ratex"))
+        {
+            return Self::with_backend(Box::new(RatexBackend::new()));
+        }
         Self::with_backend(Box::new(LatexRustBackend::new()))
     }
 
@@ -684,6 +770,23 @@ mod tests {
             .render(&ctx(), "\\frac{1}{2}", true)
             .expect("SVG 公式应能渲染");
         assert!(image.size.x > 0.0 && image.size.y > 0.0);
+    }
+
+    #[cfg(feature = "math-ratex")]
+    #[test]
+    fn ratex_backend_renders_a_fraction() {
+        let mut cache = MathCache::with_backend(Box::new(RatexBackend::new()));
+        assert_eq!(cache.backend_name(), "RaTeX 0.1.15");
+        assert!(cache.capabilities().chemistry);
+        let image = cache
+            .render(&ctx(), "\\frac{1}{2}", true)
+            .expect("RaTeX 应能渲染");
+        assert!(image.size.x > 0.0 && image.size.y > 0.0);
+        // RaTeX 的 CJK/化学式能力（字体来自系统 fallback；没有字体时应回退原文而非 panic）。
+        let cjk = cache.render(&ctx(), "\\text{中文}", true);
+        assert!(cjk.is_ok(), "RaTeX CJK 失败：{:?}", cjk.err());
+        let chem = cache.render(&ctx(), "\\ce{H2O}", true);
+        assert!(chem.is_ok(), "RaTeX 化学式失败：{:?}", chem.err());
     }
 
     #[test]
