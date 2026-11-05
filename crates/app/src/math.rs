@@ -204,7 +204,8 @@ impl MathBackend for RatexBackend {
     fn capabilities(&self) -> MathCapabilities {
         MathCapabilities {
             backend: self.name(),
-            cjk_text: true,
+            // Ratex 通过系统 Unicode 字体/CJK fallback 支持中文；没有字体时如实报告。
+            cjk_text: ratex_unicode_font::unicode_font_data_ref().is_some(),
             chemistry: true,
             vector_svg: false,
         }
@@ -249,7 +250,10 @@ impl MathBackend for RatexBackend {
             }
         }
         if min_x > max_x || min_y > max_y {
-            return Err(MathError::internal(tex, "RaTeX 输出为空"));
+            return Err(MathError::internal(
+                tex,
+                "RaTeX 输出为空（CJK 需要系统 Unicode 字体或 RATEX_UNICODE_FONT）",
+            ));
         }
         let cropped =
             image::imageops::crop_imm(&decoded, min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)

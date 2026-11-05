@@ -88,6 +88,7 @@ cargo build --release -p app           # target/release/app（不带 lib/pdfium�
 运行时仍可用 `PDF_READER_MATH_BACKEND=svg|png|ratex` 覆盖（`ratex` 需要 `math-ratex` feature）。
 
 当前约 **494 个测试**。数学默认 `latex-rust` SVG；`math-ratex` feature 启用后默认 RaTeX。
+RaTeX 的 CJK `\text{...}` 需要系统 Unicode 字体，或设置 `RATEX_UNICODE_FONT=/path/to/CJK.otf`。
 PDFium 就绪时会跑真实样本。
 
 单独跑回放：

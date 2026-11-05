@@ -107,6 +107,7 @@ dependencies = [
  "ratex-parser",
  "ratex-render",
  "ratex-types",
+ "ratex-unicode-font",
  "resvg",
 ]
 

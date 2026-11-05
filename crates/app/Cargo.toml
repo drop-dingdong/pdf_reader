@@ -14,6 +14,7 @@ math-ratex = [
     "dep:ratex-layout",
     "dep:ratex-render",
     "dep:ratex-types",
+    "dep:ratex-unicode-font",
 ]
 
 [dependencies]
@@ -52,3 +53,4 @@ ratex-parser = { version = "0.1.15", optional = true }
 ratex-layout = { version = "0.1.15", optional = true }
 ratex-render = { version = "0.1.15", default-features = false, features = ["embed-fonts"], optional = true }
 ratex-types = { version = "0.1.15", optional = true }
+ratex-unicode-font = { version = "0.1.15", optional = true }
