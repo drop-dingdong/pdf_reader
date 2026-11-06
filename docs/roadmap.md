@@ -17,6 +17,9 @@
 
 ## 2. 已决定但还没做
 
+- **Markdown 空正文双击**：标题栏 ✎ 可用，双击未生效；等 `app.rs` 拆分后查交互层（不阻塞功能）。
+- **Linux Wayland 文件拖放**：winit 0.30 Wayland 后端不支持；触发条件：升级 eframe/winit 或实现 Wayland data-device。
+  临时 `env -u WAYLAND_DISPLAY`。目前不改。
 - **便签几何编辑**：拖动/缩放便签图标；目前只有固定 18pt，不能移动。
 - **多 path 墨迹**：外部墨迹的 `/InkList` 目前只显示第一条 path（其余只计数）；需要完整显示/编辑时再做。
 - **墨迹平移增强**：吸附、页面边界夹取、浮窗跟随；目前只支持墨迹，其它种类不能移动。
@@ -24,8 +27,8 @@
 - **Adobe 兼容性人工验证**：作者/时间/便签在 Acrobat 的显示与再保存（Okular 已验证）。
 - **图片预览/截图的更多来源**（目前只有页内引用点截图与手动文字/图片 preview）。
 - **注释正文参与页面搜索**：当前刻意不索引（`/Contents` 不在页面内容流里），侧栏搜索才覆盖。
-- **LaTeX 数学后续**：P1.5 已用 `latex-rust 3.0.1` + PNG 纹理跑通；后续再评估 SVG 矢量、
-  公式纹理按 key 缓存/淘汰、行内基线微调（CJK `\text{}` 仍回退原文）。
+- **LaTeX 数学后续**：`latex-rust` 默认 SVG（PNG 可 env 回退），数学纹理按 key 缓存/淘汰已完成；
+  行内基线仍受 CommonMark row 布局限制；CJK `\text{}` 依赖系统字体或 `RATEX_UNICODE_FONT`。
 - **RaTeX 后端评估（已起步）**：`math-ratex` 可选 feature 启用后默认用 RaTeX；`PDF_READER_MATH_BACKEND=svg/png`
   可回 latex-rust 对照。已跑通分式/CJK/化学式；`scripts/build.sh` 可按后端编译。后续再比较排版/性能/字体体积，不默认启用。
 - **内部截图 B3（可选）**：批量管理图片记录/清理旧 revision；当前按 32 张、64MB 自动淘汰。
@@ -37,8 +40,8 @@
 - **长词强制按字符换行**：当前长连续英文按不可断 token 走横向滚动；可选做“超长 token 强制断行”
   （会破坏 URL/代码可读性，默认关闭）。
 - **PDF 文档链接**：浮窗内 Markdown 锚点已完成（`{#id}`/`#id`）；PDF 页内/外部文档链接仍未做。
-- **Markdown 预处理缓存（已完成）**：规范化文本、最小宽度、图片引用按源文本哈希缓存；
-  `egui_commonmark` 的完整布局仍每帧重排，真正的布局复用需要上游/自研渲染器。
+- **Markdown 完整布局复用**：预处理缓存已完成；`egui_commonmark` 的完整布局仍每帧重排，
+  真正的布局复用需要上游/自研渲染器。
 - **编辑器打开位置定位到光标**：纯文本已按 `overflow_layout` 精确映射；Markdown 因渲染结果与源码
   行结构不同，目前按纵向比例近似，完整源码映射待后续做。
 

@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-04　分支：`feat/markdown-floats`　门禁：`./scripts/check.sh` 通过（497 个测试）。
+> 快照：2026-11-06　分支：`feat/markdown-floats`　门禁：`./scripts/check.sh` 通过（497 个测试）。
 
 ## 1. 它是什么
 
@@ -55,6 +55,10 @@
 
 ## 3. 当前已知限制
 
+- **Linux Wayland 外部文件拖放不可用**：winit 0.30 的 Wayland 后端不投递 DnD 事件；
+  用 `env -u WAYLAND_DISPLAY` 走 X11/XWayland 可用。Windows 正常。
+- **Markdown 空正文双击未生效**：标题栏 ✎ 可用；原因在空正文/ScrollArea 交互层，
+  等 `app.rs` 拆分后处理，不阻塞其它 Markdown 功能。
 - 外部注释的几何/颜色/样式仍只读；改正文/删除会写回 PDF。
 - 便签不支持拖动/缩放；墨迹平移没有吸附、页面边界夹取，浮窗不跟随。
 - 页面文本搜索不索引注释正文；侧栏搜索覆盖注释正文/作者。
@@ -64,7 +68,28 @@
 - 未接 CI；性能基线只能在固定机器上比较。
 - Adobe 对作者/时间的兼容性尚未人工验证（Okular 已验证）。
 
-## 4. 代码地图（先看哪）
+## 4. Markdown 模式计划完成情况
+
+| 项目 | 状态 | 说明 |
+| --- | --- | --- |
+| 文字浮窗 Markdown 阅读视图开关 | 完成 | 顶栏全局开关，`settings.json` 持久化 |
+| 单换行/块级公式空白规范化 | 完成 | 笔记语义硬换行；块内空行去重 |
+| 正式正文编辑器 | 完成 | 标题栏 ✎、双击、光标定位、未保存确认；空正文 ✎ 可用 |
+| LaTeX 数学后端抽象 | 完成 | `MathBackend`；`latex-rust` 默认 SVG，PNG 可 env 回退 |
+| 数学错误/帮助 UX | 完成 | 语法/字形/不支持/过大分类，帮助窗口与状态栏提示 |
+| 内部图片 B1 数据/解析 | 完成 | sidecar v4 `image_id`/`image_revision`、`ImageStore`、`pd-img` |
+| 内部图片 B2 UI/导出 | 完成 | 插入引用、@ 复制、懒渲染、旧 rev 规范化、base64 导出 |
+| Markdown 锚点 | 完成 | `## 标题 {#id}` + `[文字](#id)`，每浮窗独立缓存 |
+| hover 临时预览 Markdown | 完成 | 顶栏 `hover MD`，默认关闭 |
+| 侧栏图片 `@` 入口 | 完成 | 复制与固定浮窗一致的 `pd-img` URI |
+| Markdown 预处理缓存 | 完成 | 规范化/最小宽度/图片引用按源文本哈希；完整布局仍每帧执行 |
+| SVG 后端 | 完成，视觉验证暂缓 | 按 ppp/目标像素光栅化；等应用级 UI 缩放时一起验高 DPI |
+| RaTeX 可选后端 | 完成（可选） | `math-ratex` feature 默认 RaTeX；不默认构建；CJK 依赖系统字体 |
+| 行内公式行高/基线 | 部分完成 | 显式同步行高；前后文本基线仍受 CommonMark row 布局限制 |
+| Markdown 空正文双击 | 未完成 | 标题栏 ✎ 可用；交互层原因待整理 `app.rs` 后处理 |
+| Markdown 完整布局复用 | 未完成 | `egui_commonmark` 不暴露布局缓存；需上游/自研渲染器 |
+
+## 5. 代码地图（先看哪）
 
 | 路径 | 内容 |
 | --- | --- |
@@ -77,7 +102,7 @@
 | `crates/app/src/annotations_md.rs` | 注释摘要（Markdown） |
 | `scripts/check.sh` | fmt → clippy → test → 回放基线 → 文档链接 |
 
-## 5. 接手建议
+## 6. 接手建议
 
 1. 先读 [architecture.md](architecture.md) 的不变量清单，再读你准备改的模块对应的文档。
 2. 改 UI/保存/注释行为前读 [app-ui.md](app-ui.md)；改写回/读回前读 [writeback.md](writeback.md)、
