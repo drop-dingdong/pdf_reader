@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-06　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（498 个测试）。
+> 快照：2026-11-06　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（503 个测试）。
 
 ## 1. 它是什么
 
@@ -24,6 +24,11 @@
   `app.rs` 只剩状态/构造/入口（~0.6k），内联测试移到 `app/tests.rs`。
   **Phase 2**：`draw_canvas` 拆成 `canvas::{paint,interact}`、`draw_floats` 抽出正文绘制、
   `toolbar_rows` 拆成三行子方法。逐模块提交，10 份回放结构基线全程一致。
+- **引用点浮窗改大小**：新增 `ResizeDestMark`（历史写“调整引用点浮窗大小”），
+  数据指纹补 `DestMark.body_size`，连续 resize 按 1 秒窗口合并成一条；撤销回保存点重新干净。
+- **浮窗 z 序与指针归属**：双击编辑器只认最上层浮窗的正文区（标题栏按钮不再被下层正文抢）；
+  画布注释/右键的原始命中先裁剪到 canvas，再排除弹层/窗口/模态、连续动作和任意浮窗；
+  注释 hover 只保留 `Delete` 目标，不再高亮/置顶浮窗；指针离开画布立即清空。
 - **Markdown 空正文双击**：`detect_body_double_click` 不再对整个 Markdown 模式提前返回，
   只跳过**非空** Markdown 正文（它们有自己的链接/滚动控件），空正文仍走全窗双击层；
   新增无窗口双击回归测试。
