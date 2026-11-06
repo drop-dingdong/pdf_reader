@@ -1495,6 +1495,68 @@ mod annotation_body_tests {
         );
         assert!(app.custom_previews.is_empty());
     }
+
+    /// 回归：Markdown 模式下**空正文**浮窗也能双击打开正文编辑器。
+    ///
+    /// 这条之前是 roadmap 的已知限制：`markdown_floats` 时 `detect_body_double_click`
+    /// 直接返回，而空正文又不走正文内容控件，双击没有任何入口。
+    #[test]
+    fn empty_markdown_float_opens_editor_on_double_click() {
+        let mut app = app();
+        app.markdown_floats = true;
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 40.0), egui::vec2(320.0, 240.0));
+        app.custom_previews.push(CustomPreview {
+            id: 1,
+            page: PageIndex::FIRST,
+            point: Point::new(0.0, 0.0),
+            rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+            kind: CustomKind::Text,
+            title: "空正文".to_string(),
+            text: None,
+            snapshot: None,
+            body_size: DEFAULT_CUSTOM_TEXT_BODY,
+            scale: 1.0,
+            image_id: String::new(),
+            image_revision: 0,
+        });
+        app.floats.push(Float {
+            id: 1,
+            title: "空正文".to_string(),
+            content: FloatContent::Text(String::new()),
+            rect,
+            owner: FloatOwner::Custom(0),
+            body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
+            origin: None,
+        });
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let pos = egui::pos2(200.0, 160.0);
+        let click = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        // 两帧各一次点击：第二帧构成双击，验证全窗层能接住空正文。
+        for frame in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(canvas),
+                events: vec![egui::Event::PointerMoved(pos), click(true), click(false)],
+                time: Some(1.0 + frame as f64 * 0.05),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                app.draw_floats(ui, canvas);
+                app.detect_body_double_click(ui);
+            });
+            output.drop_without_applying_deltas();
+        }
+        assert!(
+            app.editing_body.is_some(),
+            "Markdown 空正文双击应打开正文编辑器"
+        );
+    }
 }
 
 #[cfg(test)]

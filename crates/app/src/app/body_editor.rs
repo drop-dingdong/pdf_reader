@@ -335,26 +335,32 @@ impl PdfReaderApp {
         if self.editing_body.is_some() {
             return;
         }
-        // Markdown 模式的正文有自己的内容控件（链接/滚动条）。这个全窗 click
-        // 层注册在浮窗之后，会按"后注册优先"挡住它们；双击改由
-        // `draw_floats` 里的 body 响应当场处理。
-        if self.markdown_floats {
-            return;
-        }
+        // Markdown 模式的**非空**正文有自己的内容控件（链接/滚动条）。这个全窗 click
+        // 层注册在浮窗之后，会按"后注册优先"挡住它们；这些浮窗的双击改由
+        // `draw_floats` 里的 body 响应当场处理。空正文没有内容控件，仍然走这条
+        // 全窗层 —— 否则 Markdown 模式下空正文双击没有任何入口。
+        let skip_markdown_body = self.markdown_floats;
         let targets: Vec<(u64, FloatOwner, egui::Rect)> = self
             .floats
             .iter()
-            .filter_map(|window| match window.owner {
-                FloatOwner::Custom(index) => {
-                    let preview = self.custom_previews.get(index)?;
-                    (preview.kind == CustomKind::Text).then_some((
-                        window.id,
-                        window.owner,
-                        window.rect,
-                    ))
+            .filter_map(|window| {
+                if skip_markdown_body
+                    && matches!(&window.content, FloatContent::Text(text) if !text.is_empty())
+                {
+                    return None;
                 }
-                FloatOwner::Annotation(_) => Some((window.id, window.owner, window.rect)),
-                FloatOwner::None => None,
+                match window.owner {
+                    FloatOwner::Custom(index) => {
+                        let preview = self.custom_previews.get(index)?;
+                        (preview.kind == CustomKind::Text).then_some((
+                            window.id,
+                            window.owner,
+                            window.rect,
+                        ))
+                    }
+                    FloatOwner::Annotation(_) => Some((window.id, window.owner, window.rect)),
+                    FloatOwner::None => None,
+                }
             })
             .collect();
         for (id, owner, rect) in targets {
