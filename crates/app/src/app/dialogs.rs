@@ -488,7 +488,7 @@ impl PdfReaderApp {
                         ui.label(
                             "CommonMark/GFM：标题、列表、表格、任务列表、删除线、脚注、\
                              定义列表、代码块、引用；原始 HTML 不执行；图片不加载；\
-                             外部链接只提示；单换行按硬换行保留。",
+                             外部链接只提示；pd-float:// 浮窗链接在应用内跳转；单换行按硬换行保留。",
                         );
                         ui.label(
                             "表格走完整渲染路径；代码块/表格/长 URL 会测最小内容宽度，\
@@ -498,6 +498,14 @@ impl PdfReaderApp {
                         ui.label(
                             "内部图片：图片 preview 浮窗点 @，或在引用点标记右键复制引用；\
                              也可在正文编辑窗口「插入内部图片」。只有打开的文字浮窗会渲染引用。",
+                        );
+                        ui.heading("浮窗引用");
+                        ui.monospace(
+                            "pd-float://annotation/<id>    pd-float://preview/<页>/<id>",
+                        );
+                        ui.label(
+                            "文字浮窗标题栏 ↗ 复制当前浮窗的引用链接，→ 跳到来源页/位置；\
+                             页号从 0 开始。旧写法 pd-float://preview/<id> 只在 id 唯一时可用。",
                         );
                         ui.separator();
                         ui.heading("数学语法");

@@ -2062,6 +2062,283 @@ mod pointer_ownership_tests {
     }
 }
 
+#[cfg(test)]
+mod float_link_tests {
+    use super::super::*;
+    use crate::view::{body_size_of, FLOAT_TITLE_HEIGHT};
+
+    fn app() -> PdfReaderApp {
+        PdfReaderApp::new_headless(
+            crate::clock::Clock::system(),
+            crate::diag::diagnostics_for_tests(),
+            None,
+        )
+    }
+
+    fn text_float(id: u64, owner: FloatOwner, title: &str) -> Float {
+        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 40.0), egui::vec2(280.0, 150.0));
+        Float {
+            id,
+            title: title.to_string(),
+            content: FloatContent::Text(String::new()),
+            rect,
+            owner,
+            body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
+            origin: None,
+        }
+    }
+
+    fn text_preview(page: PageIndex, id: u64) -> CustomPreview {
+        CustomPreview {
+            id,
+            page,
+            point: Point::new(10.0, 20.0),
+            rect: Rect::new(10.0, 20.0, 120.0, 80.0),
+            kind: CustomKind::Text,
+            title: format!("preview {id}"),
+            text: Some("正文".to_string()),
+            snapshot: None,
+            body_size: egui::vec2(200.0, 100.0),
+            scale: 1.0,
+            image_id: String::new(),
+            image_revision: 0,
+        }
+    }
+
+    #[test]
+    fn annotation_link_uri_round_trips_and_reuses_the_click_helper() {
+        let mut app = app();
+        app.add_annotation(
+            PageIndex::FIRST,
+            pdfcore::annotation::AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        );
+        let id = app.annotations.iter().next().expect("annotation").id;
+        app.floats
+            .push(text_float(1, FloatOwner::Annotation(id), "标注"));
+        let uri = app.float_link_uri(0).expect("link uri");
+        assert_eq!(uri, format!("pd-float://annotation/{}", id.get()));
+
+        // 关闭后点击链接 → 重新打开，且带一次性高亮
+        app.floats.clear();
+        app.follow_float_link(&uri);
+        assert_eq!(app.floats.len(), 1);
+        assert_eq!(app.floats[0].owner, FloatOwner::Annotation(id));
+        assert!(app.click_highlight.is_some(), "应从链接打开后高亮");
+
+        // 已有浮窗 → 置顶（最后一条）
+        app.floats.push(text_float(2, FloatOwner::None, "其他"));
+        app.follow_float_link(&uri);
+        assert_eq!(
+            app.floats.last().map(|f| f.owner),
+            Some(FloatOwner::Annotation(id))
+        );
+    }
+
+    #[test]
+    fn title_bar_link_button_copies_pd_float_uri() {
+        let mut app = app();
+        app.add_annotation(
+            PageIndex::FIRST,
+            pdfcore::annotation::AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        );
+        let id = app.annotations.iter().next().expect("annotation").id;
+        app.floats
+            .push(text_float(1, FloatOwner::Annotation(id), "标注"));
+        let rect = app.floats[0].rect;
+        // 标题栏宽度固定 18；↗ 在 close 左侧 52。
+        let position = egui::pos2(rect.right() - 65.0, rect.top() + FLOAT_TITLE_HEIGHT * 0.5);
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let mut copied = None;
+        for frame in 0..3 {
+            let events = match frame {
+                0 => vec![],
+                1 => vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+                _ => vec![egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(canvas),
+                events,
+                time: Some(frame as f64 * 0.05),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                app.draw_floats(ui, canvas);
+            });
+            for command in &output.platform_output.commands {
+                if let egui::OutputCommand::CopyText(text) = command {
+                    copied = Some(text.clone());
+                }
+            }
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(
+            copied.as_deref(),
+            Some(format!("pd-float://annotation/{}", id.get()).as_str())
+        );
+    }
+
+    #[test]
+    fn title_bar_goto_button_pushes_jump_commands() {
+        let mut app = app();
+        app.add_annotation(
+            PageIndex::FIRST,
+            pdfcore::annotation::AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        );
+        let id = app.annotations.iter().next().expect("annotation").id;
+        app.floats
+            .push(text_float(1, FloatOwner::Annotation(id), "标注"));
+        let rect = app.floats[0].rect;
+        let position = egui::pos2(rect.right() - 91.0, rect.top() + FLOAT_TITLE_HEIGHT * 0.5);
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        for frame in 0..3 {
+            let events = match frame {
+                0 => vec![],
+                1 => vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+                _ => vec![egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(canvas),
+                events,
+                time: Some(frame as f64 * 0.05),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                app.draw_floats(ui, canvas);
+            });
+            output.drop_without_applying_deltas();
+        }
+        let jumped = app.commands.iter().any(
+            |command| matches!(command, ViewerCommand::GoToPage(page) if *page == PageIndex::FIRST),
+        );
+        let centered = app.commands.iter().any(|command| {
+            matches!(
+                command,
+                ViewerCommand::CenterOnPagePoint { page, .. } if *page == PageIndex::FIRST
+            )
+        });
+        assert!(jumped && centered, "goto 应发跳页 + 居中命令");
+        assert_eq!(
+            app.annotation_focus.map(|(focus, _)| focus),
+            Some(id),
+            "注释跳转应带定位轮廓"
+        );
+    }
+
+    #[test]
+    fn preview_links_support_page_id_and_legacy_unique_id() {
+        let mut app = app();
+        app.custom_previews.push(text_preview(PageIndex::new(2), 7));
+        app.floats
+            .push(text_float(1, FloatOwner::Custom(0), "preview"));
+        assert_eq!(
+            app.float_link_uri(0).as_deref(),
+            Some("pd-float://preview/2/7")
+        );
+
+        // 显式页号 + id
+        app.floats.clear();
+        app.follow_float_link("pd-float://preview/2/7");
+        assert_eq!(app.floats.len(), 1);
+        assert_eq!(app.floats[0].owner, FloatOwner::Custom(0));
+
+        // 旧写法：id 唯一时可解析
+        app.floats.clear();
+        app.follow_float_link("pd-float://preview/7");
+        assert_eq!(app.floats.len(), 1);
+        assert_eq!(app.floats[0].owner, FloatOwner::Custom(0));
+    }
+
+    #[test]
+    fn markdown_link_consumption_dispatches_pd_float_and_keeps_external_hint() {
+        let mut app = app();
+        app.add_annotation(
+            PageIndex::FIRST,
+            pdfcore::annotation::AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        );
+        let id = app.annotations.iter().next().expect("annotation").id;
+        let uri = format!("pd-float://annotation/{}", id.get());
+        let ctx = egui::Context::default();
+
+        app.markdown_rendered = true;
+        ctx.output_mut(|output| {
+            output
+                .commands
+                .push(egui::OutputCommand::OpenUrl(egui::OpenUrl::same_tab(&uri)));
+        });
+        app.consume_markdown_links(&ctx);
+        assert_eq!(
+            app.floats.last().map(|float| float.owner),
+            Some(FloatOwner::Annotation(id)),
+            "pd-float 链接应被内部分发"
+        );
+
+        app.markdown_rendered = true;
+        ctx.output_mut(|output| {
+            output
+                .commands
+                .push(egui::OutputCommand::OpenUrl(egui::OpenUrl::same_tab(
+                    "https://example.com",
+                )));
+        });
+        app.consume_markdown_links(&ctx);
+        assert!(app.message.contains("外部链接"), "{}", app.message);
+    }
+
+    #[test]
+    fn broken_and_ambiguous_links_only_report() {
+        let mut app = app();
+        app.follow_float_link("pd-float://annotation/9999");
+        assert!(app.message.contains("断链"), "{}", app.message);
+        app.follow_float_link("pd-float://preview/3/9999");
+        assert!(app.message.contains("断链"), "{}", app.message);
+
+        // 同一个 id 出现在两页 → 旧写法必须提示歧义，不打开错误的浮窗
+        app.custom_previews.push(text_preview(PageIndex::new(0), 5));
+        app.custom_previews.push(text_preview(PageIndex::new(1), 5));
+        app.follow_float_link("pd-float://preview/5");
+        assert!(app.message.contains("不明确"), "{}", app.message);
+        assert!(app.floats.is_empty());
+    }
+}
+
 mod external_annotation_tests {
     use super::super::*;
     use pdfcore::annotation::AnnotationKind;

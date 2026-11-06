@@ -4,8 +4,8 @@ use super::*;
 
 use crate::view::{
     body_size_of, clamp_float_rect, drag_float_rect, find_float_for_custom, fit_inside,
-    float_rect_at_row, float_size_for_body, move_to_last, overflow_layout, CUSTOM_SYMBOL_EDIT,
-    FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
+    float_rect_at_row, float_size_for_body, move_to_last, overflow_layout, parse_float_link,
+    FloatLinkTarget, CUSTOM_SYMBOL_EDIT, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
 };
 use eframe::egui;
 use egui::{Align2, Color32, CornerRadius, Id, Sense, Stroke, StrokeKind, Vec2 as EVec2};
@@ -513,6 +513,131 @@ impl PdfReaderApp {
         self.message = "已生成该自定义preview浮窗".to_string();
     }
 
+    /// 新浮窗的级联落点（没有行列上下文时使用，例如从 `pd-float://` 链接打开）。
+    fn next_float_position(&self) -> egui::Pos2 {
+        let cascade = (self.floats.len() % 6) as f32 * 24.0;
+        let base = if self.canvas_rect.width() > 1.0 {
+            self.canvas_rect.min
+        } else {
+            egui::pos2(24.0, 24.0)
+        };
+        base + egui::vec2(24.0 + cascade, 24.0 + cascade)
+    }
+
+    /// 这条浮窗可被 `pd-float://` 引用的 URI（只有注释/自定义 preview 有稳定目标）。
+    pub(super) fn float_link_uri(&self, index: usize) -> Option<String> {
+        match self.floats.get(index)?.owner {
+            FloatOwner::Annotation(id) => Some(format!("pd-float://annotation/{}", id.get())),
+            FloatOwner::Custom(index) => {
+                let preview = self.custom_previews.get(index)?;
+                Some(format!(
+                    "pd-float://preview/{}/{}",
+                    preview.page.get(),
+                    preview.id
+                ))
+            }
+            FloatOwner::None => None,
+        }
+    }
+
+    /// 浮窗来源页/页内坐标（标题栏 goto 按钮用）。
+    pub(super) fn float_goto_target(&self, index: usize) -> Option<(PageIndex, Point)> {
+        let window = self.floats.get(index)?;
+        match window.owner {
+            FloatOwner::Annotation(id) => {
+                let annotation = self.annotations.get(id)?;
+                let point = annotation
+                    .bounds()
+                    .map(|bounds| bounds.center())
+                    .unwrap_or(Point::new(0.0, 0.0));
+                Some((annotation.page, point))
+            }
+            FloatOwner::Custom(index) => {
+                let preview = self.custom_previews.get(index)?;
+                Some((preview.page, preview.point))
+            }
+            FloatOwner::None => {
+                let (page, mark_index) = window.origin?;
+                let mark = self.dest_marks.get(page.get() as usize)?.get(mark_index)?;
+                Some((page, mark.point))
+            }
+        }
+    }
+
+    /// 处理 Markdown 里的 `pd-float://` 链接：打开/置顶目标浮窗，断链只提示。
+    pub(super) fn follow_float_link(&mut self, url: &str) {
+        let Some(target) = parse_float_link(url) else {
+            self.message = format!("无法识别的浮窗链接：{url}");
+            return;
+        };
+        match target {
+            FloatLinkTarget::Annotation(raw) => {
+                let id = AnnotationId(raw);
+                if self.annotations.get(id).is_none() {
+                    self.message = format!("断链：注释 #{} 不存在（可能来自其他文档）", id.get());
+                    return;
+                }
+                let at = self.next_float_position();
+                self.open_annotation_note(id, at);
+                self.message = format!("已跳转到注释 #{}", id.get());
+            }
+            FloatLinkTarget::Preview { page, id } => {
+                match self
+                    .custom_previews
+                    .iter()
+                    .position(|preview| preview.page == page && preview.id == id)
+                {
+                    Some(index) => self.open_custom_float_by_link(index),
+                    None => {
+                        self.message = format!(
+                            "断链：第 {} 页没有 id={} 的自定义preview",
+                            page.display_number(),
+                            id
+                        );
+                    }
+                }
+            }
+            FloatLinkTarget::PreviewById(id) => {
+                let matches: Vec<usize> = self
+                    .custom_previews
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, preview)| (preview.id == id).then_some(index))
+                    .collect();
+                match matches.as_slice() {
+                    [index] => self.open_custom_float_by_link(*index),
+                    [] => {
+                        self.message = format!("断链：没有 id={id} 的自定义preview");
+                    }
+                    _ => {
+                        self.message = format!(
+                            "链接不明确：id={id} 在多页都存在，请改用 pd-float://preview/<页>/<id>"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// 从链接打开/置顶一条自定义 preview 浮窗。
+    fn open_custom_float_by_link(&mut self, index: usize) {
+        if let Some(id) = self.highlight_existing_custom_float(index) {
+            self.click_highlight = Some((id, self.clock.now() + CLICK_HIGHLIGHT));
+            self.message = "已置顶该自定义preview浮窗".to_string();
+            return;
+        }
+        let Some(preview) = self.custom_previews.get(index) else {
+            return;
+        };
+        let size = float_size_for_body(preview.body_size, FLOAT_TITLE_HEIGHT);
+        let rect = egui::Rect::from_min_size(self.next_float_position(), size);
+        self.spawn_custom_float(index, rect);
+        if let Some(window) = self.floats.last() {
+            self.click_highlight = Some((window.id, self.clock.now() + CLICK_HIGHLIGHT));
+        }
+        self.message = "已打开该自定义preview浮窗".to_string();
+    }
+
     /// 关闭浮窗并清理正文编辑状态（如果编辑的正是这个浮窗）。
     pub(super) fn close_float(&mut self, id: u64) {
         let owner = self
@@ -694,13 +819,27 @@ impl PdfReaderApp {
                 StrokeKind::Inside,
             );
             painter.rect_filled(title_rect, CornerRadius::same(4), title_color);
+            // 文字浮窗的引用链接 / goto 目标（按钮在标题右侧，标题按数量预留宽度）。
+            let link_uri = if has_text {
+                self.float_link_uri(index)
+            } else {
+                None
+            };
+            let goto_target = if has_text {
+                self.float_goto_target(index)
+            } else {
+                None
+            };
+            let reserved = 54.0
+                + if link_uri.is_some() { 26.0 } else { 0.0 }
+                + if goto_target.is_some() { 26.0 } else { 0.0 };
             // 标题：**单行截断**（长标题不再压到关闭按钮上）
             let title_font = egui::FontId::proportional(13.0);
             let title_job = overflow_layout(
                 &self.floats[index].title,
                 title_font,
                 Color32::WHITE,
-                title_rect.width() - 54.0,
+                (title_rect.width() - reserved).max(24.0),
                 1,
             );
             let title_galley = painter.layout_job(title_job);
@@ -775,6 +914,56 @@ impl PdfReaderApp {
                         let text = text.clone();
                         self.open_body_editor(owner, text, None, ui.ctx());
                     }
+                }
+            }
+            // 文字浮窗：复制 `pd-float://` 引用链接。
+            if let Some(uri) = link_uri {
+                let center = egui::pos2(close_center.x - 52.0, title_rect.center().y);
+                let button_rect = egui::Rect::from_center_size(center, EVec2::splat(18.0));
+                let response =
+                    ui.interact(button_rect, Id::unique(("float-link", id)), Sense::click());
+                ui.painter().text(
+                    center,
+                    Align2::CENTER_CENTER,
+                    "\u{2197}",
+                    egui::FontId::proportional(13.0),
+                    if response.hovered() {
+                        Color32::from_gray(235)
+                    } else {
+                        Color32::from_gray(190)
+                    },
+                );
+                if response.on_hover_text("复制引用链接").clicked() {
+                    ui.ctx().copy_text(uri);
+                    self.message = "已复制引用链接，可粘到正文".to_string();
+                }
+            }
+            // 文字浮窗：跳到来源页/位置（与侧栏 → 同一动作）。
+            if let Some((page, point)) = goto_target {
+                let center = egui::pos2(close_center.x - 78.0, title_rect.center().y);
+                let button_rect = egui::Rect::from_center_size(center, EVec2::splat(18.0));
+                let response =
+                    ui.interact(button_rect, Id::unique(("float-goto", id)), Sense::click());
+                ui.painter().text(
+                    center,
+                    Align2::CENTER_CENTER,
+                    "\u{2192}",
+                    egui::FontId::proportional(13.0),
+                    if response.hovered() {
+                        Color32::from_gray(235)
+                    } else {
+                        Color32::from_gray(190)
+                    },
+                );
+                if response.on_hover_text("跳到来源页/位置").clicked() {
+                    self.commands.push(ViewerCommand::GoToPage(page));
+                    self.commands
+                        .push(ViewerCommand::CenterOnPagePoint { page, point });
+                    if let FloatOwner::Annotation(annotation) = self.floats[index].owner {
+                        self.annotation_focus =
+                            Some((annotation, self.clock.now() + ANNOTATION_FOCUS));
+                    }
+                    self.message = format!("已跳转到来源（第 {} 页）", page.display_number());
                 }
             }
             // 图片 preview 浮窗：@ 复制内部图片引用，便于粘进注释正文。
@@ -894,7 +1083,15 @@ impl PdfReaderApp {
                 _ => true,
             });
         });
-        if let Some(url) = opened.last() {
+        let mut external = None;
+        for url in opened {
+            if url.starts_with("pd-float://") {
+                self.follow_float_link(&url);
+            } else {
+                external = Some(url);
+            }
+        }
+        if let Some(url) = external {
             self.message = format!("外部链接：{url}（打开浏览器暂未实现）");
         }
     }

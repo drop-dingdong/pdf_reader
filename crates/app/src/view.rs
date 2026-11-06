@@ -1956,6 +1956,45 @@ impl<V> KeyedStore<V> {
     }
 }
 
+/// 文字浮窗里的 `pd-float://` 链接目标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatLinkTarget {
+    /// `pd-float://annotation/<id>`：本会话内的注释 id。
+    Annotation(u64),
+    /// `pd-float://preview/<page>/<id>`：显式页号 + preview id。
+    Preview {
+        /// 页号（0 起，内部 `PageIndex`）。
+        page: PageIndex,
+        /// preview 在该页内的 id。
+        id: u64,
+    },
+    /// `pd-float://preview/<id>`：只给 id 的旧写法；解析时需要检查是否唯一。
+    PreviewById(u64),
+}
+
+/// 解析文字浮窗里的 `pd-float://` 链接。
+///
+/// 支持：
+/// * `pd-float://annotation/<id>`
+/// * `pd-float://preview/<page>/<id>`（推荐，页号 0 起）
+/// * `pd-float://preview/<id>`（兼容旧写法；`<id>` 跨页不唯一时需要调用方提示歧义）
+///
+/// 非 `pd-float://`、空段、非数字 id 都返回 `None`。
+pub fn parse_float_link(url: &str) -> Option<FloatLinkTarget> {
+    let rest = url.strip_prefix("pd-float://")?;
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
+    match parts.as_slice() {
+        ["annotation", id] => id.parse().ok().map(FloatLinkTarget::Annotation),
+        ["preview", id] => id.parse().ok().map(FloatLinkTarget::PreviewById),
+        ["preview", page, id] => Some(FloatLinkTarget::Preview {
+            page: PageIndex::new(page.parse().ok()?),
+            id: id.parse().ok()?,
+        }),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4199,5 +4238,39 @@ mod tests {
         // 其它可见页同样"当前 + 最近旧档"
         assert!(store.contains(&key(other, 2.0, Rotation::None)));
         assert!(store.contains(&key(other, 1.5, Rotation::None)));
+    }
+
+    #[test]
+    fn float_link_parses_annotation_and_preview_forms() {
+        assert_eq!(
+            parse_float_link("pd-float://annotation/42"),
+            Some(FloatLinkTarget::Annotation(42))
+        );
+        assert_eq!(
+            parse_float_link("pd-float://preview/3/7"),
+            Some(FloatLinkTarget::Preview {
+                page: PageIndex::new(3),
+                id: 7
+            })
+        );
+        assert_eq!(
+            parse_float_link("pd-float://preview/7"),
+            Some(FloatLinkTarget::PreviewById(7))
+        );
+        // 查询串/锚点不影响解析
+        assert_eq!(
+            parse_float_link("pd-float://annotation/42?x=1"),
+            Some(FloatLinkTarget::Annotation(42))
+        );
+    }
+
+    #[test]
+    fn float_link_rejects_other_schemes_and_bad_segments() {
+        assert_eq!(parse_float_link("https://example.com"), None);
+        assert_eq!(parse_float_link("pd-float://"), None);
+        assert_eq!(parse_float_link("pd-float://annotation/"), None);
+        assert_eq!(parse_float_link("pd-float://annotation/abc"), None);
+        assert_eq!(parse_float_link("pd-float://preview/1/2/3"), None);
+        assert_eq!(parse_float_link("pd-float://document/1"), None);
     }
 }

@@ -567,6 +567,7 @@ impl PdfReaderApp {
             origin: None,
         });
         self.highlight_float = Some(float_id);
+        self.click_highlight = Some((float_id, self.clock.now() + CLICK_HIGHLIGHT));
     }
 
     /// "编辑历史"可视列表：只是撤销栈的**视图**（点击不做状态跳转）。
