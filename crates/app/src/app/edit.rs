@@ -224,6 +224,7 @@ impl PdfReaderApp {
     /// 撤销一步（反向应用栈顶命令）。
     pub(super) fn undo_edit(&mut self) {
         self.last_preview_resize = None;
+        self.last_dest_resize = None;
         let Some(entry) = self.history.undo() else {
             self.message = "没有可撤销的编辑".to_string();
             return;
@@ -324,6 +325,7 @@ impl PdfReaderApp {
     /// 重做一步。
     pub(super) fn redo_edit(&mut self) {
         self.last_preview_resize = None;
+        self.last_dest_resize = None;
         let Some(entry) = self.history.redo() else {
             self.message = "没有可重做的编辑".to_string();
             return;
