@@ -1295,6 +1295,8 @@ pub struct PdfReaderApp {
     markdown_prepared: std::collections::HashMap<u64, PreparedMarkdown>,
     /// 拖入文件 hover 日志只打一次，避免 Wayland 调度每帧刷屏。
     drag_hover_logged: bool,
+    /// Ctrl+S 在 egui 帧内无法安全借 session；延后到 session 放回后执行。
+    pending_save: bool,
     /// LaTeX 公式的 PNG 纹理缓存与内嵌字体（全局共用）。
     math_cache: std::rc::Rc<std::cell::RefCell<crate::math::MathCache>>,
     /// 数学公式支持/限制帮助窗口是否打开。
@@ -1554,6 +1556,7 @@ impl PdfReaderApp {
             markdown_viewports: std::collections::HashMap::new(),
             markdown_prepared: std::collections::HashMap::new(),
             drag_hover_logged: false,
+            pending_save: false,
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(crate::math::MathCache::new())),
             math_help: false,
             images: crate::image_store::ImageStore::default(),
@@ -3666,7 +3669,9 @@ impl PdfReaderApp {
         });
         if save_shortcut {
             if self.editing_body.is_none() {
-                self.save_all();
+                // 本函数持有的是 `session` 的借用，而 `save_all` 需要 `self.session`
+                // （此刻字段是 None）；延后到本帧末尾 session 放回后再写。
+                self.pending_save = true;
             } else {
                 self.message = "正文编辑器有未保存草稿：请用 Ctrl+Enter 保存正文".to_string();
             }
@@ -9697,7 +9702,22 @@ impl PdfReaderApp {
                         rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 6.0),
                         rect.max - EVec2::new(18.0, 16.0),
                     );
-                    if body_area.width() > 0.0 && body_area.height() > 0.0 {
+                    if text.is_empty() {
+                        // 空正文没有 CommonMark 内容；不创建 ScrollArea（它会吞掉双击），
+                        // 用一个明确的正文点击层作为唯一响应。
+                        self.markdown_rendered = true;
+                        if body_area.width() > 0.0 && body_area.height() > 0.0 {
+                            let hit = ui.interact(
+                                body_area,
+                                Id::unique(("float-md-empty-edit", id)),
+                                Sense::click(),
+                            );
+                            if hit.double_clicked() && self.editing_body.is_none() {
+                                let owner = self.floats[index].owner;
+                                self.open_body_editor(owner, String::new(), None, ui.ctx());
+                            }
+                        }
+                    } else if body_area.width() > 0.0 && body_area.height() > 0.0 {
                         let source_hash = markdown_source_hash(text);
                         let prepared = self.markdown_prepared.remove(&id);
                         let prepared = match prepared {
@@ -9796,20 +9816,6 @@ impl PdfReaderApp {
                         );
                         self.markdown_caches.insert(id, md_cache);
                         self.markdown_rendered = true;
-                        // Markdown 的 ScrollArea 会注册覆盖正文的响应，空正文时连
-                        // double-click 都被它吞掉；这里最后补一个空正文专用命中层。
-                        if text.is_empty() && !matches!(self.floats[index].owner, FloatOwner::None)
-                        {
-                            let hit = ui.interact(
-                                body_area,
-                                Id::unique(("float-md-empty-edit", id)),
-                                Sense::click(),
-                            );
-                            if hit.double_clicked() && self.editing_body.is_none() {
-                                let owner = self.floats[index].owner;
-                                self.open_body_editor(owner, String::new(), None, ui.ctx());
-                            }
-                        }
                     }
                 }
                 FloatContent::Text(text) => {
@@ -10193,6 +10199,11 @@ impl eframe::App for PdfReaderApp {
         // 此时记下来会把"第 1 页"写进设置，反而把上次位置覆盖掉。
         if self.settings_dirty && !ctx.input(|input| input.pointer.any_down()) {
             self.flush_settings(Some(&ctx));
+        }
+        // Ctrl+S 同样要等 session 放回；这是它之前“按了没反应”的根因。
+        if std::mem::take(&mut self.pending_save) {
+            self.save_all();
+            ctx.request_repaint();
         }
         // 菜单里请求的"打开另一个文件"放在最后：此时 `self.session` 已经放回，
         // 打开新文档不会被旧 session 覆盖，也不会把新文件的阅读状态写坏。

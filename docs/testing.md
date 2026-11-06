@@ -106,7 +106,7 @@ cargo run -p app -- --replay scripts/replay/tiling_800.json --timing
 | 10t | 打开正文为空的注释/自定义 preview 浮窗 | 标题栏 ✎ 可见；双击正文能打开编辑器 |
 | 10u | 打开 `scripts/replay/sample/error/annotation_pos_error.pdf` | 注释与页面文字对齐；移动/写回后重开仍对齐 |
 | 10v | 空正文浮窗在 Markdown 开/关下双击 | 两种模式都能打开正文编辑器 |
-| 10w | Linux Wayland 拖入 PDF；观察终端 `[drag]` | winit 0.30 Wayland 可能不投递；`WINIT_UNIX_BACKEND=x11` 下应打印路径并打开 |
+| 10w | Linux Wayland 拖入 PDF；观察终端 `[drag]` | winit 0.30 Wayland 不投递；`env -u WAYLAND_DISPLAY` 走 X11 后应打印路径并打开 |
 | 10x | 主视图/输入框聚焦时按 `Ctrl+S` | 触发保存；正文编辑器草稿时提示 `Ctrl+Enter` |
 | 10r | `./scripts/build.sh --backend ratex` 后运行；再用 `PDF_READER_MATH_BACKEND=svg` 对照 | 分式/上下标/矩阵/化学式按 RaTeX 渲染；`\text{中文}` 在系统有 CJK 字体或设 `RATEX_UNICODE_FONT` 时正常，缺字体时回退原文而不拉伸；`--backend latex-svg/latex-png` 默认后端正确 |
 
