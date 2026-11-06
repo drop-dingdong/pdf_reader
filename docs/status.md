@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-06　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（504 个测试）。
+> 快照：2026-11-06　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（506 个测试）。
 
 ## 1. 它是什么
 
@@ -32,6 +32,8 @@
   弹层判定用**图层顺序**（非 Background）而不是 `is_pointer_over_egui()`：
   后者按 root Ui 剩余矩形判断，而 `CentralPanel` 会消费掉剩余区域，导致画布 hover 被误判。
   新增 `canvas_annotation_hover_right_click_and_delete_are_scoped` 覆盖 hover/右键/Delete/侧栏越界。
+- **浮窗拖动遮罩**：每个浮窗先注册一个只感知 drag 的全 rect 遮罩；高浮窗正文（Markdown 只感知 click）
+  上的拖动不再落到下层浮窗的标题栏/图片正文，也不会漏到 PDF 正文。标题/正文/手柄的拖动仍按各自控件工作。
 - **Markdown 空正文双击**：`detect_body_double_click` 不再对整个 Markdown 模式提前返回，
   只跳过**非空** Markdown 正文（它们有自己的链接/滚动控件），空正文仍走全窗双击层；
   新增无窗口双击回归测试。
