@@ -32,7 +32,7 @@
 | --- | --- |
 | `pdfcore` | 9 个 trait、领域类型、`DocumentSession`、几何/布局/分块/波段/缓存/调度/文本；`testkit` 假后端 |
 | `backend-pdfium` | 文档几何、导航索引、渲染、字符级文本；`pdf_index`/`readback` 解析注释；`pdf_patch` 追加对象；`writeback`（子进程 FFI）；`pdf_compact` |
-| `app` | `view`（纯逻辑，可测）+ `app`（egui 胶水、状态机）+ `persist`（`.pdf.json`）+ `settings` + `annotations_md` + `replay` |
+| `app` | `view`（纯逻辑，可测）+ `app`（egui 胶水、状态机）+ `persist`/`settings`（存档与设置）+ `export`/`writeback`/`compact`（写回与整理编排）+ `annotations_md` + `image_store` + `markdown`/`math` + `replay` |
 
 ## 3. 模块地图（按职责）
 
@@ -53,13 +53,22 @@
 
 ### app
 - `view.rs`：坐标换算、输入映射、`KeyedStore`、画法决策 `plan_page`、快照拼合、浮窗几何、
- 摘要文案；**能脱离窗口验证的逻辑一律在这里**。
-- `app.rs`：面板/画布/交互/浮窗/侧栏/对话框/保存与未保存提示状态机。
+ 摘要文案；**能脱离窗口验证的逻辑一律在这里**（当前 ~4.2k 行）。
+- `app.rs`：面板/画布/交互/浮窗/侧栏/对话框/保存与未保存提示状态机（当前 ~12.2k 行，
+  含 154 个字段与 ~1.7k 行内联测试；拆分计划见 [roadmap.md](roadmap.md)）。
 - `markdown.rs`：浮窗 Markdown 预处理（单换行→硬换行、最小内容宽度测量）。
-- `math.rs`：LaTeX `MathBackend` trait、PNG 后端、公式纹理缓存与错误类型。
+- `math.rs`：LaTeX `MathBackend` trait、SVG（PNG 可回退）后端、公式纹理缓存与错误类型。
 - `persist.rs`：`.pdf.json` 手写 JSON + 版本迁移（未知字段不保留）。
 - `settings.rs`：`settings.json`（缺字段默认、坏文件改名 `.bad-*`、原子写）。
+- `export.rs`：写回 job 组装、`--writeback` 子进程调用、校验与原子改名。
+- `writeback.rs`：子进程侧 `--writeback` job 执行。
+- `compact.rs`：`--compact` 整理副本与校验。
+- `image_store.rs`：内部图片 PNG 缓存与 `pd-img` loader。
+- `history.rs`：撤销栈（带 `affects_pdf` 标记的修订号）。
 - `annotations_md.rs`：注释摘要（Markdown）。
+- `json.rs`：极简 JSON 解析/序列化。
+- `clock.rs` / `diag.rs`：可注入时钟、诊断去处。
+- `ink.rs`：墨迹手势状态机。
 - `replay.rs`：脚本驱动真实 `App::ui`，逐帧采集 + 断言 + 结构基线。
 
 ## 4. 运行时数据流
@@ -197,7 +206,8 @@ app::compact::run_child → app --compact <in> <out>
 ## 9. 架构层面的已知限制
 
 - 纹理层按条目数限额，没有显存字节预算；上传/像素转换没有字节预算。
-- `app.rs` 很大；纯逻辑已尽量下沉到 `view.rs`，但面板/对话框仍集中在一处。
+- `app.rs` 很大（~12.2k 行、一个 impl、154 个字段）；纯逻辑已尽量下沉到 `view.rs`，
+  但面板/画布/对话框仍集中在一处，拆分计划见 [roadmap.md](roadmap.md)。
 - 无头回放只覆盖主视图渲染主线；UI 对话框、浮窗、便签、保存提示依赖人工验收。
 - `.pdf.json` 不保留未知字段；新旧版本互读会有字段丢失（只做加法迁移，不做无损往返）。
 - 性能基线只能在同类机器上比较，未接 CI。

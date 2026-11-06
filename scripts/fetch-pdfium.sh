@@ -5,7 +5,7 @@
 #   scripts/fetch-pdfium.sh              # 自动识别当前平台
 #   scripts/fetch-pdfium.sh linux-x64    # 指定平台
 #
-# 说明：bblanchon/pdfium-binaries **只提供动态库**，不提供静态库（见 docs/framework-selection.md §4）。
+# 说明：bblanchon/pdfium-binaries **只提供动态库**，不提供静态库。
 # 支持的平台标识：linux-x64 / linux-arm64 / mac-x64 / mac-arm64 / mac-univ / win-x64 / win-x86 / win-arm64
 #
 # Windows 注意：bblanchon 的 tar 包里，**运行库** pdfium.dll 在 `bin/` 下，

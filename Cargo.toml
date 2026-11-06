@@ -8,7 +8,7 @@ edition = "2021"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 
-# 发布配置：面向"单文件/小体积"优化（见 docs/framework-selection.md §4）
+# 发布配置：面向"单文件/小体积"优化
 [profile.release]
 lto = "fat"
 codegen-units = 1

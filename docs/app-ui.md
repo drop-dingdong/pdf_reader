@@ -1,18 +1,29 @@
 # UI 层（现状）
 
-> `app` crate = `view`（纯逻辑，可单测）+ `app`（egui 胶水，需真机）+ `persist`（存档 JSON）。
+> `app` crate = `view`（纯逻辑，可单测）+ `app`（egui 胶水，需真机）+ 存档/设置/写回/整理等无 UI 模块。
 > 这里的每条"每帧顺序"与"层级"都直接对应代码；改动请同步本文。
 
 ## 1. 模块划分
 
 | 模块 | 内容 | 怎么验证 |
 | --- | --- | --- |
-| [`view.rs`](../crates/app/src/view.rs) (~2.9k) | 坐标换算、输入映射、`KeyedStore`、画法决策（`plan_page`/`preview_source`/`underlay_source`）、快照拼合（`compose_snapshot`/`compose_region_snapshot`）、浮窗几何、持久化辅助 | `cargo test -p app --lib` |
-| [`app.rs`](../crates/app/src/app.rs) (~4.2k) | egui 胶水：面板、画布、交互、浮窗、侧栏、截图、对话框 | **需要真实窗口 → 人工验收**（见 [`testing.md`](testing.md) §6） |
-| [`ink.rs`](../crates/app/src/ink.rs) (~0.2k) | 墨迹手势状态机（纯逻辑）：页面空间采样、0.5 抽稀、2000 点上限、收笔判定 | `cargo test -p app --lib ink::` |
-| [`math.rs`](../crates/app/src/math.rs) | LaTeX 后端 trait、`latex-rust` PNG 实现、公式纹理缓存、错误类型 | `cargo test -p app --lib math::` |
-| [`persist.rs`](../crates/app/src/persist.rs) (~0.7k) | 存档 JSON（手写序列化 + 极简 JSON 解析）+ 版本迁移 | `cargo test -p app --lib persist::` |
-| `main.rs` / `lib.rs` | 启动、拖放、命令行参数 | 人工 |
+| [`view.rs`](../crates/app/src/view.rs) (~4.2k) | 坐标换算、输入映射、`KeyedStore`、画法决策（`plan_page`/`preview_source`/`underlay_source`）、快照拼合（`compose_snapshot`/`compose_region_snapshot`）、浮窗几何、持久化辅助 | `cargo test -p app --lib` |
+| [`app.rs`](../crates/app/src/app.rs) (~12.2k) | egui 胶水：面板、画布、交互、浮窗、侧栏、截图、对话框、保存/未保存状态机 | **需要真实窗口 → 人工验收**（见 [`testing.md`](testing.md) §6） |
+| [`app/replay.rs`](../crates/app/src/app/replay.rs) (+`replay/baseline.rs`、`replay/samples.rs`，合计 ~3.2k) | 无窗口回放：脚本驱动真实 `App::ui`，逐帧采集与结构基线 | `cargo run -p app -- --replay …` |
+| [`math.rs`](../crates/app/src/math.rs) (~0.9k) | LaTeX 后端 trait、`latex-rust` SVG（PNG 可回退）实现、公式纹理缓存、错误类型 | `cargo test -p app --lib math::` |
+| [`markdown.rs`](../crates/app/src/markdown.rs) (~0.3k) | 浮窗 Markdown 预处理（单换行→硬换行、最小内容宽度测量） | `cargo test -p app --lib markdown::` |
+| [`image_store.rs`](../crates/app/src/image_store.rs) (~0.5k) | 内部图片 PNG 缓存（32 张/64MB）与 `pd-img` loader | `cargo test -p app --lib image_store::` |
+| [`ink.rs`](../crates/app/src/ink.rs) (~0.24k) | 墨迹手势状态机（纯逻辑）：页面空间采样、0.5 抽稀、2000 点上限、收笔判定 | `cargo test -p app --lib ink::` |
+| [`persist.rs`](../crates/app/src/persist.rs) (~1.6k) | 存档 JSON（手写序列化 + 极简 JSON 解析）+ 版本迁移 | `cargo test -p app --lib persist::` |
+| [`settings.rs`](../crates/app/src/settings.rs) (~0.7k) | `settings.json`（缺字段默认、坏文件改名 `.bad-*`、原子写） | `cargo test -p app --lib settings::` |
+| [`export.rs`](../crates/app/src/export.rs) (~1.0k) | 写回 job 组装、`--writeback` 子进程调用、校验与原子改名 | `cargo test -p app --test writeback_cli` |
+| [`writeback.rs`](../crates/app/src/writeback.rs) (~0.5k) | 子进程侧 `--writeback` job 执行 | `cargo test -p app --test writeback_cli` |
+| [`compact.rs`](../crates/app/src/compact.rs) (~0.2k) | 整理副本子进程入口与校验 | `cargo test -p app --test compact_cli` |
+| [`history.rs`](../crates/app/src/history.rs) (~0.3k) | 撤销栈（带 `affects_pdf` 标记的修订号） | `cargo test -p app --lib history::` |
+| [`annotations_md.rs`](../crates/app/src/annotations_md.rs) (~0.2k) | 注释摘要 Markdown 渲染 | `cargo test -p app --lib annotations_md::` |
+| [`json.rs`](../crates/app/src/json.rs) (~0.3k) | 极简 JSON 解析/序列化 | `cargo test -p app --lib json::` |
+| `clock.rs` / `diag.rs` (~0.2k 合计) | 可注入时钟（回放/测试）、诊断去处（stderr 或内存缓冲） | `cargo test -p app --lib clock::` |
+| `main.rs` / `lib.rs` | 启动、子命令分发（`--writeback` / `--compact` / `--replay`）、模块导出 | 人工 |
 
 约定：**能脱离窗口验证的逻辑一律放 `view.rs`**；`app.rs` 只留"读输入、调会话、画"。
 
@@ -252,7 +263,7 @@ ensure_textures(allow_upload)
 
 ## 10. 已知债务
 
-* `app.rs` 单体偏大（~4.2k 行、一个 impl）：绘制/侧栏/浮窗/截图/存档胶水混在一处。
+* `app.rs` 单体偏大（~12.2k 行、一个 impl、154 个字段）：绘制/侧栏/浮窗/截图/存档胶水混在一处。
  新逻辑优先落 `view.rs`；`app.rs` 拆分见 [roadmap.md](roadmap.md)。
 * 上传与像素转换没有字节预算：`MAX_UPLOADS_PER_FRAME` 按**页**计，一页可能一次传几十块。
 * 纹理层按条目数限额（128），没有显存预算。
