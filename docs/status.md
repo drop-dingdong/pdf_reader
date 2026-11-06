@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-06　分支：`feat/markdown-floats`　门禁：`./scripts/check.sh` 通过（497 个测试）。
+> 快照：2026-11-06　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（498 个测试）。
 
 ## 1. 它是什么
 
@@ -18,6 +18,15 @@
 
 ## 2. 最近一轮完成的东西
 
+- **`app.rs` 拆分（Phase 1）**：12.2k 行的 `app.rs` 拆成 `app/` 子模块
+  （`model`/`frame`/`canvas`/`toolbar`/`sidebar`/`floats`/`hover`/`body_editor`/`dialogs`/
+  `save`/`document`/`annotate`/`modes`/`capture`/`edit`/`textures`/`paint`）；
+  `app.rs` 只剩状态/构造/入口（~0.6k），内联测试移到 `app/tests.rs`。
+  **Phase 2**：`draw_canvas` 拆成 `canvas::{paint,interact}`、`draw_floats` 抽出正文绘制、
+  `toolbar_rows` 拆成三行子方法。逐模块提交，10 份回放结构基线全程一致。
+- **Markdown 空正文双击**：`detect_body_double_click` 不再对整个 Markdown 模式提前返回，
+  只跳过**非空** Markdown 正文（它们有自己的链接/滚动控件），空正文仍走全窗双击层；
+  新增无窗口双击回归测试。
 - **文字浮窗 Markdown 阅读视图**：顶栏全局开关（`settings.json` 的 `ui.markdown_floats`）；
   注释/便签/文字 preview 用 `egui_commonmark` 渲染，正文可滚动、链接只提示；
   单换行按笔记语义保留为硬换行；代码块/表格/长 URL 会测最小内容宽度并横向滚动；
@@ -57,8 +66,6 @@
 
 - **Linux Wayland 外部文件拖放不可用**：winit 0.30 的 Wayland 后端不投递 DnD 事件；
   用 `env -u WAYLAND_DISPLAY` 走 X11/XWayland 可用。Windows 正常。
-- **Markdown 空正文双击未生效**：标题栏 ✎ 可用；原因在空正文/ScrollArea 交互层，
-  等 `app.rs` 拆分后处理，不阻塞其它 Markdown 功能。
 - 外部注释的几何/颜色/样式仍只读；改正文/删除会写回 PDF。
 - 便签不支持拖动/缩放；墨迹平移没有吸附、页面边界夹取，浮窗不跟随。
 - 页面文本搜索不索引注释正文；侧栏搜索覆盖注释正文/作者。
@@ -86,7 +93,7 @@
 | SVG 后端 | 完成，视觉验证暂缓 | 按 ppp/目标像素光栅化；等应用级 UI 缩放时一起验高 DPI |
 | RaTeX 可选后端 | 完成（可选） | `math-ratex` feature 默认 RaTeX；不默认构建；CJK 依赖系统字体 |
 | 行内公式行高/基线 | 部分完成 | 显式同步行高；前后文本基线仍受 CommonMark row 布局限制 |
-| Markdown 空正文双击 | 未完成 | 标题栏 ✎ 可用；交互层原因待整理 `app.rs` 后处理 |
+| Markdown 空正文双击 | 完成 | 空正文走全窗双击层；带无窗口回归测试 |
 | Markdown 完整布局复用 | 未完成 | `egui_commonmark` 不暴露布局缓存；需上游/自研渲染器 |
 
 ## 5. 代码地图（先看哪）
@@ -96,7 +103,12 @@
 | `crates/pdfcore` | 不依赖 UI 的模型/会话/几何/布局/渲染调度；`#![forbid(unsafe_code)]` |
 | `crates/backend-pdfium` | PDFium 适配、索引/读回、写回（子进程 FFI）、整理副本 |
 | `crates/app/src/view.rs` | 可测的纯逻辑：坐标、画法、浮窗几何、摘要格式 |
-| `crates/app/src/app.rs` | egui 胶水：面板、画布、交互、对话框、保存/提示状态机 |
+| `crates/app/src/app.rs` | 状态/构造/`eframe::App::ui` 入口（~0.6k）；子模块见 `crates/app/src/app/` |
+| `crates/app/src/app/model.rs` | `app` 共用类型/常量/纯函数 |
+| `crates/app/src/app/canvas/` | 画布：输入与交互（`interact.rs`）、页面/叠加层绘制（`paint.rs`） |
+| `crates/app/src/app/frame.rs` | 每帧编排（命令、pump、纹理、绘制顺序） |
+| `crates/app/src/app/save.rs` / `document.rs` | 保存/脏位/写回编排；打开/读回合并/对象号对账 |
+| `crates/app/src/app/tests.rs` | 原 `app.rs` 内联测试 |
 | `crates/app/src/persist.rs` | `<pdf>.json` 自定义数据（手写 JSON + 版本迁移） |
 | `crates/app/src/settings.rs` | `settings.json`（全局 UI + 每文件阅读状态 + 保存选项） |
 | `crates/app/src/annotations_md.rs` | 注释摘要（Markdown） |

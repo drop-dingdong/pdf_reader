@@ -54,8 +54,15 @@
 ### app
 - `view.rs`：坐标换算、输入映射、`KeyedStore`、画法决策 `plan_page`、快照拼合、浮窗几何、
  摘要文案；**能脱离窗口验证的逻辑一律在这里**（当前 ~4.2k 行）。
-- `app.rs`：面板/画布/交互/浮窗/侧栏/对话框/保存与未保存提示状态机（当前 ~12.2k 行，
-  含 154 个字段与 ~1.7k 行内联测试；拆分计划见 [roadmap.md](roadmap.md)）。
+- `app.rs`（~0.6k）：`PdfReaderApp` 状态/构造 + `eframe::App::ui` 转发到 `app::frame::frame`。
+- `app/model.rs`（~1.0k）：`app` 子模块共用类型/常量/纯函数（`Float`/`AppEdit`/`Tool`/
+  `CaptureState` 等；字段 `pub(super)`）。
+- `app/frame.rs`（~0.5k）：每帧编排（命令采集、pump、布局切换、纹理上传、绘制顺序）。
+- `app/canvas/`：`mod.rs` 编排与输入；`paint.rs` 页面/选区/链接/标注/引用点；
+  `interact.rs` 点击/拖动/右键/帧尾浮窗。
+- `app/{toolbar,sidebar,floats,hover,body_editor,dialogs,save,document,annotate,modes,capture,edit,textures,paint}.rs`：
+  面板、浮窗、正文编辑器、保存/打开、标注与模式、截图、纹理、无状态绘制辅助。
+- `app/tests.rs`：原 `app.rs` 内联测试（56 个）。
 - `markdown.rs`：浮窗 Markdown 预处理（单换行→硬换行、最小内容宽度测量）。
 - `math.rs`：LaTeX `MathBackend` trait、SVG（PNG 可回退）后端、公式纹理缓存与错误类型。
 - `persist.rs`：`.pdf.json` 手写 JSON + 版本迁移（未知字段不保留）。
@@ -206,8 +213,8 @@ app::compact::run_child → app --compact <in> <out>
 ## 9. 架构层面的已知限制
 
 - 纹理层按条目数限额，没有显存字节预算；上传/像素转换没有字节预算。
-- `app.rs` 很大（~12.2k 行、一个 impl、154 个字段）；纯逻辑已尽量下沉到 `view.rs`，
-  但面板/画布/对话框仍集中在一处，拆分计划见 [roadmap.md](roadmap.md)。
+- `app.rs` 已拆成 `app/` 子模块（~0.6k 行只剩状态/构造/入口）；`view.rs` 仍有 ~4.2k 行
+  （拆分的可行性评估见 [roadmap.md](roadmap.md)）。
 - 无头回放只覆盖主视图渲染主线；UI 对话框、浮窗、便签、保存提示依赖人工验收。
 - `.pdf.json` 不保留未知字段；新旧版本互读会有字段丢失（只做加法迁移，不做无损往返）。
 - 性能基线只能在同类机器上比较，未接 CI。

@@ -8,7 +8,25 @@
 | 模块 | 内容 | 怎么验证 |
 | --- | --- | --- |
 | [`view.rs`](../crates/app/src/view.rs) (~4.2k) | 坐标换算、输入映射、`KeyedStore`、画法决策（`plan_page`/`preview_source`/`underlay_source`）、快照拼合（`compose_snapshot`/`compose_region_snapshot`）、浮窗几何、持久化辅助 | `cargo test -p app --lib` |
-| [`app.rs`](../crates/app/src/app.rs) (~12.2k) | egui 胶水：面板、画布、交互、浮窗、侧栏、截图、对话框、保存/未保存状态机 | **需要真实窗口 → 人工验收**（见 [`testing.md`](testing.md) §6） |
+| [`app.rs`](../crates/app/src/app.rs) (~0.6k) | `PdfReaderApp` 状态 + 构造 + `eframe::App::ui` 转发到 `app::frame::frame` | 人工 |
+| [`app/model.rs`](../crates/app/src/app/model.rs) (~1.0k) | `app` 子模块共用类型/常量/纯函数（`Float`/`AppEdit`/`Tool`/`CaptureState`…） | `cargo test -p app --lib` |
+| [`app/frame.rs`](../crates/app/src/app/frame.rs) (~0.5k) | 每帧编排：命令采集、pump、布局切换、纹理上传、绘制顺序 | 回放 + 人工 |
+| `app/canvas/`（`mod.rs` ~0.1k、`paint.rs` ~0.6k、`interact.rs` ~0.5k） | 画布：输入与点击/拖动交互；页面/选区/链接/标注/引用点绘制 | 回放 + 人工 |
+| [`app/toolbar.rs`](../crates/app/src/app/toolbar.rs) (~0.6k) | 顶栏三行（文件菜单 / 视图开关 / 页与缩放） | 人工 |
+| [`app/sidebar.rs`](../crates/app/src/app/sidebar.rs) (~0.6k) | 搜索栏、目录、自定义 preview 列表 | 人工 |
+| [`app/floats.rs`](../crates/app/src/app/floats.rs) (~1.1k) | 浮窗绘制/打开/关闭/正文内容 | 无窗口测试 + 人工 |
+| [`app/hover.rs`](../crates/app/src/app/hover.rs) (~0.4k) | 悬停预览（含 hover MD） | 人工 |
+| [`app/body_editor.rs`](../crates/app/src/app/body_editor.rs) (~0.5k) | 正文编辑器与未保存确认 | 无窗口测试 + 人工 |
+| [`app/dialogs.rs`](../crates/app/src/app/dialogs.rs) (~0.8k) | 保存确认/未保存提示/整理/密码/数学帮助 | 人工 |
+| [`app/save.rs`](../crates/app/src/app/save.rs) (~0.7k) | 脏位/写回/另存为/自定义数据/替换文件 | 集成测试 + 人工 |
+| [`app/document.rs`](../crates/app/src/app/document.rs) (~0.5k) | 打开/读回合并/对象号对账 | 集成测试 |
+| [`app/annotate.rs`](../crates/app/src/app/annotate.rs) (~0.7k) | 标注编辑/右键菜单/历史窗口 | 回放 + 人工 |
+| [`app/modes.rs`](../crates/app/src/app/modes.rs) (~0.2k) | pin/墨迹平移/便签状态机 | 回放 + 人工 |
+| [`app/capture.rs`](../crates/app/src/app/capture.rs) (~0.5k) | 截图/引用点/快照拼合 | 人工 |
+| [`app/edit.rs`](../crates/app/src/app/edit.rs) (~0.4k) | 撤销/重做/视图记忆/settings flush | 单测 |
+| [`app/textures.rs`](../crates/app/src/app/textures.rs) (~0.4k) | 纹理上传/预算/预览纹理 | 回放 |
+| [`app/paint.rs`](../crates/app/src/app/paint.rs) (~0.3k) | 无状态绘制辅助（`paint_*`/坐标换算） | 人工 |
+| [`app/tests.rs`](../crates/app/src/app/tests.rs) (~1.8k) | 原 `app.rs` 内联测试（56 个） | `cargo test -p app --lib` |
 | [`app/replay.rs`](../crates/app/src/app/replay.rs) (+`replay/baseline.rs`、`replay/samples.rs`，合计 ~3.2k) | 无窗口回放：脚本驱动真实 `App::ui`，逐帧采集与结构基线 | `cargo run -p app -- --replay …` |
 | [`math.rs`](../crates/app/src/math.rs) (~0.9k) | LaTeX 后端 trait、`latex-rust` SVG（PNG 可回退）实现、公式纹理缓存、错误类型 | `cargo test -p app --lib math::` |
 | [`markdown.rs`](../crates/app/src/markdown.rs) (~0.3k) | 浮窗 Markdown 预处理（单换行→硬换行、最小内容宽度测量） | `cargo test -p app --lib markdown::` |
@@ -27,7 +45,7 @@
 
 约定：**能脱离窗口验证的逻辑一律放 `view.rs`**；`app.rs` 只留"读输入、调会话、画"。
 
-## 2. 每帧顺序（`PdfReaderApp::ui`）
+## 2. 每帧顺序（`app::frame::frame`，由 `PdfReaderApp::ui` 转发）
 
 ```text
 1. handle_dropped_files         拖入文件立刻打开（空状态/Windows 显式开启 drag-and-drop）
@@ -40,7 +58,7 @@
 8. draw_toolbar             顶栏（三行；全屏时为悬浮 Area）
 9. draw_sidebar(ui, &mut session)    侧栏（目录 / 自定义preview 两个标签页）
 10. draw_status             底部状态栏
-11. draw_canvas(ui, &mut session)    画布：页面 → 高亮/链接 → 浮窗 → 悬停预览
+11. draw_canvas(ui, &mut session)    画布：输入(paint/interact) → 页面 → 高亮/链接/标注 → 浮窗 → 悬停预览
 12. RequestVisible            提交渲染（预览窗口内跳过）
 13. draw_password_prompt / draw_custom_dialog / draw_edit_dialogs
 ```
@@ -263,7 +281,7 @@ ensure_textures(allow_upload)
 
 ## 10. 已知债务
 
-* `app.rs` 单体偏大（~12.2k 行、一个 impl、154 个字段）：绘制/侧栏/浮窗/截图/存档胶水混在一处。
+* `app.rs` 已拆成 `app/` 子模块（~0.6k 行只剩状态/构造/入口）；`view.rs` 仍有 ~4.2k 行，拆分可行性见 [roadmap.md](roadmap.md)。
  新逻辑优先落 `view.rs`；`app.rs` 拆分见 [roadmap.md](roadmap.md)。
 * 上传与像素转换没有字节预算：`MAX_UPLOADS_PER_FRAME` 按**页**计，一页可能一次传几十块。
 * 纹理层按条目数限额（128），没有显存预算。

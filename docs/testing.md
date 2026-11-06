@@ -28,7 +28,7 @@ cargo test -p pdfcore --lib tiling   # 单模块
 | UI 联调 | `crates/app/tests/*.rs` | 真实 `DocumentSession` + `view`、注释往返、replay 脚本、CLI 写回 |
 | 回放 | `crates/app/src/app/replay.rs` + `scripts/replay/` | 驱动真实 `App::ui`，逐帧检查绘制输出 |
 
-测试数量会变，以 `cargo test` 输出为准；当前 497 个。
+测试数量会变，以 `cargo test` 输出为准；当前 498 个。
 
 ## 3. 基础设施
 
