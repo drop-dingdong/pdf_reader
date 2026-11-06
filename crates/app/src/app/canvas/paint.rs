@@ -327,9 +327,21 @@ impl PdfReaderApp {
         let canvas = ctx.canvas;
         let scroll = ctx.scroll;
         // 2b') 标注叠加层（D-118）：几何在页面空间，这里换算到屏幕
+        //
+        // 每帧先清空悬停目标：`Delete` 只删除**本帧**指针真正位于画布注释上的那一条。
+        // 这一步必须在 `show_annotations`/截图判断之外，否则关掉标注或进入截图后
+        // 旧的悬停目标会残留（侧栏 hover + Delete 误删就是这条路径）。
+        self.hovered_annotation = None;
         if self.show_annotations && self.capture.is_none() {
-            let pointer = ui.ctx().pointer_hover_pos();
-            self.hovered_annotation = None; // 每帧重算（指针离开后立即失效）
+            // 画布注释不是 egui widget：命中判断自己裁剪到 canvas，并避开弹层/拖拽/浮窗。
+            let pointer = ui.ctx().pointer_hover_pos().filter(|position| {
+                self.canvas_hover_allowed(
+                    canvas,
+                    *position,
+                    ui.ctx().is_pointer_over_egui(),
+                    ui.ctx().egui_is_using_pointer(),
+                )
+            });
             for page in self.visible.clone() {
                 let Some(placement) = session.placement(page).copied() else {
                     continue;
@@ -364,11 +376,6 @@ impl PdfReaderApp {
                             {
                                 // 命中/删除只看几何，与"有没有正文"无关
                                 self.hovered_annotation = Some(annotation.id);
-                                if let Some(window) = self.floats.iter().find(|window| {
-                                    window.owner == FloatOwner::Annotation(annotation.id)
-                                }) {
-                                    self.highlight_float = Some(window.id);
-                                }
                             }
                         }
                         continue;
@@ -384,11 +391,6 @@ impl PdfReaderApp {
                         if let Some(pointer) = pointer {
                             if screen.expand(2.0).contains(pointer) {
                                 self.hovered_annotation = Some(annotation.id);
-                                if let Some(window) = self.floats.iter().find(|window| {
-                                    window.owner == FloatOwner::Annotation(annotation.id)
-                                }) {
-                                    self.highlight_float = Some(window.id);
-                                }
                             }
                         }
                         continue;
@@ -406,16 +408,11 @@ impl PdfReaderApp {
                                 canvas.min.y + content.y - scroll.y,
                             )
                         };
-                        // 悬停：把对应浮窗高亮一帧（离开即熄灭；点击另有时长高亮）
+                        // 悬停：只记录 Delete 目标；不置顶、不改变浮窗高亮（点击才打开/置顶）
                         if let Some(pointer) = pointer {
                             if screen.contains(pointer) {
                                 // 命中/删除只看几何，与"有没有正文"无关
                                 self.hovered_annotation = Some(annotation.id);
-                                if let Some(window) = self.floats.iter().find(|window| {
-                                    window.owner == FloatOwner::Annotation(annotation.id)
-                                }) {
-                                    self.highlight_float = Some(window.id);
-                                }
                             }
                         }
                         match annotation.kind {

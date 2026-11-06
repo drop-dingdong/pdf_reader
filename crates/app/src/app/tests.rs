@@ -1650,6 +1650,105 @@ mod annotation_body_tests {
         assert_eq!(app.dest_marks[0][0].body_size, c);
         assert_eq!(app.floats[0].body, c);
     }
+
+    #[test]
+    fn canvas_hover_is_clipped_by_panels_floats_and_gestures() {
+        let mut app = app();
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let inside = egui::pos2(100.0, 100.0);
+        assert!(app.canvas_hover_allowed(canvas, inside, false, false));
+        // 侧栏/顶栏方向（canvas 之外）
+        assert!(!app.canvas_hover_allowed(canvas, egui::pos2(900.0, 100.0), false, false));
+        // 弹层/窗口/模态
+        assert!(!app.canvas_hover_allowed(canvas, inside, true, false));
+        // 连续动作进行中
+        assert!(!app.canvas_hover_allowed(canvas, inside, false, true));
+        // 浮窗覆盖（任意部分，包括标题栏）
+        app.floats.push(Float {
+            id: 1,
+            title: "遮挡".to_string(),
+            content: FloatContent::Text(String::new()),
+            rect: egui::Rect::from_min_size(inside, egui::vec2(200.0, 160.0)),
+            owner: FloatOwner::None,
+            body: egui::vec2(200.0, 142.0),
+            origin: None,
+        });
+        assert!(!app.canvas_hover_allowed(canvas, inside, false, false));
+    }
+
+    #[test]
+    fn topmost_float_wins_over_lower_float() {
+        let mut app = app();
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(200.0, 120.0));
+        for id in [1, 2] {
+            app.floats.push(Float {
+                id,
+                title: format!("浮窗 {id}"),
+                content: FloatContent::Text(String::new()),
+                rect,
+                owner: FloatOwner::None,
+                body: egui::vec2(200.0, 102.0),
+                origin: None,
+            });
+        }
+        // 后加入的（id=2，下标 1）在最上层。
+        assert_eq!(app.topmost_float_at(rect.center()), Some(1));
+    }
+
+    /// 回归：高浮窗标题栏压在低浮窗正文上时，双击 ✎ 必须打开**高**浮窗的编辑器。
+    #[test]
+    fn double_click_on_upper_title_bar_does_not_open_lower_editor() {
+        let mut app = app();
+        app.markdown_floats = false;
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        // 低浮窗：正文覆盖 (100,100)-(500,400)
+        let lower = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(400.0, 300.0));
+        // 高浮窗：标题栏 y=130..148，压在低浮窗正文上
+        let upper = egui::Rect::from_min_size(egui::pos2(150.0, 130.0), egui::vec2(300.0, 200.0));
+        for (id, rect, annotation) in [(1, lower, 1), (2, upper, 2)] {
+            app.floats.push(Float {
+                id,
+                title: format!("标注 #{annotation}"),
+                content: FloatContent::Text(String::new()),
+                rect,
+                owner: FloatOwner::Annotation(AnnotationId(annotation)),
+                body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
+                origin: None,
+            });
+        }
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        // 高浮窗标题栏里的 ✎ 中心：right-39, title 中心。
+        let position = egui::pos2(upper.right() - 39.0, upper.top() + FLOAT_TITLE_HEIGHT * 0.5);
+        let click = |pressed| egui::Event::PointerButton {
+            pos: position,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        for frame in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(canvas),
+                events: vec![
+                    egui::Event::PointerMoved(position),
+                    click(true),
+                    click(false),
+                ],
+                time: Some(1.0 + frame as f64 * 0.05),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                app.draw_floats(ui, canvas);
+                app.detect_body_double_click(ui);
+            });
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.body_edit_owner(),
+            Some(FloatOwner::Annotation(AnnotationId(2))),
+            "应打开高浮窗的编辑器，而不是被压住的低浮窗"
+        );
+    }
 }
 
 #[cfg(test)]

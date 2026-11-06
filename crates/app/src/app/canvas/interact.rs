@@ -288,11 +288,22 @@ impl PdfReaderApp {
         // 用原始指针事件，不受 popup 捕获影响；在另一条注释上右键可直接切换。
         if self.capture.is_none() && ui.input(|i| i.pointer.secondary_clicked()) {
             if let Some(position) = ui.input(|i| i.pointer.interact_pos()) {
-                if canvas.contains(position) {
+                // 右键目标也按归属判定：面板/弹层/拖拽/浮窗覆盖处不把下面的注释当目标。
+                let allowed = self.canvas_hover_allowed(
+                    canvas,
+                    position,
+                    ui.ctx().is_pointer_over_egui(),
+                    ui.ctx().egui_is_using_pointer(),
+                );
+                if allowed {
                     let content = canvas_to_content(canvas, position, scroll);
                     let id = self.annotation_at(session, content);
                     self.context_annotation = id;
                     self.context_menu_pos = id.map(|_| position);
+                } else if self.topmost_float_at(position).is_some() {
+                    // 指针在浮窗上：清掉画布注释菜单，避免右键浮窗时菜单指向下面的注释。
+                    self.context_annotation = None;
+                    self.context_menu_pos = None;
                 }
             }
         }

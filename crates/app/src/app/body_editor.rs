@@ -2,9 +2,8 @@
 
 use super::*;
 
-use crate::view::FLOAT_TITLE_HEIGHT;
 use eframe::egui;
-use egui::{Color32, Id, Sense, Vec2 as EVec2};
+use egui::{Color32, Id};
 
 impl PdfReaderApp {
     /// 打开正文编辑窗口；每次换一个会话号，使编辑区滚动位置从顶部开始。
@@ -332,76 +331,74 @@ impl PdfReaderApp {
 
     /// 双击浮窗正文 → 进入原位编辑（自定义文字 preview 或注释正文）。
     pub(super) fn detect_body_double_click(&mut self, ui: &mut egui::Ui) {
-        if self.editing_body.is_some() {
+        if self.editing_body.is_some() || self.capture.is_some() {
             return;
         }
-        // Markdown 模式的**非空**正文有自己的内容控件（链接/滚动条）。这个全窗 click
-        // 层注册在浮窗之后，会按"后注册优先"挡住它们；这些浮窗的双击改由
-        // `draw_floats` 里的 body 响应当场处理。空正文没有内容控件，仍然走这条
-        // 全窗层 —— 否则 Markdown 模式下空正文双击没有任何入口。
-        let skip_markdown_body = self.markdown_floats;
-        let targets: Vec<(u64, FloatOwner, egui::Rect)> = self
-            .floats
-            .iter()
-            .filter_map(|window| {
-                if skip_markdown_body
-                    && matches!(&window.content, FloatContent::Text(text) if !text.is_empty())
-                {
-                    return None;
-                }
-                match window.owner {
-                    FloatOwner::Custom(index) => {
-                        let preview = self.custom_previews.get(index)?;
-                        (preview.kind == CustomKind::Text).then_some((
-                            window.id,
-                            window.owner,
-                            window.rect,
-                        ))
-                    }
-                    FloatOwner::Annotation(_) => Some((window.id, window.owner, window.rect)),
-                    FloatOwner::None => None,
-                }
-            })
-            .collect();
-        for (id, owner, rect) in targets {
-            let body_rect = egui::Rect::from_min_max(
-                rect.min + EVec2::new(10.0, FLOAT_TITLE_HEIGHT + 8.0),
-                rect.max - EVec2::new(10.0, 8.0),
-            );
-            let hit = ui.interact(
-                body_rect,
-                Id::unique(("float-body-edit", id)),
-                Sense::click(),
-            );
-            if hit.double_clicked() {
-                let text = match owner {
-                    FloatOwner::Custom(index) => self
-                        .custom_previews
-                        .get(index)
-                        .and_then(|preview| preview.text.clone())
-                        .unwrap_or_default(),
-                    FloatOwner::Annotation(id) => self
-                        .annotations
-                        .get(id)
-                        .and_then(|annotation| annotation.body.clone())
-                        .unwrap_or_default(),
-                    FloatOwner::None => String::new(),
-                };
-                let cursor = hit.interact_pointer_pos().map(|position| {
-                    body_cursor_from_pointer(
-                        ui.ctx(),
-                        &text,
-                        body_rect,
-                        position,
-                        false,
-                        egui::Vec2::ZERO,
-                        None,
-                    )
-                });
-                self.open_body_editor(owner, text, cursor, ui.ctx());
-                return;
-            }
+        // 只认最上层浮窗的**正文区**：标题栏/按钮/手柄不在这里处理。
+        // 用原始双击事件 + 纯 hit-test，而不是再注册一层 `float-body-edit`；
+        // 后者会注册在 ✎/✕ 之后，抢走高浮窗标题栏上的双击（打开低浮窗编辑器）。
+        if !ui.input(|input| {
+            input
+                .pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+        }) {
+            return;
         }
+        if ui.ctx().is_pointer_over_egui() || ui.ctx().egui_is_using_pointer() {
+            return;
+        }
+        let Some(position) = ui.ctx().pointer_interact_pos() else {
+            return;
+        };
+        let Some(index) = self.topmost_float_at(position) else {
+            return;
+        };
+        let rect = self.floats[index].rect;
+        if !crate::app::floats::float_body_rect(rect).contains(position) {
+            return;
+        }
+        // Markdown 非空正文由 `draw_floats` 的 body 响应当场处理（链接/滚动控件）。
+        if self.markdown_floats
+            && matches!(&self.floats[index].content, FloatContent::Text(text) if !text.is_empty())
+        {
+            return;
+        }
+        let owner = self.floats[index].owner;
+        let editable = match owner {
+            FloatOwner::Custom(index) => self
+                .custom_previews
+                .get(index)
+                .is_some_and(|preview| preview.kind == CustomKind::Text),
+            FloatOwner::Annotation(_) => true,
+            FloatOwner::None => false,
+        };
+        if !editable {
+            return;
+        }
+        let text = match owner {
+            FloatOwner::Custom(index) => self
+                .custom_previews
+                .get(index)
+                .and_then(|preview| preview.text.clone())
+                .unwrap_or_default(),
+            FloatOwner::Annotation(id) => self
+                .annotations
+                .get(id)
+                .and_then(|annotation| annotation.body.clone())
+                .unwrap_or_default(),
+            FloatOwner::None => String::new(),
+        };
+        let body_rect = crate::app::floats::float_body_rect(rect);
+        let cursor = Some(body_cursor_from_pointer(
+            ui.ctx(),
+            &text,
+            body_rect,
+            position,
+            false,
+            egui::Vec2::ZERO,
+            None,
+        ));
+        self.open_body_editor(owner, text, cursor, ui.ctx());
     }
 
     /// 编辑题目 / 正文的对话框（✎ 按钮与"固定浮窗内双击文字"共用）。

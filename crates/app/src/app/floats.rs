@@ -10,6 +10,16 @@ use crate::view::{
 use eframe::egui;
 use egui::{Align2, Color32, CornerRadius, Id, Sense, Stroke, StrokeKind, Vec2 as EVec2};
 
+/// 浮窗的正文区域：标题栏以下、整个浮窗宽度。
+///
+/// 标题栏（含 ✎/✕/@ 按钮）不属于正文；双击判定与正文编辑入口都用它。
+pub(super) fn float_body_rect(rect: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.top() + FLOAT_TITLE_HEIGHT),
+        rect.max,
+    )
+}
+
 impl PdfReaderApp {
     /// 由"侧栏行的屏幕矩形"决定浮窗位置（委托给已测试的 `view::float_rect_at_row`）。
     pub(super) fn float_rect_at_row(&self, row: egui::Rect, size: egui::Vec2) -> egui::Rect {
@@ -287,6 +297,31 @@ impl PdfReaderApp {
             self.apply_edit(AppEdit::ResizePreview { key, before, after }, true);
         }
         self.last_preview_resize = Some((key, now));
+    }
+
+    /// 指针下**最上层**的浮窗（`floats` 顺序 = z 序，后画的在上）。
+    pub(super) fn topmost_float_at(&self, position: egui::Pos2) -> Option<usize> {
+        self.floats
+            .iter()
+            .rposition(|window| window.rect.contains(position))
+    }
+
+    /// 画布内容（注释/链接/右键目标）是否允许响应指针。
+    ///
+    /// 画布内容不是 egui widget，命中判断必须自己裁剪：面板区域（顶栏/侧栏/状态栏）
+    /// 由 `canvas` 矩形排除；弹层/窗口/模态由调用方传 `pointer_over_egui`；
+    /// 连续动作（拖拽/画墨迹/截图选区）期间不响应新的 hover。
+    pub(super) fn canvas_hover_allowed(
+        &self,
+        canvas: egui::Rect,
+        position: egui::Pos2,
+        pointer_over_egui: bool,
+        using_pointer: bool,
+    ) -> bool {
+        canvas.contains(position)
+            && !pointer_over_egui
+            && !using_pointer
+            && self.topmost_float_at(position).is_none()
     }
 
     /// 连续拖拽同一引用点浮窗 resize 合并成一条历史（1 秒窗口）。
