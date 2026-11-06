@@ -50,6 +50,7 @@ mod edit_describe_tests {
 mod annotation_body_tests {
     use super::super::*;
     use crate::view::{body_size_of, FLOAT_TITLE_HEIGHT};
+    use pdfcore::annotation::INK_OPACITY;
 
     fn app() -> PdfReaderApp {
         PdfReaderApp::new_headless(
