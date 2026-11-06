@@ -61,7 +61,8 @@
 - `app/canvas/`：`mod.rs` 编排与输入；`paint.rs` 页面/选区/链接/标注/引用点；
   `interact.rs` 点击/拖动/右键/帧尾浮窗。画布内容的原始命中先按 canvas 裁剪。
 - `app/floats.rs` 里还有指针归属：`topmost_float_at`（z 序最上层浮窗）与
-  `canvas_hover_allowed`（面板/弹层/拖拽/浮窗的排除）。
+  `canvas_hover_allowed`（面板/弹层/拖拽/浮窗的排除）与 `pointer_over_overlay`
+  （按图层顺序识别窗口/弹出菜单/模态）。
 - `app/{toolbar,sidebar,hover,body_editor,dialogs,save,document,annotate,modes,capture,edit,textures,paint}.rs`：
   面板、浮窗、正文编辑器、保存/打开、标注与模式、截图、纹理、无状态绘制辅助。
 - `app/tests.rs`：原 `app.rs` 内联测试（56 个）。

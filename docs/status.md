@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-06　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（503 个测试）。
+> 快照：2026-11-06　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（504 个测试）。
 
 ## 1. 它是什么
 
@@ -29,6 +29,9 @@
 - **浮窗 z 序与指针归属**：双击编辑器只认最上层浮窗的正文区（标题栏按钮不再被下层正文抢）；
   画布注释/右键的原始命中先裁剪到 canvas，再排除弹层/窗口/模态、连续动作和任意浮窗；
   注释 hover 只保留 `Delete` 目标，不再高亮/置顶浮窗；指针离开画布立即清空。
+  弹层判定用**图层顺序**（非 Background）而不是 `is_pointer_over_egui()`：
+  后者按 root Ui 剩余矩形判断，而 `CentralPanel` 会消费掉剩余区域，导致画布 hover 被误判。
+  新增 `canvas_annotation_hover_right_click_and_delete_are_scoped` 覆盖 hover/右键/Delete/侧栏越界。
 - **Markdown 空正文双击**：`detect_body_double_click` 不再对整个 Markdown 模式提前返回，
   只跳过**非空** Markdown 正文（它们有自己的链接/滚动控件），空正文仍走全窗双击层；
   新增无窗口双击回归测试。
