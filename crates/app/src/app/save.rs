@@ -678,3 +678,38 @@ impl PdfReaderApp {
             .map_err(|error| format!("写入数据文件 {} 失败：{error}", target.display()))
     }
 }
+/// 画"白底页框"占位（D-06：位图未就绪时用它；D-98 起缺块处优先铺整页底料，不再补白）。
+/// 用临时文件替换目标：优先 rename（Unix 原子覆盖）；失败且目标存在时退化为
+/// 删掉目标再 rename（Windows）。失败时临时文件保留，便于排查。
+pub(super) fn replace_file(
+    temporary: &std::path::Path,
+    target: &std::path::Path,
+) -> std::result::Result<(), String> {
+    match std::fs::rename(temporary, target) {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            if target.exists() {
+                std::fs::remove_file(target).map_err(|error| {
+                    format!(
+                        "替换 {} 失败：{error}（临时文件保留：{}）",
+                        target.display(),
+                        temporary.display()
+                    )
+                })?;
+                std::fs::rename(temporary, target).map_err(|error| {
+                    format!(
+                        "改名到 {} 失败：{error}（临时文件保留：{}）",
+                        target.display(),
+                        temporary.display()
+                    )
+                })
+            } else {
+                Err(format!(
+                    "改名到 {} 失败：{first}（临时文件保留：{}）",
+                    target.display(),
+                    temporary.display()
+                ))
+            }
+        }
+    }
+}

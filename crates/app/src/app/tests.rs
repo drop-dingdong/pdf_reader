@@ -49,6 +49,7 @@ mod edit_describe_tests {
 #[cfg(test)]
 mod annotation_body_tests {
     use super::super::*;
+    use crate::view::{body_size_of, FLOAT_TITLE_HEIGHT};
 
     fn app() -> PdfReaderApp {
         PdfReaderApp::new_headless(

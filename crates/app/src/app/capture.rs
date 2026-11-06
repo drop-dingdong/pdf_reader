@@ -335,4 +335,117 @@ impl PdfReaderApp {
         });
         self.message = format!("已把截图放入浮窗 #{id}");
     }
+    /// 把截图结果存进某个**自定义图片预览**。
+    ///
+    /// **不再**自动生成浮窗（用户要求）：浮窗只在用户从侧栏悬浮/点击该条目时出现。
+    pub(super) fn commit_custom_image(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &DocumentSession,
+        index: usize,
+        content_rect: Rect,
+    ) {
+        // **只保留重叠面积最大的那一页**（用户要求：跨 a-b 两页时取交叠更多的页）
+        let all_pages: Vec<(usize, Rect)> = (0..session.page_count() as usize)
+            .filter_map(|page_index| {
+                let page = PageIndex::new(page_index as u32);
+                session
+                    .placement(page)
+                    .map(|placement| (page_index, placement.rect))
+            })
+            .collect();
+        // 必须与本 preview **自己所在的页**求交：否则 rect 与 page 不匹配，
+        // 重新加载后会去错误的页取图（用户要求强限制）
+        let Some(preview_page) = self.custom_previews.get(index).map(|preview| preview.page) else {
+            return;
+        };
+        let Some((_, page_rect)) = all_pages
+            .iter()
+            .find(|(page_index, _)| *page_index == preview_page.get() as usize)
+            .copied()
+        else {
+            self.message = "找不到该 preview 所在页".to_string();
+            return;
+        };
+        let Some(overlap) = page_rect.intersection(content_rect) else {
+            self.message = "截图区域与该 preview 所在页没有重叠，未保存".to_string();
+            return;
+        };
+        if overlap.width <= 0.0 || overlap.height <= 0.0 {
+            self.message = "截图区域与该 preview 所在页没有重叠，未保存".to_string();
+            return;
+        }
+        let page = preview_page;
+        let Some(snapshot) = self.snapshot_for(ui, session, overlap) else {
+            if self.diag.enabled() {
+                self.diag.line(format!(
+                    "[图片预览] 合成失败：页={:?} 选区={:?} 缩放={:.3} 可见页={:?}",
+                    page,
+                    overlap,
+                    session.state().zoom,
+                    self.visible
+                ));
+            }
+            self.message = "该区域还没有已渲染的像素（请稍候再试）".to_string();
+            return;
+        };
+        let png = crate::image_store::encode_png(&snapshot);
+        let texture = ui.ctx().load_texture(
+            format!("custom-image-{index}"),
+            snapshot,
+            egui::TextureOptions::LINEAR,
+        );
+        // 记录交叠部分的矩形（页面空间）与它在**当前缩放比**下的显示尺寸
+        let page_rect = session
+            .placement(page)
+            .and_then(|placement| view_rect_to_page_rect(placement, overlap, Vec2::ZERO))
+            .map(|rect| {
+                Rect::new(
+                    rect.x.round(),
+                    rect.y.round(),
+                    rect.width.round(),
+                    rect.height.round(),
+                )
+            })
+            .unwrap_or(overlap);
+        let Some(before) = self.custom_previews.get(index).cloned() else {
+            return;
+        };
+        let key = PreviewKey {
+            page: before.page,
+            id: before.id,
+        };
+        let mut after = before.clone();
+        after.snapshot = Some(texture);
+        after.rect = page_rect;
+        after.body_size = egui::vec2(overlap.width, overlap.height);
+        after.image_revision = before.image_revision.saturating_add(1);
+        if let Some(png) = png {
+            let image_ref = crate::image_store::ImageRef {
+                record_id: after.image_id.clone(),
+                revision: after.image_revision,
+            };
+            self.images.insert(&image_ref, png);
+            ui.ctx().forget_image(&crate::image_store::image_uri(
+                &image_ref.record_id,
+                image_ref.revision,
+            ));
+        }
+        // ▲v2：记录这张图的分辨率（截图时的显示比例）—— 之后重建预览时按它请求渲染
+        after.scale = session.state().zoom;
+        self.apply_edit(
+            AppEdit::ReplacePreview {
+                key,
+                before: std::sync::Arc::new(before),
+                after: std::sync::Arc::new(after),
+            },
+            true,
+        );
+        self.message = format!(
+            "已保存图片预览（取第 {} 页，交叠 {:.0}×{:.0}）",
+            page.display_number(),
+            overlap.width,
+            overlap.height
+        );
+    }
 }

@@ -451,4 +451,24 @@ impl PdfReaderApp {
             }
         }
     }
+    pub(super) fn run_edit_action(&mut self, action: EditDiscardAction, ctx: &egui::Context) {
+        match action {
+            EditDiscardAction::CloseEditor => self.editing_body = None,
+            EditDiscardAction::CloseFloat(id) => self.close_float(id),
+            EditDiscardAction::Open(path) => self.request_open(path),
+            EditDiscardAction::Quit => {
+                if self.is_dirty() {
+                    // 正文保存后可能让文档变脏；交给已有的未保存文档提示。
+                    self.pending_action = Some(PendingAction {
+                        kind: PendingActionKind::Quit,
+                    });
+                } else {
+                    self.closing_after_decision = true;
+                    self.remember_document_view();
+                    self.flush_settings(Some(ctx));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
 }

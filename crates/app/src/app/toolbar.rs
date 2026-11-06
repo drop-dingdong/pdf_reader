@@ -546,4 +546,38 @@ impl PdfReaderApp {
             });
         }
     }
+    /// 底部状态栏：页码与缩放已移到顶栏（用户要求），这里只留消息、选中字数与诊断。
+    pub(super) fn draw_status(&self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("status").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.separator();
+                ui.separator();
+                ui.label(format!("纹理 {} 个", self.textures.len()));
+                if let Some(kind) = self.custom_pin {
+                    ui.separator();
+                    ui.colored_label(
+                        Color32::from_rgb(230, 180, 60),
+                        match kind {
+                            CustomKind::Text => "当前自定义preview：文字（点击页面确定位置）",
+                            CustomKind::Image => "当前自定义preview：图片（点击页面确定位置）",
+                        },
+                    );
+                }
+                if !self.message.is_empty() {
+                    ui.separator();
+                    // 状态栏最多一行：长文本用省略号，不能让消息把窗口撑高。
+                    ui.add(egui::Label::new(&self.message).truncate());
+                }
+                if let Some(error) = &self.error {
+                    ui.separator();
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(error).color(Color32::from_rgb(200, 60, 60)),
+                        )
+                        .truncate(),
+                    );
+                }
+            });
+        });
+    }
 }

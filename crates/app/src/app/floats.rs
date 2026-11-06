@@ -915,4 +915,138 @@ impl PdfReaderApp {
             }
         }
     }
+    /// 添加一个"测试浮窗"（带任意文字），位置按已有浮窗数量级联偏移。
+    ///
+    /// 入口在顶栏第二行（「测试浮窗」按钮）；用于不依赖文档内容地验证浮窗的
+    /// 拖动/改大小/关闭/层级。
+    pub(super) fn add_test_float(&mut self) {
+        let id = self.next_float_id;
+        self.next_float_id += 1;
+        let cascade = ((id as f32 - 1.0) % 6.0) * 24.0;
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(24.0 + cascade, 24.0 + cascade),
+            EVec2::new(280.0, 150.0),
+        );
+        self.floats.push(Float {
+            id,
+            title: format!("测试浮窗 #{id}"),
+            content: FloatContent::Text(format!(
+                "这是第 {id} 个测试浮窗。\n目前只显示文字。\n\n可以拖动标题栏移动、\n拖右下角改变大小、\n点右上角 ✕ 关闭。"
+            )),
+            origin: None,
+            owner: FloatOwner::None,
+            body: body_size_of(rect, FLOAT_TITLE_HEIGHT),
+            rect,
+        });
+        self.message = format!("已添加测试浮窗 #{id}");
+    }
+
+    /// 安装 `pd-img` bytes loader 与 PNG image loader。
+    pub(super) fn ensure_image_loaders(&self, ctx: &egui::Context) {
+        if !ctx.is_loader_installed(crate::image_store::InternalImageLoader::ID) {
+            ctx.add_bytes_loader(std::sync::Arc::new(
+                crate::image_store::InternalImageLoader::new(self.images.clone()),
+            ));
+        }
+        egui_extras::install_image_loaders(ctx);
+    }
+
+    /// 取走公式后端的首次失败错误，写入状态栏（短暂提示，后续消息可顶替）。
+    pub(super) fn take_math_error(&mut self) {
+        let after_save = std::mem::take(&mut self.math_recheck_pending);
+        if let Some(error) = self.math_cache.borrow_mut().take_error() {
+            let line = error.status_line();
+            self.message = if after_save {
+                format!("已更新内容；{line}")
+            } else {
+                line
+            };
+        }
+    }
+
+    /// 取走本帧 Markdown 链接产生的 `OpenUrl` 命令，改为状态栏提示。
+    ///
+    /// `egui_commonmark` 的外部链接最终走 `ui.hyperlink_to` → `ctx.open_url`；
+    /// 项目当前对 PDF URI 也只提示、不打开浏览器（见 `follow_link`）。在
+    /// `egui_commonmark` 没有链接钩子的情况下，这是官方文档给出的检查方式
+    /// （`ctx.output_mut` 遍历 `OutputCommand::OpenUrl`）。
+    pub(super) fn consume_markdown_links(&mut self, ctx: &egui::Context) {
+        if !self.markdown_rendered {
+            return;
+        }
+        self.markdown_rendered = false;
+        let mut opened = Vec::new();
+        ctx.output_mut(|output| {
+            output.commands.retain(|command| match command {
+                egui::OutputCommand::OpenUrl(open) => {
+                    opened.push(open.url.clone());
+                    false
+                }
+                _ => true,
+            });
+        });
+        if let Some(url) = opened.last() {
+            self.message = format!("外部链接：{url}（打开浏览器暂未实现）");
+        }
+    }
+
+    /// 命中当前页的链接热区则发出跳转命令，返回是否命中。
+    ///
+    /// 热区判断（点在哪个链接里）在核心层：[`DocumentSession::link_at`]；
+    /// 这里只负责"把内容空间的点交给它"，以及把结果翻译成命令
+    /// （[`crate::view::commands_for_destination`]：有落点 → 居中，无落点 → 顶部对齐）。
+    pub(super) fn follow_link(&mut self, session: &DocumentSession, content: Point) -> bool {
+        for page in self.visible.clone() {
+            let Some(placement) = session.placement(page).copied() else {
+                continue;
+            };
+            if !placement.rect.contains(content) {
+                continue;
+            }
+            let page_point = placement.content_to_page(content);
+            // 找出命中的链接下标（登记表与 links_on 同构，因此能直接查）
+            let Some(navigation) = self.navigation.clone() else {
+                return false;
+            };
+            let hit = navigation
+                .links_on(page)
+                .iter()
+                .position(|link| link.rect.contains(page_point));
+            let Some(index) = hit else { return false };
+            let destination = navigation.links_on(page)[index].destination.clone();
+            match &destination {
+                Destination::Uri(uri) => {
+                    self.message = format!("外部链接：{uri}（打开浏览器暂未实现）");
+                }
+                Destination::Page { .. } => {
+                    // 优先：跳到**被引用点矩形的中心**（用户要求；登记表在打开时解析）
+                    let target = self
+                        .link_marks
+                        .get(page.get() as usize)
+                        .and_then(|registered| registered.get(index))
+                        .copied()
+                        .flatten();
+                    let mark_center = target.and_then(|(mark_page, mark_index)| {
+                        self.dest_marks
+                            .get(mark_page.get() as usize)?
+                            .get(mark_index)
+                            .map(|mark| (mark_page, mark.rect.center()))
+                    });
+                    match mark_center {
+                        Some((mark_page, center)) => {
+                            self.commands.push(ViewerCommand::GoToPage(mark_page));
+                            self.commands.push(ViewerCommand::CenterOnPagePoint {
+                                page: mark_page,
+                                point: center,
+                            });
+                        }
+                        // 没有登记被引用点（例如仅 /Fit 的目标）→ 退回原有语义
+                        None => self.commands.extend(commands_for_destination(&destination)),
+                    }
+                }
+            }
+            return true;
+        }
+        false
+    }
 }
