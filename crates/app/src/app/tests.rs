@@ -1753,8 +1753,17 @@ mod annotation_body_tests {
 #[cfg(test)]
 mod pointer_ownership_tests {
     use super::super::*;
+    use crate::view::FLOAT_TITLE_HEIGHT;
     use pdfcore::testkit::{ImmediateScheduler, MemoryBackend, MemoryCache, MemoryPage};
     use std::sync::Arc;
+
+    fn app() -> PdfReaderApp {
+        PdfReaderApp::new_headless(
+            crate::clock::Clock::system(),
+            crate::diag::diagnostics_for_tests(),
+            None,
+        )
+    }
 
     fn run_frame(
         app: &mut PdfReaderApp,
@@ -1834,6 +1843,136 @@ mod pointer_ownership_tests {
             app.canvas_rect.min.y + content.y - scroll.y + 10.0,
         );
         (app, ctx, id, screen, position)
+    }
+
+    /// 两个 Markdown 文字浮窗重叠：在上浮窗正文上拖动，不能拖动下层浮窗的标题栏。
+    #[test]
+    fn dragging_upper_markdown_float_does_not_move_lower_float() {
+        let mut app = app();
+        app.markdown_floats = true;
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let lower = egui::Rect::from_min_size(egui::pos2(120.0, 150.0), egui::vec2(300.0, 200.0));
+        let upper = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(300.0, 200.0));
+        for (id, rect, text) in [(1, lower, "lower"), (2, upper, "upper")] {
+            app.floats.push(Float {
+                id,
+                title: format!("浮窗 {id}"),
+                content: FloatContent::Text(text.to_string()),
+                rect,
+                owner: FloatOwner::None,
+                body: egui::vec2(rect.width(), rect.height() - FLOAT_TITLE_HEIGHT),
+                origin: None,
+            });
+        }
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        // 指针落在上浮窗正文、同时压住下浮窗标题栏（y=150..168）。
+        let start = egui::pos2(200.0, 160.0);
+        let mut frames = Vec::new();
+        for frame in 0..5 {
+            let events = match frame {
+                0 => vec![],
+                1 => vec![
+                    egui::Event::PointerMoved(start),
+                    egui::Event::PointerButton {
+                        pos: start,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+                4 => vec![egui::Event::PointerButton {
+                    pos: egui::pos2(start.x + 40.0, start.y),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+                _ => vec![egui::Event::PointerMoved(egui::pos2(
+                    start.x + 20.0 * (frame - 1) as f32,
+                    start.y,
+                ))],
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                time: Some(frame as f64 * 0.05),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                app.draw_floats(ui, canvas);
+            });
+            out.drop_without_applying_deltas();
+            frames.push(());
+        }
+        assert_eq!(
+            app.floats[0].rect, lower,
+            "下浮窗不应被上浮窗正文上的拖动带着走"
+        );
+    }
+
+    /// 上浮窗正文只感知 click（Markdown）时，拖动也不能漏给 PDF 画布。
+    #[test]
+    fn dragging_markdown_float_body_does_not_fall_through_to_canvas() {
+        let mut app = app();
+        app.markdown_floats = true;
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let rect = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(300.0, 200.0));
+        app.floats.push(Float {
+            id: 1,
+            title: "浮窗".to_string(),
+            content: FloatContent::Text("markdown".to_string()),
+            rect,
+            owner: FloatOwner::None,
+            body: egui::vec2(rect.width(), rect.height() - FLOAT_TITLE_HEIGHT),
+            origin: None,
+        });
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let start = egui::pos2(200.0, 200.0);
+        let mut canvas_dragged = false;
+        for frame in 0..5 {
+            let events = match frame {
+                0 => vec![],
+                1 => vec![
+                    egui::Event::PointerMoved(start),
+                    egui::Event::PointerButton {
+                        pos: start,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+                4 => vec![egui::Event::PointerButton {
+                    pos: egui::pos2(start.x + 40.0, start.y),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+                _ => vec![egui::Event::PointerMoved(egui::pos2(
+                    start.x + 20.0 * (frame - 1) as f32,
+                    start.y,
+                ))],
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                time: Some(frame as f64 * 0.05),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                let response = ui.interact(
+                    canvas,
+                    egui::Id::unique("test-canvas"),
+                    egui::Sense::click_and_drag(),
+                );
+                app.draw_floats(ui, canvas);
+                canvas_dragged |= response.dragged() || response.drag_started();
+            });
+            out.drop_without_applying_deltas();
+        }
+        assert!(!canvas_dragged, "拖动浮窗正文不应落到 PDF 画布");
     }
 
     #[test]

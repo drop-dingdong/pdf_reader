@@ -571,6 +571,12 @@ impl PdfReaderApp {
             let markdown_active = self.markdown_floats && has_text;
             let wheel_owner = topmost_under_pointer == Some(id);
 
+            // 拖动遮罩：**先于本浮窗自己的控件注册**，位于所有更低浮窗之上。
+            // 只感知 drag、不处理任何动作：用来保证拖动不会落到下层浮窗的
+            // 标题栏/图片正文，也不会漏到 PDF 正文（Markdown 正文的 body 只感知 click）。
+            let _drag_block =
+                ui.interact(rect, Id::unique(("float-drag-block", id)), Sense::drag());
+
             // 主体：占住点击（避免"点在浮窗上却给文档落了光标"）。
             // 纯文本模式沿用"整个主体可拖动"；Markdown 模式只允许标题栏拖动，
             // 正文留给内部滚动条/链接/双击编辑。
