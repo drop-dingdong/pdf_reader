@@ -290,9 +290,9 @@ impl PdfReaderApp {
             if let Some(position) = ui.input(|i| i.pointer.interact_pos()) {
                 // 右键目标也按归属判定：面板/弹层/拖拽/浮窗覆盖处不把下面的注释当目标。
                 let allowed = self.canvas_hover_allowed(
+                    ui.ctx(),
                     canvas,
                     position,
-                    ui.ctx().is_pointer_over_egui(),
                     ui.ctx().egui_is_using_pointer(),
                 );
                 if allowed {

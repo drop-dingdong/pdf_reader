@@ -334,13 +334,9 @@ impl PdfReaderApp {
         self.hovered_annotation = None;
         if self.show_annotations && self.capture.is_none() {
             // 画布注释不是 egui widget：命中判断自己裁剪到 canvas，并避开弹层/拖拽/浮窗。
+            let using_pointer = ui.ctx().egui_is_using_pointer();
             let pointer = ui.ctx().pointer_hover_pos().filter(|position| {
-                self.canvas_hover_allowed(
-                    canvas,
-                    *position,
-                    ui.ctx().is_pointer_over_egui(),
-                    ui.ctx().egui_is_using_pointer(),
-                )
+                self.canvas_hover_allowed(ui.ctx(), canvas, *position, using_pointer)
             });
             for page in self.visible.clone() {
                 let Some(placement) = session.placement(page).copied() else {

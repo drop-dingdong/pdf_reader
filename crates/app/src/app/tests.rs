@@ -34,7 +34,7 @@ mod edit_describe_tests {
     fn undo_list_keeps_the_row_count_for_text_marks() {
         let annotation = pdfcore::annotation::Annotation::new(
             PageIndex::FIRST,
-            AnnotationKind::Highlight {
+            pdfcore::annotation::AnnotationKind::Highlight {
                 quads: vec![
                     Rect::new(0.0, 0.0, 10.0, 2.0),
                     Rect::new(0.0, 4.0, 10.0, 2.0),
@@ -1654,15 +1654,14 @@ mod annotation_body_tests {
     #[test]
     fn canvas_hover_is_clipped_by_panels_floats_and_gestures() {
         let mut app = app();
+        let ctx = egui::Context::default();
         let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
         let inside = egui::pos2(100.0, 100.0);
-        assert!(app.canvas_hover_allowed(canvas, inside, false, false));
+        assert!(app.canvas_hover_allowed(&ctx, canvas, inside, false));
         // 侧栏/顶栏方向（canvas 之外）
-        assert!(!app.canvas_hover_allowed(canvas, egui::pos2(900.0, 100.0), false, false));
-        // 弹层/窗口/模态
-        assert!(!app.canvas_hover_allowed(canvas, inside, true, false));
+        assert!(!app.canvas_hover_allowed(&ctx, canvas, egui::pos2(900.0, 100.0), false));
         // 连续动作进行中
-        assert!(!app.canvas_hover_allowed(canvas, inside, false, true));
+        assert!(!app.canvas_hover_allowed(&ctx, canvas, inside, true));
         // 浮窗覆盖（任意部分，包括标题栏）
         app.floats.push(Float {
             id: 1,
@@ -1673,7 +1672,7 @@ mod annotation_body_tests {
             body: egui::vec2(200.0, 142.0),
             origin: None,
         });
-        assert!(!app.canvas_hover_allowed(canvas, inside, false, false));
+        assert!(!app.canvas_hover_allowed(&ctx, canvas, inside, false));
     }
 
     #[test]
@@ -1752,6 +1751,178 @@ mod annotation_body_tests {
 }
 
 #[cfg(test)]
+mod pointer_ownership_tests {
+    use super::super::*;
+    use pdfcore::testkit::{ImmediateScheduler, MemoryBackend, MemoryCache, MemoryPage};
+    use std::sync::Arc;
+
+    fn run_frame(
+        app: &mut PdfReaderApp,
+        ctx: &egui::Context,
+        screen: egui::Rect,
+        events: Vec<egui::Event>,
+        time: f64,
+    ) {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            time: Some(time),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            app.frame(ui);
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    /// 一个打开的内存文档 + 一条高亮注释；返回指针应落到的屏幕坐标。
+    fn app_with_annotation() -> (
+        PdfReaderApp,
+        egui::Context,
+        AnnotationId,
+        egui::Rect,
+        egui::Pos2,
+    ) {
+        let backend = MemoryBackend::new(vec![MemoryPage::new(
+            Size::new(600.0, 800.0),
+            Rotation::None,
+            vec!["Hello".to_string()],
+        )]);
+        let opened = backend.open(Source::Bytes(b"x"), None).unwrap();
+        let raster = opened.raster.clone();
+        let mut session = DocumentSession::new(
+            opened,
+            Arc::new(MemoryCache::new()),
+            Arc::new(ImmediateScheduler::new(raster)),
+            Box::new(VerticalLayout),
+            Box::new(RangeSelection::new()),
+        )
+        .unwrap();
+        let mut events = Vec::new();
+        session.handle(
+            ViewerCommand::ResizeViewport(Size::new(800.0, 600.0)),
+            &mut events,
+        );
+        session.handle(ViewerCommand::SetZoom(1.0), &mut events);
+
+        let mut app = PdfReaderApp::new_headless(
+            crate::clock::Clock::system(),
+            crate::diag::diagnostics_for_tests(),
+            None,
+        );
+        app.session = Some(session);
+        app.add_annotation(
+            PageIndex::FIRST,
+            pdfcore::annotation::AnnotationKind::Highlight {
+                quads: vec![Rect::new(250.0, 400.0, 120.0, 30.0)],
+            },
+        );
+        let id = app.annotations.iter().next().expect("annotation").id;
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        // 两帧让面板/画布布局稳定，再按真实布局算注释的屏幕坐标。
+        for frame in 0..2 {
+            run_frame(&mut app, &ctx, screen, Vec::new(), frame as f64);
+        }
+        let session = app.session.as_ref().expect("session");
+        let placement = session.placement(PageIndex::FIRST).expect("placement");
+        let content = placement.rect_to_content(Rect::new(250.0, 400.0, 120.0, 30.0));
+        let scroll = session.viewport().scroll;
+        let position = egui::pos2(
+            app.canvas_rect.min.x + content.x - scroll.x + 10.0,
+            app.canvas_rect.min.y + content.y - scroll.y + 10.0,
+        );
+        (app, ctx, id, screen, position)
+    }
+
+    #[test]
+    fn canvas_annotation_hover_right_click_and_delete_are_scoped() {
+        let (mut app, ctx, id, screen, pos) = app_with_annotation();
+        // 1) 画布上 hover → 记录 Delete 目标
+        run_frame(
+            &mut app,
+            &ctx,
+            screen,
+            vec![egui::Event::PointerMoved(pos)],
+            10.0,
+        );
+        assert_eq!(app.hovered_annotation, Some(id), "画布 hover 应命中注释");
+
+        // 2) 指针移到侧栏 → 悬停目标立即清空
+        run_frame(
+            &mut app,
+            &ctx,
+            screen,
+            vec![egui::Event::PointerMoved(egui::pos2(50.0, 300.0))],
+            11.0,
+        );
+        assert_eq!(app.hovered_annotation, None, "侧栏 hover 不应保留注释目标");
+
+        // 3) 此时 Delete 不得删除
+        run_frame(
+            &mut app,
+            &ctx,
+            screen,
+            vec![egui::Event::Key {
+                key: egui::Key::Delete,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            12.0,
+        );
+        assert!(
+            app.annotations.get(id).is_some(),
+            "侧栏 hover + Delete 不应删除"
+        );
+
+        // 4) 回到画布 hover，再右键 → 菜单目标
+        run_frame(
+            &mut app,
+            &ctx,
+            screen,
+            vec![egui::Event::PointerMoved(pos)],
+            13.0,
+        );
+        assert_eq!(app.hovered_annotation, Some(id));
+        let secondary = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        run_frame(
+            &mut app,
+            &ctx,
+            screen,
+            vec![secondary(true), secondary(false)],
+            14.0,
+        );
+        assert_eq!(app.context_annotation, Some(id), "右键应指向注释");
+
+        // 5) Delete 删除悬停注释
+        run_frame(
+            &mut app,
+            &ctx,
+            screen,
+            vec![egui::Event::Key {
+                key: egui::Key::Delete,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            15.0,
+        );
+        assert!(
+            app.annotations.get(id).is_none(),
+            "画布 hover + Delete 应删除"
+        );
+    }
+}
+
 mod external_annotation_tests {
     use super::super::*;
     use pdfcore::annotation::AnnotationKind;

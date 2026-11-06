@@ -10,6 +10,17 @@ use crate::view::{
 use eframe::egui;
 use egui::{Align2, Color32, CornerRadius, Id, Sense, Stroke, StrokeKind, Vec2 as EVec2};
 
+/// 指针是否落在弹层/窗口/模态上（egui 的非背景层）。
+///
+/// 不用 `Context::is_pointer_over_egui()`：它按"root Ui 剩余可用矩形"判断，
+/// 而本应用用 `CentralPanel` 把剩余区域全部消费掉，导致画布上的普通 hover 也被判成
+/// "在 egui 之外"。这里只关心图层顺序：浮窗/画布都在 Background，窗口/弹出菜单/模态
+/// 在 Middle/Foreground/Tooltip；`layer_id_at` 用上一帧图层，最多晚一帧。
+pub(super) fn pointer_over_overlay(ctx: &egui::Context, position: egui::Pos2) -> bool {
+    ctx.layer_id_at(position)
+        .is_some_and(|layer| layer.order != egui::Order::Background)
+}
+
 /// 浮窗的正文区域：标题栏以下、整个浮窗宽度。
 ///
 /// 标题栏（含 ✎/✕/@ 按钮）不属于正文；双击判定与正文编辑入口都用它。
@@ -309,17 +320,17 @@ impl PdfReaderApp {
     /// 画布内容（注释/链接/右键目标）是否允许响应指针。
     ///
     /// 画布内容不是 egui widget，命中判断必须自己裁剪：面板区域（顶栏/侧栏/状态栏）
-    /// 由 `canvas` 矩形排除；弹层/窗口/模态由调用方传 `pointer_over_egui`；
+    /// 由 `canvas` 矩形排除；弹层/窗口/模态用"指针下是否是非背景层"判断；
     /// 连续动作（拖拽/画墨迹/截图选区）期间不响应新的 hover。
     pub(super) fn canvas_hover_allowed(
         &self,
+        ctx: &egui::Context,
         canvas: egui::Rect,
         position: egui::Pos2,
-        pointer_over_egui: bool,
         using_pointer: bool,
     ) -> bool {
         canvas.contains(position)
-            && !pointer_over_egui
+            && !pointer_over_overlay(ctx, position)
             && !using_pointer
             && self.topmost_float_at(position).is_none()
     }
