@@ -197,6 +197,8 @@ pub struct PdfReaderApp {
     next_preview_id: Vec<u64>,
     /// 连续的 preview resize 合并窗口。
     last_preview_resize: Option<(PreviewKey, std::time::Instant)>,
+    /// 连续的引用点浮窗 resize 合并窗口。
+    last_dest_resize: Option<((PageIndex, usize), std::time::Instant)>,
     /// 自定义数据是否有未保存的修改（影响保存按钮文案）。
     data_dirty: bool,
     /// 页码原位编辑草稿（`Some` = 正在编辑）。
@@ -520,6 +522,7 @@ impl PdfReaderApp {
             custom_previews: Vec::new(),
             next_preview_id: Vec::new(),
             last_preview_resize: None,
+            last_dest_resize: None,
             data_dirty: false,
             page_edit: None,
             zoom_edit: None,

@@ -289,6 +289,58 @@ impl PdfReaderApp {
         self.last_preview_resize = Some((key, now));
     }
 
+    /// 连续拖拽同一引用点浮窗 resize 合并成一条历史（1 秒窗口）。
+    pub(super) fn apply_dest_resize(
+        &mut self,
+        page: PageIndex,
+        index: usize,
+        before: egui::Vec2,
+        after: egui::Vec2,
+    ) {
+        let now = self.clock.now();
+        let target = (page, index);
+        let merge = self.last_dest_resize.is_some_and(|(last, last_at)| {
+            last == target
+                && now.duration_since(last_at) <= std::time::Duration::from_secs(1)
+                && !self.history.can_redo()
+        });
+        let merged = merge
+            && self.history.last_mut().is_some_and(|entry| {
+                matches!(
+                    entry.command,
+                    AppEdit::ResizeDestMark { page: p, index: i, .. } if (p, i) == target
+                )
+            });
+        if merged {
+            self.apply_edit(
+                AppEdit::ResizeDestMark {
+                    page,
+                    index,
+                    before,
+                    after,
+                },
+                false,
+            );
+            if let Some(entry) = self.history.last_mut() {
+                if let AppEdit::ResizeDestMark { after: last, .. } = &mut entry.command {
+                    *last = after;
+                }
+            }
+            self.refresh_dirty();
+        } else {
+            self.apply_edit(
+                AppEdit::ResizeDestMark {
+                    page,
+                    index,
+                    before,
+                    after,
+                },
+                true,
+            );
+        }
+        self.last_dest_resize = Some((target, now));
+    }
+
     /// 预留的顺序调整接口：当前侧栏还没有拖拽 UI。
     #[allow(dead_code)]
     pub(super) fn move_custom_preview(&mut self, key: PreviewKey, to: usize) {

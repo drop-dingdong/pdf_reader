@@ -469,7 +469,7 @@ impl PdfReaderApp {
         // 浮窗尺寸变化 → 回写正文尺寸到来源数据（用户要求：改大小即记住正文面积）
         // 先收集，再统一走 apply_edit，保证一次 resize 进入撤销栈。
         let mut preview_resizes: Vec<(PreviewKey, egui::Vec2, egui::Vec2)> = Vec::new();
-        let mut dest_resizes: Vec<(PageIndex, usize, DestMark, DestMark)> = Vec::new();
+        let mut dest_resizes: Vec<(PageIndex, usize, egui::Vec2, egui::Vec2)> = Vec::new();
         for window in std::mem::take(&mut self.floats) {
             let body = window.body;
             if let Some((page, index)) = window.origin {
@@ -479,10 +479,7 @@ impl PdfReaderApp {
                     .and_then(|marks| marks.get(index))
                 {
                     if body_size_changed(mark.body_size, body) {
-                        let before = mark.clone();
-                        let mut after = before.clone();
-                        after.body_size = body;
-                        dest_resizes.push((page, index, before, after));
+                        dest_resizes.push((page, index, mark.body_size, body));
                     }
                 }
             }
@@ -506,15 +503,7 @@ impl PdfReaderApp {
             self.apply_preview_resize(key, before, after);
         }
         for (page, index, before, after) in dest_resizes {
-            self.apply_edit(
-                AppEdit::EditDestMark {
-                    page,
-                    index,
-                    before: std::sync::Arc::new(before),
-                    after: std::sync::Arc::new(after),
-                },
-                true,
-            );
+            self.apply_dest_resize(page, index, before, after);
         }
 
         // 固定浮窗：绘制与注册都在此；后加入的在更上层（见 draw_floats）

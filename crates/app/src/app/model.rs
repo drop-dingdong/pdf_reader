@@ -855,6 +855,17 @@ pub(super) enum AppEdit {
         /// 新值。
         after: std::sync::Arc<DestMark>,
     },
+    /// 调整引用点浮窗正文尺寸（与 preview 的 resize 同语义）。
+    ResizeDestMark {
+        /// 页号。
+        page: PageIndex,
+        /// 该页第几个被引用点。
+        index: usize,
+        /// 旧正文尺寸。
+        before: egui::Vec2,
+        /// 新正文尺寸。
+        after: egui::Vec2,
+    },
 }
 
 impl AppEdit {
@@ -936,6 +947,9 @@ impl AppEdit {
             }
             Self::EditDestMark { page, .. } => {
                 format!("重选引用点（第 {} 页）", page.display_number())
+            }
+            Self::ResizeDestMark { page, .. } => {
+                format!("调整引用点浮窗大小（第 {} 页）", page.display_number())
             }
         }
     }

@@ -492,6 +492,8 @@ impl PdfReaderApp {
                 mark.rect.y.to_bits().hash(&mut hasher);
                 mark.rect.width.to_bits().hash(&mut hasher);
                 mark.rect.height.to_bits().hash(&mut hasher);
+                mark.body_size.x.to_bits().hash(&mut hasher);
+                mark.body_size.y.to_bits().hash(&mut hasher);
                 mark.scale.to_bits().hash(&mut hasher);
             }
         }

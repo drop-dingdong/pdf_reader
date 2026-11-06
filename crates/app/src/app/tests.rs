@@ -1560,6 +1560,96 @@ mod annotation_body_tests {
             "Markdown 空正文双击应打开正文编辑器"
         );
     }
+
+    #[test]
+    fn resizing_a_dest_float_is_dirty_labelled_and_undoable() {
+        let mut app = app();
+        let page = PageIndex::FIRST;
+        let before = egui::vec2(120.0, 80.0);
+        let after = egui::vec2(300.0, 200.0);
+        app.dest_marks = vec![vec![DestMark {
+            point: Point::new(10.0, 20.0),
+            rect: Rect::new(10.0, 20.0, 120.0, 80.0),
+            snapshot: None,
+            body_size: before,
+            scale: 1.0,
+            image_id: String::new(),
+            image_revision: 0,
+        }]];
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(40.0, 40.0),
+            crate::view::float_size_for_body(before, FLOAT_TITLE_HEIGHT),
+        );
+        app.floats.push(Float {
+            id: 1,
+            title: "引用点".to_string(),
+            content: FloatContent::Text(String::new()),
+            rect,
+            owner: FloatOwner::None,
+            body: before,
+            origin: Some((page, 0)),
+        });
+        // 模拟“刚保存/刚打开”的干净基线。
+        app.data_clean_hash = Some(app.data_fingerprint());
+        app.refresh_dirty();
+        assert!(!app.data_dirty, "基线应干净");
+
+        app.apply_dest_resize(page, 0, before, after);
+        assert!(app.data_dirty, "引用点浮窗改大小应置数据脏");
+        assert_eq!(app.dest_marks[0][0].body_size, after);
+        assert_eq!(app.floats[0].body, after);
+        let description = app
+            .history
+            .last_mut()
+            .map(|entry| entry.description.clone())
+            .expect("一条历史");
+        assert!(
+            description.contains("调整引用点浮窗大小"),
+            "历史应写明是改大小：{description}"
+        );
+        assert!(!description.contains("重选引用点"), "{description}");
+
+        app.undo_edit();
+        assert_eq!(app.dest_marks[0][0].body_size, before);
+        assert_eq!(app.floats[0].body, before);
+        assert!(!app.data_dirty, "撤销回保存点后应重新干净");
+    }
+
+    #[test]
+    fn consecutive_dest_resizes_merge_into_one_history_entry() {
+        let mut app = app();
+        let page = PageIndex::FIRST;
+        let a = egui::vec2(120.0, 80.0);
+        let b = egui::vec2(200.0, 120.0);
+        let c = egui::vec2(300.0, 200.0);
+        app.dest_marks = vec![vec![DestMark {
+            point: Point::new(10.0, 20.0),
+            rect: Rect::new(10.0, 20.0, 120.0, 80.0),
+            snapshot: None,
+            body_size: a,
+            scale: 1.0,
+            image_id: String::new(),
+            image_revision: 0,
+        }]];
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(40.0, 40.0),
+            crate::view::float_size_for_body(a, FLOAT_TITLE_HEIGHT),
+        );
+        app.floats.push(Float {
+            id: 1,
+            title: "引用点".to_string(),
+            content: FloatContent::Text(String::new()),
+            rect,
+            owner: FloatOwner::None,
+            body: a,
+            origin: Some((page, 0)),
+        });
+        app.apply_dest_resize(page, 0, a, b);
+        app.apply_dest_resize(page, 0, b, c);
+        assert_eq!(app.history.len(), 1, "连续 resize 应合并成一条");
+        assert_eq!(app.dest_marks[0][0].body_size, c);
+        assert_eq!(app.floats[0].body, c);
+    }
 }
 
 #[cfg(test)]

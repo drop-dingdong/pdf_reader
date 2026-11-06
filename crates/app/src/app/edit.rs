@@ -191,6 +191,26 @@ impl PdfReaderApp {
                     }
                 }
             }
+            AppEdit::ResizeDestMark {
+                page, index, after, ..
+            } => {
+                if let Some(slot) = self
+                    .dest_marks
+                    .get_mut(page.get() as usize)
+                    .and_then(|marks| marks.get_mut(*index))
+                {
+                    slot.body_size = *after;
+                    for window in &mut self.floats {
+                        if window.origin == Some((*page, *index)) {
+                            window.body = *after;
+                            window.rect = egui::Rect::from_min_size(
+                                window.rect.min,
+                                float_size_for_body(*after, FLOAT_TITLE_HEIGHT),
+                            );
+                        }
+                    }
+                }
+            }
         }
         if record {
             let weight = edit.weight();
@@ -279,6 +299,17 @@ impl PdfReaderApp {
                 before,
                 after,
             } => AppEdit::EditDestMark {
+                page,
+                index,
+                before: after,
+                after: before,
+            },
+            AppEdit::ResizeDestMark {
+                page,
+                index,
+                before,
+                after,
+            } => AppEdit::ResizeDestMark {
                 page,
                 index,
                 before: after,
