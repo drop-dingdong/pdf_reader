@@ -28,7 +28,7 @@ cargo test -p pdfcore --lib tiling   # 单模块
 | UI 联调 | `crates/app/tests/*.rs` | 真实 `DocumentSession` + `view`、注释往返、replay 脚本、CLI 写回 |
 | 回放 | `crates/app/src/app/replay.rs` + `scripts/replay/` | 驱动真实 `App::ui`，逐帧检查绘制输出 |
 
-测试数量会变，以 `cargo test` 输出为准；当前 506 个。
+测试数量会变，以 `cargo test` 输出为准；当前 514 个。
 
 ## 3. 基础设施
 
@@ -122,6 +122,7 @@ cargo run -p app -- --replay scripts/replay/tiling_800.json --timing
 | 15a | 两个注释浮窗重叠，把高浮窗标题栏的 ✎/✕ 压在低浮窗正文上，点击/双击 ✎ | 打开高浮窗编辑器；拖动/关闭也只作用于高浮窗 |
 | 15b | 放大一条很大的注释，使其延伸到侧栏/顶栏；hover 那块不可见区域后按 `Delete` | 不高亮浮窗、不删除注释；指针离开画布即清空悬停目标 |
 | 15c | 两个浮窗重叠：在上浮窗的 Markdown 正文上拖动；再在图片浮窗正文上拖动 | 前者不带动下层浮窗、不拖动 PDF；后者正常移动图片浮窗 |
+| 15d | 在文字浮窗正文写一个指向 `pd-float://annotation/1` 的 Markdown 链接；点标题栏 ↗ 复制链接、→ 跳到来源；再改成不存在/歧义的 id | 点击链接打开或置顶目标浮窗并短暂高亮；↗ 复制、→ 跳转；断链/歧义只在状态栏提示，不崩溃 |
 | 16 | 保存 → 重开 → Okular 查看 | 注释可见可改；id 不重复；再保存不叠对象 |
 | 17 | 移动墨迹 → 保存 → 撤销 → 保存 | 回到原位（不消失）；重做回移动位置 |
 | 18 | 保存后 Okular 修改正文/便签，再回本程序保存 | 修改保留；同一 id 取最后一份 |

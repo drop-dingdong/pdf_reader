@@ -17,22 +17,9 @@
 
 ## 2. 已决定但还没做
 
-推荐实现顺序：文本浮窗跳转 → 行内基线/完整布局（后者需改上游渲染器，成本高）。
-`app.rs` 拆分与 Markdown 空正文双击已完成，见 [status.md](status.md) §2。
+推荐实现顺序：行内基线/完整布局（后者需改上游渲染器，成本高）。
+`app.rs` 拆分、Markdown 空正文双击、文本浮窗跳转已完成，见 [status.md](status.md) §2。
 
-- **文本浮窗跳转（规划，排在行内基线之前）**：
-  - 链接语法：`pd-float://annotation/<id>` / `pd-float://preview/<id>`（放在标准 Markdown 链接的地址位）；
-    保持链接文字由作者写死，重命名目标不改 Markdown。
-  - 创建入口：文字浮窗标题栏提供「复制引用链接」，与图片 `@` 分开；
-    标题栏「goto」按钮复用侧栏 `→` 的“跳到来源页/位置”动作。
-  - 点击：目标未打开则用现有 `spawn_custom_float` / `open_annotation_note` 打开；
-    已打开则置顶并高亮一段时间；目标缺失提示断链。
-  - 作用域：ID 文档内有效；跨文档粘贴按断链处理，暂不建全局数据库。
-  - 外部注释：可引用；但外部注释没有稳定 `/NM` 时，跨会话 ID 可能变化，
-    先按“当前会话可用/断链提示”处理，持久化映射另议。
-  - 不自动扫描、不自动级联打开；只在用户点击 `pd-float://` 时触发。
-  - 落点：`FloatOwner::Custom` 用 preview `id`（不是 Vec 下标），
-    `FloatOwner::Annotation` 用注释 id；`FloatOwner::None` 的测试/截图浮窗没有来源，不显示 goto。
 - **Linux Wayland 文件拖放**：winit 0.30 Wayland 后端不支持；触发条件：升级 eframe/winit 或实现 Wayland data-device。
   临时 `env -u WAYLAND_DISPLAY`。目前不改。
 - **便签几何编辑**：拖动/缩放便签图标；目前只有固定 18pt，不能移动。
