@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod edit_describe_tests {
     use super::super::*;
+    use pdfcore::annotation::AnnotationKind;
 
     fn ink() -> pdfcore::annotation::Annotation {
         pdfcore::annotation::Annotation::new(
@@ -50,7 +51,9 @@ mod edit_describe_tests {
 mod annotation_body_tests {
     use super::super::*;
     use crate::view::{body_size_of, FLOAT_TITLE_HEIGHT};
+    use egui::Id;
     use pdfcore::annotation::INK_OPACITY;
+    use pdfcore::annotation::{Annotation, AnnotationKind};
 
     fn app() -> PdfReaderApp {
         PdfReaderApp::new_headless(
@@ -1562,6 +1565,7 @@ mod annotation_body_tests {
 #[cfg(test)]
 mod external_annotation_tests {
     use super::super::*;
+    use pdfcore::annotation::AnnotationKind;
 
     fn app_with_external() -> (
         PdfReaderApp,

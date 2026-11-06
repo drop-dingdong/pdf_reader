@@ -105,30 +105,30 @@ impl PdfReaderApp {
                 // 两个标签页：目录 / 自定义preview（Pin）。同一时刻只显示一个。
                 ui.horizontal(|ui| {
                     if ui
-                        .selectable_label(self.sidebar_tab == SidebarTab::Outline, "目录")
+                        .selectable_label(self.sidebar_tab == SidebarPane::Outline, "目录")
                         .clicked()
                     {
-                        self.sidebar_tab = SidebarTab::Outline;
+                        self.sidebar_tab = SidebarPane::Outline;
                     }
                     if ui
-                        .selectable_label(self.sidebar_tab == SidebarTab::Pins, "自定义preview")
+                        .selectable_label(self.sidebar_tab == SidebarPane::Pins, "自定义preview")
                         .clicked()
                     {
-                        self.sidebar_tab = SidebarTab::Pins;
+                        self.sidebar_tab = SidebarPane::Pins;
                     }
                     if ui
-                        .selectable_label(self.sidebar_tab == SidebarTab::Annotations, "注释")
+                        .selectable_label(self.sidebar_tab == SidebarPane::Annotations, "注释")
                         .clicked()
                     {
-                        self.sidebar_tab = SidebarTab::Annotations;
+                        self.sidebar_tab = SidebarPane::Annotations;
                     }
                 });
                 ui.separator();
-                if self.sidebar_tab == SidebarTab::Pins {
+                if self.sidebar_tab == SidebarPane::Pins {
                     self.draw_pin_list(ui, session);
                     return;
                 }
-                if self.sidebar_tab == SidebarTab::Annotations {
+                if self.sidebar_tab == SidebarPane::Annotations {
                     self.draw_annotation_list(ui, session);
                     return;
                 }
