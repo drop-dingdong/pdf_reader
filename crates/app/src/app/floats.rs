@@ -709,202 +709,7 @@ impl PdfReaderApp {
                     }
                 }
             }
-            // Markdown 模式：正文的 body 先于内容控件注册，双击普通文字会落到 body；
-            // 链接/滚动条的单次点击由它们自己优先，不会被双击层吞掉。
-            let markdown_active = self.markdown_floats
-                && matches!(&self.floats[index].content, FloatContent::Text(text) if !text.is_empty());
-            if markdown_active && body.double_clicked() && self.editing_body.is_none() {
-                if let FloatContent::Text(text) = &self.floats[index].content {
-                    let owner = self.floats[index].owner;
-                    let text = text.clone();
-                    let body_area = egui::Rect::from_min_max(
-                        rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 6.0),
-                        rect.max - EVec2::new(18.0, 16.0),
-                    );
-                    let viewport = self
-                        .markdown_viewports
-                        .get(&self.floats[index].id)
-                        .copied()
-                        .unwrap_or((egui::Vec2::ZERO, egui::Vec2::ZERO));
-                    let cursor = body.interact_pointer_pos().map(|position| {
-                        body_cursor_from_pointer(
-                            ui.ctx(),
-                            &text,
-                            body_area,
-                            position,
-                            true,
-                            viewport.0,
-                            Some(viewport.1),
-                        )
-                    });
-                    self.open_body_editor(owner, text, cursor, ui.ctx());
-                }
-            }
-            match &self.floats[index].content {
-                FloatContent::Text(text) if markdown_active => {
-                    // Markdown 正文：子 Ui + 内部 ScrollArea（可滚动、可点链接）。
-                    // 右侧留出滚动条位置，底部留出缩放手柄位置。
-                    let body_area = egui::Rect::from_min_max(
-                        rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 6.0),
-                        rect.max - EVec2::new(18.0, 16.0),
-                    );
-                    if text.is_empty() {
-                        // 空正文没有 CommonMark 内容；不创建 ScrollArea（它会吞掉双击），
-                        // 用一个明确的正文点击层作为唯一响应。
-                        self.markdown_rendered = true;
-                        if body_area.width() > 0.0 && body_area.height() > 0.0 {
-                            let hit = ui.interact(
-                                body_area,
-                                Id::unique(("float-md-empty-edit", id)),
-                                Sense::click(),
-                            );
-                            if hit.double_clicked() && self.editing_body.is_none() {
-                                let owner = self.floats[index].owner;
-                                self.open_body_editor(owner, String::new(), None, ui.ctx());
-                            }
-                        }
-                    } else if body_area.width() > 0.0 && body_area.height() > 0.0 {
-                        let source_hash = markdown_source_hash(text);
-                        let prepared = self.markdown_prepared.remove(&id);
-                        let prepared = match prepared {
-                            Some(prepared) if prepared.source_hash == source_hash => prepared,
-                            _ => {
-                                let normalized = crate::markdown::normalize_display_math(
-                                    &crate::markdown::preserve_single_line_breaks(text),
-                                );
-                                let image_refs = crate::image_store::markdown_refs(&normalized);
-                                let min_width = {
-                                    let mut measure = |line: &str, monospace: bool| {
-                                        let font = if monospace {
-                                            egui::FontId::monospace(13.0)
-                                        } else {
-                                            egui::FontId::proportional(13.0)
-                                        };
-                                        ui.fonts_mut(|fonts| {
-                                            fonts
-                                                .layout_no_wrap(
-                                                    line.to_owned(),
-                                                    font,
-                                                    Color32::from_gray(225),
-                                                )
-                                                .size()
-                                                .x
-                                        })
-                                    };
-                                    crate::markdown::min_unwrapped_width(&normalized, &mut measure)
-                                };
-                                PreparedMarkdown {
-                                    source_hash,
-                                    normalized,
-                                    image_refs,
-                                    min_width,
-                                }
-                            }
-                        };
-                        let min_width = prepared.min_width;
-                        let text = crate::image_store::canonicalize_markdown(
-                            &prepared.normalized,
-                            &self.images,
-                        );
-                        self.markdown_prepared.insert(id, prepared);
-                        let view_id = Id::unique(("float-md", id));
-                        let default_width = if min_width > body_area.width() {
-                            Some(
-                                (min_width.ceil() as usize)
-                                    .max(1)
-                                    .min(canvas.width().max(1.0) as usize),
-                            )
-                        } else {
-                            None
-                        };
-                        let mut md_cache = self.markdown_caches.remove(&id).unwrap_or_default();
-                        ui.scope_builder(
-                            egui::UiBuilder::new().max_rect(body_area).id_salt(view_id),
-                            |ui| {
-                                ui.set_clip_rect(body_area.intersect(canvas));
-                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                                ui.style_mut().url_in_tooltip = true;
-                                let mut visuals = egui::Visuals::dark();
-                                visuals.override_text_color = Some(Color32::from_gray(225));
-                                visuals.hyperlink_color = Color32::from_rgb(120, 180, 255);
-                                *ui.visuals_mut() = visuals;
-                                ui.spacing_mut().item_spacing = EVec2::new(0.0, 4.0);
-                                // 数学公式走 render_math_fn（egui_commonmark 会在
-                                // 有回调时启用 ENABLE_MATH）；缓存按公式/行内/DPI。
-                                let math_cache = self.math_cache.clone();
-                                let math_fn = move |ui: &mut egui::Ui, tex: &str, inline: bool| {
-                                    crate::math::paint(ui, &math_cache, tex, inline);
-                                };
-                                let scroll_source = egui::scroll_area::ScrollSource {
-                                    mouse_wheel: wheel_owner,
-                                    ..Default::default()
-                                };
-                                let scroll_output = egui::ScrollArea::both()
-                                    .id_salt(view_id.with("scroll"))
-                                    .scroll_source(scroll_source)
-                                    .auto_shrink([false, false])
-                                    .content_margin(egui::Margin::same(4))
-                                    .show(ui, |ui| {
-                                        egui_commonmark::CommonMarkViewer::new()
-                                            .default_width(default_width)
-                                            .enable_scroll_to_heading(true)
-                                            .render_math_fn(Some(&math_fn))
-                                            .show(ui, &mut md_cache, &text);
-                                    });
-                                self.markdown_viewports.insert(
-                                    id,
-                                    (
-                                        scroll_output.state.clamped_offset(),
-                                        scroll_output.content_size,
-                                    ),
-                                );
-                            },
-                        );
-                        self.markdown_caches.insert(id, md_cache);
-                        self.markdown_rendered = true;
-                    }
-                }
-                FloatContent::Text(text) => {
-                    // 正文：**自动换行 + 行数上限（放不下就截断并显示 …）**
-                    let body_origin = rect.min + EVec2::new(10.0, FLOAT_TITLE_HEIGHT + 8.0);
-                    let body_area =
-                        egui::Rect::from_min_max(body_origin, rect.max - EVec2::new(10.0, 8.0));
-                    if body_area.width() > 0.0 && body_area.height() > 0.0 {
-                        // 行高按字体 1.3 倍估算；至少保留 1 行
-                        let row_height = 13.0 * 1.3;
-                        let rows = ((body_area.height() / row_height).floor() as usize).max(1);
-                        let job = overflow_layout(
-                            text,
-                            egui::FontId::proportional(13.0),
-                            Color32::from_gray(225),
-                            body_area.width(),
-                            rows,
-                        );
-                        let galley = painter.layout_job(job);
-                        painter.with_clip_rect(body_area).galley(
-                            body_area.min,
-                            galley,
-                            Color32::from_gray(225),
-                        );
-                    }
-                }
-                FloatContent::Image(texture) => {
-                    // 正文区域：按**保持长宽比**放进窗口（居中、不拉伸变形）；
-                    // 改变窗口大小只影响显示尺寸，图片内容本身不变。
-                    let body = egui::Rect::from_min_max(
-                        rect.min + EVec2::new(4.0, FLOAT_TITLE_HEIGHT + 4.0),
-                        rect.max - EVec2::new(4.0, 4.0),
-                    );
-                    let size = texture.size_vec2();
-                    let target = fit_inside(size, body);
-                    painter.image(
-                        texture.id(),
-                        target,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
-                }
-            }
+            self.draw_float_content(ui, canvas, rect, index, &body, wheel_owner);
         }
         if let Some(id) = close {
             self.close_float(id);
@@ -1048,5 +853,214 @@ impl PdfReaderApp {
             return true;
         }
         false
+    }
+    /// 绘制浮窗正文（Markdown/纯文本/图片）与正文双击入口。
+    pub(super) fn draw_float_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        canvas: egui::Rect,
+        rect: egui::Rect,
+        index: usize,
+        body: &egui::Response,
+        wheel_owner: bool,
+    ) {
+        let id = self.floats[index].id;
+        let painter = ui.painter();
+        // Markdown 模式：正文的 body 先于内容控件注册，双击普通文字会落到 body；
+        // 链接/滚动条的单次点击由它们自己优先，不会被双击层吞掉。
+        let markdown_active = self.markdown_floats
+            && matches!(&self.floats[index].content, FloatContent::Text(text) if !text.is_empty());
+        if markdown_active && body.double_clicked() && self.editing_body.is_none() {
+            if let FloatContent::Text(text) = &self.floats[index].content {
+                let owner = self.floats[index].owner;
+                let text = text.clone();
+                let body_area = egui::Rect::from_min_max(
+                    rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 6.0),
+                    rect.max - EVec2::new(18.0, 16.0),
+                );
+                let viewport = self
+                    .markdown_viewports
+                    .get(&self.floats[index].id)
+                    .copied()
+                    .unwrap_or((egui::Vec2::ZERO, egui::Vec2::ZERO));
+                let cursor = body.interact_pointer_pos().map(|position| {
+                    body_cursor_from_pointer(
+                        ui.ctx(),
+                        &text,
+                        body_area,
+                        position,
+                        true,
+                        viewport.0,
+                        Some(viewport.1),
+                    )
+                });
+                self.open_body_editor(owner, text, cursor, ui.ctx());
+            }
+        }
+        match &self.floats[index].content {
+            FloatContent::Text(text) if markdown_active => {
+                // Markdown 正文：子 Ui + 内部 ScrollArea（可滚动、可点链接）。
+                // 右侧留出滚动条位置，底部留出缩放手柄位置。
+                let body_area = egui::Rect::from_min_max(
+                    rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 6.0),
+                    rect.max - EVec2::new(18.0, 16.0),
+                );
+                if text.is_empty() {
+                    // 空正文没有 CommonMark 内容；不创建 ScrollArea（它会吞掉双击），
+                    // 用一个明确的正文点击层作为唯一响应。
+                    self.markdown_rendered = true;
+                    if body_area.width() > 0.0 && body_area.height() > 0.0 {
+                        let hit = ui.interact(
+                            body_area,
+                            Id::unique(("float-md-empty-edit", id)),
+                            Sense::click(),
+                        );
+                        if hit.double_clicked() && self.editing_body.is_none() {
+                            let owner = self.floats[index].owner;
+                            self.open_body_editor(owner, String::new(), None, ui.ctx());
+                        }
+                    }
+                } else if body_area.width() > 0.0 && body_area.height() > 0.0 {
+                    let source_hash = markdown_source_hash(text);
+                    let prepared = self.markdown_prepared.remove(&id);
+                    let prepared = match prepared {
+                        Some(prepared) if prepared.source_hash == source_hash => prepared,
+                        _ => {
+                            let normalized = crate::markdown::normalize_display_math(
+                                &crate::markdown::preserve_single_line_breaks(text),
+                            );
+                            let image_refs = crate::image_store::markdown_refs(&normalized);
+                            let min_width = {
+                                let mut measure = |line: &str, monospace: bool| {
+                                    let font = if monospace {
+                                        egui::FontId::monospace(13.0)
+                                    } else {
+                                        egui::FontId::proportional(13.0)
+                                    };
+                                    ui.fonts_mut(|fonts| {
+                                        fonts
+                                            .layout_no_wrap(
+                                                line.to_owned(),
+                                                font,
+                                                Color32::from_gray(225),
+                                            )
+                                            .size()
+                                            .x
+                                    })
+                                };
+                                crate::markdown::min_unwrapped_width(&normalized, &mut measure)
+                            };
+                            PreparedMarkdown {
+                                source_hash,
+                                normalized,
+                                image_refs,
+                                min_width,
+                            }
+                        }
+                    };
+                    let min_width = prepared.min_width;
+                    let text = crate::image_store::canonicalize_markdown(
+                        &prepared.normalized,
+                        &self.images,
+                    );
+                    self.markdown_prepared.insert(id, prepared);
+                    let view_id = Id::unique(("float-md", id));
+                    let default_width = if min_width > body_area.width() {
+                        Some(
+                            (min_width.ceil() as usize)
+                                .max(1)
+                                .min(canvas.width().max(1.0) as usize),
+                        )
+                    } else {
+                        None
+                    };
+                    let mut md_cache = self.markdown_caches.remove(&id).unwrap_or_default();
+                    ui.scope_builder(
+                        egui::UiBuilder::new().max_rect(body_area).id_salt(view_id),
+                        |ui| {
+                            ui.set_clip_rect(body_area.intersect(canvas));
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                            ui.style_mut().url_in_tooltip = true;
+                            let mut visuals = egui::Visuals::dark();
+                            visuals.override_text_color = Some(Color32::from_gray(225));
+                            visuals.hyperlink_color = Color32::from_rgb(120, 180, 255);
+                            *ui.visuals_mut() = visuals;
+                            ui.spacing_mut().item_spacing = EVec2::new(0.0, 4.0);
+                            // 数学公式走 render_math_fn（egui_commonmark 会在
+                            // 有回调时启用 ENABLE_MATH）；缓存按公式/行内/DPI。
+                            let math_cache = self.math_cache.clone();
+                            let math_fn = move |ui: &mut egui::Ui, tex: &str, inline: bool| {
+                                crate::math::paint(ui, &math_cache, tex, inline);
+                            };
+                            let scroll_source = egui::scroll_area::ScrollSource {
+                                mouse_wheel: wheel_owner,
+                                ..Default::default()
+                            };
+                            let scroll_output = egui::ScrollArea::both()
+                                .id_salt(view_id.with("scroll"))
+                                .scroll_source(scroll_source)
+                                .auto_shrink([false, false])
+                                .content_margin(egui::Margin::same(4))
+                                .show(ui, |ui| {
+                                    egui_commonmark::CommonMarkViewer::new()
+                                        .default_width(default_width)
+                                        .enable_scroll_to_heading(true)
+                                        .render_math_fn(Some(&math_fn))
+                                        .show(ui, &mut md_cache, &text);
+                                });
+                            self.markdown_viewports.insert(
+                                id,
+                                (
+                                    scroll_output.state.clamped_offset(),
+                                    scroll_output.content_size,
+                                ),
+                            );
+                        },
+                    );
+                    self.markdown_caches.insert(id, md_cache);
+                    self.markdown_rendered = true;
+                }
+            }
+            FloatContent::Text(text) => {
+                // 正文：**自动换行 + 行数上限（放不下就截断并显示 …）**
+                let body_origin = rect.min + EVec2::new(10.0, FLOAT_TITLE_HEIGHT + 8.0);
+                let body_area =
+                    egui::Rect::from_min_max(body_origin, rect.max - EVec2::new(10.0, 8.0));
+                if body_area.width() > 0.0 && body_area.height() > 0.0 {
+                    // 行高按字体 1.3 倍估算；至少保留 1 行
+                    let row_height = 13.0 * 1.3;
+                    let rows = ((body_area.height() / row_height).floor() as usize).max(1);
+                    let job = overflow_layout(
+                        text,
+                        egui::FontId::proportional(13.0),
+                        Color32::from_gray(225),
+                        body_area.width(),
+                        rows,
+                    );
+                    let galley = painter.layout_job(job);
+                    painter.with_clip_rect(body_area).galley(
+                        body_area.min,
+                        galley,
+                        Color32::from_gray(225),
+                    );
+                }
+            }
+            FloatContent::Image(texture) => {
+                // 正文区域：按**保持长宽比**放进窗口（居中、不拉伸变形）；
+                // 改变窗口大小只影响显示尺寸，图片内容本身不变。
+                let body = egui::Rect::from_min_max(
+                    rect.min + EVec2::new(4.0, FLOAT_TITLE_HEIGHT + 4.0),
+                    rect.max - EVec2::new(4.0, 4.0),
+                );
+                let size = texture.size_vec2();
+                let target = fit_inside(size, body);
+                painter.image(
+                    texture.id(),
+                    target,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+        }
     }
 }
