@@ -194,6 +194,7 @@ impl PdfReaderApp {
             self.message = "该被引用点还没有可用的截图（稍后重试）".to_string();
             return;
         };
+        let palette = float_palette(self.dark_mode);
         // 正文尺寸取该被引用点储存的 body_size（用户要求）
         let body = self
             .dest_marks
@@ -208,20 +209,16 @@ impl PdfReaderApp {
         // 临时预览：**点击或拖动都固定**；拖动时把位移带到新浮窗上（用户要求）
         let response = ui.interact(rect, Id::unique("hover-tip"), Sense::click_and_drag());
         let painter = ui.painter();
-        painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(30, 32, 36));
+        painter.rect_filled(rect, CornerRadius::same(4), palette.bg);
         painter.rect_stroke(
             rect,
             CornerRadius::same(4),
-            Stroke::new(1.0, Color32::from_gray(150)),
+            Stroke::new(1.0, palette.border),
             StrokeKind::Inside,
         );
         let title_rect =
             egui::Rect::from_min_size(rect.min, EVec2::new(rect.width(), FLOAT_TITLE_HEIGHT));
-        painter.rect_filled(
-            title_rect,
-            CornerRadius::same(4),
-            Color32::from_rgb(54, 58, 66),
-        );
+        painter.rect_filled(title_rect, CornerRadius::same(4), palette.title);
         let tip_title = format!("引用点预览 · 第 {} 页（点击固定）", page.display_number());
         let tip_job = overflow_layout(
             &tip_title,
@@ -237,7 +234,7 @@ impl PdfReaderApp {
                 title_rect.center().y - tip_galley.size().y * 0.5,
             ),
             tip_galley,
-            Color32::WHITE,
+            palette.title_text,
         );
         let body = egui::Rect::from_min_max(
             rect.min + EVec2::new(4.0, FLOAT_TITLE_HEIGHT + 4.0),
@@ -284,6 +281,7 @@ impl PdfReaderApp {
             self.custom_hover = None;
             return;
         };
+        let palette = float_palette(self.dark_mode);
         let title = if preview.title.is_empty() {
             "自定义preview".to_string()
         } else {
@@ -305,20 +303,16 @@ impl PdfReaderApp {
         // 临时预览也要能点击/拖动固定；之前只画不注册交互，点击会落回画布。
         let response = ui.interact(rect, Id::unique("custom-hover"), Sense::click_and_drag());
         let painter = ui.painter().clone();
-        painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(30, 32, 36));
+        painter.rect_filled(rect, CornerRadius::same(4), palette.bg);
         painter.rect_stroke(
             rect,
             CornerRadius::same(4),
-            Stroke::new(1.0, Color32::from_gray(150)),
+            Stroke::new(1.0, palette.border),
             StrokeKind::Inside,
         );
         let title_rect =
             egui::Rect::from_min_size(rect.min, EVec2::new(rect.width(), FLOAT_TITLE_HEIGHT));
-        painter.rect_filled(
-            title_rect,
-            CornerRadius::same(4),
-            Color32::from_rgb(54, 58, 66),
-        );
+        painter.rect_filled(title_rect, CornerRadius::same(4), palette.title);
         let job = overflow_layout(
             &title,
             egui::FontId::proportional(13.0),
@@ -333,7 +327,7 @@ impl PdfReaderApp {
                 title_rect.center().y - galley.size().y * 0.5,
             ),
             galley,
-            Color32::WHITE,
+            palette.title_text,
         );
         let body = egui::Rect::from_min_max(
             rect.min + EVec2::new(8.0, FLOAT_TITLE_HEIGHT + 6.0),
@@ -357,14 +351,14 @@ impl PdfReaderApp {
                     let job = overflow_layout(
                         &text,
                         egui::FontId::proportional(13.0),
-                        Color32::from_gray(225),
+                        palette.text,
                         body.width(),
                         rows,
                     );
                     let galley = painter.layout_job(job);
                     painter
                         .with_clip_rect(body)
-                        .galley(body.min, galley, Color32::from_gray(225));
+                        .galley(body.min, galley, palette.text);
                 }
             }
             (None, None) => {
@@ -437,9 +431,14 @@ impl PdfReaderApp {
             |ui| {
                 ui.set_clip_rect(body.intersect(ui.clip_rect()));
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                let mut visuals = egui::Visuals::dark();
-                visuals.override_text_color = Some(Color32::from_gray(225));
-                visuals.hyperlink_color = Color32::from_rgb(120, 180, 255);
+                let palette = float_palette(self.dark_mode);
+                let mut visuals = if self.dark_mode {
+                    egui::Visuals::dark()
+                } else {
+                    egui::Visuals::light()
+                };
+                visuals.override_text_color = Some(palette.text);
+                visuals.hyperlink_color = palette.link;
                 *ui.visuals_mut() = visuals;
                 ui.spacing_mut().item_spacing = EVec2::new(0.0, 4.0);
                 let math_cache = self.markdown.math_cache.clone();

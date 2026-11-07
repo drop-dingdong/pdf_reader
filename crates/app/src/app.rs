@@ -253,6 +253,8 @@ pub struct PdfReaderApp {
     hover_preview_markdown: bool,
     /// 是否允许复制外部注释的链接（跨会话不保证准确；设置项，默认关闭）。
     allow_external_annotation_links: bool,
+    /// 是否使用深色主题（默认 false=浅色；显式设置，不跟随系统）。
+    dark_mode: bool,
     /// 本次文档加载的 token；外部注释链接跨会话/重开时失效。
     document_load_token: u64,
     /// 等待用户确认的外部注释链接（属性不足以完全验证时）。
@@ -308,6 +310,24 @@ impl PdfReaderApp {
             settings_path,
             warning,
         );
+        // 显式主题：启动即定下来，避免 Windows/Linux 跟着不同系统主题走。
+        cc.egui_ctx.set_theme(if app.dark_mode {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
+        if app.runtime.diag.enabled() {
+            let style = cc.egui_ctx.global_style();
+            let visuals = &style.visuals;
+            eprintln!(
+                "[主题] theme={:?} dark_mode={} panel_fill={:?} window_fill={:?} text={:?}",
+                cc.egui_ctx.theme(),
+                app.dark_mode,
+                visuals.panel_fill,
+                visuals.window_fill,
+                visuals.override_text_color
+            );
+        }
         // 窗口系统在创建时还不知道设置；只有**已有设置文件**时才恢复尺寸，
         // 首次启动保持 main 的默认窗口大小。
         if had_settings {
@@ -464,6 +484,7 @@ impl PdfReaderApp {
             markdown_floats: ui_settings.markdown_floats,
             hover_preview_markdown: ui_settings.hover_preview_markdown,
             allow_external_annotation_links: ui_settings.allow_external_annotation_links,
+            dark_mode: ui_settings.dark_mode,
             document_load_token: 0,
             pending_external_link: None,
             drag_hover_logged: false,

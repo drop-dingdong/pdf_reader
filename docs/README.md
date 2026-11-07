@@ -14,7 +14,7 @@
 | UI：面板、每帧顺序、交互状态机、浮窗/侧栏/便签/拖拽、保存提示 | [app-ui.md](app-ui.md) |
 | 浮窗链接语法/身份规则/外部注释策略/失败语义 | [float-links.md](float-links.md) |
 | `PdfReaderApp` 状态分组的 Phase 3 评估（未实施） | [state-grouping-evaluation.md](state-grouping-evaluation.md) |
-| UI 样式/图标/侧栏/主题的共识规范（未实施） | [ui-standards.md](ui-standards.md) |
+| UI 样式/图标/侧栏/主题的规范（已实施） | [ui-standards.md](ui-standards.md) |
 | 文件格式与持久化：PDF 注释字段、`<pdf>.json`、`settings.json` | [persistence.md](persistence.md) / [readback.md](readback.md) / [writeback.md](writeback.md) |
 | 写回 PDF（子进程、FFI、外观、校验、排查） | [writeback.md](writeback.md) |
 | 从 PDF 读回注释、对象号配对、外部注释 | [readback.md](readback.md) |

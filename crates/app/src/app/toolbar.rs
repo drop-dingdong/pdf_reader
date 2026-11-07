@@ -227,6 +227,21 @@ impl PdfReaderApp {
                 self.enter_pin(CustomKind::Image);
             }
             ui.separator();
+            ui.menu_button("样式", |ui| {
+                if ui.selectable_label(!self.dark_mode, "浅色").clicked() {
+                    self.dark_mode = false;
+                    self.settings_dirty = true;
+                    ui.ctx().set_theme(egui::Theme::Light);
+                    ui.close();
+                }
+                if ui.selectable_label(self.dark_mode, "深色").clicked() {
+                    self.dark_mode = true;
+                    self.settings_dirty = true;
+                    ui.ctx().set_theme(egui::Theme::Dark);
+                    ui.close();
+                }
+            });
+            ui.separator();
             ui.checkbox(&mut self.pin_hover_enabled, "Pin悬浮响应");
             ui.checkbox(&mut self.horizontal_scroll, "横向滚动")
                 .on_hover_text("勾选后纵向滚轮改为横向滚动（拖动不受影响）");

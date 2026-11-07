@@ -414,6 +414,7 @@ impl PdfReaderApp {
             markdown_floats: self.markdown_floats,
             hover_preview_markdown: self.hover_preview_markdown,
             allow_external_annotation_links: self.allow_external_annotation_links,
+            dark_mode: self.dark_mode,
         };
         if ui != self.settings.ui {
             self.settings.ui = ui;

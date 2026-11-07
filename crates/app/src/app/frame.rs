@@ -275,6 +275,12 @@ impl PdfReaderApp {
 impl PdfReaderApp {
     pub(super) fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        // 显式两态主题：不依赖 Linux/Windows 的系统主题上报。
+        ctx.set_theme(if self.dark_mode {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
         self.ensure_image_loaders(&ctx);
         self.apply_pending_window_size(&ctx);
         if ctx.input(|input| input.viewport().close_requested()) {

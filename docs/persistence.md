@@ -152,6 +152,7 @@ v3 不再写 `custom_images` / `custom_texts`，也不使用 `order` 字段；
 | `ui.markdown_floats` | 文字浮窗是否默认按 Markdown 渲染（顶栏「Markdown」，默认 `false`；只影响显示，不改源文本/`.json`） |
 | `ui.hover_preview_markdown` | 侧栏 hover 临时预览是否也按 Markdown 渲染（顶栏「hover MD」，默认 `false`；会触发公式/图片 owner 渲染） |
 | `ui.allow_external_annotation_links` | 是否允许复制外部注释链接（`?` 帮助窗口，默认 `false`；开启后链接仍带文档加载 token，跨会话按页号/类型/创建时间校验或确认） |
+| `ui.dark_mode` | 显式主题：`false=浅色`（默认）、`true=深色`；顶栏「样式」切换，不跟随系统 |
 | `save.backup_in_place` | 原地保存前是否留一份 `.bak`（默认 `false`，文件菜单可切换） |
 | `annotation_defaults` | 新注释的默认样式（颜色、高亮透明度、墨迹线宽） |
 | `documents` | **每个文件一份**的阅读状态，同时充当"最近文件"（最多 12 条，按 `opened_at` 降序；文件菜单 →「最近打开」展示前 8 条） |

@@ -1,10 +1,10 @@
 # UI 样式与交互规范
 
-> 状态：2026-11-07 共识已确定；**第 1–3 步（hover 固定 + dest goto、
-> SVG 图标、侧栏行统一）已实施，主题尚未实施**。本文是后续新增按钮、侧栏行、图标、主题/颜色时的默认依据；
+> 状态：2026-11-07 共识已确定；**第 1–4 步（hover 固定 + dest goto、
+> SVG 图标、侧栏行统一、显式浅/深主题）已实施**；页面背景色暂不做。本文是后续新增按钮、侧栏行、图标、主题/颜色时的默认依据；
 > 如果新需求与本文冲突，先改本文再改代码。
 >
-> 当前主题仍默认跟随系统；
+> 当前主题默认浅色、可在顶栏「样式」切换；
 > 实际行为以 [app-ui.md](app-ui.md) 为准，本文描述的是**目标约定**。
 
 ## 1. 已确认的决策
@@ -180,7 +180,7 @@ ctx.set_theme(if settings.ui.dark_mode {
 ```
 
 - 顶栏提供「样式 ▾」菜单：浅色/深色两个选项；
-- 切换后立即 `set_theme`，并同步 `settings_dirty`；
+- 切换后立即 `set_theme`，并同步 `settings_dirty`；当前已实施；
 - 不依赖 `ThemePreference::System`：Linux 下 KDE 主题主要影响窗口标题栏，
   egui 内容是否跟随系统并不保证。
 
@@ -210,7 +210,7 @@ ctx.set_theme(if settings.ui.dark_mode {
 ### 5.3 颜色审计
 
 当前 `app/floats.rs`、`app/sidebar.rs`、`app/paint.rs` 等仍有数十处硬编码颜色。
-主题实施时：
+主题实施记录：
 
 1. 先列出现有硬编码颜色与用途；
 2. 把能映射到 `Visuals` 的换成语义角色；
@@ -312,5 +312,7 @@ ctx.set_theme(if settings.ui.dark_mode {
 2. ~~SVG 图标系统 + 关闭/文字/图片/编辑/link/goto/更多替换。~~
    已完成首批：`app/icons.rs` + `assets/icons/`；删除图标资源已备，菜单项暂用文字。
 3. ~~侧栏两类行统一。~~ 已完成：整行交互 + 透明 `⋯`。
-4. 主题 `dark_mode` + 样式菜单 + 颜色审计 + 跨 OS 评审；
+4. ~~主题 `dark_mode` + 样式菜单 + 颜色审计。~~
+   已完成：显式 `Theme::Light/Dark`、浮窗/临时预览 palette、`PDF_READER_DIAGNOSE`
+   启动打印；跨 OS 外观仍需人工评审。
 5. 页面背景色暂不做。

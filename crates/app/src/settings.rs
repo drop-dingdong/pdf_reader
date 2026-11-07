@@ -71,6 +71,8 @@ pub struct UiSettings {
     pub hover_preview_markdown: bool,
     /// 是否允许复制外部注释的链接（跨会话不保证准确；默认关闭）。
     pub allow_external_annotation_links: bool,
+    /// 深色主题（默认 false=浅色）；显式设置，不跟随系统。
+    pub dark_mode: bool,
 }
 
 impl Default for UiSettings {
@@ -86,6 +88,7 @@ impl Default for UiSettings {
             markdown_floats: false,
             hover_preview_markdown: false,
             allow_external_annotation_links: false,
+            dark_mode: false,
         }
     }
 }
@@ -146,7 +149,7 @@ impl Settings {
     pub fn to_json(&self) -> String {
         let mut out = String::from("{\n  \"version\": 1,\n");
         out.push_str(&format!(
-            "  \"ui\": {{ \"window_size\": [{:.0}, {:.0}], \"sidebar_width\": {:.0},              \"pin_hover_enabled\": {}, \"horizontal_scroll\": {}, \"show_links\": {},              \"show_dest_points\": {}, \"show_annotations\": {}, \"markdown_floats\": {},              \"hover_preview_markdown\": {},              \"allow_external_annotation_links\": {} }},\n",
+            "  \"ui\": {{ \"window_size\": [{:.0}, {:.0}], \"sidebar_width\": {:.0},              \"pin_hover_enabled\": {}, \"horizontal_scroll\": {}, \"show_links\": {},              \"show_dest_points\": {}, \"show_annotations\": {}, \"markdown_floats\": {},              \"hover_preview_markdown\": {},              \"allow_external_annotation_links\": {},              \"dark_mode\": {} }},\n",
             self.ui.window_size[0],
             self.ui.window_size[1],
             self.ui.sidebar_width,
@@ -157,7 +160,8 @@ impl Settings {
             self.ui.show_annotations,
             self.ui.markdown_floats,
             self.ui.hover_preview_markdown,
-            self.ui.allow_external_annotation_links
+            self.ui.allow_external_annotation_links,
+            self.ui.dark_mode
         ));
         out.push_str(&format!(
             "  \"save\": {{ \"backup_in_place\": {} }},\n",
@@ -261,6 +265,10 @@ impl Settings {
                 .unwrap_or(false);
             settings.ui.allow_external_annotation_links = ui
                 .field("allow_external_annotation_links")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            settings.ui.dark_mode = ui
+                .field("dark_mode")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false);
         }
@@ -544,6 +552,7 @@ mod tests {
         settings.ui.markdown_floats = true;
         settings.ui.hover_preview_markdown = true;
         settings.ui.allow_external_annotation_links = true;
+        settings.ui.dark_mode = true;
         settings.save.backup_in_place = true;
         let parsed = Settings::from_json(&settings.to_json()).expect("应能解析");
         assert!(!parsed.ui.pin_hover_enabled);
@@ -554,6 +563,7 @@ mod tests {
         assert!(parsed.ui.markdown_floats);
         assert!(parsed.ui.hover_preview_markdown);
         assert!(parsed.ui.allow_external_annotation_links);
+        assert!(parsed.ui.dark_mode);
         assert!(parsed.save.backup_in_place);
     }
 
@@ -569,6 +579,7 @@ mod tests {
         assert!(!parsed.ui.markdown_floats, "旧设置文件应保持纯文本显示");
         assert!(!parsed.ui.hover_preview_markdown);
         assert!(!parsed.ui.allow_external_annotation_links);
+        assert!(!parsed.ui.dark_mode);
     }
 
     #[test]

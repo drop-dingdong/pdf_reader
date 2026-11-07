@@ -255,3 +255,47 @@ pub(super) fn paint_ink(
         painter.circle_filled(*joint, radius, color);
     }
 }
+
+/// 自绘浮窗/临时预览的颜色。深色保持原有配色，浅色用低对比的纸面灰。
+pub(super) struct FloatPalette {
+    pub(super) bg: Color32,
+    pub(super) title: Color32,
+    pub(super) border: Color32,
+    pub(super) text: Color32,
+    pub(super) title_text: Color32,
+    pub(super) muted: Color32,
+    pub(super) icon: Color32,
+    pub(super) icon_hover: Color32,
+    pub(super) handle: Color32,
+    pub(super) link: Color32,
+}
+
+pub(super) fn float_palette(dark: bool) -> FloatPalette {
+    if dark {
+        FloatPalette {
+            bg: Color32::from_rgb(30, 32, 36),
+            title: Color32::from_rgb(54, 58, 66),
+            border: Color32::from_gray(130),
+            text: Color32::from_gray(225),
+            title_text: Color32::WHITE,
+            muted: Color32::from_gray(150),
+            icon: Color32::from_gray(190),
+            icon_hover: Color32::from_gray(235),
+            handle: Color32::from_gray(120),
+            link: Color32::from_rgb(120, 180, 255),
+        }
+    } else {
+        FloatPalette {
+            bg: Color32::from_rgb(248, 248, 250),
+            title: Color32::from_rgb(226, 229, 235),
+            border: Color32::from_rgb(175, 180, 188),
+            text: Color32::from_rgb(30, 32, 38),
+            title_text: Color32::from_rgb(20, 22, 28),
+            muted: Color32::from_rgb(95, 100, 108),
+            icon: Color32::from_rgb(75, 80, 88),
+            icon_hover: Color32::from_rgb(20, 22, 28),
+            handle: Color32::from_rgb(150, 155, 162),
+            link: Color32::from_rgb(30, 95, 200),
+        }
+    }
+}

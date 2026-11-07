@@ -922,6 +922,7 @@ impl PdfReaderApp {
                 self.floats[index].body = body_size_of(resized, FLOAT_TITLE_HEIGHT);
             }
 
+            let palette = float_palette(self.dark_mode);
             // 右上角关闭按钮：**画成带底色的圆**，悬停/按下变红 —— 否则只有一个"✕"太不显眼
             let close_center = egui::pos2(title_rect.right() - 13.0, title_rect.center().y);
             let close_rect = egui::Rect::from_center_size(close_center, EVec2::splat(18.0));
@@ -932,7 +933,7 @@ impl PdfReaderApp {
             } else if close_response.hovered() {
                 Color32::from_rgb(205, 70, 70)
             } else {
-                Color32::from_gray(95)
+                palette.muted
             };
             ui.painter().circle_filled(close_center, 8.5, close_color);
             self.paint_icon(ui, icons::Icon::Close, close_center, 13.0, Color32::WHITE);
@@ -959,10 +960,10 @@ impl PdfReaderApp {
                     Color32::from_rgb(140, 96, 36),
                 )
             } else {
-                (Color32::from_gray(130), 1.0, Color32::from_rgb(54, 58, 66))
+                (palette.border, 1.0, palette.title)
             };
             let painter = ui.painter();
-            painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(30, 32, 36));
+            painter.rect_filled(rect, CornerRadius::same(4), palette.bg);
             painter.rect_stroke(
                 rect,
                 CornerRadius::same(4),
@@ -1028,14 +1029,14 @@ impl PdfReaderApp {
                     title_rect.center().y - title_galley.size().y * 0.5,
                 ),
                 title_galley,
-                Color32::WHITE,
+                if highlighted {
+                    Color32::WHITE
+                } else {
+                    palette.title_text
+                },
             );
             // 缩放手柄示意
-            painter.rect_filled(
-                handle_rect.shrink(5.0),
-                CornerRadius::ZERO,
-                Color32::from_gray(120),
-            );
+            painter.rect_filled(handle_rect.shrink(5.0), CornerRadius::ZERO, palette.handle);
             // 自定义 preview 的浮窗：内容从记录里**每帧刷新**，这样"快照迟到"也能自动补上
             if let Some(custom_index) = self.floats[index].custom_index() {
                 if let Some(preview) = self.custom_previews.get(custom_index) {
@@ -1074,9 +1075,9 @@ impl PdfReaderApp {
                 let edit_response =
                     ui.interact(edit_rect, Id::unique(("float-edit", id)), Sense::click());
                 let edit_color = if edit_response.hovered() {
-                    Color32::from_gray(235)
+                    palette.icon_hover
                 } else {
-                    Color32::from_gray(190)
+                    palette.icon
                 };
                 self.paint_icon(ui, icons::Icon::Edit, edit_center, 13.0, edit_color);
                 if interactive && edit_response.on_hover_text("编辑正文").clicked() {
@@ -1145,9 +1146,9 @@ impl PdfReaderApp {
                                 Sense::click(),
                             );
                             let color = if response.hovered() {
-                                Color32::from_gray(235)
+                                palette.icon_hover
                             } else {
-                                Color32::from_gray(190)
+                                palette.icon
                             };
                             self.paint_icon(ui, icons::Icon::ImageRef, center, 13.0, color);
                             if interactive
@@ -1324,6 +1325,7 @@ impl PdfReaderApp {
         wheel_owner: bool,
     ) {
         let id = self.floats[index].id;
+        let palette = float_palette(self.dark_mode);
         let painter = ui.painter();
         // Markdown 模式：正文的 body 先于内容控件注册，双击普通文字会落到 body；
         // 链接/滚动条的单次点击由它们自己优先，不会被双击层吞掉。
@@ -1441,9 +1443,13 @@ impl PdfReaderApp {
                             ui.set_clip_rect(body_area.intersect(canvas));
                             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                             ui.style_mut().url_in_tooltip = true;
-                            let mut visuals = egui::Visuals::dark();
-                            visuals.override_text_color = Some(Color32::from_gray(225));
-                            visuals.hyperlink_color = Color32::from_rgb(120, 180, 255);
+                            let mut visuals = if self.dark_mode {
+                                egui::Visuals::dark()
+                            } else {
+                                egui::Visuals::light()
+                            };
+                            visuals.override_text_color = Some(palette.text);
+                            visuals.hyperlink_color = palette.link;
                             *ui.visuals_mut() = visuals;
                             ui.spacing_mut().item_spacing = EVec2::new(0.0, 4.0);
                             // 数学公式走 render_math_fn（egui_commonmark 会在
@@ -1493,16 +1499,14 @@ impl PdfReaderApp {
                     let job = overflow_layout(
                         text,
                         egui::FontId::proportional(13.0),
-                        Color32::from_gray(225),
+                        palette.text,
                         body_area.width(),
                         rows,
                     );
                     let galley = painter.layout_job(job);
-                    painter.with_clip_rect(body_area).galley(
-                        body_area.min,
-                        galley,
-                        Color32::from_gray(225),
-                    );
+                    painter
+                        .with_clip_rect(body_area)
+                        .galley(body_area.min, galley, palette.text);
                 }
             }
             FloatContent::Image(texture) => {

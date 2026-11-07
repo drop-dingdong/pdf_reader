@@ -14,6 +14,8 @@
 | S8c：ObjStm 重打包 / 流式整理 / qpdf 检测 | 整理副本已可用；qpdf 已安装但未接入 | 需要进一步压缩对象流，或整理大文件内存不够 |
 | CSV 导出 | 只有 Markdown 摘要；字段已拍平 | 需要跨文档统计/导入表格时 |
 | `view.rs` 拆分（~4.2k 行） | 生产代码 ~2k、测试 ~2.2k；纯函数、耦合低 | 再出现单文件维护困难，或改动继续集中在 `view.rs` |
+| 页面纸张背景色/透明 PDF 背景 | 当前页面纹理直接绘制；透明区域可能露出画布；共识为后续独立事项，不在 UI 样式轮 | 用户遇到透明页面显示异常，或需要非白纸张背景 |
+
 | `PdfReaderApp` 全量多级状态树 | 四组目标分组已完成（159 → 118 字段，见 [state-grouping-evaluation.md](state-grouping-evaluation.md)）；全量分组收益低，暂不做 | 字段继续增长，或跨组借用明显变难 |
 
 
@@ -22,8 +24,6 @@
 推荐实现顺序：行内基线/完整布局（后者需改上游渲染器，成本高）。
 `app.rs` 拆分、Markdown 空正文双击、文本/图片浮窗跳转与稳定链接已完成，见 [status.md](status.md) §2 与 [float-links.md](float-links.md)。
 
-- **UI 样式统一（SVG 图标 / 侧栏行 / 主题）**：共识见 [ui-standards.md](ui-standards.md)；
-  hover 固定 + dest goto、首批 SVG 图标、侧栏行统一已完成；剩余主题；页面背景色暂不做。
 - **Linux Wayland 文件拖放**：winit 0.30 Wayland 后端不支持；触发条件：升级 eframe/winit 或实现 Wayland data-device。
   临时 `env -u WAYLAND_DISPLAY`。目前不改。
 - **便签几何编辑**：拖动/缩放便签图标；目前只有固定 18pt，不能移动。
