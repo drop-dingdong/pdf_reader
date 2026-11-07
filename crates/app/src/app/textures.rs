@@ -108,17 +108,17 @@ impl PdfReaderApp {
         }
 
         // 软上限：当前视口自身就超预算时只报告一次（这台机器的显示需求超出预算）
-        if desired.over_budget && !self.budget_warned {
-            self.budget_warned = true;
-            if self.diag.enabled() {
-                self.diag.line(format!(
+        if desired.over_budget && !self.runtime.budget_warned {
+            self.runtime.budget_warned = true;
+            if self.runtime.diag.enabled() {
+                self.runtime.diag.line(format!(
                     "[贴图] 纹理超出预算：当前视口需要 {:.1}MB > 预算 {:.0}MB（不淘汰当前视口，只提示）",
                     desired.must_bytes as f64 / (1024.0 * 1024.0),
                     self.textures.max_bytes() as f64 / (1024.0 * 1024.0)
                 ));
             }
         }
-        self.last_retain = desired;
+        self.runtime.last_retain = desired;
         uploaded
     }
 
@@ -131,7 +131,7 @@ impl PdfReaderApp {
         key: &RenderKey,
         image: &Arc<RasterImage>,
     ) {
-        if !self.diag.enabled() {
+        if !self.runtime.diag.enabled() {
             return;
         }
         let Some(placement) = session.placement(key.page).copied() else {
@@ -139,7 +139,7 @@ impl PdfReaderApp {
         };
         let scroll = session.viewport().scroll;
         match key.tile {
-            None => self.diag.line(format!(
+            None => self.runtime.diag.line(format!(
                 "[贴图] 页={} 整页图={}x{} 渲染比例={:.3} 键={}",
                 key.page.display_number(),
                 image.width,
@@ -161,7 +161,7 @@ impl PdfReaderApp {
                     session.render_scale(key.page).0,
                     scroll,
                 );
-                self.diag.line(format!(
+                self.runtime.diag.line(format!(
                     "[贴图] 页={} col={} row={} 瓦片图={}x{} 页面px={}x{} 显示px={:.0}x{:.0} 瓦片px=({},{},{},{}) 屏幕=({:.1},{:.1},{:.0},{:.0}) scroll=({:.1},{:.1}) 渲染比例={:.3}",
                     key.page.get(), tile.col, tile.row, image.width, image.height,
                     page_width, page_height,
@@ -182,7 +182,7 @@ impl PdfReaderApp {
         // 全项目唯一的像素格式转换点：**一遍**完成（见 view::color_image 的说明）
         let started = std::time::Instant::now();
         let color = color_image(image.format, image.data(), image.width, image.height);
-        self.last_convert_ms += started.elapsed().as_secs_f64() * 1000.0;
+        self.runtime.last_convert_ms += started.elapsed().as_secs_f64() * 1000.0;
 
         let started = std::time::Instant::now();
         let texture = ctx.load_texture(
@@ -190,7 +190,7 @@ impl PdfReaderApp {
             color,
             egui::TextureOptions::LINEAR,
         );
-        self.last_upload_ms += started.elapsed().as_secs_f64() * 1000.0;
+        self.runtime.last_upload_ms += started.elapsed().as_secs_f64() * 1000.0;
         self.textures.insert(key, texture);
     }
 
@@ -223,8 +223,8 @@ impl PdfReaderApp {
             || page_rect.width <= 0.0
             || page_rect.height <= 0.0
         {
-            if self.diag.enabled() {
-                self.diag.line(format!(
+            if self.runtime.diag.enabled() {
+                self.runtime.diag.line(format!(
                     "[预览] 初次生成失败：{tag} 页={page:?} 区域为空 {page_rect:?}"
                 ));
             }
@@ -249,8 +249,8 @@ impl PdfReaderApp {
         let Some(range) =
             grid.tiles_for_page_rect(page_rect, placement.page_size, placement.rotation)
         else {
-            if self.diag.enabled() {
-                self.diag.line(format!(
+            if self.runtime.diag.enabled() {
+                self.runtime.diag.line(format!(
                     "[预览] 初次生成失败：{tag} 页={} 区域 {page_rect:?} 不在页面内",
                     page.display_number()
                 ));
@@ -259,8 +259,8 @@ impl PdfReaderApp {
         };
         let Some(tiles) = session.region_tiles(page, page_rect, render) else {
             let count = session.request_region(page, page_rect, render);
-            if self.diag.enabled() {
-                self.diag.line(format!(
+            if self.runtime.diag.enabled() {
+                self.runtime.diag.line(format!(
                     "[预览] 初次生成：{tag} 页={} 区域pt=({:.1},{:.1},{:.1},{:.1}) 记录分辨率={:.0}% 渲染比例={:.3} 可见块={:?} 提交渲染={} 块（等待就绪）",
                     page.display_number(),
                     page_rect.x,
@@ -285,7 +285,7 @@ impl PdfReaderApp {
                     let steps = (requested_scale / render_value.max(f32::MIN_POSITIVE))
                         .log(crate::view::DEFAULT_PREVIEW_STEP)
                         .round();
-                    self.diag.line(format!(
+                    self.runtime.diag.line(format!(
                         "[预览] 降档：{tag} 页={} 记录分辨率={:.0}% 原渲染比例={:.3} → 实际={:.3}（降 {:.0} 档：区域 {}x{} 超过 max_texture_side={}）",
                         page.display_number(),
                         display_scale * 100.0,
@@ -312,8 +312,8 @@ impl PdfReaderApp {
             &grid,
             &borrowed,
         ) else {
-            if self.diag.enabled() {
-                self.diag.line(format!(
+            if self.runtime.diag.enabled() {
+                self.runtime.diag.line(format!(
                     "[预览] 初次生成失败：{tag} 页={} 区域 {page_rect:?} 的块都为空（块数 {}）",
                     page.display_number(),
                     borrowed.len()
@@ -321,8 +321,8 @@ impl PdfReaderApp {
             }
             return None;
         };
-        if self.diag.enabled() {
-            self.diag.line(format!(
+        if self.runtime.diag.enabled() {
+            self.runtime.diag.line(format!(
                 "[预览] 初次生成完成：{tag} 页={} 区域pt=({:.1},{:.1},{:.1},{:.1}) 记录分辨率={:.0}% 渲染比例={:.3} 尺寸={}x{}",
                 page.display_number(),
                 page_rect.x,

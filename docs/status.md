@@ -61,6 +61,9 @@
 - **透明度 100% 与外部兼容**：内部注释（有 `pd-fr:` `/NM`）显式 `/CA 1.0` 保留 100%，
   保存/重开不再回退成 35%；外部高亮仍沿用旧兼容规则（`/CA` 缺失或 1.0 → 35%），
   避免改变其它阅读器写出的高亮显示。
+- **Phase 3 第一步 RuntimeState**：把诊断/注入时钟/启动与报告时刻/上一帧缩放旋转/
+  可见页/拖动计时等运行态字段收进 `app/state.rs`；`PdfReaderApp` 顶层字段 159 → 146，
+  热点字段（session/floats/annotations/previews/settings）保持顶层。无行为变化。
 - **图片可获取性重检**：文字浮窗引用的 `pd-img` 每次 owner 扫描都重新判定来源
   preview/dest 是否还在；来源被删时清掉 `ImageStore` 的旧 revision 并 `forget_image`，
   不再继续显示缓存里的已删除图片。

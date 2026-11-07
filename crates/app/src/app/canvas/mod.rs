@@ -85,13 +85,13 @@ impl PdfReaderApp {
             let ctx = CanvasPaint { painter, canvas, scroll };
             let report = self.paint_pages(session, &ctx, &visible);
             // 诊断输出（PDF_READER_DIAGNOSE=1）：每秒一次，足够定位"看不到内容"这类问题
-            if self.diag.enabled()
-                && self.clock.now().saturating_duration_since(self.last_report)
+            if self.runtime.diag.enabled()
+                && self.runtime.clock.now().saturating_duration_since(self.runtime.last_report)
                     >= std::time::Duration::from_secs(1)
             {
-                self.last_report = self.clock.now();
+                self.runtime.last_report = self.runtime.clock.now();
                 let max_side = ui.ctx().input(|input| input.max_texture_side);
-                self.diag.line(format!(
+                self.runtime.diag.line(format!(
                     "[诊断] 缩放={:.0}% 视口={:.0}×{:.0} scroll=({:.1},{:.1}) 当前页={} 可见页={:?} \
                      纹理={}条/{:.1}MB(A{:.1}/B{:.1}/C{:.1}) 预算={:.0}MB 位图={}条/{:.1}MB 在飞={} 预览中={} max_texture_side={} | {}",
                     session.state().zoom * 100.0,
@@ -103,9 +103,9 @@ impl PdfReaderApp {
                     self.visible.iter().map(|page| page.display_number()).collect::<Vec<_>>(),
                     self.textures.len(),
                     self.textures.bytes() as f64 / (1024.0 * 1024.0),
-                    self.last_retain.must_bytes as f64 / (1024.0 * 1024.0),
-                    self.last_retain.bed_bytes as f64 / (1024.0 * 1024.0),
-                    self.last_retain.old_bytes as f64 / (1024.0 * 1024.0),
+                    self.runtime.last_retain.must_bytes as f64 / (1024.0 * 1024.0),
+                    self.runtime.last_retain.bed_bytes as f64 / (1024.0 * 1024.0),
+                    self.runtime.last_retain.old_bytes as f64 / (1024.0 * 1024.0),
                     self.textures.max_bytes() as f64 / (1024.0 * 1024.0),
                     session.cache_bytes().1,
                     session.cache_bytes().0 as f64 / (1024.0 * 1024.0),

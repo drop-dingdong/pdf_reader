@@ -323,7 +323,7 @@ impl PdfReaderApp {
         before: egui::Vec2,
         after: egui::Vec2,
     ) {
-        let now = self.clock.now();
+        let now = self.runtime.clock.now();
         let merge = self.last_preview_resize.is_some_and(|(last_key, last_at)| {
             last_key == key
                 && now.duration_since(last_at) <= std::time::Duration::from_secs(1)
@@ -380,7 +380,7 @@ impl PdfReaderApp {
         before: egui::Vec2,
         after: egui::Vec2,
     ) {
-        let now = self.clock.now();
+        let now = self.runtime.clock.now();
         let target = (page, index);
         let merge = self.last_dest_resize.is_some_and(|(last, last_at)| {
             last == target
@@ -535,7 +535,7 @@ impl PdfReaderApp {
             let id = window.id;
             self.floats.push(window);
             // 一次性高亮（点击动作需要有限时长）+ 当帧也置为高亮
-            self.click_highlight = Some((id, self.clock.now() + CLICK_HIGHLIGHT));
+            self.click_highlight = Some((id, self.runtime.clock.now() + CLICK_HIGHLIGHT));
             self.highlight_float = Some(id);
             self.message = "已唤出该自定义preview浮窗".to_string();
             return;
@@ -549,7 +549,7 @@ impl PdfReaderApp {
         let size = float_size_for_body(preview.body_size, FLOAT_TITLE_HEIGHT);
         let rect = self.float_rect_at_row(row, size);
         self.spawn_custom_float(index, rect);
-        self.click_highlight = Some((id, self.clock.now() + CLICK_HIGHLIGHT));
+        self.click_highlight = Some((id, self.runtime.clock.now() + CLICK_HIGHLIGHT));
         self.message = "已生成该自定义preview浮窗".to_string();
     }
 
@@ -763,7 +763,7 @@ impl PdfReaderApp {
     /// 从链接打开/置顶一条自定义 preview 浮窗。
     fn open_custom_float_by_link(&mut self, index: usize) {
         if let Some(id) = self.highlight_existing_custom_float(index) {
-            self.click_highlight = Some((id, self.clock.now() + CLICK_HIGHLIGHT));
+            self.click_highlight = Some((id, self.runtime.clock.now() + CLICK_HIGHLIGHT));
             self.message = "已置顶该自定义preview浮窗".to_string();
             return;
         }
@@ -774,7 +774,7 @@ impl PdfReaderApp {
         let rect = egui::Rect::from_min_size(self.next_float_position(), size);
         self.spawn_custom_float(index, rect);
         if let Some(window) = self.floats.last() {
-            self.click_highlight = Some((window.id, self.clock.now() + CLICK_HIGHLIGHT));
+            self.click_highlight = Some((window.id, self.runtime.clock.now() + CLICK_HIGHLIGHT));
         }
         self.message = "已打开该自定义preview浮窗".to_string();
     }
@@ -953,7 +953,7 @@ impl PdfReaderApp {
             // 高亮有两个来源：悬浮（每帧判定）与点击（一次性，带截止时刻）
             let clicked_highlight = self
                 .click_highlight
-                .is_some_and(|(target, until)| target == id && self.clock.now() < until);
+                .is_some_and(|(target, until)| target == id && self.runtime.clock.now() < until);
             let highlighted = self.highlight_float == Some(id) || clicked_highlight;
             let (border, border_width, title_color) = if highlighted {
                 (
@@ -1121,7 +1121,7 @@ impl PdfReaderApp {
                         .push(ViewerCommand::CenterOnPagePoint { page, point });
                     if let FloatOwner::Annotation(annotation) = self.floats[index].owner {
                         self.annotation_focus =
-                            Some((annotation, self.clock.now() + ANNOTATION_FOCUS));
+                            Some((annotation, self.runtime.clock.now() + ANNOTATION_FOCUS));
                     }
                     self.message = format!("已跳转到来源（第 {} 页）", page.display_number());
                 }

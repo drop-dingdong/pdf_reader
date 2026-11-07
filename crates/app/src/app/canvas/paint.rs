@@ -197,7 +197,7 @@ impl PdfReaderApp {
                 .last_plan
                 .insert(page, stamp)
                 .filter(|prev| *prev != stamp);
-            if let Some(previous) = previous.filter(|_| self.diag.enabled()) {
+            if let Some(previous) = previous.filter(|_| self.runtime.diag.enabled()) {
                 // 边沿触发：画法一变就立刻打一行（不受 1 秒节流），
                 // 白块到底是"没渲染好"还是"被旧内容挤掉"一眼可见（D-96）。
                 let line = format!(
@@ -214,9 +214,9 @@ impl PdfReaderApp {
                         layers,
                         underlay
                     );
-                self.diag.line(line);
+                self.runtime.diag.line(line);
             }
-            if self.diag.enabled() {
+            if self.runtime.diag.enabled() {
                 report.push(format!(
                         "p{} 画法={} 块={}/{} 网格={} 渲染比例={:.3} 等待={}ms 预览={:?} 底料={:?} 视图矩形=({:.0},{:.0} {:.0}×{:.0})",
                         page.display_number(),
@@ -259,7 +259,7 @@ impl PdfReaderApp {
         let canvas = ctx.canvas;
         let scroll = ctx.scroll;
         // 链接热区诊断（PDF_READER_DIAGNOSE=1）：热区越界 = 坐标空间不一致
-        if self.diag.enabled() {
+        if self.runtime.diag.enabled() {
             if let Some(navigation) = &self.navigation {
                 for page in self.visible.clone() {
                     let Some(placement) = session.placement(page).copied() else {
@@ -271,7 +271,7 @@ impl PdfReaderApp {
                     }
                     let size = placement.page_size;
                     let first = links[0].rect;
-                    self.diag.line(format!(
+                    self.runtime.diag.line(format!(
                             "[链接] p{} 页尺寸={:.1}×{:.1} 热区数={} 首个=({:.1},{:.1} {:.1}×{:.1}) 越界(粗查,只能发现大偏移)={}",
                             page.display_number(),
                             size.width,
@@ -451,7 +451,7 @@ impl PdfReaderApp {
 
             // 列表定位后的中性轮廓：不改注释颜色，只做短时定位反馈。
             if let Some((id, until)) = self.annotation_focus {
-                if self.clock.now() >= until {
+                if self.runtime.clock.now() >= until {
                     self.annotation_focus = None;
                 } else if let Some(annotation) = self.annotations.get(id) {
                     if let (Some(bounds), Some(placement)) =

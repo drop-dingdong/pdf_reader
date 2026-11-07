@@ -115,10 +115,10 @@ impl PdfReaderApp {
             ) {
                 session.handle(command, &mut self.events);
                 view_changed = true;
-                if self.diag.enabled() {
+                if self.runtime.diag.enabled() {
                     let after = session.viewport().scroll;
                     let viewport = session.viewport().size;
-                    self.diag.line(format!(
+                    self.runtime.diag.line(format!(
                             "[滚动] 滚轮 delta=({:.1},{:.1}) scroll ({:.1},{:.1})→({:.1},{:.1}) 视口={}x{} 横向布局={}",
                             scroll_delta.x, scroll_delta.y, scroll_before.x, scroll_before.y,
                             after.x, after.y, viewport.width, viewport.height,
@@ -132,7 +132,7 @@ impl PdfReaderApp {
             }
             if view_changed {
                 // 视图刚被滚动/缩放 → 静默一段时间，期间不显示悬停预览（用户要求）
-                self.scroll_quiet_until = Some(self.clock.now() + HOVER_SCROLL_QUIET);
+                self.scroll_quiet_until = Some(self.runtime.clock.now() + HOVER_SCROLL_QUIET);
                 ui.ctx().request_repaint();
             }
         }
@@ -154,12 +154,12 @@ impl PdfReaderApp {
             self.handle_ink_pointer(ui, canvas, response, session, session.viewport().scroll);
         } else if self.capture.is_none() && response.drag_started() && !self.note_pin {
             self.selection_started_on_text = false;
-            self.drag_started_at = Some(self.clock.now());
-            self.last_pan_at = None;
-            if self.diag.enabled() {
-                self.diag.line(format!(
+            self.runtime.drag_started_at = Some(self.runtime.clock.now());
+            self.runtime.last_pan_at = None;
+            if self.runtime.diag.enabled() {
+                self.runtime.diag.line(format!(
                     "[时序] 拖动开始 t={:.6}s",
-                    self.started_at.elapsed().as_secs_f64()
+                    self.runtime.started_at.elapsed().as_secs_f64()
                 ));
             }
             // Alt+拖拽墨迹 = 平移（v1 只支持墨迹）。命中才进入，否则照旧选字/平移。
@@ -212,40 +212,42 @@ impl PdfReaderApp {
                     );
                     let after = session.viewport().scroll;
                     // 拖动也是"视图在动" → 同样静默，避免预览在拖动中闪现
-                    self.scroll_quiet_until = Some(self.clock.now() + HOVER_SCROLL_QUIET);
-                    if self.diag.enabled() && after != before {
-                        let now = self.clock.now();
+                    self.scroll_quiet_until = Some(self.runtime.clock.now() + HOVER_SCROLL_QUIET);
+                    if self.runtime.diag.enabled() && after != before {
+                        let now = self.runtime.clock.now();
                         let since_start = self
+                            .runtime
                             .drag_started_at
                             .map(|start| now.duration_since(start).as_secs_f64() * 1000.0)
                             .unwrap_or(0.0);
                         let since_last = self
+                            .runtime
                             .last_pan_at
                             .map(|last| now.duration_since(last).as_secs_f64() * 1000.0)
                             .unwrap_or(f64::NAN);
-                        self.diag.line(format!(
+                        self.runtime.diag.line(format!(
                                 "[时序] 拖动位移生效 t={:.6}s Δ起={:.1}ms Δ上次={:.1}ms scroll=({:.1},{:.1})",
-                                self.started_at.elapsed().as_secs_f64(),
+                                self.runtime.started_at.elapsed().as_secs_f64(),
                                 since_start,
                                 since_last,
                                 after.x,
                                 after.y
                             ));
-                        self.last_pan_at = Some(now);
+                        self.runtime.last_pan_at = Some(now);
                         // "因为拖动而重新决定显示内容"= 可见页集合发生变化（要换/补位图）
                         let mut visible = Vec::new();
                         session.visible_pages(&mut visible);
-                        if visible != self.last_visible {
-                            self.diag.line(format!(
+                        if visible != self.runtime.last_visible {
+                            self.runtime.diag.line(format!(
                                 "[时序] 可见页集变化 t={:.6}s Δ起={:.1}ms 可见页={:?}",
-                                self.started_at.elapsed().as_secs_f64(),
+                                self.runtime.started_at.elapsed().as_secs_f64(),
                                 since_start,
                                 visible
                                     .iter()
                                     .map(|page| page.display_number())
                                     .collect::<Vec<_>>()
                             ));
-                            self.last_visible = visible;
+                            self.runtime.last_visible = visible;
                         }
                     }
                 }
@@ -371,13 +373,13 @@ impl PdfReaderApp {
         }
 
         // 拖动过程诊断：把 egui 报的状态与下一帧要执行的滚动量打出来（PDF_READER_DIAGNOSE=1）
-        if self.diag.enabled()
+        if self.runtime.diag.enabled()
             && (response.drag_started()
                 || response.dragged()
                 || response.drag_stopped()
                 || response.clicked())
         {
-            self.diag.line(format!(
+            self.runtime.diag.line(format!(
                     "[拖动] started={} dragged={} stopped={} clicked={} 模式={:?} 指针={:?} delta={:?} 当前scroll=({:.1},{:.1})",
                     response.drag_started(),
                     response.dragged(),
@@ -404,14 +406,15 @@ impl PdfReaderApp {
                 && self.selection_started_on_text
                 && self.annotation_tool.is_some();
             self.selection_started_on_text = false;
-            if self.diag.enabled() {
+            if self.runtime.diag.enabled() {
                 let total = self
+                    .runtime
                     .drag_started_at
                     .map(|start| start.elapsed().as_secs_f64() * 1000.0)
                     .unwrap_or(0.0);
-                self.diag.line(format!(
+                self.runtime.diag.line(format!(
                     "[时序] 拖动结束 t={:.6}s 全程={:.1}ms",
-                    self.started_at.elapsed().as_secs_f64(),
+                    self.runtime.started_at.elapsed().as_secs_f64(),
                     total
                 ));
             }
@@ -419,8 +422,8 @@ impl PdfReaderApp {
                 self.finish_ink_move();
             }
             self.drag = None;
-            self.drag_started_at = None;
-            self.last_pan_at = None;
+            self.runtime.drag_started_at = None;
+            self.runtime.last_pan_at = None;
             if apply_markup {
                 self.pending_annotate = self.annotation_tool;
             }

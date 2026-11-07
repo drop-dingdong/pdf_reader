@@ -224,7 +224,7 @@ impl PdfReaderApp {
         scale_milli: u32,
         ready: usize,
     ) -> u64 {
-        let now = self.clock.now();
+        let now = self.runtime.clock.now();
         if ready == 0 {
             self.band_since.remove(&page);
             return 0;
@@ -241,8 +241,9 @@ impl PdfReaderApp {
     }
 
     pub(super) fn previewing(&self) -> bool {
-        self.preview_until
-            .is_some_and(|deadline| self.clock.now() < deadline)
+        self.runtime
+            .preview_until
+            .is_some_and(|deadline| self.runtime.clock.now() < deadline)
     }
 
     /// 没有打开文档时的空状态界面。
@@ -334,7 +335,7 @@ impl PdfReaderApp {
         // 少了这次请求，空闲时 egui 不会再画一帧 —— 高亮会一直停在屏幕上，
         // 直到下一次鼠标移动之类的事件（用户实测"移开指针后高亮不定长地持续"）。
         if let Some((id, until)) = self.click_highlight {
-            let now = self.clock.now();
+            let now = self.runtime.clock.now();
             if now < until {
                 self.highlight_float = Some(id);
                 ctx.request_repaint_after(until - now);
@@ -372,15 +373,17 @@ impl PdfReaderApp {
         // 检测"缩放/旋转刚刚变过"：连续缩放期间不提交渲染，只显示旧图拉伸（见 ZOOM_PREVIEW_WINDOW）
         let zoom_now = session.state().zoom;
         let rotation_now = session.state().user_rotation;
-        if (zoom_now - self.last_zoom).abs() > f32::EPSILON || rotation_now != self.last_rotation {
-            self.last_zoom = zoom_now;
-            self.last_rotation = rotation_now;
-            self.preview_until = Some(self.clock.now() + ZOOM_PREVIEW_WINDOW);
+        if (zoom_now - self.runtime.last_zoom).abs() > f32::EPSILON
+            || rotation_now != self.runtime.last_rotation
+        {
+            self.runtime.last_zoom = zoom_now;
+            self.runtime.last_rotation = rotation_now;
+            self.runtime.preview_until = Some(self.runtime.clock.now() + ZOOM_PREVIEW_WINDOW);
         }
         let previewing = self.previewing();
 
-        self.last_convert_ms = 0.0;
-        self.last_upload_ms = 0.0;
+        self.runtime.last_convert_ms = 0.0;
+        self.runtime.last_upload_ms = 0.0;
         // 拖动期间**暂缓**转换与上传：把"新页进入"那一帧的逐像素开销挪到松手之后，
         // 拖动本身只需保证画面跟着走（未就绪的区域显示旧图或白纸）。
         let dragging = self.drag.is_some();
@@ -420,16 +423,16 @@ impl PdfReaderApp {
         let after_draw = frame_start.elapsed();
 
         // 每帧耗时分解：拖动期间（或单帧明显慢时）打印，用来定位"不跟手"到底花在哪
-        if self.diag.enabled() {
+        if self.runtime.diag.enabled() {
             let total_ms = after_draw.as_secs_f64() * 1000.0;
             if self.drag.is_some() || total_ms > 25.0 {
-                self.diag.line(format!(
+                self.runtime.diag.line(format!(
                     "[帧] 总={:.1}ms 输入+pump={:.1}ms 纹理={:.1}ms(转换={:.1} 上传={:.1}) 绘制={:.1}ms 纹理数={} 命中={} 可见页={} 大纲={} 在飞={}",
                     total_ms,
                     after_input.as_secs_f64() * 1000.0,
                     (after_textures - after_input).as_secs_f64() * 1000.0,
-                    self.last_convert_ms,
-                    self.last_upload_ms,
+                    self.runtime.last_convert_ms,
+                    self.runtime.last_upload_ms,
                     (after_draw - after_textures).as_secs_f64() * 1000.0,
                     self.textures.len(),
                     self.hits.len(),
@@ -456,8 +459,10 @@ impl PdfReaderApp {
 
         // 预览窗口结束后必须自己醒一次，去请求最终比例的渲染
         if previewing {
-            if let Some(deadline) = self.preview_until {
-                ctx.request_repaint_after(deadline.saturating_duration_since(self.clock.now()));
+            if let Some(deadline) = self.runtime.preview_until {
+                ctx.request_repaint_after(
+                    deadline.saturating_duration_since(self.runtime.clock.now()),
+                );
             }
         } else if pending > 0 {
             ctx.request_repaint();

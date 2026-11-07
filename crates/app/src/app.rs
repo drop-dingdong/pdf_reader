@@ -39,12 +39,14 @@ mod paint;
 pub mod replay;
 mod save;
 mod sidebar;
+mod state;
 mod textures;
 mod toolbar;
 
 use crate::view::{commands_for_destination, outline_node_count, Desired, KeyedStore, PlanStamp};
 pub(super) use model::*;
 use paint::*;
+use state::RuntimeState;
 
 /// 应用状态。
 pub struct PdfReaderApp {
@@ -59,10 +61,6 @@ pub struct PdfReaderApp {
     sidecar_migrated: bool,
     /// 同目录存档由**更新版本**写入：不加载、也不允许覆盖（`(存档版本, 本程序版本)`，D-107）。
     sidecar_locked: Option<(u32, u32)>,
-    /// 是否已经提示过"当前视口的纹理需求超出预算"（只提示一次，D-111）。
-    budget_warned: bool,
-    /// 上一帧的保留统计（A/B/C 各占多少字节），诊断用（D-111）。
-    last_retain: Desired,
     /// 每帧临时持有的命令与事件缓冲（避免反复分配）。
     commands: Vec<ViewerCommand>,
     events: Vec<SessionEvent>,
@@ -235,9 +233,6 @@ pub struct PdfReaderApp {
     ///
     /// 前提：打开后 PDF 内容不再变化（不会插入新链接）—— 用户已确认该假设成立。
     link_marks: Vec<Vec<Option<(PageIndex, usize)>>>,
-    /// 本帧累计的"像素格式转换"与"load_texture"耗时（诊断用，定位 150ms 到底在哪一段）。
-    last_convert_ms: f64,
-    last_upload_ms: f64,
     /// 侧栏宽度：**由 app 自己保存**。
     ///
     /// egui 的面板尺寸以 `parent_ui.scope_id().with_salt(...)` 为键持久化，
@@ -338,38 +333,13 @@ pub struct PdfReaderApp {
     canvas_rect: egui::Rect,
     /// 画布所在图层；用于区分画布本层和盖在上面的编辑窗口/弹层。
     canvas_layer: egui::LayerId,
+    /// 运行时诊断/时间状态（不持久化）。
+    runtime: RuntimeState,
     /// 点击 Pin 条目后的一次性高亮（浮窗 id + 截止时刻）。
     click_highlight: Option<(u64, std::time::Instant)>,
     /// 状态栏文本与错误提示。
     message: String,
     error: Option<String>,
-    /// 运行时诊断输出（环境变量 `PDF_READER_DIAGNOSE=1` 开启）。
-    ///
-    /// 存在的理由：像"800% 时看不到内容"这类问题只在真实窗口 + 真实 GPU 上出现，
-    /// 无头测试无法复现；把每帧的绘制决策打到 stderr，用户就能把实况数据交回来
-    /// （agent.md 规则 2：UI 相关验证交给用户，但要让用户能看到可诊断的信息）。
-    diag: crate::diag::Diagnostics,
-    /// 行为性截止时间用的时钟（真实时间；回放器注入可推进的时钟）。
-    clock: crate::clock::Clock,
-    /// 上次诊断输出的时间（限流到每秒一次）。
-    last_report: std::time::Instant,
-    /// 缩放/旋转"刚变过"的截止时间：在此之前不提交新渲染，全部可见页统一显示旧图拉伸。
-    ///
-    /// 连续滚轮缩放会产生一串中间比例（100→120→140→150），逐个渲染既浪费时间
-    /// 又每步都掉一次帧（第三轮验收"缩放总是有顿感"）。等用户停手再渲染最终比例，
-    /// 中间的过场用旧图顶上 —— 这是"预览质量阶梯"的轻量版。
-    preview_until: Option<std::time::Instant>,
-    /// 上一帧观察到的缩放与旋转，用于检测"刚变过"。
-    last_zoom: f32,
-    last_rotation: Rotation,
-    /// 进程启动时刻：所有时序诊断都按"相对它的秒数"输出（用户要求：秒 + 浮点）。
-    started_at: std::time::Instant,
-    /// 本次拖动开始时刻（拖动结束时清空）。
-    drag_started_at: Option<std::time::Instant>,
-    /// 上一次"拖动位移生效"的诊断时刻，用于给出帧间隔。
-    last_pan_at: Option<std::time::Instant>,
-    /// 上一次记录的可见页集，用于检测"因拖动而重新决定显示内容"。
-    last_visible: Vec<PageIndex>,
 }
 
 impl PdfReaderApp {
@@ -403,7 +373,7 @@ impl PdfReaderApp {
     /// 设置纹理层字节预算（0 = 不限制）。给回放/调参用；正常路径由构造时读取。
     pub fn set_texture_budget(&mut self, bytes: u64) {
         self.textures.set_max_bytes(bytes);
-        self.budget_warned = false;
+        self.runtime.budget_warned = false;
     }
 
     /// **无窗口**构造：自己提供时钟与诊断去处（回放器 / 集成测试用）。
@@ -436,8 +406,6 @@ impl PdfReaderApp {
         settings_path: Option<PathBuf>,
         settings_warning: Option<String>,
     ) -> Self {
-        // 诊断限流与"启动时刻"都取注入时钟的当前值（回放时它由脚本推进）。
-        let boot = clock.now();
         let style = settings.annotation.clone();
         let sidebar_width = settings.ui.sidebar_width;
         let ui_settings = settings.ui.clone();
@@ -455,8 +423,6 @@ impl PdfReaderApp {
             last_plan: std::collections::HashMap::new(),
             sidecar_migrated: false,
             sidecar_locked: None,
-            budget_warned: false,
-            last_retain: Desired::default(),
             commands: Vec::new(),
             events: Vec::new(),
             visible: Vec::new(),
@@ -547,8 +513,6 @@ impl PdfReaderApp {
             editing_title: None,
             editing_body: None,
             link_marks: Vec::new(),
-            last_convert_ms: 0.0,
-            last_upload_ms: 0.0,
             sidebar_width,
             password_for: None,
             password_input: String::new(),
@@ -594,19 +558,10 @@ impl PdfReaderApp {
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
             canvas_layer: egui::LayerId::background(),
+            runtime: RuntimeState::new(clock, diag),
             click_highlight: None,
             message: String::new(),
             error: None,
-            diag,
-            clock,
-            last_report: boot,
-            preview_until: None,
-            last_zoom: 1.0,
-            last_rotation: Rotation::None,
-            started_at: boot,
-            drag_started_at: None,
-            last_pan_at: None,
-            last_visible: Vec::new(),
         };
         if let Some(warning) = settings_warning {
             app.message = warning;

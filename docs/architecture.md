@@ -57,6 +57,8 @@
 - `app.rs`（~0.6k）：`PdfReaderApp` 状态/构造 + `eframe::App::ui` 转发到 `app::frame::frame`。
 - `app/model.rs`（~1.0k）：`app` 子模块共用类型/常量/纯函数（`Float`/`AppEdit`/`Tool`/
   `CaptureState` 等；字段 `pub(super)`）。
+- `app/state.rs`：`RuntimeState`（诊断、注入时钟、启动/报告时刻、上一帧缩放/旋转/
+  可见页/拖动计时等运行态字段；不持久化）。
 - `app/frame.rs`（~0.5k）：每帧编排（命令采集、pump、布局切换、纹理上传、绘制顺序）。
 - `app/canvas/`：`mod.rs` 编排与输入；`paint.rs` 页面/选区/链接/标注/引用点；
   `interact.rs` 点击/拖动/右键/帧尾浮窗。画布内容的原始命中先按 canvas 裁剪。
@@ -220,8 +222,9 @@ app::compact::run_child → app --compact <in> <out>
 
 - 纹理层按条目数限额，没有显存字节预算；上传/像素转换没有字节预算。
 - `app.rs` 已拆成 `app/` 子模块（~0.6k 行只剩状态/构造/入口）；`PdfReaderApp` 仍有
-  约 159 个字段，状态分组的 Phase 3 评估见
-  [state-grouping-evaluation.md](state-grouping-evaluation.md)（未实施）；`view.rs` 仍有 ~4.2k 行
+  约 146 个字段，`RuntimeState` 已分组，其余 Phase 3 评估见
+  [state-grouping-evaluation.md](state-grouping-evaluation.md)（SaveFlow/Markdown/
+  AnnotationPdf 未实施）；`view.rs` 仍有 ~4.2k 行
   （拆分的可行性评估见 [roadmap.md](roadmap.md)）。
 - 无头回放只覆盖主视图渲染主线；UI 对话框、浮窗、便签、保存提示依赖人工验收。
 - `.pdf.json` 不保留未知字段；新旧版本互读会有字段丢失（只做加法迁移，不做无损往返）。

@@ -43,7 +43,7 @@ impl PdfReaderApp {
         //    被浮窗盖住的链接不应再有悬停反馈。
         let scrolling = self
             .scroll_quiet_until
-            .is_some_and(|deadline| self.clock.now() < deadline);
+            .is_some_and(|deadline| self.runtime.clock.now() < deadline);
         let float_rects: Vec<egui::Rect> = self.floats.iter().map(|window| window.rect).collect();
         let over_float = pointer.is_some_and(|position| pointer_over_any(position, &float_rects));
         // 3. **画墨迹期间**不弹出（用户实测：笔画压住链接时不该出现目的地预览）。

@@ -11,6 +11,7 @@
 | [`view.rs`](../crates/app/src/view.rs) (~4.2k) | 坐标换算、输入映射、`KeyedStore`、画法决策（`plan_page`/`preview_source`/`underlay_source`）、快照拼合（`compose_snapshot`/`compose_region_snapshot`）、浮窗几何、持久化辅助 | `cargo test -p app --lib` |
 | [`app.rs`](../crates/app/src/app.rs) (~0.6k) | `PdfReaderApp` 状态 + 构造 + `eframe::App::ui` 转发到 `app::frame::frame` | 人工 |
 | [`app/model.rs`](../crates/app/src/app/model.rs) (~1.0k) | `app` 子模块共用类型/常量/纯函数（`Float`/`AppEdit`/`Tool`/`CaptureState`…） | `cargo test -p app --lib` |
+| [`app/state.rs`](../crates/app/src/app/state.rs) (~0.1k) | `RuntimeState`：诊断、时钟、启动/报告时刻、上一帧缩放/旋转/可见页/拖动计时 | 编译 + 回放/人工 |
 | [`app/frame.rs`](../crates/app/src/app/frame.rs) (~0.5k) | 每帧编排：命令采集、pump、布局切换、纹理上传、绘制顺序 | 回放 + 人工 |
 | `app/canvas/`（`mod.rs` ~0.1k、`paint.rs` ~0.6k、`interact.rs` ~0.5k） | 画布：输入与点击/拖动交互；页面/选区/链接/标注/引用点绘制 | 回放 + 人工 |
 | [`app/toolbar.rs`](../crates/app/src/app/toolbar.rs) (~0.6k) | 顶栏三行（文件菜单 / 视图开关 / 页与缩放） | 人工 |

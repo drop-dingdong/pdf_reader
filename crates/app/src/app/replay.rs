@@ -1075,7 +1075,7 @@ pub fn run(
         };
         harness.apply_action(app, action);
         // 每个动作开始时清空诊断缓冲：这一行只属于这个动作
-        let _ = app.diag.take();
+        let _ = app.runtime.diag.take();
 
         let mut quiet = 0u32;
         let mut last_state = (usize::MAX, 0usize, BTreeMap::new());
@@ -1135,7 +1135,7 @@ pub fn run(
             }
         }
         action_report.elapsed_ms = action_started.elapsed().as_secs_f64() * 1000.0;
-        action_report.diag = app.diag.take();
+        action_report.diag = app.runtime.diag.take();
         // 结构指标（与硬件无关，可做硬门禁）：
         let first = action_report.frames_data.first();
         let last = action_report.frames_data.last();

@@ -433,7 +433,7 @@ impl PdfReaderApp {
         } else {
             self.commands.push(ViewerCommand::GoToPage(page));
         }
-        self.annotation_focus = Some((id, self.clock.now() + ANNOTATION_FOCUS));
+        self.annotation_focus = Some((id, self.runtime.clock.now() + ANNOTATION_FOCUS));
         self.message = format!(
             "已定位到注释 #{}（第 {} 页）",
             id.get(),
@@ -611,7 +611,7 @@ impl PdfReaderApp {
             at.x = at.x.clamp(self.canvas_rect.left(), max_x);
             at.y = at.y.clamp(self.canvas_rect.top(), max_y);
         }
-        self.annotation_focus = Some((id, self.clock.now() + ANNOTATION_FOCUS));
+        self.annotation_focus = Some((id, self.runtime.clock.now() + ANNOTATION_FOCUS));
         self.open_annotation_note(id, at);
     }
 
@@ -631,7 +631,7 @@ impl PdfReaderApp {
             let float_id = window.id;
             self.floats.push(window);
             self.highlight_float = Some(float_id);
-            self.click_highlight = Some((float_id, self.clock.now() + CLICK_HIGHLIGHT));
+            self.click_highlight = Some((float_id, self.runtime.clock.now() + CLICK_HIGHLIGHT));
             return;
         }
         let rect = egui::Rect::from_min_size(at, EVec2::new(280.0, 150.0));
@@ -647,7 +647,7 @@ impl PdfReaderApp {
             origin: None,
         });
         self.highlight_float = Some(float_id);
-        self.click_highlight = Some((float_id, self.clock.now() + CLICK_HIGHLIGHT));
+        self.click_highlight = Some((float_id, self.runtime.clock.now() + CLICK_HIGHLIGHT));
     }
 
     /// "编辑历史"可视列表：只是撤销栈的**视图**（点击不做状态跳转）。

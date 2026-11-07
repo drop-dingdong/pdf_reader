@@ -101,7 +101,7 @@ impl PdfReaderApp {
                             ));
                         }
                     }
-                    self.diag.line(format!(
+                    self.runtime.diag.line(format!(
                         "[截图] 视图区域 ({:.1},{:.1} {:.1}×{:.1}){}",
                         selection.min.x,
                         selection.min.y,
@@ -120,7 +120,7 @@ impl PdfReaderApp {
                     );
                 }
                 None => {
-                    self.diag.line("[截图] 未框选任何区域".to_string());
+                    self.runtime.diag.line("[截图] 未框选任何区域".to_string());
                     self.message = "截图模式：未框选区域".to_string();
                 }
             }
@@ -377,8 +377,8 @@ impl PdfReaderApp {
         }
         let page = preview_page;
         let Some(snapshot) = self.snapshot_for(ui, session, overlap) else {
-            if self.diag.enabled() {
-                self.diag.line(format!(
+            if self.runtime.diag.enabled() {
+                self.runtime.diag.line(format!(
                     "[图片预览] 合成失败：页={:?} 选区={:?} 缩放={:.3} 可见页={:?}",
                     page,
                     overlap,
