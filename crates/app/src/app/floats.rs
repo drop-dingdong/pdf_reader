@@ -5,10 +5,10 @@ use super::*;
 use crate::view::{
     body_size_of, clamp_float_rect, drag_float_rect, find_float_for_custom, fit_inside,
     float_rect_at_row, float_size_for_body, move_to_last, overflow_layout, parse_float_link,
-    FloatLinkTarget, CUSTOM_SYMBOL_EDIT, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
+    FloatLinkTarget, FLOAT_HANDLE_SIZE, FLOAT_MIN_SIZE, FLOAT_TITLE_HEIGHT,
 };
 use eframe::egui;
-use egui::{Align2, Color32, CornerRadius, Id, Sense, Stroke, StrokeKind, Vec2 as EVec2};
+use egui::{Color32, CornerRadius, Id, Sense, Stroke, StrokeKind, Vec2 as EVec2};
 
 /// 指针是否落在画布之上的窗口/弹层（而不是画布本层）。
 ///
@@ -935,13 +935,7 @@ impl PdfReaderApp {
                 Color32::from_gray(95)
             };
             ui.painter().circle_filled(close_center, 8.5, close_color);
-            ui.painter().text(
-                close_center,
-                Align2::CENTER_CENTER,
-                "✕",
-                egui::FontId::proportional(12.0),
-                Color32::WHITE,
-            );
+            self.paint_icon(ui, icons::Icon::Close, close_center, 13.0, Color32::WHITE);
             if interactive && close_response.on_hover_text("关闭浮窗").clicked() {
                 let owner = self.floats[index].owner;
                 if self.body_edit_owner() == Some(owner) && self.body_edit_dirty() {
@@ -1084,13 +1078,7 @@ impl PdfReaderApp {
                 } else {
                     Color32::from_gray(190)
                 };
-                ui.painter().text(
-                    edit_center,
-                    Align2::CENTER_CENTER,
-                    CUSTOM_SYMBOL_EDIT,
-                    egui::FontId::proportional(13.0),
-                    edit_color,
-                );
+                self.paint_icon(ui, icons::Icon::Edit, edit_center, 13.0, edit_color);
                 if interactive && edit_response.on_hover_text("编辑正文").clicked() {
                     if let FloatContent::Text(text) = &self.floats[index].content {
                         let owner = self.floats[index].owner;
@@ -1105,17 +1093,12 @@ impl PdfReaderApp {
                 let button_rect = egui::Rect::from_center_size(center, EVec2::splat(18.0));
                 let response =
                     ui.interact(button_rect, Id::unique(("float-link", id)), Sense::click());
-                ui.painter().text(
-                    center,
-                    Align2::CENTER_CENTER,
-                    "\u{2197}",
-                    egui::FontId::proportional(13.0),
-                    if response.hovered() {
-                        Color32::from_gray(235)
-                    } else {
-                        Color32::from_gray(190)
-                    },
-                );
+                let color = if response.hovered() {
+                    Color32::from_gray(235)
+                } else {
+                    Color32::from_gray(190)
+                };
+                self.paint_icon(ui, icons::Icon::Link, center, 13.0, color);
                 if interactive && response.on_hover_text("复制引用链接").clicked() {
                     ui.ctx().copy_text(uri);
                     self.message = "已复制引用链接，可粘到正文".to_string();
@@ -1127,17 +1110,12 @@ impl PdfReaderApp {
                 let button_rect = egui::Rect::from_center_size(center, EVec2::splat(18.0));
                 let response =
                     ui.interact(button_rect, Id::unique(("float-goto", id)), Sense::click());
-                ui.painter().text(
-                    center,
-                    Align2::CENTER_CENTER,
-                    "\u{2192}",
-                    egui::FontId::proportional(13.0),
-                    if response.hovered() {
-                        Color32::from_gray(235)
-                    } else {
-                        Color32::from_gray(190)
-                    },
-                );
+                let color = if response.hovered() {
+                    Color32::from_gray(235)
+                } else {
+                    Color32::from_gray(190)
+                };
+                self.paint_icon(ui, icons::Icon::Goto, center, 13.0, color);
                 if interactive && response.on_hover_text("跳到来源页/位置").clicked() {
                     self.commands.push(ViewerCommand::GoToPage(page));
                     self.commands
@@ -1166,17 +1144,12 @@ impl PdfReaderApp {
                                 Id::unique(("float-image-ref", id)),
                                 Sense::click(),
                             );
-                            ui.painter().text(
-                                center,
-                                Align2::CENTER_CENTER,
-                                "@",
-                                egui::FontId::proportional(13.0),
-                                if response.hovered() {
-                                    Color32::from_gray(235)
-                                } else {
-                                    Color32::from_gray(190)
-                                },
-                            );
+                            let color = if response.hovered() {
+                                Color32::from_gray(235)
+                            } else {
+                                Color32::from_gray(190)
+                            };
+                            self.paint_icon(ui, icons::Icon::ImageRef, center, 13.0, color);
                             if interactive
                                 && response.on_hover_text("复制 Markdown 图片引用").clicked()
                             {

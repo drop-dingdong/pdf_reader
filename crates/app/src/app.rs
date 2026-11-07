@@ -32,6 +32,7 @@ mod edit;
 mod floats;
 mod frame;
 mod hover;
+mod icons;
 mod model;
 mod modes;
 mod paint;
@@ -276,6 +277,8 @@ pub struct PdfReaderApp {
     save_flow: SaveFlowState,
     /// Markdown/数学/内部图片的会话内缓存。
     markdown: MarkdownState,
+    /// SVG 图标纹理缓存（按图标/DPI/主题色）。
+    icons: icons::IconCache,
     /// 注释/PDF 对象号的会话内簿记。
     annotation_pdf: AnnotationPdfState,
     /// 点击 Pin 条目后的一次性高亮（浮窗 id + 截止时刻）。
@@ -473,6 +476,7 @@ impl PdfReaderApp {
             runtime: RuntimeState::new(clock, diag),
             save_flow: SaveFlowState::default(),
             markdown: MarkdownState::default(),
+            icons: icons::IconCache::default(),
             annotation_pdf: AnnotationPdfState::default(),
             click_highlight: None,
             message: String::new(),

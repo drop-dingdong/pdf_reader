@@ -4,7 +4,6 @@ use super::*;
 
 use crate::view::{
     checkbox_row, fit_height_zoom, page_index_from_text, parse_zoom_percent, zoom_percent_text,
-    CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT,
 };
 use eframe::egui;
 use egui::{Id, Key, RichText};
@@ -215,16 +214,14 @@ impl PdfReaderApp {
                 .on_hover_text("显示/隐藏侧边栏（目录 / 自定义preview）");
             ui.separator();
             ui.label("添加预览：");
-            if ui
-                .button(CUSTOM_SYMBOL_TEXT)
-                .on_hover_text("添加文字预览")
+            if self
+                .icon_button(ui, icons::Icon::TextPreview, "添加文字预览")
                 .clicked()
             {
                 self.enter_pin(CustomKind::Text);
             }
-            if ui
-                .button(CUSTOM_SYMBOL_IMAGE)
-                .on_hover_text("添加图片预览")
+            if self
+                .icon_button(ui, icons::Icon::ImagePreview, "添加图片预览")
                 .clicked()
             {
                 self.enter_pin(CustomKind::Image);

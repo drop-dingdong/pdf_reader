@@ -2,7 +2,7 @@
 
 use super::*;
 
-use crate::view::{annotation_time_line, overflow_layout, CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT};
+use crate::view::{annotation_time_line, overflow_layout};
 use eframe::egui;
 use egui::{Align2, CornerRadius, Id, Key, RichText, Sense, Vec2 as EVec2};
 use pdfcore::annotation::AnnotationKind;
@@ -367,11 +367,18 @@ impl PdfReaderApp {
                                 text
                             });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.menu_button("\u{22ef}", |ui| {
+                            let (menu_rect, menu_response) =
+                                ui.allocate_exact_size(egui::vec2(24.0, 18.0), Sense::click());
+                            let color = if menu_response.hovered() {
+                                ui.visuals().strong_text_color()
+                            } else {
+                                ui.visuals().weak_text_color()
+                            };
+                            self.paint_icon(ui, icons::Icon::More, menu_rect.center(), 16.0, color);
+                            let menu_response = menu_response.on_hover_text("更多操作");
+                            egui::Popup::menu(&menu_response).show(|ui| {
                                 self.annotation_row_menu(ui, id);
-                            })
-                            .response
-                            .on_hover_text("更多操作");
+                            });
                         });
                         response.context_menu(|ui| {
                             self.annotation_row_menu(ui, id);
@@ -470,19 +477,15 @@ impl PdfReaderApp {
                     continue;
                 };
                 // 行首：类型符号 + 标题（长标题截断）+ 右侧页码
-                let symbol = match preview.kind {
-                    CustomKind::Text => CUSTOM_SYMBOL_TEXT,
-                    CustomKind::Image => CUSTOM_SYMBOL_IMAGE,
+                let kind_icon = match preview.kind {
+                    CustomKind::Text => icons::Icon::TextPreview,
+                    CustomKind::Image => icons::Icon::ImagePreview,
                 };
-                let title = format!(
-                    "{} {}",
-                    symbol,
-                    if preview.title.is_empty() {
-                        "（无题）"
-                    } else {
-                        preview.title.as_str()
-                    }
-                );
+                let title = if preview.title.is_empty() {
+                    "（无题）".to_string()
+                } else {
+                    preview.title.clone()
+                };
                 let page_label = format!("第 {} 页", preview.page.display_number());
 
                 // 1) 先占位（整行宽度），2) 再画，3) 最后在该矩形上注册交互。
@@ -511,7 +514,16 @@ impl PdfReaderApp {
                 let painter = ui.painter();
                 let menu_width = 20.0;
                 let page_width = 56.0;
-                let title_width = (rect.width() - page_width - menu_width - 8.0).max(24.0);
+                let icon_width = 22.0;
+                let title_width =
+                    (rect.width() - page_width - menu_width - icon_width - 8.0).max(24.0);
+                self.paint_icon(
+                    ui,
+                    kind_icon,
+                    egui::pos2(rect.min.x + 10.0, rect.center().y),
+                    14.0,
+                    ui.visuals().text_color(),
+                );
                 let job = overflow_layout(
                     &title,
                     egui::FontId::proportional(13.0),
@@ -521,7 +533,10 @@ impl PdfReaderApp {
                 );
                 let galley = painter.layout_job(job);
                 painter.galley(
-                    egui::pos2(rect.min.x, rect.center().y - galley.size().y * 0.5),
+                    egui::pos2(
+                        rect.min.x + icon_width,
+                        rect.center().y - galley.size().y * 0.5,
+                    ),
                     galley,
                     ui.visuals().text_color(),
                 );
@@ -543,9 +558,14 @@ impl PdfReaderApp {
                     egui::pos2(rect.max.x - 10.0, rect.center().y),
                     EVec2::new(menu_width, row_height),
                 );
-                let menu_response = ui
-                    .put(menu_rect, egui::Button::new("\u{22ef}").frame(false))
-                    .on_hover_text("更多操作");
+                let menu_response = ui.put(menu_rect, egui::Button::new("").frame(false));
+                let color = if menu_response.hovered() {
+                    ui.visuals().strong_text_color()
+                } else {
+                    ui.visuals().weak_text_color()
+                };
+                self.paint_icon(ui, icons::Icon::More, menu_rect.center(), 16.0, color);
+                let menu_response = menu_response.on_hover_text("更多操作");
                 egui::Popup::menu(&menu_response).show(|ui| {
                     self.preview_row_menu(ui, index);
                 });

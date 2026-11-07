@@ -68,6 +68,9 @@
   无行为变化。
 - **UI 样式共识（未实施）**：新增按钮/侧栏行/图标/主题颜色的约定落在
   [ui-standards.md](ui-standards.md)；当前代码仍使用部分 Unicode 图标和未统一侧栏行。
+- **UI 第二步：SVG 图标**：新增 `app/icons.rs` 与 `assets/icons/*.svg`，用 `resvg`
+  按 DPI/主题色缓存纹理；浮窗关闭/编辑/link/goto/image-ref、顶栏文字/图片预览、
+  侧栏类型/更多图标已替换，`CUSTOM_SYMBOL_*` 常量移除；删除图标资源已备，菜单项暂用文字。
 - **UI 第一步：hover 固定 + dest goto**：链接 hover 的临时预览在按下帧不再被
   `using_pointer` 清掉，点击/拖动可固定；引用点/dest 浮窗增加 `→`，目标为
   `DestMark.point`（不是截图 rect 中心），仍不提供 `↗`。新增回放回归与单测。

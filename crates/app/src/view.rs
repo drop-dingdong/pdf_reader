@@ -789,12 +789,6 @@ pub fn float_rect_at_row(
     clamp_float_rect(wanted, canvas, min_size)
 }
 
-/// 侧栏 Pin 列表行首的**类型符号**：文字 / 截图（用户指定的 unicode）。
-///
-/// 用 Rust 的 `\u{...}` 转义写出，确保码点与用户要求一致：
-/// 文字 `U+1F5B9`、截图 `U+1F5BB`。若渲染成方块，说明当前字体缺这两个字形
-/// （与码点无关，换个带符号的字体即可）。
-pub const CUSTOM_SYMBOL_TEXT: &str = "\u{1F5B9}";
 /// 缩放比 → 显示文本（四舍五入到整数百分比），如 `1.532` → `"153%"`。
 pub fn zoom_percent_text(zoom: f32) -> String {
     format!("{:.0}%", zoom * 100.0)
@@ -883,13 +877,6 @@ pub fn save_button_label(dirty: bool) -> &'static str {
         "保存"
     }
 }
-
-/// 编辑按钮符号（U+270E）。
-pub const CUSTOM_SYMBOL_EDIT: &str = "\u{270E}";
-/// 删除按钮符号（U+274E）。
-pub const CUSTOM_SYMBOL_DELETE: &str = "\u{274E}";
-/// 截图类型符号，见 [`CUSTOM_SYMBOL_TEXT`]。
-pub const CUSTOM_SYMBOL_IMAGE: &str = "\u{1F5BB}";
 
 /// 在"浮窗来源"列表里找**某个自定义 preview 的正式浮窗**（侧栏响应要用）。
 ///
@@ -3394,29 +3381,6 @@ mod tests {
         assert_eq!(save_button_label(false), "保存");
         assert_eq!(save_button_label(true), "*保存");
         assert!(save_button_label(true).starts_with('*'));
-    }
-
-    /// 侧栏行首类型符号：码点必须与用户指定的完全一致。
-    #[test]
-    fn custom_preview_symbols_are_the_requested_codepoints() {
-        assert_eq!(
-            CUSTOM_SYMBOL_TEXT.chars().next().map(u32::from),
-            Some(0x1F5B9)
-        );
-        assert_eq!(
-            CUSTOM_SYMBOL_IMAGE.chars().next().map(u32::from),
-            Some(0x1F5BB)
-        );
-        assert_eq!(CUSTOM_SYMBOL_TEXT.chars().count(), 1);
-        assert_eq!(CUSTOM_SYMBOL_IMAGE.chars().count(), 1);
-        assert_eq!(
-            CUSTOM_SYMBOL_EDIT.chars().next().map(u32::from),
-            Some(0x270E)
-        );
-        assert_eq!(
-            CUSTOM_SYMBOL_DELETE.chars().next().map(u32::from),
-            Some(0x274E)
-        );
     }
 
     /// 侧栏 Pin 列表 → 正式浮窗的查找。

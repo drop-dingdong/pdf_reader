@@ -1,10 +1,10 @@
 # UI 样式与交互规范
 
-> 状态：2026-11-07 共识已确定；**第 1 步（hover 固定 + dest goto）已实施，
-> SVG/侧栏/主题尚未实施**。本文是后续新增按钮、侧栏行、图标、主题/颜色时的默认依据；
+> 状态：2026-11-07 共识已确定；**第 1 步（hover 固定 + dest goto）与
+> SVG 图标系统已实施，侧栏统一/主题尚未实施**。本文是后续新增按钮、侧栏行、图标、主题/颜色时的默认依据；
 > 如果新需求与本文冲突，先改本文再改代码。
 >
-> 当前代码仍使用部分 Unicode 图标、默认跟随系统的主题和未统一的侧栏行；
+> 当前主题仍默认跟随系统，侧栏两类行尚未完全统一；
 > 实际行为以 [app-ui.md](app-ui.md) 为准，本文描述的是**目标约定**。
 
 ## 1. 已确认的决策
@@ -272,7 +272,7 @@ ctx.set_theme(if settings.ui.dark_mode {
 | 顶栏按钮/样式菜单 | `crates/app/src/app/toolbar.rs` |
 | 侧栏行/菜单 | `crates/app/src/app/sidebar.rs` |
 | 页面/浮窗无状态绘制 | `crates/app/src/app/paint.rs` |
-| 类型符号常量（待迁移） | `crates/app/src/view.rs` 的 `CUSTOM_SYMBOL_*` |
+| 类型/关闭/编辑/link/goto/更多图标 | `crates/app/assets/icons/*.svg` + `app/icons.rs` |
 | 设置字段 | `crates/app/src/settings.rs` |
 | 设置同步 | `crates/app/src/app/edit.rs::sync_style_settings` |
 | 状态组 | `crates/app/src/app/state.rs` |
@@ -309,7 +309,8 @@ ctx.set_theme(if settings.ui.dark_mode {
 
 1. ~~修临时 hover 浮窗点击固定 bug + dest 浮窗 `→`（point）。~~
    已完成：点击/拖动临时预览可固定；dest `→` 使用 `mark.point`。
-2. SVG 图标系统 + 关闭/文字/图片/编辑/link/goto/更多/删除替换；
+2. ~~SVG 图标系统 + 关闭/文字/图片/编辑/link/goto/更多替换。~~
+   已完成首批：`app/icons.rs` + `assets/icons/`；删除图标资源已备，菜单项暂用文字。
 3. 侧栏两类行统一；
 4. 主题 `dark_mode` + 样式菜单 + 颜色审计 + 跨 OS 评审；
 5. 页面背景色暂不做。
