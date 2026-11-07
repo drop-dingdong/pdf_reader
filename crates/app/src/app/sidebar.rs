@@ -335,50 +335,67 @@ impl PdfReaderApp {
                     }
                     ui.horizontal(|ui| {
                         ui.add_space(8.0);
-                        let width = (ui.available_width() - 42.0).max(80.0);
-                        let response = ui
-                            .allocate_ui_with_layout(
-                                EVec2::new(width, 18.0),
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    ui.add(
-                                        egui::Label::new(text)
-                                            .truncate()
-                                            // 关闭 Label 的“截断时自动 tooltip”，只保留我们自己的。
-                                            .show_tooltip_when_elided(false)
-                                            .halign(egui::Align::Min)
-                                            .sense(Sense::click()),
-                                    )
-                                },
-                            )
-                            .inner
-                            .on_hover_text({
-                                // 列表已按页分组，"第 N 页"冗余：这里换成作者；时间单独一行。
-                                let mut text = format!(
-                                    "{preview}\n\n{label} · {}{}{}",
-                                    author.as_deref().unwrap_or("未署名"),
-                                    if external { " · 外部" } else { " · 自有" },
-                                    if readonly { " · 内联" } else { "" }
-                                );
-                                if let Some(line) = annotation_time_line(created, modified) {
-                                    text.push('\n');
-                                    text.push_str(&line);
-                                }
-                                text
-                            });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let (menu_rect, menu_response) =
-                                ui.allocate_exact_size(egui::vec2(24.0, 18.0), Sense::click());
-                            let color = if menu_response.hovered() {
-                                ui.visuals().strong_text_color()
-                            } else {
-                                ui.visuals().weak_text_color()
-                            };
-                            self.paint_icon(ui, icons::Icon::More, menu_rect.center(), 16.0, color);
-                            let menu_response = menu_response.on_hover_text("更多操作");
-                            egui::Popup::menu(&menu_response).show(|ui| {
-                                self.annotation_row_menu(ui, id);
-                            });
+                        let width = ui.available_width();
+                        let (rect, _) = ui.allocate_exact_size(
+                            EVec2::new(width, OUTLINE_ROW_HEIGHT),
+                            Sense::hover(),
+                        );
+                        let response = ui.interact(
+                            rect,
+                            Id::unique(("annotation-row", id.get())),
+                            Sense::click(),
+                        );
+                        if response.hovered() {
+                            ui.painter().rect_filled(
+                                rect,
+                                CornerRadius::ZERO,
+                                ui.visuals().widgets.hovered.weak_bg_fill,
+                            );
+                        }
+                        let menu_width = 24.0;
+                        let text_width = (rect.width() - menu_width - 8.0).max(24.0);
+                        let job = overflow_layout(
+                            &text,
+                            egui::FontId::proportional(13.0),
+                            ui.visuals().text_color(),
+                            text_width,
+                            1,
+                        );
+                        let galley = ui.painter().layout_job(job);
+                        ui.painter().galley(
+                            egui::pos2(rect.min.x, rect.center().y - galley.size().y * 0.5),
+                            galley,
+                            ui.visuals().text_color(),
+                        );
+                        let menu_rect = egui::Rect::from_center_size(
+                            egui::pos2(rect.max.x - 10.0, rect.center().y),
+                            EVec2::new(menu_width, OUTLINE_ROW_HEIGHT),
+                        );
+                        let menu_response = ui.put(menu_rect, egui::Button::new("").frame(false));
+                        let color = if menu_response.hovered() {
+                            ui.visuals().strong_text_color()
+                        } else {
+                            ui.visuals().weak_text_color()
+                        };
+                        self.paint_icon(ui, icons::Icon::More, menu_rect.center(), 16.0, color);
+                        let menu_response = menu_response.on_hover_text("更多操作");
+                        egui::Popup::menu(&menu_response).show(|ui| {
+                            self.annotation_row_menu(ui, id);
+                        });
+
+                        let response = response.on_hover_text({
+                            // 列表已按页分组，"第 N 页"冗余：这里换成作者；时间单独一行。
+                            let mut text = format!(
+                                "{preview}\n\n{label} · {}{}{}",
+                                author.as_deref().unwrap_or("未署名"),
+                                if external { " · 外部" } else { " · 自有" },
+                                if readonly { " · 内联" } else { "" }
+                            );
+                            if let Some(line) = annotation_time_line(created, modified) {
+                                text.push('\n');
+                                text.push_str(&line);
+                            }
+                            text
                         });
                         response.context_menu(|ui| {
                             self.annotation_row_menu(ui, id);

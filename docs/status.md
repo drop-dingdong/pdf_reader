@@ -74,6 +74,8 @@
 - **UI 第一步：hover 固定 + dest goto**：链接 hover 的临时预览在按下帧不再被
   `using_pointer` 清掉，点击/拖动可固定；引用点/dest 浮窗增加 `→`，目标为
   `DestMark.point`（不是截图 rect 中心），仍不提供 `↗`。新增回放回归与单测。
+- **UI 第三步：侧栏行统一**：注释行改为和 preview 行相同的整行 response +
+  透明 `⋯` + 整行右键；hover 整行背景；不再只让左侧 label 响应。
 - **图片可获取性重检**：文字浮窗引用的 `pd-img` 每次 owner 扫描都重新判定来源
   preview/dest 是否还在；来源被删时清掉 `ImageStore` 的旧 revision 并 `forget_image`，
   不再继续显示缓存里的已删除图片。
