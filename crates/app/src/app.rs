@@ -46,7 +46,7 @@ mod toolbar;
 use crate::view::{commands_for_destination, outline_node_count, Desired, KeyedStore, PlanStamp};
 pub(super) use model::*;
 use paint::*;
-use state::RuntimeState;
+use state::{RuntimeState, SaveFlowState};
 
 /// 应用状态。
 pub struct PdfReaderApp {
@@ -106,10 +106,6 @@ pub struct PdfReaderApp {
     ink_color: [u8; 3],
     /// 进入标记模式前的工具，退出时恢复。
     tool_before_annotation: Option<Tool>,
-    /// 是否正在等"原地写入 PDF"的确认（S5c）。
-    pending_in_place: bool,
-    /// 保存确认框里的错误；失败/冲突时对话框保留并显示它。
-    in_place_error: Option<String>,
     /// 上次打开时 PDF 里带 `pd-fr:` 标记的注释数（决定空 overlay 能否写回/导出）。
     pdf_marked_annotations: usize,
     /// 原地写入重开后要恢复的视图（页、缩放、滚动、剩余帧数）。
@@ -123,14 +119,6 @@ pub struct PdfReaderApp {
     saved_pdf_revision: u64,
     /// 原地保存前是否留一份 `.bak` 副本（设置项，默认关闭）。
     backup_before_inplace: bool,
-    /// 关闭/切换文件前的未保存提示。
-    pending_action: Option<PendingAction>,
-    /// 正文编辑尚未保存时挂起的关闭/切换动作。
-    pending_edit_action: Option<EditDiscardAction>,
-    /// 提示里的错误（保存失败/冲突等）。
-    pending_action_error: Option<String>,
-    /// 用户已经决定关闭：下一次 close_requested 不再拦截。
-    closing_after_decision: bool,
     /// 上次成功保存自定义数据 / 打开时自定义数据的指纹。
     data_clean_hash: Option<u64>,
     /// 编辑历史（注释 + 重选截图/引用点，单栈时间序）。
@@ -163,20 +151,6 @@ pub struct PdfReaderApp {
     document_path: Option<std::path::PathBuf>,
     /// 打开时记录的文件身份；写回前若变化则拒绝覆盖。
     pdf_file_stamp: Option<PdfFileStamp>,
-    /// 另存为对话框中的目标路径；`None` = 未打开。
-    save_as: Option<String>,
-    /// 另存为对话框的错误提示。
-    save_as_error: Option<String>,
-    /// 另存为：同时写原 PDF 的数据文件。
-    save_as_write_original: bool,
-    /// 另存为：写新 PDF 的数据文件。
-    save_as_write_target: bool,
-    /// 另存为：目标已存在时是否覆盖（对话框里勾选）。
-    save_as_overwrite: bool,
-    /// 整理副本对话框里的目标路径；`None` = 未打开。
-    compact_dialog: Option<String>,
-    /// 整理副本的错误提示。
-    compact_error: Option<String>,
     /// 便签模式：下一次点击页面时在该位置新建便签。
     note_pin: bool,
     /// 新建便签的输入对话框。
@@ -311,8 +285,6 @@ pub struct PdfReaderApp {
     markdown_prepared: std::collections::HashMap<u64, PreparedMarkdown>,
     /// 拖入文件 hover 日志只打一次，避免 Wayland 调度每帧刷屏。
     drag_hover_logged: bool,
-    /// Ctrl+S 在 egui 帧内无法安全借 session；延后到 session 放回后执行。
-    pending_save: bool,
     /// LaTeX 公式的 PNG 纹理缓存与内嵌字体（全局共用）。
     math_cache: std::rc::Rc<std::cell::RefCell<crate::math::MathCache>>,
     /// 数学公式支持/限制帮助窗口是否打开。
@@ -335,6 +307,8 @@ pub struct PdfReaderApp {
     canvas_layer: egui::LayerId,
     /// 运行时诊断/时间状态（不持久化）。
     runtime: RuntimeState,
+    /// 保存/关闭流程的对话框与一次性状态。
+    save_flow: SaveFlowState,
     /// 点击 Pin 条目后的一次性高亮（浮窗 id + 截止时刻）。
     click_highlight: Option<(u64, std::time::Instant)>,
     /// 状态栏文本与错误提示。
@@ -453,17 +427,11 @@ impl PdfReaderApp {
             pending_window_size: None,
             pending_open: None,
             tool_before_annotation: None,
-            pending_in_place: false,
-            in_place_error: None,
             pdf_marked_annotations: 0,
             pending_view_restore: None,
             pdf_dirty: false,
             saved_pdf_revision: 0,
             backup_before_inplace: save_settings.backup_in_place,
-            pending_action: None,
-            pending_edit_action: None,
-            pending_action_error: None,
-            closing_after_decision: false,
             data_clean_hash: None,
             history: crate::history::History::new(),
             show_history: false,
@@ -480,17 +448,10 @@ impl PdfReaderApp {
             highlight_float: None,
             document_path: None,
             pdf_file_stamp: None,
-            save_as: None,
-            save_as_error: None,
-            save_as_write_original: true,
-            compact_dialog: None,
-            compact_error: None,
             note_pin: false,
             note_dialog: None,
             ink_move: None,
             move_ink_armed: None,
-            save_as_write_target: true,
-            save_as_overwrite: false,
             custom_pin: None,
             custom_dialog: None,
             custom_previews: Vec::new(),
@@ -547,7 +508,6 @@ impl PdfReaderApp {
             markdown_viewports: std::collections::HashMap::new(),
             markdown_prepared: std::collections::HashMap::new(),
             drag_hover_logged: false,
-            pending_save: false,
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(crate::math::MathCache::new())),
             math_help: false,
             images: crate::image_store::ImageStore::default(),
@@ -559,6 +519,7 @@ impl PdfReaderApp {
             canvas_rect: egui::Rect::NOTHING,
             canvas_layer: egui::LayerId::background(),
             runtime: RuntimeState::new(clock, diag),
+            save_flow: SaveFlowState::default(),
             click_highlight: None,
             message: String::new(),
             error: None,

@@ -528,7 +528,10 @@ mod annotation_body_tests {
         assert!(app.body_edit_dirty());
         app.request_open(PathBuf::from("/tmp/another.pdf"));
         assert!(
-            matches!(app.pending_edit_action, Some(EditDiscardAction::Open(_))),
+            matches!(
+                app.save_flow.pending_edit_action,
+                Some(EditDiscardAction::Open(_))
+            ),
             "有未保存正文时应先挂起切换动作"
         );
     }

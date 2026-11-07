@@ -942,7 +942,7 @@ impl PdfReaderApp {
             if interactive && close_response.on_hover_text("关闭浮窗").clicked() {
                 let owner = self.floats[index].owner;
                 if self.body_edit_owner() == Some(owner) && self.body_edit_dirty() {
-                    self.pending_edit_action = Some(EditDiscardAction::CloseFloat(id));
+                    self.save_flow.pending_edit_action = Some(EditDiscardAction::CloseFloat(id));
                 } else {
                     close = Some(id);
                 }

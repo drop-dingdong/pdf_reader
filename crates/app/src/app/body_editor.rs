@@ -183,7 +183,7 @@ impl PdfReaderApp {
         // Esc/「取消」按钮是明确的放弃操作，不弹二次确认。
         if !open {
             if self.body_text_dirty(owner, &text) {
-                self.pending_edit_action = Some(EditDiscardAction::CloseEditor);
+                self.save_flow.pending_edit_action = Some(EditDiscardAction::CloseEditor);
                 self.editing_body = Some((owner, text));
                 return;
             }
@@ -275,7 +275,7 @@ impl PdfReaderApp {
 
     /// 正文草稿未保存时，关闭浮窗/切换文件前的确认框。
     pub(super) fn draw_edit_discard_dialog(&mut self, ctx: &egui::Context) {
-        let Some(action) = self.pending_edit_action.clone() else {
+        let Some(action) = self.save_flow.pending_edit_action.clone() else {
             return;
         };
         let what = match self.body_edit_owner() {
@@ -310,7 +310,7 @@ impl PdfReaderApp {
             });
         });
         if cancel {
-            self.pending_edit_action = None;
+            self.save_flow.pending_edit_action = None;
             return;
         }
         if save {
@@ -324,7 +324,7 @@ impl PdfReaderApp {
             self.message = "已放弃正文修改".to_string();
         }
         if save || discard {
-            self.pending_edit_action = None;
+            self.save_flow.pending_edit_action = None;
             self.run_edit_action(action, ctx);
         }
     }
@@ -465,11 +465,11 @@ impl PdfReaderApp {
             EditDiscardAction::Quit => {
                 if self.is_dirty() {
                     // 正文保存后可能让文档变脏；交给已有的未保存文档提示。
-                    self.pending_action = Some(PendingAction {
+                    self.save_flow.pending_action = Some(PendingAction {
                         kind: PendingActionKind::Quit,
                     });
                 } else {
-                    self.closing_after_decision = true;
+                    self.save_flow.closing_after_decision = true;
                     self.remember_document_view();
                     self.flush_settings(Some(ctx));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);

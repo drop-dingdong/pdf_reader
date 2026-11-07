@@ -28,7 +28,7 @@ impl PdfReaderApp {
             if self.editing_body.is_none() {
                 // 本函数持有的是 `session` 的借用，而 `save_all` 需要 `self.session`
                 // （此刻字段是 None）；延后到本帧末尾 session 放回后再写。
-                self.pending_save = true;
+                self.save_flow.pending_save = true;
             } else {
                 self.message = "正文编辑器有未保存草稿：请用 Ctrl+Enter 保存正文".to_string();
             }
@@ -278,14 +278,14 @@ impl PdfReaderApp {
         self.ensure_image_loaders(&ctx);
         self.apply_pending_window_size(&ctx);
         if ctx.input(|input| input.viewport().close_requested()) {
-            if self.closing_after_decision {
+            if self.save_flow.closing_after_decision {
                 self.remember_document_view();
                 self.flush_settings(Some(&ctx));
             } else if self.body_edit_dirty() {
                 // 正文窗口里有未保存草稿：先取消关闭，交给编辑确认框。
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                if self.pending_edit_action.is_none() {
-                    self.pending_edit_action = Some(EditDiscardAction::Quit);
+                if self.save_flow.pending_edit_action.is_none() {
+                    self.save_flow.pending_edit_action = Some(EditDiscardAction::Quit);
                 }
             } else if !self.is_dirty() {
                 self.remember_document_view();
@@ -293,11 +293,11 @@ impl PdfReaderApp {
             } else {
                 // 有未保存改动：取消这次关闭；提示已经开着也不能放行。
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                if self.pending_action.is_none() {
-                    self.pending_action = Some(PendingAction {
+                if self.save_flow.pending_action.is_none() {
+                    self.save_flow.pending_action = Some(PendingAction {
                         kind: PendingActionKind::Quit,
                     });
-                    self.pending_action_error = None;
+                    self.save_flow.pending_action_error = None;
                 }
             }
         }
@@ -479,7 +479,7 @@ impl PdfReaderApp {
             self.flush_settings(Some(&ctx));
         }
         // Ctrl+S 同样要等 session 放回；这是它之前“按了没反应”的根因。
-        if std::mem::take(&mut self.pending_save) {
+        if std::mem::take(&mut self.save_flow.pending_save) {
             self.save_all();
             ctx.request_repaint();
         }

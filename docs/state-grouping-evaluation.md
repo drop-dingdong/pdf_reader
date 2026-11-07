@@ -1,11 +1,11 @@
 # Phase 3 评估：`PdfReaderApp` 状态分组
 
-> 状态：2026-11-07 评估；**RuntimeState 已实施，其余三组未实施**。
+> 状态：2026-11-07 评估；**RuntimeState、SaveFlowState 已实施，其余两组未实施**。
 > 当前行为以 [architecture.md](architecture.md) / [app-ui.md](app-ui.md) 为准。
 
 ## 1. 结论摘要
 
-`PdfReaderApp` 当前约 **146 个字段**（RuntimeState 已把 14 个字段收成一组），
+`PdfReaderApp` 当前约 **133 个字段**（RuntimeState 收 14 个、SaveFlowState 收 14 个），
 但 `app.rs` 已经拆成 20 多个子模块；
 真正的维护成本不在“单文件太长”，而在：
 
@@ -15,8 +15,9 @@
 - 大量测试直接访问 `app.floats` / `app.annotations` / `app.custom_previews`。
 
 **建议：只做“目标分组”（Runtime / SaveFlow / Markdown / AnnotationPdf 四组），
-不做全量多级状态树。RuntimeState 已完成，下个低风险组是 SaveFlowState。** 全量分组的收益主要是字段数量好看，代价是大量 `self.` 路径、
-借用冲突和测试改动；当前不划算。
+不做全量多级状态树。** RuntimeState、SaveFlowState 已完成，下一组是 MarkdownState。
+全量分组的收益主要是字段数量好看，代价是大量 `self.` 路径、借用冲突和测试改动；
+当前不划算。
 
 如果继续，推荐顺序：
 
@@ -32,7 +33,7 @@
 
 | 指标 | 当前 |
 | --- | --- |
-| `PdfReaderApp` 字段 | 约 146（RuntimeState 已收 14 个） |
+| `PdfReaderApp` 字段 | 约 133（RuntimeState + SaveFlowState 各收 14 个） |
 | `app.rs` | 状态/构造/`App::ui` 入口，约 0.6k 行 |
 | `app/*` 子模块 | 约 16.7k 行（含 tests/replay） |
 | 最大业务模块 | `floats.rs` ~1.5k、`model.rs` ~1.1k、`dialogs.rs` ~0.8k |
@@ -211,7 +212,8 @@ app.markdown_floats...
 
 1. ~~`RuntimeState`：只加结构 + 搬诊断/时钟/上一帧观察值；更新测试并提交。~~
    已完成：`app/state.rs`，顶层字段 159 → 146，523 测试通过。
-2. **搬 `SaveFlowState`**：另存为/整理/关闭确认；确认 `Settings` 序列化不变；提交。
+2. ~~`SaveFlowState`：另存为/整理/关闭确认；确认 `Settings` 序列化不变。~~
+   已完成：`app/state.rs`，顶层字段 146 → 133，523 测试通过。
 3. **搬 `MarkdownState`**：先搬缓存字段，保留 `markdown_floats` 等设置值在顶层；
    处理 `ensure_markdown_image_owners` 的借用；提交。
 4. **搬 `AnnotationPdfState`**：对象号/读回/内联/`pdf_ref_ids`；`merge_readback`、
@@ -220,8 +222,8 @@ app.markdown_floats...
 
 ## 7. 决策与触发条件
 
-**当前建议：不做全量 Phase 3；RuntimeState 已完成，剩余组按收益逐步做。**
-如果维护痛点继续出现，按 B 的 2–4 步继续；做到哪一步由收益决定。
+**当前建议：不做全量 Phase 3；RuntimeState、SaveFlowState 已完成，剩余组按收益逐步做。**
+如果维护痛点继续出现，按 B 的 3–4 步继续；做到哪一步由收益决定。
 
 触发条件：
 

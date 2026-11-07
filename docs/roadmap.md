@@ -14,7 +14,7 @@
 | S8c：ObjStm 重打包 / 流式整理 / qpdf 检测 | 整理副本已可用；qpdf 已安装但未接入 | 需要进一步压缩对象流，或整理大文件内存不够 |
 | CSV 导出 | 只有 Markdown 摘要；字段已拍平 | 需要跨文档统计/导入表格时 |
 | `view.rs` 拆分（~4.2k 行） | 生产代码 ~2k、测试 ~2.2k；纯函数、耦合低 | 再出现单文件维护困难，或改动继续集中在 `view.rs` |
-| `PdfReaderApp` 状态分组（Phase 3） | RuntimeState 已完成（159 → 146 字段）；剩余 SaveFlow/Markdown/AnnotationPdf 见 [state-grouping-evaluation.md](state-grouping-evaluation.md) | 字段继续增长，或出现“关闭/保存漏清缓存”类 bug |
+| `PdfReaderApp` 状态分组（Phase 3） | RuntimeState、SaveFlowState 已完成（159 → 133 字段）；剩余 Markdown/AnnotationPdf 见 [state-grouping-evaluation.md](state-grouping-evaluation.md) | 字段继续增长，或出现“关闭/保存漏清缓存”类 bug |
 
 
 ## 2. 已决定但还没做

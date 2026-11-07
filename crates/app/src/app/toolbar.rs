@@ -127,8 +127,8 @@ impl PdfReaderApp {
                         save.on_disabled_hover_text("没有需要保存的改动")
                     };
                     if save.clicked() {
-                        self.pending_in_place = true;
-                        self.in_place_error = None;
+                        self.save_flow.pending_in_place = true;
+                        self.save_flow.in_place_error = None;
                         ui.close();
                     }
                     let save_as =

@@ -23,14 +23,14 @@ impl PdfReaderApp {
             return;
         }
         if self.body_edit_dirty() {
-            self.pending_edit_action = Some(EditDiscardAction::Open(path));
+            self.save_flow.pending_edit_action = Some(EditDiscardAction::Open(path));
             return;
         }
         if self.is_dirty() {
-            self.pending_action = Some(PendingAction {
+            self.save_flow.pending_action = Some(PendingAction {
                 kind: PendingActionKind::Open(path),
             });
-            self.pending_action_error = None;
+            self.save_flow.pending_action_error = None;
         } else {
             self.pending_open = Some(path);
         }
@@ -69,13 +69,13 @@ impl PdfReaderApp {
 
     /// 保存/另存为成功之后，继续挂起的关闭或切换动作。
     pub(super) fn continue_pending_action(&mut self, ctx: &egui::Context) {
-        let Some(pending) = self.pending_action.take() else {
+        let Some(pending) = self.save_flow.pending_action.take() else {
             return;
         };
-        self.pending_action_error = None;
+        self.save_flow.pending_action_error = None;
         match pending.kind {
             PendingActionKind::Quit => {
-                self.closing_after_decision = true;
+                self.save_flow.closing_after_decision = true;
                 self.remember_document_view();
                 self.flush_settings(Some(ctx));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -175,24 +175,24 @@ impl PdfReaderApp {
             };
             let candidate = pdf.with_file_name(format!("{stem}-{suffix}.pdf"));
             if !candidate.exists() {
-                self.save_as = Some(candidate.to_string_lossy().to_string());
+                self.save_flow.save_as = Some(candidate.to_string_lossy().to_string());
                 break;
             }
             index += 1;
         }
-        self.save_as_error = None;
-        self.save_as_write_original = true;
-        self.save_as_write_target = true;
-        self.save_as_overwrite = false;
+        self.save_flow.save_as_error = None;
+        self.save_flow.save_as_write_original = true;
+        self.save_flow.save_as_write_target = true;
+        self.save_flow.save_as_overwrite = false;
     }
 
     /// 用指定目标打开「另存为」（覆盖保存时预填原路径，并默认勾选覆盖）。
     pub(super) fn open_save_as_dialog_at(&mut self, target: PathBuf) {
-        self.save_as_overwrite = target.exists();
-        self.save_as = Some(target.to_string_lossy().to_string());
-        self.save_as_error = None;
-        self.save_as_write_original = true;
-        self.save_as_write_target = true;
+        self.save_flow.save_as_overwrite = target.exists();
+        self.save_flow.save_as = Some(target.to_string_lossy().to_string());
+        self.save_flow.save_as_error = None;
+        self.save_flow.save_as_write_original = true;
+        self.save_flow.save_as_write_target = true;
     }
 
     /// 把当前 PDF + 当前注释写到新文件；成功后切换文档。

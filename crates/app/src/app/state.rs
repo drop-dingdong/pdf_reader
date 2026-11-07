@@ -1,7 +1,7 @@
-//! `PdfReaderApp` 的运行时状态组：诊断、注入时钟与“上一帧观察值”。
+//! `PdfReaderApp` 的状态组：运行时诊断/时钟、保存/关闭流程。
 //!
-//! 这些字段不参与持久化，也不决定文档内容；把它们收在一组，避免继续散落在
-//! `PdfReaderApp` 的平面字段里。热点字段（session/floats/annotations 等）仍留在顶层。
+//! 这些字段不参与持久化，也不决定文档内容；把它们收在明确的组里，避免继续散落在
+//! `PdfReaderApp` 的平面字段中。热点字段（session/floats/annotations 等）仍留在顶层。
 
 use super::*;
 
@@ -56,6 +56,62 @@ impl RuntimeState {
             last_visible: Vec::new(),
             budget_warned: false,
             last_retain: Desired::default(),
+        }
+    }
+}
+
+/// 保存/关闭流程的对话框与一次性状态。
+///
+/// 这些字段都只在“用户发起保存/整理/关闭”到“动作完成或取消”之间有意义；
+/// 按组放在这里，避免和文档内容/浮窗状态混在一起。
+pub(super) struct SaveFlowState {
+    /// 另存为对话框中的目标路径；`None` = 未打开。
+    pub(super) save_as: Option<String>,
+    /// 另存为对话框的错误提示。
+    pub(super) save_as_error: Option<String>,
+    /// 另存为：同时写原 PDF 的数据文件。
+    pub(super) save_as_write_original: bool,
+    /// 另存为：写新 PDF 的数据文件。
+    pub(super) save_as_write_target: bool,
+    /// 另存为：目标已存在时是否覆盖。
+    pub(super) save_as_overwrite: bool,
+    /// 整理副本对话框里的目标路径；`None` = 未打开。
+    pub(super) compact_dialog: Option<String>,
+    /// 整理副本的错误提示。
+    pub(super) compact_error: Option<String>,
+    /// 是否正在等“原地写入 PDF”的确认。
+    pub(super) pending_in_place: bool,
+    /// 保存确认框里的错误。
+    pub(super) in_place_error: Option<String>,
+    /// 关闭/切换文件前的未保存提示。
+    pub(super) pending_action: Option<PendingAction>,
+    /// 正文编辑尚未保存时挂起的关闭/切换动作。
+    pub(super) pending_edit_action: Option<EditDiscardAction>,
+    /// 提示里的错误（保存失败/冲突等）。
+    pub(super) pending_action_error: Option<String>,
+    /// 用户已经决定关闭：下一次 close_requested 不再拦截。
+    pub(super) closing_after_decision: bool,
+    /// Ctrl+S 在 egui 帧内无法安全借 session；延后到 session 放回后执行。
+    pub(super) pending_save: bool,
+}
+
+impl Default for SaveFlowState {
+    fn default() -> Self {
+        Self {
+            save_as: None,
+            save_as_error: None,
+            save_as_write_original: true,
+            save_as_write_target: true,
+            save_as_overwrite: false,
+            compact_dialog: None,
+            compact_error: None,
+            pending_in_place: false,
+            in_place_error: None,
+            pending_action: None,
+            pending_edit_action: None,
+            pending_action_error: None,
+            closing_after_decision: false,
+            pending_save: false,
         }
     }
 }

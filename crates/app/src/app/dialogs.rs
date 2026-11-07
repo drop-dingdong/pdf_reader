@@ -11,18 +11,18 @@ use std::path::PathBuf;
 impl PdfReaderApp {
     /// 原地写入的确认框（S5c）。确认后覆盖原文件；取消则什么都不做。
     pub(super) fn draw_in_place_dialog(&mut self, ctx: &egui::Context) {
-        if !self.pending_in_place {
+        if !self.save_flow.pending_in_place {
             return;
         }
         let Some(path) = self.document_path.clone() else {
-            self.pending_in_place = false;
+            self.save_flow.pending_in_place = false;
             return;
         };
         let sidecar = persist::sidecar_path(&path);
         let pdf = self.pdf_dirty;
         let data = self.data_dirty;
         if !pdf && !data {
-            self.pending_in_place = false;
+            self.save_flow.pending_in_place = false;
             self.message = "无改动".to_string();
             return;
         }
@@ -38,7 +38,7 @@ impl PdfReaderApp {
         let updated = ref_updates.len() + inline_updates.len();
         let deleted = ref_deletes.len() + inline_deletes.len();
         let conflict = pdf && self.pdf_conflict();
-        let error = self.in_place_error.clone();
+        let error = self.save_flow.in_place_error.clone();
         let mut decision: Option<u8> = None;
         egui::Modal::new(Id::unique("in-place-confirm")).show(ctx, |ui| {
             ui.set_width(520.0);
@@ -86,21 +86,21 @@ impl PdfReaderApp {
         });
         match decision {
             Some(0) => {
-                self.pending_in_place = false;
-                self.in_place_error = None;
+                self.save_flow.pending_in_place = false;
+                self.save_flow.in_place_error = None;
             }
             Some(1) => {
-                self.pending_in_place = false;
-                self.in_place_error = None;
+                self.save_flow.pending_in_place = false;
+                self.save_flow.in_place_error = None;
                 self.open_save_as_dialog();
             }
             Some(2) => match self.save_in_place_now(false) {
                 Ok(()) => {
-                    self.pending_in_place = false;
-                    self.in_place_error = None;
+                    self.save_flow.pending_in_place = false;
+                    self.save_flow.in_place_error = None;
                 }
                 // 失败/冲突：保留对话框与错误，用户可以直接改走另存为。
-                Err(error) => self.in_place_error = Some(error),
+                Err(error) => self.save_flow.in_place_error = Some(error),
             },
             _ => {}
         }
@@ -108,11 +108,11 @@ impl PdfReaderApp {
 
     /// 关闭/切换前的未保存提示。
     pub(super) fn draw_pending_action_dialog(&mut self, ctx: &egui::Context) {
-        let Some(pending) = self.pending_action.as_ref() else {
+        let Some(pending) = self.save_flow.pending_action.as_ref() else {
             return;
         };
         // 另存为对话框已经在上面时，先让它处理，避免两个模态叠在一起。
-        if self.save_as.is_some() {
+        if self.save_flow.save_as.is_some() {
             return;
         }
         let action = match &pending.kind {
@@ -150,7 +150,7 @@ impl PdfReaderApp {
                     "原 PDF 已被其他程序修改：原地保存会丢弃对方的修改。",
                 );
             }
-            if let Some(error) = &self.pending_action_error {
+            if let Some(error) = &self.save_flow.pending_action_error {
                 ui.colored_label(Color32::from_rgb(200, 60, 60), error);
             }
             ui.separator();
@@ -176,7 +176,7 @@ impl PdfReaderApp {
         match decision {
             Some(0) => match self.save_in_place_now(false) {
                 Ok(()) => self.continue_pending_action(ctx),
-                Err(error) => self.pending_action_error = Some(error),
+                Err(error) => self.save_flow.pending_action_error = Some(error),
             },
             Some(1) => {
                 // 覆盖保存 = 另存为到原路径；勾选覆盖后走同一条写回。
@@ -187,8 +187,8 @@ impl PdfReaderApp {
             Some(2) => self.open_save_as_dialog(),
             Some(3) => self.continue_pending_action(ctx),
             Some(4) => {
-                self.pending_action = None;
-                self.pending_action_error = None;
+                self.save_flow.pending_action = None;
+                self.save_flow.pending_action_error = None;
             }
             _ => {}
         }
@@ -209,13 +209,13 @@ impl PdfReaderApp {
             index += 1;
             candidate = pdf.with_file_name(format!("{stem}.compact-{index}.pdf"));
         }
-        self.compact_dialog = Some(candidate.to_string_lossy().to_string());
-        self.compact_error = None;
+        self.save_flow.compact_dialog = Some(candidate.to_string_lossy().to_string());
+        self.save_flow.compact_error = None;
     }
 
     /// 「整理副本」对话框：路径输入 + 未保存注释的提示 + 错误信息。
     pub(super) fn draw_compact_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut draft) = self.compact_dialog.clone() else {
+        let Some(mut draft) = self.save_flow.compact_dialog.clone() else {
             return;
         };
         let red = Color32::from_rgb(200, 60, 60);
@@ -231,7 +231,7 @@ impl PdfReaderApp {
                     .hint_text("目标 .pdf 路径"),
             );
             if response.gained_focus() {
-                self.compact_error = None;
+                self.save_flow.compact_error = None;
             }
             let mut target = PathBuf::from(draft.trim());
             if target.extension().is_none() {
@@ -248,7 +248,7 @@ impl PdfReaderApp {
             if let Some(hint) = crate::view::compact_unsaved_hint(self.pdf_dirty) {
                 ui.colored_label(red, hint);
             }
-            if let Some(error) = &self.compact_error {
+            if let Some(error) = &self.save_flow.compact_error {
                 ui.colored_label(red, error);
             }
             ui.label(
@@ -269,8 +269,8 @@ impl PdfReaderApp {
         match decision {
             Some(true) => {
                 if draft.trim().is_empty() {
-                    self.compact_error = Some("目标路径不能为空".to_string());
-                    self.compact_dialog = Some(draft);
+                    self.save_flow.compact_error = Some("目标路径不能为空".to_string());
+                    self.save_flow.compact_dialog = Some(draft);
                     return;
                 }
                 let mut target = PathBuf::from(draft.trim());
@@ -280,20 +280,20 @@ impl PdfReaderApp {
                 match self.perform_compact(target) {
                     Ok(message) => {
                         self.message = message;
-                        self.compact_dialog = None;
-                        self.compact_error = None;
+                        self.save_flow.compact_dialog = None;
+                        self.save_flow.compact_error = None;
                     }
                     Err(error) => {
-                        self.compact_dialog = Some(draft);
-                        self.compact_error = Some(error);
+                        self.save_flow.compact_dialog = Some(draft);
+                        self.save_flow.compact_error = Some(error);
                     }
                 }
             }
             Some(false) => {
-                self.compact_dialog = None;
-                self.compact_error = None;
+                self.save_flow.compact_dialog = None;
+                self.save_flow.compact_error = None;
             }
-            None => self.compact_dialog = Some(draft),
+            None => self.save_flow.compact_dialog = Some(draft),
         }
     }
 
@@ -311,7 +311,7 @@ impl PdfReaderApp {
 
     /// 「另存为」路径输入与确认框。
     pub(super) fn draw_save_as_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut draft) = self.save_as.clone() else {
+        let Some(mut draft) = self.save_flow.save_as.clone() else {
             return;
         };
         let mut decision: Option<bool> = None;
@@ -326,7 +326,7 @@ impl PdfReaderApp {
                     .hint_text("目标 .pdf 路径"),
             );
             if response.gained_focus() {
-                self.save_as_error = None;
+                self.save_flow.save_as_error = None;
             }
             let mut target_preview = PathBuf::from(draft.trim());
             if target_preview.extension().is_none() {
@@ -335,7 +335,7 @@ impl PdfReaderApp {
             let target_exists = target_preview.exists();
             if target_exists {
                 ui.checkbox(
-                    &mut self.save_as_overwrite,
+                    &mut self.save_flow.save_as_overwrite,
                     "目标已存在：覆盖它（同时按下面的勾选覆盖数据文件）",
                 );
             }
@@ -350,7 +350,7 @@ impl PdfReaderApp {
             let target_sidecar = persist::sidecar_path(&target_preview).display().to_string();
             ui.add_space(4.0);
             ui.checkbox(
-                &mut self.save_as_write_original,
+                &mut self.save_flow.save_as_write_original,
                 "写入原 PDF 的数据文件（归档/同步原路径）",
             );
             ui.label(
@@ -359,7 +359,7 @@ impl PdfReaderApp {
                     .color(ui.visuals().weak_text_color()),
             );
             ui.checkbox(
-                &mut self.save_as_write_target,
+                &mut self.save_flow.save_as_write_target,
                 "写入新 PDF 的数据文件（切换后新文档使用）",
             );
             ui.label(
@@ -368,8 +368,8 @@ impl PdfReaderApp {
                     .color(ui.visuals().weak_text_color()),
             );
             let warnings = save_as_warnings(
-                self.save_as_write_original,
-                self.save_as_write_target,
+                self.save_flow.save_as_write_original,
+                self.save_flow.save_as_write_target,
                 self.data_dirty,
                 has_custom_data,
             );
@@ -418,7 +418,7 @@ impl PdfReaderApp {
                     ),
                 );
             }
-            if let Some(error) = &self.save_as_error {
+            if let Some(error) = &self.save_flow.save_as_error {
                 ui.colored_label(Color32::from_rgb(200, 60, 60), error);
             }
             ui.add_space(6.0);
@@ -434,7 +434,7 @@ impl PdfReaderApp {
         match decision {
             Some(true) => {
                 if draft.trim().is_empty() {
-                    self.save_as_error = Some("目标路径不能为空".to_string());
+                    self.save_flow.save_as_error = Some("目标路径不能为空".to_string());
                     return;
                 }
                 let mut target = PathBuf::from(draft.trim());
@@ -443,23 +443,23 @@ impl PdfReaderApp {
                 }
                 match self.save_as_to(
                     target,
-                    self.save_as_write_original,
-                    self.save_as_write_target,
-                    self.save_as_overwrite,
+                    self.save_flow.save_as_write_original,
+                    self.save_flow.save_as_write_target,
+                    self.save_flow.save_as_overwrite,
                 ) {
                     Ok(()) => {
-                        self.save_as = None;
-                        self.save_as_error = None;
+                        self.save_flow.save_as = None;
+                        self.save_flow.save_as_error = None;
                         self.continue_pending_action(ctx);
                     }
-                    Err(error) => self.save_as_error = Some(error),
+                    Err(error) => self.save_flow.save_as_error = Some(error),
                 }
             }
             Some(false) => {
-                self.save_as = None;
-                self.save_as_error = None;
+                self.save_flow.save_as = None;
+                self.save_flow.save_as_error = None;
             }
-            None => self.save_as = Some(draft),
+            None => self.save_flow.save_as = Some(draft),
         }
     }
 
