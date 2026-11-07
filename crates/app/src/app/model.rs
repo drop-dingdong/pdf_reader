@@ -572,6 +572,35 @@ pub(super) fn new_image_id(prefix: &str) -> String {
     format!("{prefix}-{nanos:x}-{seq:x}")
 }
 
+/// 注释类型在链接里的短标记（外部注释跨会话校验用）。
+pub(super) fn annotation_kind_code(kind: &AnnotationKind) -> &'static str {
+    match kind {
+        AnnotationKind::Highlight { .. } => "highlight",
+        AnnotationKind::Underline { .. } => "underline",
+        AnnotationKind::StrikeOut { .. } => "strike",
+        AnnotationKind::Ink { .. } => "ink",
+        AnnotationKind::Note { .. } => "note",
+    }
+}
+
+/// 待确认的外部注释链接（token 失效、且属性不足以完全验证时）。
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PendingExternalLink {
+    /// 目标注释 id。
+    pub(super) id: AnnotationId,
+}
+
+/// 本次文档加载的 token（不持久化）：外部注释链接只在同一次加载内可信。
+pub(super) fn new_document_load_token() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    nanos ^ (COUNTER.fetch_add(1, Ordering::Relaxed).rotate_left(32))
+}
+
 /// 每个浮窗缓存的 Markdown 预处理结果（不缓存 egui_commonmark 的排版）。
 pub(super) struct PreparedMarkdown {
     /// 源文本哈希；变化时重建。
@@ -775,7 +804,7 @@ pub(super) enum AppEdit {
     RestyleAnnotation {
         /// 改样式前快照。
         before: pdfcore::annotation::Annotation,
-        /// 改样式后快照（id 可能不同）。
+        /// 改样式后快照（**与 before 同 id**；链接依赖 id 稳定）。
         after: pdfcore::annotation::Annotation,
     },
     /// 移动已有标注（目前只有墨迹）：原地改几何；写回时旧对象删除、新对象重建。

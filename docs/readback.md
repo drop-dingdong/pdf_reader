@@ -20,7 +20,7 @@
 | 几何（文本类） | `/QuadPoints`（min/max → 矩形） | 为空则跳过该注释 |
 | 几何（墨迹） | `/InkList` 第一条 path | 少于 2 点跳过；额外 path 只计数、当前不显示 |
 | 几何（便签） | `/Rect`（`FPDFAnnot_GetRect`） | 宽/高 ≤0 跳过 |
-| 颜色/透明度 | `FPDFAnnot_GetColor`；**带 AP 时它一定失败**，改从 AP 内容流解析 `RG/rg/G/g` 与 `CA/ca` | 种类默认值 |
+| 颜色/透明度 | `FPDFAnnot_GetColor`；**带 AP 时它一定失败**，改从 AP 内容流解析 `RG/rg/G/g` 与 `CA/ca`；显式 `/CA 1.0` 对内部注释保留 100%，对外部高亮沿用旧的 35% 兼容回退 | 种类默认值 |
 | 墨迹线宽 | `/BS` `/W` | 2.0 |
 | id | `/NM = pd-fr:<id>` | 无标记 → `None`（外部注释） |
 | 正文 | `/Contents`（UTF-16LE） | 无 |
@@ -76,7 +76,7 @@
 | --- | --- |
 | 类型 | Highlight/Underline/StrikeOut/Ink/Text；链接、Widget、Popup 等跳过（Popup 随父删除） |
 | 几何 | QuadPoints / InkList 第一条 path；多条 path 只计数 |
-| 颜色/透明度 | `/C`、`/CA`；**`/CA` 缺失或 =1 时高亮按 0.35，其它按 1.0** |
+| 颜色/透明度 | `/C`、`/CA`；**内部注释显式值（含 1.0）优先；外部高亮 `/CA` 缺失或 1.0 回退 0.35，其它按显式值；非高亮缺失时 1.0** |
 | 线宽 | `/BS` `/W`；缺失回退 2.0 |
 | 正文 | `/Contents`，显示在注释自己的浮窗里（可编辑） |
 | 身份 | `pdf_index` 解析页面树 + `/Annots`（含 ObjStm），得到 `(num,gen)`；按页与 PDFium 读回顺序配对 |

@@ -221,6 +221,9 @@ impl PdfReaderApp {
     }
 
     pub(super) fn open(&mut self, path: &std::path::Path, password: Option<&str>) {
+        // 每次加载（包括写回后的重开）都换 token：外部注释 id 可能被重新分配。
+        self.document_load_token = super::model::new_document_load_token();
+        self.pending_external_link = None;
         let preserve_history = self.reopening_after_write;
         self.reopening_after_write = false;
         if !preserve_history && self.document_path.is_some() {
@@ -437,7 +440,18 @@ impl PdfReaderApp {
                                 }
                                 old
                             };
+                            let mut generated_preview_ids = 0usize;
                             for (kind, item) in ordered {
+                                let image_id = if item.image_id.is_empty() {
+                                    generated_preview_ids += 1;
+                                    new_image_id(if kind == CustomKind::Image {
+                                        "custom"
+                                    } else {
+                                        "preview"
+                                    })
+                                } else {
+                                    item.image_id.clone()
+                                };
                                 self.custom_previews.push(CustomPreview {
                                     id: 0,
                                     page: item.page,
@@ -449,17 +463,17 @@ impl PdfReaderApp {
                                     snapshot: None,
                                     body_size: egui::vec2(item.body[0], item.body[1]),
                                     scale: item.scale,
-                                    image_id: if kind == CustomKind::Image {
-                                        if item.image_id.is_empty() {
-                                            new_image_id("custom")
-                                        } else {
-                                            item.image_id.clone()
-                                        }
-                                    } else {
-                                        String::new()
-                                    },
+                                    image_id,
                                     image_revision: item.image_revision,
                                 });
+                            }
+                            if generated_preview_ids > 0 {
+                                // 文字 preview 复用了 v4 的 image_id 字段作为链接记录 id；
+                                // 生成后必须让文件变脏，保存才会把 id 写回。
+                                self.sidecar_migrated = true;
+                                eprintln!(
+                                    "[存档] 为 {generated_preview_ids} 条 preview 生成了稳定记录 id（保存后写回）"
+                                );
                             }
                         }
                         self.next_preview_id = vec![0; session.page_count() as usize];

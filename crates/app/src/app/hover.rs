@@ -22,6 +22,21 @@ impl PdfReaderApp {
     ) {
         let pointer = ui.ctx().pointer_hover_pos();
 
+        // 统一归属：画布内的链接 hover 也必须先排除编辑窗口/弹层/面板/浮窗。
+        // 之前只判断了滚动、浮窗和画墨迹，编辑窗口盖住的链接仍会触发临时预览。
+        let pointer_allowed = pointer.is_some_and(|position| {
+            self.canvas_hover_allowed(
+                ui.ctx(),
+                canvas,
+                position,
+                ui.input(|input| input.pointer.any_down()),
+            )
+        });
+        if !pointer_allowed {
+            self.hover_tip = None;
+            return;
+        }
+
         // 闸门（用户要求）：
         // 1. 滚动/缩放的静默窗口内不显示；
         // 2. 指针落在**任何浮窗**（永久或临时）之上时不显示 —— 浮窗屏蔽主视图动作，

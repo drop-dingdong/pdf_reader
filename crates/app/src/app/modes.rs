@@ -219,7 +219,7 @@ impl PdfReaderApp {
     /// 新建一条便签（正文可空）。返回是否成功；整个创建是**一条**撤销记录。
     pub(super) fn add_note_annotation(&mut self, page: PageIndex, rect: Rect, text: &str) -> bool {
         let body = text.trim().to_string();
-        let Some(id) = self.annotations.add(page, AnnotationKind::Note { rect }) else {
+        let Some(id) = self.insert_internal_annotation(page, AnnotationKind::Note { rect }) else {
             return false;
         };
         if let Some(annotation) = self.annotations.get_mut(id) {

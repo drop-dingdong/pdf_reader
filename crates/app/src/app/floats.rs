@@ -10,15 +10,29 @@ use crate::view::{
 use eframe::egui;
 use egui::{Align2, Color32, CornerRadius, Id, Sense, Stroke, StrokeKind, Vec2 as EVec2};
 
-/// 指针是否落在弹层/窗口/模态上（egui 的非背景层）。
+/// 指针是否落在画布之上的窗口/弹层（而不是画布本层）。
 ///
 /// 不用 `Context::is_pointer_over_egui()`：它按"root Ui 剩余可用矩形"判断，
 /// 而本应用用 `CentralPanel` 把剩余区域全部消费掉，导致画布上的普通 hover 也被判成
-/// "在 egui 之外"。这里只关心图层顺序：浮窗/画布都在 Background，窗口/弹出菜单/模态
-/// 在 Middle/Foreground/Tooltip；`layer_id_at` 用上一帧图层，最多晚一帧。
-pub(super) fn pointer_over_overlay(ctx: &egui::Context, position: egui::Pos2) -> bool {
+/// "在 egui 之外"。也不能简单判断 `order != Background`：回放/某些布局里画布本身在
+/// Middle 层，必须和 `canvas_layer` 比较；只有**别的**非 Background 层才算遮住画布。
+/// `layer_id_at` 用上一帧图层，最多晚一帧。
+pub(super) fn pointer_over_overlay(
+    ctx: &egui::Context,
+    canvas_layer: egui::LayerId,
+    position: egui::Pos2,
+) -> bool {
     ctx.layer_id_at(position)
-        .is_some_and(|layer| layer.order != egui::Order::Background)
+        .is_some_and(|layer| layer != canvas_layer && layer.order != egui::Order::Background)
+}
+
+/// 从 `pd-float://...?a=b&c=d` 里取一个查询参数。
+fn query_value<'a>(url: &'a str, key: &str) -> Option<&'a str> {
+    let (_, query) = url.split_once('?')?;
+    query.split('&').find_map(|part| {
+        part.strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix('='))
+    })
 }
 
 /// 浮窗的正文区域：标题栏以下、整个浮窗宽度。
@@ -80,6 +94,29 @@ impl PdfReaderApp {
             }
         }
         for reference in refs {
+            // 每次 owner 扫描都重新判定“这张图还能不能获取”。如果来源 preview 被删除、
+            // 或 dest mark 已不存在，就不能继续用 ImageStore 里的旧缓存（否则文字浮窗
+            // 仍显示已删除的图，且不会重新检测）。
+            let has_owner = self.custom_previews.iter().any(|preview| {
+                preview.kind == CustomKind::Image && preview.image_id == reference.record_id
+            }) || self.dest_marks.iter().any(|marks| {
+                marks
+                    .iter()
+                    .any(|mark| mark.image_id == reference.record_id)
+            });
+            if !has_owner {
+                for revision in self.images.remove_record(&reference.record_id) {
+                    ui.ctx().forget_image(&crate::image_store::image_uri(
+                        &reference.record_id,
+                        revision,
+                    ));
+                }
+                ui.ctx().forget_image(&crate::image_store::image_uri(
+                    &reference.record_id,
+                    reference.revision,
+                ));
+                continue;
+            }
             // 自定义图片 preview
             if let Some(index) = self
                 .custom_previews
@@ -330,7 +367,7 @@ impl PdfReaderApp {
         using_pointer: bool,
     ) -> bool {
         canvas.contains(position)
-            && !pointer_over_overlay(ctx, position)
+            && !pointer_over_overlay(ctx, self.canvas_layer, position)
             && !using_pointer
             && self.topmost_float_at(position).is_none()
     }
@@ -404,6 +441,11 @@ impl PdfReaderApp {
 
     /// 删除 `custom_previews[index]` 之后，把浮窗里的下标引用左移并移除指向它的浮窗。
     pub(super) fn shift_float_custom_indices(&mut self, index: usize) {
+        // 先移除被删 preview 自己的浮窗，再给后面的下标前移。
+        // 顺序反了会把“前移后恰好变成 index”的其它 preview 浮窗一起删掉
+        // （用户实测：删除 preview a 会关掉 preview b 的浮窗）。
+        self.floats
+            .retain(|window| window.owner != FloatOwner::Custom(index));
         for window in &mut self.floats {
             if let FloatOwner::Custom(custom) = window.owner {
                 if custom > index {
@@ -411,8 +453,6 @@ impl PdfReaderApp {
                 }
             }
         }
-        self.floats
-            .retain(|window| window.owner != FloatOwner::Custom(index));
     }
 
     pub(super) fn spawn_custom_float(&mut self, index: usize, rect: egui::Rect) {
@@ -514,7 +554,7 @@ impl PdfReaderApp {
     }
 
     /// 新浮窗的级联落点（没有行列上下文时使用，例如从 `pd-float://` 链接打开）。
-    fn next_float_position(&self) -> egui::Pos2 {
+    pub(super) fn next_float_position(&self) -> egui::Pos2 {
         let cascade = (self.floats.len() % 6) as f32 * 24.0;
         let base = if self.canvas_rect.width() > 1.0 {
             self.canvas_rect.min
@@ -524,18 +564,48 @@ impl PdfReaderApp {
         base + egui::vec2(24.0 + cascade, 24.0 + cascade)
     }
 
+    /// 注释的 `pd-float://` URI；外部注释默认返回 None（设置关闭时不给复制入口）。
+    pub(super) fn annotation_link_uri(&self, id: AnnotationId) -> Option<String> {
+        let annotation = self.annotations.get(id)?;
+        let external = self.external_ids.contains(&id);
+        if external && !self.allow_external_annotation_links {
+            return None;
+        }
+        let mut uri = format!(
+            "pd-float://annotation/{}/{}",
+            annotation.page.get(),
+            id.get()
+        );
+        if external {
+            uri.push_str(&format!(
+                "?s={}&k={}",
+                self.document_load_token,
+                annotation_kind_code(&annotation.kind)
+            ));
+            if let Some(created) = annotation.created {
+                uri.push_str(&format!("&c={created}"));
+            }
+        }
+        Some(uri)
+    }
+
+    /// 自定义 preview 的 `pd-float://` URI。
+    pub(super) fn preview_link_uri(&self, index: usize) -> Option<String> {
+        let preview = self.custom_previews.get(index)?;
+        let record = if preview.image_id.is_empty() {
+            // 极旧的运行时数据：退回页号 + 每页内序号（仅唯一时可用）。
+            format!("{}/{}", preview.page.get(), preview.id)
+        } else {
+            preview.image_id.clone()
+        };
+        Some(format!("pd-float://preview/{record}"))
+    }
+
     /// 这条浮窗可被 `pd-float://` 引用的 URI（只有注释/自定义 preview 有稳定目标）。
     pub(super) fn float_link_uri(&self, index: usize) -> Option<String> {
         match self.floats.get(index)?.owner {
-            FloatOwner::Annotation(id) => Some(format!("pd-float://annotation/{}", id.get())),
-            FloatOwner::Custom(index) => {
-                let preview = self.custom_previews.get(index)?;
-                Some(format!(
-                    "pd-float://preview/{}/{}",
-                    preview.page.get(),
-                    preview.id
-                ))
-            }
+            FloatOwner::Annotation(id) => self.annotation_link_uri(id),
+            FloatOwner::Custom(index) => self.preview_link_uri(index),
             FloatOwner::None => None,
         }
     }
@@ -571,17 +641,107 @@ impl PdfReaderApp {
             return;
         };
         match target {
-            FloatLinkTarget::Annotation(raw) => {
+            FloatLinkTarget::Annotation { page, id: raw } => {
                 let id = AnnotationId(raw);
-                if self.annotations.get(id).is_none() {
+                let Some(annotation) = self.annotations.get(id) else {
                     self.message = format!("断链：注释 #{} 不存在（可能来自其他文档）", id.get());
+                    return;
+                };
+                if page.is_some_and(|page| page != annotation.page) {
+                    self.message = format!(
+                        "断链：注释 #{} 不在第 {} 页（可能在其它阅读器中被替换）",
+                        id.get(),
+                        page.map(|page| page.display_number()).unwrap_or_default()
+                    );
+                    return;
+                }
+                if self.external_ids.contains(&id) {
+                    let token = query_value(url, "s").and_then(|value| value.parse::<u64>().ok());
+                    if token == Some(self.document_load_token) {
+                        let at = self.next_float_position();
+                        self.open_annotation_note(id, at);
+                        self.message = format!("已跳转到外部注释 #{}", id.get());
+                        return;
+                    }
+                    if !self.allow_external_annotation_links {
+                        self.message = format!(
+                            "断链：外部注释 #{} 的链接跨会话失效（可在 ? 中开启跨会话外部注释链接）",
+                            id.get()
+                        );
+                        return;
+                    }
+                    // A+B：先校验类型；created 可验证则直接打开，否则让用户确认。
+                    let Some(kind) = query_value(url, "k") else {
+                        self.message = "断链：外部注释链接缺少类型校验信息".to_string();
+                        return;
+                    };
+                    if kind != annotation_kind_code(&annotation.kind) {
+                        self.message = format!(
+                            "断链：外部注释 #{} 的类型已变化（链接可能指向别的注释）",
+                            id.get()
+                        );
+                        return;
+                    }
+                    if let Some(raw_created) = query_value(url, "c") {
+                        if let (Ok(link_created), Some(current)) =
+                            (raw_created.parse::<i64>(), annotation.created)
+                        {
+                            if link_created == current {
+                                let at = self.next_float_position();
+                                self.open_annotation_note(id, at);
+                                self.message = format!("已跳转到外部注释 #{}", id.get());
+                                return;
+                            }
+                            self.message = format!(
+                                "断链：外部注释 #{} 的创建时间已变化（链接可能指向别的注释）",
+                                id.get()
+                            );
+                            return;
+                        }
+                    }
+                    // 页号 + 类型匹配，但缺少创建时间：不能完全验证，交给用户确认。
+                    self.pending_external_link = Some(PendingExternalLink { id });
+                    self.message = "无法完全验证外部注释目标，请在确认框中决定是否打开".to_string();
                     return;
                 }
                 let at = self.next_float_position();
                 self.open_annotation_note(id, at);
                 self.message = format!("已跳转到注释 #{}", id.get());
             }
-            FloatLinkTarget::Preview { page, id } => {
+            FloatLinkTarget::PreviewRecord(record) => {
+                let mut index = self
+                    .custom_previews
+                    .iter()
+                    .position(|preview| preview.image_id == record);
+                if index.is_none() {
+                    // 旧写法：preview/<id>，id 是每页内序号；仅唯一时可用。
+                    if let Ok(legacy) = record.parse::<u64>() {
+                        let matches: Vec<usize> = self
+                            .custom_previews
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, preview)| (preview.id == legacy).then_some(index))
+                            .collect();
+                        match matches.as_slice() {
+                            [only] => index = Some(*only),
+                            [] => {}
+                            _ => {
+                                self.message = format!(
+                                    "链接不明确：id={legacy} 在多页都存在，请改用 pd-float://preview/<页>/<id>"
+                                );
+                                return;
+                            }
+                        }
+                    }
+                }
+                match index {
+                    Some(index) => self.open_custom_float_by_link(index),
+                    None => {
+                        self.message = format!("断链：没有记录 id={record} 的自定义preview");
+                    }
+                }
+            }
+            FloatLinkTarget::PreviewLegacy { page, id } => {
                 match self
                     .custom_previews
                     .iter()
@@ -593,25 +753,6 @@ impl PdfReaderApp {
                             "断链：第 {} 页没有 id={} 的自定义preview",
                             page.display_number(),
                             id
-                        );
-                    }
-                }
-            }
-            FloatLinkTarget::PreviewById(id) => {
-                let matches: Vec<usize> = self
-                    .custom_previews
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, preview)| (preview.id == id).then_some(index))
-                    .collect();
-                match matches.as_slice() {
-                    [index] => self.open_custom_float_by_link(*index),
-                    [] => {
-                        self.message = format!("断链：没有 id={id} 的自定义preview");
-                    }
-                    _ => {
-                        self.message = format!(
-                            "链接不明确：id={id} 在多页都存在，请改用 pd-float://preview/<页>/<id>"
                         );
                     }
                 }
@@ -669,22 +810,30 @@ impl PdfReaderApp {
         let mut raise: Option<u64> = None;
         // 点击浮窗任意处（含链接、滚动条）→ 置顶；后画的浮窗在循环后面，
         // 因此天然覆盖先画的（顶层优先）。
-        let clicked_pos = ui.ctx().input(|input| {
-            input
-                .pointer
-                .any_click()
-                .then(|| input.pointer.interact_pos())
-                .flatten()
-        });
+        let clicked_pos = ui
+            .ctx()
+            .input(|input| {
+                input
+                    .pointer
+                    .any_click()
+                    .then(|| input.pointer.interact_pos())
+                    .flatten()
+            })
+            // raw click 只看矩形，不看图层；编辑窗口/弹层覆盖处不能把下面的浮窗置顶。
+            .filter(|position| !pointer_over_overlay(ui.ctx(), self.canvas_layer, *position));
         // 多个浮窗重叠时，滚轮只归 z 轴最高的那个；否则先注册的下层
         // ScrollArea 会先消费滚轮，看起来像“滚了下面的窗口”。
-        let topmost_under_pointer = ui.ctx().pointer_hover_pos().and_then(|position| {
-            self.floats
-                .iter()
-                .rev()
-                .find(|window| window.rect.contains(position))
-                .map(|window| window.id)
-        });
+        let topmost_under_pointer = ui
+            .ctx()
+            .pointer_hover_pos()
+            .filter(|position| !pointer_over_overlay(ui.ctx(), self.canvas_layer, *position))
+            .and_then(|position| {
+                self.floats
+                    .iter()
+                    .rev()
+                    .find(|window| window.rect.contains(position))
+                    .map(|window| window.id)
+            });
         for index in 0..self.floats.len() {
             // 每帧夹取回视图区域内（用户要求：浮窗始终在视图区域内部）
             let rect = clamp_float_rect(self.floats[index].rect, canvas, FLOAT_MIN_SIZE);
@@ -695,6 +844,11 @@ impl PdfReaderApp {
             let has_text = matches!(&self.floats[index].content, FloatContent::Text(_));
             let markdown_active = self.markdown_floats && has_text;
             let wheel_owner = topmost_under_pointer == Some(id);
+            // 指针在编辑窗口/弹层上时，浮窗不应收到任何点击/拖动动作（否则窗口背景下的
+            // 浮窗按钮或 body 仍可能被 egui 命中，导致置顶/编辑）。
+            let interactive = !ui.ctx().pointer_hover_pos().is_some_and(|position| {
+                pointer_over_overlay(ui.ctx(), self.canvas_layer, position)
+            });
 
             // 拖动遮罩：**先于本浮窗自己的控件注册**，位于所有更低浮窗之上。
             // 只感知 drag、不处理任何动作：用来保证拖动不会落到下层浮窗的
@@ -711,7 +865,7 @@ impl PdfReaderApp {
                 Sense::click_and_drag()
             };
             let body = ui.interact(rect, Id::unique(("float", id)), body_sense);
-            if body.clicked() || body.drag_started() {
+            if interactive && (body.clicked() || body.drag_started()) {
                 raise = Some(id);
             }
             if let Some(position) = clicked_pos {
@@ -719,7 +873,7 @@ impl PdfReaderApp {
                     raise = Some(id);
                 }
             }
-            if body.dragged() {
+            if interactive && body.dragged() {
                 self.floats[index].rect =
                     drag_float_rect(rect, body.drag_delta(), canvas, FLOAT_MIN_SIZE);
             }
@@ -734,10 +888,10 @@ impl PdfReaderApp {
                 Id::unique(("float-title", id)),
                 Sense::click_and_drag(),
             );
-            if title.clicked() || title.drag_started() {
+            if interactive && (title.clicked() || title.drag_started()) {
                 raise = Some(id);
             }
-            if title.dragged() {
+            if interactive && title.dragged() {
                 self.floats[index].rect =
                     drag_float_rect(rect, title.drag_delta(), canvas, FLOAT_MIN_SIZE);
             }
@@ -751,7 +905,7 @@ impl PdfReaderApp {
                 EVec2::splat(FLOAT_HANDLE_SIZE),
             );
             let handle = ui.interact(handle_rect, Id::unique(("float-resize", id)), Sense::drag());
-            if handle.dragged() {
+            if interactive && handle.dragged() {
                 let delta = handle.drag_delta();
                 let resized = egui::Rect::from_min_size(
                     rect.min,
@@ -785,7 +939,7 @@ impl PdfReaderApp {
                 egui::FontId::proportional(12.0),
                 Color32::WHITE,
             );
-            if close_response.on_hover_text("关闭浮窗").clicked() {
+            if interactive && close_response.on_hover_text("关闭浮窗").clicked() {
                 let owner = self.floats[index].owner;
                 if self.body_edit_owner() == Some(owner) && self.body_edit_dirty() {
                     self.pending_edit_action = Some(EditDiscardAction::CloseFloat(id));
@@ -820,12 +974,18 @@ impl PdfReaderApp {
             );
             painter.rect_filled(title_rect, CornerRadius::same(4), title_color);
             // 文字浮窗的引用链接 / goto 目标（按钮在标题右侧，标题按数量预留宽度）。
-            let link_uri = if has_text {
+            // 可链接的是“持久记录”的浮窗：注释、文字/图片 preview。
+            // 引用点/截图/测试浮窗是派生视图，没有稳定记录 id。
+            let linkable = matches!(
+                self.floats[index].owner,
+                FloatOwner::Annotation(_) | FloatOwner::Custom(_)
+            );
+            let link_uri = if linkable {
                 self.float_link_uri(index)
             } else {
                 None
             };
-            let goto_target = if has_text {
+            let goto_target = if linkable {
                 self.float_goto_target(index)
             } else {
                 None
@@ -908,7 +1068,7 @@ impl PdfReaderApp {
                     egui::FontId::proportional(13.0),
                     edit_color,
                 );
-                if edit_response.on_hover_text("编辑正文").clicked() {
+                if interactive && edit_response.on_hover_text("编辑正文").clicked() {
                     if let FloatContent::Text(text) = &self.floats[index].content {
                         let owner = self.floats[index].owner;
                         let text = text.clone();
@@ -916,7 +1076,7 @@ impl PdfReaderApp {
                     }
                 }
             }
-            // 文字浮窗：复制 `pd-float://` 引用链接。
+            // 浮窗：复制 `pd-float://` 引用链接（注释/文字/图片 preview）。
             if let Some(uri) = link_uri {
                 let center = egui::pos2(close_center.x - 52.0, title_rect.center().y);
                 let button_rect = egui::Rect::from_center_size(center, EVec2::splat(18.0));
@@ -933,12 +1093,12 @@ impl PdfReaderApp {
                         Color32::from_gray(190)
                     },
                 );
-                if response.on_hover_text("复制引用链接").clicked() {
+                if interactive && response.on_hover_text("复制引用链接").clicked() {
                     ui.ctx().copy_text(uri);
                     self.message = "已复制引用链接，可粘到正文".to_string();
                 }
             }
-            // 文字浮窗：跳到来源页/位置（与侧栏 → 同一动作）。
+            // 浮窗：跳到来源页/位置（与侧栏菜单同一动作）。
             if let Some((page, point)) = goto_target {
                 let center = egui::pos2(close_center.x - 78.0, title_rect.center().y);
                 let button_rect = egui::Rect::from_center_size(center, EVec2::splat(18.0));
@@ -955,7 +1115,7 @@ impl PdfReaderApp {
                         Color32::from_gray(190)
                     },
                 );
-                if response.on_hover_text("跳到来源页/位置").clicked() {
+                if interactive && response.on_hover_text("跳到来源页/位置").clicked() {
                     self.commands.push(ViewerCommand::GoToPage(page));
                     self.commands
                         .push(ViewerCommand::CenterOnPagePoint { page, point });
@@ -994,7 +1154,9 @@ impl PdfReaderApp {
                                     Color32::from_gray(190)
                                 },
                             );
-                            if response.on_hover_text("复制 Markdown 图片引用").clicked() {
+                            if interactive
+                                && response.on_hover_text("复制 Markdown 图片引用").clicked()
+                            {
                                 ui.ctx().copy_text(uri);
                                 self.message = "已复制图片引用，可粘到正文".to_string();
                             }

@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-06　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（514 个测试）。
+> 快照：2026-11-07　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（523 个测试）。
 
 ## 1. 它是什么
 
@@ -34,10 +34,36 @@
   新增 `canvas_annotation_hover_right_click_and_delete_are_scoped` 覆盖 hover/右键/Delete/侧栏越界。
 - **浮窗拖动遮罩**：每个浮窗先注册一个只感知 drag 的全 rect 遮罩；高浮窗正文（Markdown 只感知 click）
   上的拖动不再落到下层浮窗的标题栏/图片正文，也不会漏到 PDF 正文。标题/正文/手柄的拖动仍按各自控件工作。
-- **文本浮窗跳转**：文字浮窗标题栏新增「↗ 复制引用链接」与「→ 跳到来源」；
-  正文 Markdown 里的 `pd-float://annotation/<id>` / `pd-float://preview/<page>/<id>`
-  点击后复用注释单击/侧栏 preview 的打开/置顶/高亮路径；断链与歧义只在状态栏提示，
-  不自动扫描或级联打开。`/preview/<id>` 仅在 id 唯一时兼容。
+- **文本/图片浮窗跳转与稳定链接**：文字浮窗标题栏「↗ 复制引用链接」与「→ 跳到来源」
+  也适用于图片 preview；注释链接改为 `pd-float://annotation/<page>/<id>`，
+  preview 链接用 sidecar v5 的稳定记录 id（文字 preview 复用 `image_id`）：
+  `pd-float://preview/<record_id>`。点击后复用注释单击/侧栏 preview 的打开/置顶/高亮路径；
+  断链与歧义只在状态栏提示，不自动扫描或级联打开。旧写法
+  `annotation/<id>`、`preview/<page>/<id>`、`preview/<id>` 继续兼容。
+- **注释 id 稳定性**：新建内部注释用时间戳/单调、**不复用**的 id（<2^53，避免写回 job 的
+  JSON number 被 f64 舍入）；改样式（颜色/透明度/墨迹线宽）改为同 id 重建
+  （`pdf_ref=None` 进 deletes），改正文/移动墨迹/撤销重做也保持 id。外部注释仍按加载顺序
+  分配 id。
+- **外部注释链接**：默认禁止复制；`?` 中可开启“允许跨会话外部注释链接”。链接带本次
+  文档加载 token；token 不匹配时校验页号/类型/创建时间，不完全可验证则弹确认框；
+  关闭时 token 不匹配直接断链。外部编辑器改写 `/NM` 会让原内部注释退化为外部注释，
+  旧链接明确断链而不是按 id 猜。
+- **侧栏 ⋯ 菜单**：preview/注释行只保留一个 `⋯` 按钮，点按钮与右键弹同一菜单
+  （复制链接、跳转、编辑/删除、复制图片引用）；行单击行为不变。
+- **编辑窗口遮挡浮窗**：raw click 置顶先按图层判定，编辑窗口/弹层覆盖处不再置顶；
+  浮窗按钮/拖动也在指针位于非 Background 图层时禁用。画布 hover/点击统一走
+  `canvas_hover_allowed`（先 canvas 矩形，再“非画布本层”的窗口/弹层，再浮窗/连续动作），
+  编辑窗口盖住的链接 hover、点击、选字、便签选点都不再触发。画布层用
+  `app.canvas_layer` 记录，回放/布局中画布处于 Middle 层也能正确区分。
+- **删除 preview 误关其它浮窗**：`shift_float_custom_indices` 先移除被删条目的浮窗，
+  再把后续下标前移；之前先前移再 `retain(owner==index)` 会把前移后恰好变成 index 的
+  其它 preview 浮窗一起删掉。新增回归测试。
+- **透明度 100% 与外部兼容**：内部注释（有 `pd-fr:` `/NM`）显式 `/CA 1.0` 保留 100%，
+  保存/重开不再回退成 35%；外部高亮仍沿用旧兼容规则（`/CA` 缺失或 1.0 → 35%），
+  避免改变其它阅读器写出的高亮显示。
+- **图片可获取性重检**：文字浮窗引用的 `pd-img` 每次 owner 扫描都重新判定来源
+  preview/dest 是否还在；来源被删时清掉 `ImageStore` 的旧 revision 并 `forget_image`，
+  不再继续显示缓存里的已删除图片。
 - **Markdown 空正文双击**：`detect_body_double_click` 不再对整个 Markdown 模式提前返回，
   只跳过**非空** Markdown 正文（它们有自己的链接/滚动控件），空正文仍走全窗双击层；
   新增无窗口双击回归测试。
@@ -49,7 +75,7 @@
   拖放打开在空状态也生效；Linux Wayland 受 winit 0.30 限制，可走 X11 并观察 `[drag]` 日志。
   注释坐标按渲染盒原点归一化，写回时加回；`Ctrl+S` 不再被输入焦点吞掉。
   Markdown 预处理（规范化/最小宽度/图片引用）按源文本哈希缓存；完整布局仍由 commonmark 每帧排版。
-  内部图片 B1：sidecar v4 增加 `image_id`/`image_revision`；`ImageStore` + `pd-img` loader；
+  内部图片 B1：sidecar v4 增加 `image_id`/`image_revision`（v5 起文字 preview 也用它作链接 id）；`ImageStore` + `pd-img` loader；
   只扫描打开的文字浮窗引用，缺图时由 preview/被引用点 owner 懒渲染；图片浮窗 @、引用点右键复制引用；
   编辑窗口「插入内部图片」；导出摘要时已缓存图片转 base64；同一来源的旧 rev 在渲染前规范化，
   重开 PDF / 重选目的地后旧引用也能显示当前图。顶栏「hover MD」开关持久化，
@@ -102,7 +128,7 @@
 | 内部图片 B2 UI/导出 | 完成 | 插入引用、@ 复制、懒渲染、旧 rev 规范化、base64 导出 |
 | Markdown 锚点 | 完成 | `## 标题 {#id}` + `[文字](#id)`，每浮窗独立缓存 |
 | hover 临时预览 Markdown | 完成 | 顶栏 `hover MD`，默认关闭 |
-| 侧栏图片 `@` 入口 | 完成 | 复制与固定浮窗一致的 `pd-img` URI |
+| 侧栏 preview/注释 `⋯` 菜单 | 完成 | 复制引用链接、跳转、编辑/删除、复制图片引用；与右键同一菜单 |
 | Markdown 预处理缓存 | 完成 | 规范化/最小宽度/图片引用按源文本哈希；完整布局仍每帧执行 |
 | SVG 后端 | 完成，视觉验证暂缓 | 按 ppp/目标像素光栅化；等应用级 UI 缩放时一起验高 DPI |
 | RaTeX 可选后端 | 完成（可选） | `math-ratex` feature 默认 RaTeX；不默认构建；CJK 依赖系统字体 |

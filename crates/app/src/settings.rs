@@ -69,6 +69,8 @@ pub struct UiSettings {
     pub markdown_floats: bool,
     /// 侧栏 hover 临时预览是否也按 Markdown 渲染（默认关闭，避免 hover 触发重工作）。
     pub hover_preview_markdown: bool,
+    /// 是否允许复制外部注释的链接（跨会话不保证准确；默认关闭）。
+    pub allow_external_annotation_links: bool,
 }
 
 impl Default for UiSettings {
@@ -83,6 +85,7 @@ impl Default for UiSettings {
             show_annotations: true,
             markdown_floats: false,
             hover_preview_markdown: false,
+            allow_external_annotation_links: false,
         }
     }
 }
@@ -143,7 +146,7 @@ impl Settings {
     pub fn to_json(&self) -> String {
         let mut out = String::from("{\n  \"version\": 1,\n");
         out.push_str(&format!(
-            "  \"ui\": {{ \"window_size\": [{:.0}, {:.0}], \"sidebar_width\": {:.0},              \"pin_hover_enabled\": {}, \"horizontal_scroll\": {}, \"show_links\": {},              \"show_dest_points\": {}, \"show_annotations\": {}, \"markdown_floats\": {},              \"hover_preview_markdown\": {} }},\n",
+            "  \"ui\": {{ \"window_size\": [{:.0}, {:.0}], \"sidebar_width\": {:.0},              \"pin_hover_enabled\": {}, \"horizontal_scroll\": {}, \"show_links\": {},              \"show_dest_points\": {}, \"show_annotations\": {}, \"markdown_floats\": {},              \"hover_preview_markdown\": {},              \"allow_external_annotation_links\": {} }},\n",
             self.ui.window_size[0],
             self.ui.window_size[1],
             self.ui.sidebar_width,
@@ -153,7 +156,8 @@ impl Settings {
             self.ui.show_dest_points,
             self.ui.show_annotations,
             self.ui.markdown_floats,
-            self.ui.hover_preview_markdown
+            self.ui.hover_preview_markdown,
+            self.ui.allow_external_annotation_links
         ));
         out.push_str(&format!(
             "  \"save\": {{ \"backup_in_place\": {} }},\n",
@@ -253,6 +257,10 @@ impl Settings {
                 .unwrap_or(false);
             settings.ui.hover_preview_markdown = ui
                 .field("hover_preview_markdown")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            settings.ui.allow_external_annotation_links = ui
+                .field("allow_external_annotation_links")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false);
         }
@@ -535,6 +543,7 @@ mod tests {
         settings.ui.show_annotations = false;
         settings.ui.markdown_floats = true;
         settings.ui.hover_preview_markdown = true;
+        settings.ui.allow_external_annotation_links = true;
         settings.save.backup_in_place = true;
         let parsed = Settings::from_json(&settings.to_json()).expect("应能解析");
         assert!(!parsed.ui.pin_hover_enabled);
@@ -544,6 +553,7 @@ mod tests {
         assert!(!parsed.ui.show_annotations);
         assert!(parsed.ui.markdown_floats);
         assert!(parsed.ui.hover_preview_markdown);
+        assert!(parsed.ui.allow_external_annotation_links);
         assert!(parsed.save.backup_in_place);
     }
 
@@ -558,6 +568,7 @@ mod tests {
         let parsed = Settings::from_json(r#"{"ui":{"sidebar_width":300}}"#).expect("应能解析");
         assert!(!parsed.ui.markdown_floats, "旧设置文件应保持纯文本显示");
         assert!(!parsed.ui.hover_preview_markdown);
+        assert!(!parsed.ui.allow_external_annotation_links);
     }
 
     #[test]

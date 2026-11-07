@@ -2,10 +2,7 @@
 
 use super::*;
 
-use crate::view::{
-    annotation_time_line, overflow_layout, CUSTOM_SYMBOL_DELETE, CUSTOM_SYMBOL_EDIT,
-    CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT,
-};
+use crate::view::{annotation_time_line, overflow_layout, CUSTOM_SYMBOL_IMAGE, CUSTOM_SYMBOL_TEXT};
 use eframe::egui;
 use egui::{Align2, CornerRadius, Id, Key, RichText, Sense, Vec2 as EVec2};
 use pdfcore::annotation::AnnotationKind;
@@ -370,21 +367,14 @@ impl PdfReaderApp {
                                 text
                             });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let delete = ui.add_enabled(
-                                !readonly,
-                                egui::Button::new("\u{274e}").small().frame(false),
-                            );
-                            let delete = if readonly {
-                                delete.on_hover_text("只读：无对象号，不能删除")
-                            } else {
-                                delete.on_hover_text("删除这条注释（可撤销）")
-                            };
-                            if delete.clicked() {
-                                self.delete_annotation(id);
-                            }
+                            ui.menu_button("\u{22ef}", |ui| {
+                                self.annotation_row_menu(ui, id);
+                            })
+                            .response
+                            .on_hover_text("更多操作");
                         });
                         response.context_menu(|ui| {
-                            self.annotation_context_menu(ui, id);
+                            self.annotation_row_menu(ui, id);
                         });
                         if response.clicked() {
                             self.focus_annotation(id, session);
@@ -392,6 +382,75 @@ impl PdfReaderApp {
                     });
                 }
             });
+    }
+
+    /// 注释行的 ⋯ / 右键菜单。
+    fn annotation_row_menu(&mut self, ui: &mut egui::Ui, id: AnnotationId) {
+        let uri = self.annotation_link_uri(id);
+        let copy = ui.add_enabled(uri.is_some(), egui::Button::new("复制引用链接"));
+        let copy = if uri.is_some() {
+            copy
+        } else {
+            copy.on_disabled_hover_text("外部注释默认不可引用（可在 ? 中开启跨会话外部注释链接）")
+        };
+        if copy.clicked() {
+            if let Some(uri) = uri {
+                ui.ctx().copy_text(uri);
+                self.message = "已复制注释引用链接，可粘到正文".to_string();
+            }
+            ui.close();
+        }
+        if ui.button("跳到位置").clicked() {
+            self.jump_to_annotation(id);
+            ui.close();
+        }
+        if ui.button("删除注释（可撤销）").clicked() {
+            self.delete_annotation(id);
+            ui.close();
+        }
+    }
+
+    /// preview 行的 ⋯ / 右键菜单。
+    fn preview_row_menu(&mut self, ui: &mut egui::Ui, index: usize) {
+        let Some(preview) = self.custom_previews.get(index) else {
+            return;
+        };
+        let page = preview.page;
+        let point = preview.point;
+        let kind = preview.kind;
+        let image_ref = (kind == CustomKind::Image && !preview.image_id.is_empty())
+            .then(|| (preview.image_id.clone(), preview.image_revision));
+        let title = preview.title.clone();
+        if let Some(uri) = self.preview_link_uri(index) {
+            if ui.button("复制引用链接").clicked() {
+                ui.ctx().copy_text(uri);
+                self.message = "已复制自定义preview引用链接，可粘到正文".to_string();
+                ui.close();
+            }
+        }
+        if ui.button("跳到位置").clicked() {
+            self.commands.push(ViewerCommand::GoToPage(page));
+            self.commands
+                .push(ViewerCommand::CenterOnPagePoint { page, point });
+            self.message = format!("已跳到第 {} 页", page.display_number());
+            ui.close();
+        }
+        if ui.button("编辑标题").clicked() {
+            self.editing_title = Some((index, title));
+            ui.close();
+        }
+        if let Some((record_id, revision)) = image_ref {
+            if ui.button("复制图片引用").clicked() {
+                ui.ctx()
+                    .copy_text(crate::image_store::image_uri(&record_id, revision));
+                self.message = "已复制图片引用，可粘到正文".to_string();
+                ui.close();
+            }
+        }
+        if ui.button("删除条目（可撤销）").clicked() {
+            self.delete_custom_preview(index);
+            ui.close();
+        }
     }
 
     /// 侧栏的"自定义preview（Pin）"列表：
@@ -415,8 +474,6 @@ impl PdfReaderApp {
                     CustomKind::Text => CUSTOM_SYMBOL_TEXT,
                     CustomKind::Image => CUSTOM_SYMBOL_IMAGE,
                 };
-                let image_ref = (preview.kind == CustomKind::Image && !preview.image_id.is_empty())
-                    .then(|| (preview.image_id.clone(), preview.image_revision));
                 let title = format!(
                     "{} {}",
                     symbol,
@@ -452,19 +509,9 @@ impl PdfReaderApp {
                     }
                 }
                 let painter = ui.painter();
+                let menu_width = 20.0;
                 let page_width = 56.0;
-                let go_width = 24.0;
-                let edit_width = 20.0;
-                let delete_width = 20.0;
-                let ref_width = if image_ref.is_some() { 20.0 } else { 0.0 };
-                let title_width = (rect.width()
-                    - page_width
-                    - go_width
-                    - edit_width
-                    - delete_width
-                    - ref_width
-                    - 8.0)
-                    .max(24.0);
+                let title_width = (rect.width() - page_width - menu_width - 8.0).max(24.0);
                 let job = overflow_layout(
                     &title,
                     egui::FontId::proportional(13.0),
@@ -479,10 +526,7 @@ impl PdfReaderApp {
                     ui.visuals().text_color(),
                 );
                 painter.text(
-                    egui::pos2(
-                        rect.max.x - go_width - edit_width - delete_width,
-                        rect.center().y,
-                    ),
+                    egui::pos2(rect.max.x - menu_width - 4.0, rect.center().y),
                     Align2::RIGHT_CENTER,
                     &page_label,
                     egui::FontId::proportional(11.0),
@@ -490,83 +534,24 @@ impl PdfReaderApp {
                 );
 
                 if response.clicked() {
-                    // 单击立即生成/唤出浮窗（不再延迟：跳转改由右侧 → 按钮触发）
+                    // 单击立即生成/唤出浮窗；跳转/编辑/删除/复制链接都收进 ⋯ 菜单。
                     self.ensure_custom_snapshot(ui, session, index);
                     self.activate_custom_preview(index, rect);
                 }
 
-                // 行右侧的 go 按钮（→）：点击跳转到该条目记录的页与页内坐标。
-                // 它在行交互**之后**注册，因此点击优先落到按钮上，不会同时生成浮窗。
-                let go_rect = egui::Rect::from_center_size(
+                let menu_rect = egui::Rect::from_center_size(
                     egui::pos2(rect.max.x - 10.0, rect.center().y),
-                    EVec2::new(20.0, row_height),
+                    EVec2::new(menu_width, row_height),
                 );
-                // ✎ 修改题目；❎ 删除条目（都在 → 之前注册，命中优先级更高）
-                let edit_rect = egui::Rect::from_center_size(
-                    egui::pos2(
-                        go_rect.min.x - edit_width * 0.5 - delete_width,
-                        rect.center().y,
-                    ),
-                    EVec2::new(edit_width, row_height),
-                );
-                let delete_rect = egui::Rect::from_center_size(
-                    egui::pos2(go_rect.min.x - delete_width * 0.5, rect.center().y),
-                    EVec2::new(delete_width, row_height),
-                );
-                if ui
-                    .put(
-                        edit_rect,
-                        egui::Button::new(CUSTOM_SYMBOL_EDIT).frame(false),
-                    )
-                    .clicked()
-                {
-                    if let Some(preview) = self.custom_previews.get(index) {
-                        self.editing_title = Some((index, preview.title.clone()));
-                    }
-                }
-                if ui
-                    .put(
-                        delete_rect,
-                        egui::Button::new(CUSTOM_SYMBOL_DELETE).frame(false),
-                    )
-                    .clicked()
-                {
-                    self.delete_custom_preview(index);
-                }
-                if let Some((record_id, revision)) = &image_ref {
-                    let ref_rect = egui::Rect::from_center_size(
-                        egui::pos2(
-                            go_rect.min.x
-                                - edit_width
-                                - delete_width
-                                - page_width
-                                - ref_width * 0.5,
-                            rect.center().y,
-                        ),
-                        EVec2::new(ref_width, row_height),
-                    );
-                    if ui
-                        .put(ref_rect, egui::Button::new("@").frame(false))
-                        .on_hover_text("复制 Markdown 图片引用")
-                        .clicked()
-                    {
-                        ui.ctx()
-                            .copy_text(crate::image_store::image_uri(record_id, *revision));
-                        self.message = "已复制图片引用，可粘到正文".to_string();
-                    }
-                }
-                if ui
-                    .put(go_rect, egui::Button::new("\u{2192}").frame(false))
-                    .clicked()
-                {
-                    if let Some(preview) = self.custom_previews.get(index) {
-                        self.commands.push(ViewerCommand::GoToPage(preview.page));
-                        self.commands.push(ViewerCommand::CenterOnPagePoint {
-                            page: preview.page,
-                            point: preview.point,
-                        });
-                    }
-                }
+                let menu_response = ui
+                    .put(menu_rect, egui::Button::new("\u{22ef}").frame(false))
+                    .on_hover_text("更多操作");
+                egui::Popup::menu(&menu_response).show(|ui| {
+                    self.preview_row_menu(ui, index);
+                });
+                response.context_menu(|ui| {
+                    self.preview_row_menu(ui, index);
+                });
             }
         });
         // 悬浮条目 → 只显示临时浮窗（离开即关）；同时记录行矩形用于定位

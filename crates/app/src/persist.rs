@@ -28,7 +28,9 @@ use crate::json::{Json, JsonLookup, Parsed};
 ///   不再拆成 `custom_images` / `custom_texts`，也不再需要 `order` 字段。
 /// * **v4**：被引用点与图片 preview 增加稳定 `image_id` / `image_revision`，
 ///   供 Markdown 内部图片引用；旧档迁移时按页/下标生成 legacy id。
-pub const CURRENT_VERSION: u32 = 4;
+/// * **v5**：文字 preview 也使用 `image_id` 作为稳定链接记录 id；加载时给空值生成，
+///   保存后写回 v5。旧程序会按 D-107 拒绝加载 v5，避免静默清空文字 id。
+pub const CURRENT_VERSION: u32 = 5;
 
 /// 旧存档缺 `scale` 时的默认分辨率（用户要求：按 100% 处理）。
 pub const DEFAULT_SCALE: f32 = 1.0;
@@ -68,9 +70,9 @@ pub struct SavedMark {
     pub body: [f32; 2],
     /// ▲v2 截图时的**显示比例**（`1.0` = 100%）。预览图按它请求渲染。
     pub scale: f32,
-    /// ▲v4 稳定图片记录 id（旧档迁移时生成）。
+    /// ▲v4/v5 稳定记录 id；图片 preview 用作图片引用，文字 preview 用作链接记录 id。
     pub image_id: String,
-    /// ▲v4 图片内容版本；影响像素的修改递增。
+    /// ▲v4 图片内容版本；影响像素的修改递增（文字 preview 固定 0）。
     pub image_revision: u64,
 }
 
@@ -432,6 +434,21 @@ pub fn migrate(data: &mut SavedData) -> Migration {
         ));
     }
 
+    if data.version < 5 {
+        // 文字 preview 的记录 id 需要应用层生成（保证唯一），这里只升级版本并让调用方置脏；
+        // 加载时会给缺 id 的文字 preview 补值（见 `document::open`）。
+        data.version = 5;
+        let text_count = data
+            .custom_previews
+            .iter()
+            .filter(|preview| preview.kind == SavedCustomKind::Text)
+            .count()
+            + data.custom_texts.len();
+        notes.push(format!(
+            "v4 → v5：{text_count} 条文字preview 使用稳定链接 id（加载时生成，保存后写回 v{CURRENT_VERSION}）"
+        ));
+    }
+
     Migration {
         from,
         to: data.version,
@@ -731,7 +748,7 @@ mod tests {
                 title: "题\n目".into(),
                 text: Some("内容\\带转义".into()),
                 scale: DEFAULT_SCALE,
-                image_id: String::new(),
+                image_id: "preview-test".to_string(),
                 image_revision: 0,
             }],
             custom_previews: vec![
@@ -759,7 +776,7 @@ mod tests {
                         title: "题\n目".into(),
                         text: Some("内容\\带转义".into()),
                         scale: DEFAULT_SCALE,
-                        image_id: String::new(),
+                        image_id: "preview-test".to_string(),
                         image_revision: 0,
                     },
                 },
@@ -823,6 +840,30 @@ mod tests {
         assert!(text.contains(&format!("\"version\": {CURRENT_VERSION}")));
         let back = SavedData::from_json(&text).expect("v2 应能解析");
         assert_eq!(back, data);
+    }
+
+    /// v4 的文字 preview 没有记录 id：v5 迁移必须置脏，加载时再生成 id。
+    #[test]
+    fn v4_text_preview_migrates_to_v5_and_marks_dirty() {
+        let mut data = sample();
+        data.version = 4;
+        for preview in &mut data.custom_previews {
+            if preview.kind == SavedCustomKind::Text {
+                preview.item.image_id.clear();
+            }
+        }
+        let migration = migrate(&mut data);
+        assert_eq!((migration.from, migration.to), (4, CURRENT_VERSION));
+        assert!(migration.changed, "文字 preview 升级必须置脏");
+        assert!(
+            migration
+                .notes
+                .iter()
+                .any(|note| note.contains("文字preview")),
+            "{:?}",
+            migration.notes
+        );
+        assert_eq!(data.version, CURRENT_VERSION);
     }
 
     /// v2 的 `scale` 必须原样往返，不能被迁移改写。

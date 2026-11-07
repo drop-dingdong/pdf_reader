@@ -297,6 +297,12 @@ pub struct PdfReaderApp {
     markdown_floats: bool,
     /// 侧栏 hover 临时预览是否也按 Markdown 渲染（设置项）。
     hover_preview_markdown: bool,
+    /// 是否允许复制外部注释的链接（跨会话不保证准确；设置项，默认关闭）。
+    allow_external_annotation_links: bool,
+    /// 本次文档加载的 token；外部注释链接跨会话/重开时失效。
+    document_load_token: u64,
+    /// 等待用户确认的外部注释链接（属性不足以完全验证时）。
+    pending_external_link: Option<PendingExternalLink>,
     /// hover Markdown 专用的解析/标题缓存。
     hover_markdown_cache: egui_commonmark::CommonMarkCache,
     /// 当前 hover Markdown 对应的 preview 下标；变化时清缓存。
@@ -330,6 +336,8 @@ pub struct PdfReaderApp {
     custom_hover: Option<(usize, egui::Rect)>,
     /// 上一帧主视图（画布）的矩形：侧栏先于画布绘制，用它给浮窗定位。
     canvas_rect: egui::Rect,
+    /// 画布所在图层；用于区分画布本层和盖在上面的编辑窗口/弹层。
+    canvas_layer: egui::LayerId,
     /// 点击 Pin 条目后的一次性高亮（浮窗 id + 截止时刻）。
     click_highlight: Option<(u64, std::time::Instant)>,
     /// 状态栏文本与错误提示。
@@ -566,6 +574,9 @@ impl PdfReaderApp {
             pin_hover_enabled: ui_settings.pin_hover_enabled,
             markdown_floats: ui_settings.markdown_floats,
             hover_preview_markdown: ui_settings.hover_preview_markdown,
+            allow_external_annotation_links: ui_settings.allow_external_annotation_links,
+            document_load_token: 0,
+            pending_external_link: None,
             hover_markdown_cache: egui_commonmark::CommonMarkCache::default(),
             hover_markdown_index: None,
             markdown_caches: std::collections::HashMap::new(),
@@ -582,6 +593,7 @@ impl PdfReaderApp {
             markdown_rendered: false,
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
+            canvas_layer: egui::LayerId::background(),
             click_highlight: None,
             message: String::new(),
             error: None,

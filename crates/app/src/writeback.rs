@@ -282,9 +282,10 @@ fn parse_annotation(value: &Json, context: &str) -> Result<WritebackAnnotation, 
         .as_object()
         .ok_or_else(|| format!("{context} 不是对象"))?;
     let kind_name = string(object, "kind")?;
+    // id 是 u64（时间戳量级），不能用 as_number（内部是 f32，会把相邻 id 舍入成同一个）。
     let id = object
         .field("id")
-        .and_then(|value| value.as_number())
+        .and_then(|value| value.as_i64())
         .map(|value| value as u64);
     let color = color(object).unwrap_or([255, 214, 0]);
     let opacity = object

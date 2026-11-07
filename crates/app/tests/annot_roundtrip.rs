@@ -125,6 +125,106 @@ fn annotation_and_body_survive_a_save_and_reopen() {
 }
 
 #[test]
+fn external_highlight_with_ca_one_keeps_legacy_35_percent() {
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    if !backend() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "pdf-external-opacity-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("建临时目录");
+    let source = dir.join("rotated_2p.pdf");
+    app::replay::samples::Sample::Rotated
+        .write(&dir)
+        .expect("写样本");
+    let output = dir.join("external.pdf");
+    let spec = backend_pdfium::writeback::WritebackSpec {
+        source: source.clone(),
+        output: output.clone(),
+        pages: vec![backend_pdfium::writeback::WritebackPage {
+            page: pdfcore::prelude::PageIndex::FIRST,
+            origin: pdfcore::prelude::Point::ORIGIN,
+            annotations: vec![backend_pdfium::writeback::WritebackAnnotation {
+                // 没有 /NM：模拟其它阅读器写出的外部高亮。
+                id: None,
+                kind: pdfcore::annotation::AnnotationKind::Highlight {
+                    quads: vec![pdfcore::prelude::Rect::new(50.0, 690.0, 450.0, 50.0)],
+                },
+                color: [255, 214, 0],
+                opacity: 1.0,
+                body: None,
+            }],
+        }],
+        updates: Vec::new(),
+        deletes: Vec::new(),
+    };
+    backend_pdfium::writeback::write(&spec).expect("写外部注释");
+    let readback = backend_pdfium::readback::read(&output, None).expect("读回外部注释");
+    let annotation = readback.annotations.first().expect("一条外部注释");
+    assert!(annotation.id.is_none(), "外部注释不应有 /NM");
+    assert!(
+        (annotation.opacity - 0.35).abs() < 0.01,
+        "外部 /CA 1.0 应保持旧的 35% 兼容显示，实际 {}",
+        annotation.opacity
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn restyled_highlight_opacity_is_saved() {
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    if !backend() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "pdf-opacity-roundtrip-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("建临时目录");
+    app::replay::samples::Sample::Rotated
+        .write(&dir)
+        .expect("写样本");
+    std::env::set_var("PDF_READER_WRITEBACK_EXE", env!("CARGO_BIN_EXE_app"));
+    let script = dir.join("opacity.json");
+    std::fs::write(
+        &script,
+        r#"{"name":"opacity","pdf":"rotated_2p.pdf","actions":[
+             {"id":"resize","op":"resize","width":700,"height":800},
+             {"id":"top","op":"set_scroll","x":0,"y":0},
+             {"id":"settle","op":"wait","frames":8},
+             {"id":"a","op":"highlight","page":0,"x":50,"y":690,"width":450,"height":50},
+             {"id":"save1","op":"save"},
+             {"id":"settle1","op":"wait","frames":3},
+             {"id":"opacity","op":"opacity","value":1.0},
+             {"id":"save2","op":"save"},
+             {"id":"after","op":"wait","frames":3}
+           ]}"#,
+    )
+    .expect("写脚本");
+    app::replay::run_script_file(&script, None).expect("回放");
+    let readback = backend_pdfium::readback::read(&dir.join("rotated_2p.pdf"), None)
+        .expect("读回保存后的 PDF");
+    let annotation = readback.annotations.first().expect("一条注释");
+    assert!(
+        (annotation.opacity - 1.0).abs() < 0.01,
+        "保存后的透明度应为 1.0，实际 {}",
+        annotation.opacity
+    );
+    std::env::remove_var("PDF_READER_WRITEBACK_EXE");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn consecutive_saves_keep_earlier_annotations() {
     let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     if !backend() {

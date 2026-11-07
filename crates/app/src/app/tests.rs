@@ -1976,6 +1976,72 @@ mod pointer_ownership_tests {
     }
 
     #[test]
+    fn clicking_editor_window_over_a_float_does_not_raise_it() {
+        let mut app = app();
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        for (id, left, top, title) in [(1, 50.0, 50.0, "低"), (2, 150.0, 150.0, "高")] {
+            let rect = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(300.0, 200.0));
+            app.floats.push(Float {
+                id,
+                title: title.to_string(),
+                content: FloatContent::Text(String::new()),
+                rect,
+                owner: FloatOwner::None,
+                body: egui::vec2(300.0, 182.0),
+                origin: None,
+            });
+        }
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let point = egui::pos2(60.0, 60.0);
+        for frame in 0..3 {
+            let events = if frame < 2 {
+                vec![egui::Event::PointerMoved(point)]
+            } else {
+                vec![
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ]
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                time: Some(frame as f64 * 0.05),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                app.draw_floats(ui, canvas);
+                egui::Window::new("editor")
+                    .fixed_rect(egui::Rect::from_min_size(
+                        egui::pos2(0.0, 0.0),
+                        egui::vec2(400.0, 300.0),
+                    ))
+                    .show(ui.ctx(), |ui| {
+                        ui.label("editor");
+                    });
+            });
+            output.drop_without_applying_deltas();
+        }
+        let order: Vec<u64> = app.floats.iter().map(|float| float.id).collect();
+        assert_eq!(order, vec![1, 2], "编辑窗口覆盖处点击不应把下面浮窗置顶");
+        assert!(
+            !app.canvas_hover_allowed(&ctx, canvas, point, false),
+            "编辑窗口覆盖处也不应允许画布链接/注释 hover"
+        );
+    }
+
+    #[test]
     fn canvas_annotation_hover_right_click_and_delete_are_scoped() {
         let (mut app, ctx, id, screen, pos) = app_with_annotation();
         // 1) 画布上 hover → 记录 Delete 目标
@@ -2106,6 +2172,144 @@ mod float_link_tests {
     }
 
     #[test]
+    fn external_annotation_links_require_token_and_validation() {
+        let mut app = app();
+        app.add_annotation(
+            PageIndex::FIRST,
+            pdfcore::annotation::AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        );
+        let id = app.annotations.iter().next().expect("annotation").id;
+        app.external_ids.insert(id);
+        app.document_load_token = 42;
+        if let Some(annotation) = app.annotations.get_mut(id) {
+            annotation.created = Some(123);
+        }
+
+        // 默认关闭：不提供复制 URI。
+        assert!(app.annotation_link_uri(id).is_none());
+
+        app.allow_external_annotation_links = true;
+        let uri = app.annotation_link_uri(id).expect("external uri");
+        assert!(uri.contains("s=42"), "{uri}");
+        assert!(uri.contains("k=highlight"), "{uri}");
+        assert!(uri.contains("c=123"), "{uri}");
+
+        // token 匹配：当前会话直接打开。
+        app.follow_float_link(&uri);
+        assert_eq!(
+            app.floats.last().map(|float| float.owner),
+            Some(FloatOwner::Annotation(id))
+        );
+
+        // token 不匹配 + 开关关闭：断链。
+        app.floats.clear();
+        app.document_load_token = 99;
+        app.allow_external_annotation_links = false;
+        app.follow_float_link(&uri);
+        assert!(app.message.contains("跨会话失效"), "{}", app.message);
+        assert!(app.floats.is_empty());
+
+        // token 不匹配 + 开关开启：类型 + 创建时间都匹配 → 打开。
+        app.allow_external_annotation_links = true;
+        app.follow_float_link(&uri);
+        assert_eq!(app.floats.len(), 1);
+
+        // 类型不匹配 → 断链。
+        app.floats.clear();
+        let wrong_kind = uri.replace("k=highlight", "k=ink");
+        app.follow_float_link(&wrong_kind);
+        assert!(app.message.contains("类型"), "{}", app.message);
+        assert!(app.floats.is_empty());
+
+        // 创建时间不匹配 → 断链。
+        let wrong_created = uri.replace("c=123", "c=456");
+        app.follow_float_link(&wrong_created);
+        assert!(app.message.contains("创建时间"), "{}", app.message);
+
+        // 缺少创建时间 → 进入确认框，不直接打开。
+        let unverified = uri.replace("&c=123", "");
+        app.follow_float_link(&unverified);
+        assert!(app.pending_external_link.is_some(), "应进入确认");
+        assert!(app.floats.is_empty());
+    }
+
+    #[test]
+    fn preview_record_id_is_used_in_links() {
+        let mut app = app();
+        let mut preview = text_preview(PageIndex::new(2), 7);
+        preview.image_id = "preview-abc-1".to_string();
+        app.custom_previews.push(preview);
+        app.floats
+            .push(text_float(1, FloatOwner::Custom(0), "preview"));
+        assert_eq!(
+            app.preview_link_uri(0).as_deref(),
+            Some("pd-float://preview/preview-abc-1")
+        );
+        assert_eq!(
+            app.float_link_uri(0).as_deref(),
+            Some("pd-float://preview/preview-abc-1")
+        );
+    }
+
+    #[test]
+    fn deleting_a_preview_keeps_other_preview_floats() {
+        let mut app = app();
+        app.custom_previews.push(text_preview(PageIndex::FIRST, 1));
+        app.custom_previews.push(text_preview(PageIndex::FIRST, 2));
+        app.floats.push(text_float(1, FloatOwner::Custom(0), "a"));
+        app.floats.push(text_float(2, FloatOwner::Custom(1), "b"));
+        app.delete_custom_preview(0);
+        assert_eq!(app.custom_previews.len(), 1);
+        assert_eq!(app.floats.len(), 1, "只应关闭被删 preview 的浮窗");
+        assert_eq!(app.floats[0].owner, FloatOwner::Custom(0));
+        assert_eq!(app.floats[0].title, "b");
+    }
+
+    #[test]
+    fn annotation_ids_are_not_reused_and_restyle_keeps_the_id() {
+        let mut app = app();
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            pdfcore::annotation::AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+            },
+        ));
+        let id = app.annotations.iter().next().expect("annotation").id;
+        assert!(id.get() > 0);
+        assert!(
+            id.get() < (1u64 << 53),
+            "id 必须能被写回 job 的 JSON number 精确表示"
+        );
+
+        // 改颜色：id 不变，旧对象仍进入 deletes（pdf_ref = None）。
+        assert!(app.recolor_annotation(id, [70, 180, 90]));
+        assert!(app.annotations.get(id).is_some(), "改样式不得换 id");
+        assert_eq!(app.annotations.get(id).unwrap().color, [70, 180, 90]);
+        app.undo_edit();
+        assert!(app.annotations.get(id).is_some(), "撤销后仍是同一 id");
+
+        // 删除后新注释不得复用旧 id。
+        let old_id = app.annotations.iter().next().unwrap().id;
+        app.apply_edit(
+            AppEdit::DeleteAnnotation {
+                annotation: app.annotations.get(old_id).unwrap().clone(),
+            },
+            true,
+        );
+        assert!(app.add_annotation(
+            PageIndex::FIRST,
+            pdfcore::annotation::AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 40.0, 30.0, 8.0)],
+            },
+        ));
+        let new_id = app.annotations.iter().next().unwrap().id;
+        assert_ne!(new_id, old_id, "新注释不得复用已删除的 id");
+        assert!(new_id.get() < (1u64 << 53));
+    }
+
+    #[test]
     fn annotation_link_uri_round_trips_and_reuses_the_click_helper() {
         let mut app = app();
         app.add_annotation(
@@ -2118,7 +2322,14 @@ mod float_link_tests {
         app.floats
             .push(text_float(1, FloatOwner::Annotation(id), "标注"));
         let uri = app.float_link_uri(0).expect("link uri");
-        assert_eq!(uri, format!("pd-float://annotation/{}", id.get()));
+        assert_eq!(
+            uri,
+            format!(
+                "pd-float://annotation/{}/{}",
+                PageIndex::FIRST.get(),
+                id.get()
+            )
+        );
 
         // 关闭后点击链接 → 重新打开，且带一次性高亮
         app.floats.clear();
@@ -2192,7 +2403,14 @@ mod float_link_tests {
         }
         assert_eq!(
             copied.as_deref(),
-            Some(format!("pd-float://annotation/{}", id.get()).as_str())
+            Some(
+                format!(
+                    "pd-float://annotation/{}/{}",
+                    PageIndex::FIRST.get(),
+                    id.get()
+                )
+                .as_str(),
+            )
         );
     }
 
@@ -2294,7 +2512,11 @@ mod float_link_tests {
             },
         );
         let id = app.annotations.iter().next().expect("annotation").id;
-        let uri = format!("pd-float://annotation/{}", id.get());
+        let uri = format!(
+            "pd-float://annotation/{}/{}",
+            PageIndex::FIRST.get(),
+            id.get()
+        );
         let ctx = egui::Context::default();
 
         app.markdown_rendered = true;

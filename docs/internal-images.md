@@ -1,6 +1,6 @@
 # 内部图片引用（设计基线）
 
-> 状态：**B1 / B2 完成（2026-11-04）**。sidecar v4、`ImageStore` + latest revision 字典、`pd-img`
+> 状态：**B1 / B2 完成（2026-11-04）**。sidecar v4（v5 沿用同一 `image_id` 字段）、`ImageStore` + latest revision 字典、`pd-img`
 > loader、打开文字浮窗时的 owner 懒渲染、旧 rev 渲染前规范化、图片 @、DestMark 右键、编辑窗口列表、
 > 摘要导出 base64 均已接入。侧栏 hover 临时预览的 Markdown 开关也已接入（顶栏「hover MD」，
 > 默认关闭，设置持久化）。

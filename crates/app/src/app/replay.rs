@@ -162,6 +162,11 @@ pub enum Action {
         /// 区域高。
         height: f32,
     },
+    /// 把最后一条注释的透明度改成 `value`（测试用；走真实 restyle 路径）。
+    Opacity {
+        /// 目标透明度（0–1）。
+        value: f32,
+    },
     /// 保存所有有改动的文件（等价于点"保存"或 Ctrl+S）。
     Save,
     /// 撤销一步（等价于 Ctrl+Z）。
@@ -193,6 +198,7 @@ impl Action {
             Self::SetTool { .. } => "set_tool",
             Self::SeedInk { .. } => "seed_ink",
             Self::Highlight { .. } => "highlight",
+            Self::Opacity { .. } => "opacity",
             Self::Save => "save",
             Self::Undo => "undo",
             Self::Redo => "redo",
@@ -241,6 +247,7 @@ impl Action {
             } => {
                 format!("highlight p{page} ({x},{y},{width},{height})")
             }
+            Self::Opacity { value } => format!("opacity {value:.2}"),
             Self::Save => "save".to_string(),
             Self::Undo => "undo".to_string(),
             Self::Redo => "redo".to_string(),
@@ -687,6 +694,9 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
                 y: number("y")?,
                 width: number("width")?,
                 height: number("height")?,
+            },
+            "opacity" => Action::Opacity {
+                value: number("value")?,
             },
             "save" => Action::Save,
             "undo" => Action::Undo,
@@ -1312,6 +1322,17 @@ impl Harness {
             }
             return;
         }
+        if let Action::Opacity { value } = action {
+            if let Some(id) = app
+                .annotations
+                .iter()
+                .last()
+                .map(|annotation| annotation.id)
+            {
+                app.restyle_annotation(id, None, Some(*value), None);
+            }
+            return;
+        }
         if let Action::Save = action {
             app.save_all();
             return;
@@ -1370,6 +1391,7 @@ impl Harness {
             | Action::Ink { .. }
             | Action::SetTool { .. }
             | Action::SeedInk { .. }
+            | Action::Opacity { .. }
             | Action::Save => {}
             Action::HoverLink { .. } | Action::Unhover => {
                 // 指针位置必须走 egui 的输入事件：在 `run_frame` 里按帧重放

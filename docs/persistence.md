@@ -12,11 +12,11 @@
 自定义数据**不存像素**：只存"页号 + 页面空间矩形 + 浮窗正文尺寸 + 题目/文字 + **分辨率**"，
 载入后按分辨率重新请求渲染并合成（见 §4）。旧 `.annot.json` 不再读取/创建，遗留文件忽略。
 
-## 2. 文件格式（v4）
+## 2. 文件格式（v5）
 
 ```jsonc
 {
- "version": 4,
+ "version": 5,
  "links":    [ [ {"rect":[x,y,w,h], "dest":{"kind":"page","page":3,"offset":[x,y]}} ], … ],
  "dest_marks": [ [ {"point":[x,y], "rect":[x,y,w,h], "body":[w,h], "scale":8.0,
                    "image_id":"dest-…", "image_revision":0} ], … ],
@@ -24,7 +24,7 @@
   {"kind":"image", "page":1, "point":[x,y], "rect":[x,y,w,h], "body":[w,h], "scale":2.5,
    "title":"…", "image_id":"custom-…", "image_revision":0},
   {"kind":"text", "page":2, "point":[x,y], "rect":[x,y,w,h], "body":[w,h], "scale":1,
-   "title":"…", "text":"…", "image_id":"", "image_revision":0}
+   "title":"…", "text":"…", "image_id":"preview-…", "image_revision":0}
  ]
 }
 ```
@@ -38,8 +38,8 @@
 | `scale` | ▲v2 截图时的**显示比例**（`1.0` = 100%）；决定预览图按什么分辨率重建 |
 | `kind` | ▲v3 `image` / `text`；统一列表按当前显示顺序保存 |
 | `title` / `text` | 题目 / 文字预览的正文 |
-| `image_id` | ▲v4 稳定图片记录 id；文字 preview 为空 |
-| `image_revision` | ▲v4 图片内容版本；影响像素的修改递增 |
+| `image_id` | ▲v4/v5 稳定记录 id：图片 preview 用作图片引用，文字 preview 用作 `pd-float://preview/<record_id>` 链接 id |
+| `image_revision` | ▲v4 图片内容版本；影响像素的修改递增；文字 preview 固定 0 |
 
 v3 不再写 `custom_images` / `custom_texts`，也不使用 `order` 字段；
 旧 v1/v2 的两个数组仍可读入，并按“先图片后文字”的顺序迁移成 `custom_previews`。
@@ -58,7 +58,8 @@ v3 不再写 `custom_images` / `custom_texts`，也不使用 `order` 字段；
 | **v2** | `dest_marks[]` 与 `custom_images[]` 增加 `scale` | v1 → v2：缺失/非法（≤0、非有限）的 `scale` 填 `DEFAULT_SCALE = 1.0`，并**置脏** |
 | **v3** | preview 改为单一有序 `custom_previews[]`（每条带 `kind`） | v1/v2 读入后迁移为统一列表，置脏 |
 | **v4** | dest_marks 与图片 preview 增加 `image_id` / `image_revision` | v1–v3 读取后按页/下标生成 `legacy-*` id，置脏 |
-| **v5+** | 未定义 | **拒绝读取**（见下面第 6 条）：不加载、不保存、不覆盖 |
+| **v5** | 文字 preview 也把 `image_id` 当稳定记录 id（链接用），不再强制为空 | v4 读取时给空值生成 `preview-*` id 并置脏；v5 文件由旧版读取会按 D-107 拒绝加载 |
+| **v6+** | 未定义 | **拒绝读取**（见下面第 6 条）：不加载、不保存、不覆盖 |
 
 规则（新增版本时必须遵守）：
 
@@ -75,7 +76,7 @@ v3 不再写 `custom_images` / `custom_texts`，也不使用 `order` 字段；
   * 理由：旧程序只认识一部分字段，读一半再保存就是用残缺数据覆盖完整数据，
    比"什么都不做"更糟；而"读进来但不许保存"又会让用户的编辑被静默丢弃。
 
-可观测：stderr `[存档] v1 → v2：…` / `v2 → v3：…` / `v3 → v4：…`；
+可观测：stderr `[存档] v1 → v2：…` / `v2 → v3：…` / `v3 → v4：…` / `v4 → v5：…`；
 打开后状态栏提示"存档已升级到 v3，请保存"。守它的测试：
 `persist::tests::v1_…` / `v2_…` / `newer_…` / `invalid_scale_…`。
 
@@ -150,6 +151,7 @@ v3 不再写 `custom_images` / `custom_texts`，也不使用 `order` 字段；
 | `ui.show_links` / `show_dest_points` / `show_annotations` | 引用显示样式（链接框 / 引用点 / 标注）的持久化值 |
 | `ui.markdown_floats` | 文字浮窗是否默认按 Markdown 渲染（顶栏「Markdown」，默认 `false`；只影响显示，不改源文本/`.json`） |
 | `ui.hover_preview_markdown` | 侧栏 hover 临时预览是否也按 Markdown 渲染（顶栏「hover MD」，默认 `false`；会触发公式/图片 owner 渲染） |
+| `ui.allow_external_annotation_links` | 是否允许复制外部注释链接（`?` 帮助窗口，默认 `false`；开启后链接仍带文档加载 token，跨会话按页号/类型/创建时间校验或确认） |
 | `save.backup_in_place` | 原地保存前是否留一份 `.bak`（默认 `false`，文件菜单可切换） |
 | `annotation_defaults` | 新注释的默认样式（颜色、高亮透明度、墨迹线宽） |
 | `documents` | **每个文件一份**的阅读状态，同时充当"最近文件"（最多 12 条，按 `opened_at` 降序；文件菜单 →「最近打开」展示前 8 条） |
@@ -173,6 +175,8 @@ v3 不再写 `custom_images` / `custom_texts`，也不使用 `order` 字段；
  像素尺寸会有 ≤1.6 倍差异（待办：记录渲染比例快照）。
 * 旧档迁移后 `scale = 1.0` 而 `body` 仍是当年的大窗口 → 预览会偏糊（不自动改用户窗口尺寸）。
 * 文本 preview 与图片 preview 共用 `SavedCustom`（`scale` 对文字无意义，写 1.0）。
+* 文字 preview 的 `image_id` 是**链接记录 id**，不是图片；`ImageStore`/`pd-img` 只处理
+  `kind=image` 的记录，不会把文字 preview 当图片。
 
 ## 8. 将来的版本（还没做，先记着）
 
@@ -181,8 +185,8 @@ v3 不再写 `custom_images` / `custom_texts`，也不使用 `order` 字段；
 
 | 候选 | 内容 | 触发条件 |
 | --- | --- | --- |
-| v4 | 记录 `overscan` 快照（或直接记录渲染比例），让预览的像素尺寸不受 `DEFAULT_OVERSCAN` 变化影响 | 真要改 `DEFAULT_OVERSCAN` 时 |
-| v4 | `quality.source`：记录预览是"当时截的图"还是"后来重建的"，便于诊断 | 出现"预览看起来不对"的反馈时 |
-| v4 | `body` 与 `scale` 的一致性策略（旧档迁移后 `body` 偏大导致预览偏糊） | 旧档数量多、被投诉糊时 |
+| v6 | 记录 `overscan` 快照（或直接记录渲染比例），让预览的像素尺寸不受 `DEFAULT_OVERSCAN` 变化影响 | 真要改 `DEFAULT_OVERSCAN` 时 |
+| v6 | `quality.source`：记录预览是"当时截的图"还是"后来重建的"，便于诊断 | 出现"预览看起来不对"的反馈时 |
+| v6 | `body` 与 `scale` 的一致性策略（旧档迁移后 `body` 偏大导致预览偏糊） | 旧档数量多、被投诉糊时 |
 
 不再计划：保留未知字段。新版本存档不允许被旧版本读取，"原样回写"没有使用场景。

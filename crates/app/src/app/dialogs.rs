@@ -504,8 +504,24 @@ impl PdfReaderApp {
                             "pd-float://annotation/<id>    pd-float://preview/<页>/<id>",
                         );
                         ui.label(
-                            "文字浮窗标题栏 ↗ 复制当前浮窗的引用链接，→ 跳到来源页/位置；\
+                            "文字/图片 preview 与注释浮窗标题栏 ↗ 复制引用链接，→ 跳到来源页/位置；\
                              页号从 0 开始。旧写法 pd-float://preview/<id> 只在 id 唯一时可用。",
+                        );
+                        let allow = ui
+                            .checkbox(
+                                &mut self.allow_external_annotation_links,
+                                "允许跨会话外部注释链接（不保证准确）",
+                            )
+                            .on_hover_text(
+                                "默认关闭：外部注释没有稳定的 /NM，重开后 id 可能指向别的注释。\
+                                 开启后允许复制；跨会话回退会校验页号/类型/创建时间，仍不保证完全准确。",
+                            );
+                        if allow.changed() {
+                            self.settings_dirty = true;
+                        }
+                        ui.label(
+                            "外部注释的 id 由加载顺序分配；外部编辑器改写 /NM 也会让链接失效。\
+                             引用点/截图/测试浮窗没有稳定目标，不能链接。",
                         );
                         ui.separator();
                         ui.heading("数学语法");
@@ -684,7 +700,8 @@ impl PdfReaderApp {
                     snapshot: None,
                     body_size,
                     scale: 1.0,
-                    image_id: String::new(),
+                    // 文字 preview 也使用 image_id 作为稳定记录 id（链接用）。
+                    image_id: new_image_id("preview"),
                     image_revision: 0,
                 };
                 let position = self.custom_previews.len();
@@ -744,6 +761,50 @@ impl PdfReaderApp {
         } else if cancel {
             self.custom_dialog = None;
             self.message = "已取消自定义preview".to_string();
+        }
+    }
+
+    /// token 失效且属性不足以完全验证的外部注释链接：让用户确认。
+    pub(super) fn draw_external_link_dialog(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_external_link else {
+            return;
+        };
+        let Some(annotation) = self.annotations.get(pending.id) else {
+            self.pending_external_link = None;
+            return;
+        };
+        let page = annotation.page;
+        let kind = annotation_kind_code(&annotation.kind);
+        let mut open = false;
+        let mut cancel = false;
+        egui::Modal::new(Id::unique("external-annotation-link")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading("外部注释链接");
+            ui.label("无法完全验证目标（外部注释 id 会随加载顺序变化）。");
+            ui.label(format!(
+                "目标：第 {} 页 · {} · #{}",
+                page.display_number(),
+                kind,
+                pending.id.get()
+            ));
+            ui.label("页号与类型匹配；缺少创建时间或创建时间不可用，仍可能指向别的注释。");
+            ui.horizontal(|ui| {
+                if ui.button("打开").clicked() {
+                    open = true;
+                }
+                if ui.button("取消").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if open {
+            self.pending_external_link = None;
+            let at = self.next_float_position();
+            self.open_annotation_note(pending.id, at);
+            self.message = format!("已按用户确认跳转到外部注释 #{}", pending.id.get());
+        } else if cancel {
+            self.pending_external_link = None;
+            self.message = "已取消打开外部注释链接".to_string();
         }
     }
 

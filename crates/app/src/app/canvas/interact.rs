@@ -390,6 +390,15 @@ impl PdfReaderApp {
                     scroll.y
                 ));
         }
+        // 点击/双击也走同一归属判定：编辑窗口/弹层盖住画布时，即使 egui 把点击
+        // 透传给了背景 canvas，也不能触发链接/标注/选字/便签选点。
+        if (response.clicked() || response.double_clicked())
+            && !response.interact_pointer_pos().is_some_and(|position| {
+                self.canvas_hover_allowed(ui.ctx(), canvas, position, false)
+            })
+        {
+            return;
+        }
         if response.drag_stopped() {
             let apply_markup = self.drag == Some(DragMode::Select)
                 && self.selection_started_on_text
@@ -469,8 +478,10 @@ impl PdfReaderApp {
     ) {
         let canvas = ctx.canvas;
         let scroll = ctx.scroll;
-        // 记下画布矩形：侧栏（在该函数之前绘制）需要它来给浮窗定位
+        // 记下画布矩形/图层：侧栏（在该函数之前绘制）需要它来给浮窗定位；
+        // 指针归属需要图层来区分画布本层与编辑窗口。
         self.canvas_rect = canvas;
+        self.canvas_layer = ui.layer_id();
 
         // 悬停预览：**先只做检测与状态更新**（含"同一目的地已固定 → 高亮 + 置顶"）
         if self.capture.is_none() && self.custom_pin.is_none() {

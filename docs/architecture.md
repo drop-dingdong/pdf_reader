@@ -60,13 +60,14 @@
 - `app/frame.rs`（~0.5k）：每帧编排（命令采集、pump、布局切换、纹理上传、绘制顺序）。
 - `app/canvas/`：`mod.rs` 编排与输入；`paint.rs` 页面/选区/链接/标注/引用点；
   `interact.rs` 点击/拖动/右键/帧尾浮窗。画布内容的原始命中先按 canvas 裁剪。
-- `app/floats.rs` 里还有指针归属：`topmost_float_at`（z 序最上层浮窗）与
-  `canvas_hover_allowed`（面板/弹层/拖拽/浮窗的排除）与 `pointer_over_overlay`
-  （按图层顺序识别窗口/弹出菜单/模态）；每个浮窗还有一个只感知 drag 的全 rect 遮罩，
+- `app/floats.rs` 还负责 `pd-float://` 的复制/解析/打开（契约见
+  [float-links.md](float-links.md)）与指针归属：`topmost_float_at`（z 序最上层浮窗）与
+  `canvas_hover_allowed`（面板/画布本层之外的窗口/弹层/拖拽/浮窗排除，画布层由
+  `canvas_layer` 记录）与 `pointer_over_overlay`（比较画布层，识别编辑窗口/菜单/模态）；每个浮窗还有一个只感知 drag 的全 rect 遮罩，
   防止拖动漏到下层浮窗或画布。
 - `app/{toolbar,sidebar,hover,body_editor,dialogs,save,document,annotate,modes,capture,edit,textures,paint}.rs`：
   面板、浮窗、正文编辑器、保存/打开、标注与模式、截图、纹理、无状态绘制辅助。
-- `app/tests.rs`：原 `app.rs` 内联测试（56 个）。
+- `app/tests.rs`：原 `app.rs` 内联测试（含浮窗链接/指针归属/注释 id 稳定性）。
 - `markdown.rs`：浮窗 Markdown 预处理（单换行→硬换行、最小内容宽度测量）。
 - `math.rs`：LaTeX `MathBackend` trait、SVG（PNG 可回退）后端、公式纹理缓存与错误类型。
 - `persist.rs`：`.pdf.json` 手写 JSON + 版本迁移（未知字段不保留）。
@@ -213,6 +214,7 @@ app::compact::run_child → app --compact <in> <out>
 | INV-21 | 整理副本不覆盖源文件；签名/加密拒绝；不更小不落盘 | `tests/compact.rs` |
 | INV-22 | 外部注释只读几何/颜色；改正文/删除可以写回 | `readback`/UI 人工验收 |
 | INV-23 | Markdown 只影响文字浮窗的显示：不改 `Float.body`、不改源文本/持久化/写回；LaTeX 纹理只是临时缓存；滚轮不穿透浮窗；外部链接不打开浏览器 | `markdown`/`math` 单测 + 浮窗人工验收 |
+| INV-24 | 浮窗链接“要么正确、要么断链”：内部注释 id 不复用且除删除外的编辑保持 id；preview 用稳定记录 id；外部注释仅会话 token/校验后可用；不可验证时提示而不按 id 猜 | `float_link_tests`、`annot_roundtrip`、人工验收 |
 
 ## 9. 架构层面的已知限制
 

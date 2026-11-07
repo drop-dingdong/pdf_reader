@@ -276,13 +276,63 @@ impl PdfReaderApp {
         self.add_annotation_with_style(page, kind, Some((color, opacity)))
     }
 
+    /// 新的内部注释 id：时间戳/单调，保证大于现有 id 且不复用已删除的旧 id。
+    ///
+    /// **必须小于 2^53**：写回 job 用 JSON number 传 id，f64 只能精确表示 2^53 以内的整数；
+    /// 超过就会在保存/重开后变成另一个 id，`pd-float://` 链接随之断开。
+    fn next_internal_annotation_id(&self) -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST: AtomicU64 = AtomicU64::new(0);
+        static SEQ: AtomicU64 = AtomicU64::new(1);
+        // 秒 << 20：约 1.8e15（< 9.0e15 = 2^53），低 20 位给同一秒内的序号
+        // （约 100 万条/秒；足够，且 2^53 上限可用到 2255 年左右）。
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed) & 0xf_ffff;
+        let base = (seconds << 20) | seq;
+        let floor = self
+            .annotations
+            .iter()
+            .map(|annotation| annotation.id.get())
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        loop {
+            let previous = LAST.load(Ordering::Relaxed);
+            let candidate = base.max(floor).max(previous.saturating_add(1));
+            if LAST
+                .compare_exchange(previous, candidate, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return candidate;
+            }
+        }
+    }
+
+    /// 以新的内部 id 插入一条注释（不记历史）；调用方负责后续字段与 `apply_edit`。
+    pub(super) fn insert_internal_annotation(
+        &mut self,
+        page: PageIndex,
+        kind: AnnotationKind,
+    ) -> Option<AnnotationId> {
+        let mut annotation = pdfcore::annotation::Annotation::new(page, kind)?;
+        annotation.id = AnnotationId(self.next_internal_annotation_id());
+        let id = annotation.id;
+        self.annotations.insert(annotation);
+        Some(id)
+    }
+
     pub(super) fn add_annotation_with_style(
         &mut self,
         page: PageIndex,
         kind: AnnotationKind,
         style: Option<([u8; 3], f32)>,
     ) -> bool {
-        let Some(id) = self.annotations.add(page, kind) else {
+        // 时间戳/单调 id：删除注释后旧 id 不会被新注释复用，`pd-float://` 链接
+        // 才不会在重开后静默指向另一条注释。外部注释仍由读回按加载顺序分配。
+        let Some(id) = self.insert_internal_annotation(page, kind) else {
             return false;
         };
         if let Some(annotation) = self.annotations.get_mut(id) {
@@ -351,23 +401,14 @@ impl PdfReaderApp {
         {
             return false;
         }
-        let new_id = match self.annotations.add(before.page, kind) {
-            Some(id) => id,
-            None => return false,
-        };
-        if let Some(after) = self.annotations.get_mut(new_id) {
-            after.color = color;
-            after.opacity = opacity;
-            after.body = before.body.clone();
-            after.author = before.author.clone();
-            after.created = before.created;
-            after.modified = Some(unix_now());
-        }
-        let Some(after) = self.annotations.get(new_id).cloned() else {
-            self.annotations.remove(new_id);
-            return false;
-        };
-        self.annotations.remove(new_id);
+        // **保留同一个 id**：链接（pd-float://annotation/<id>）在改样式后仍然有效。
+        let mut after = before.clone();
+        after.kind = kind;
+        after.color = color;
+        after.opacity = opacity;
+        after.modified = Some(unix_now());
+        // 样式变了，写回必须重建对象；旧对象由 `deletes` 清理。
+        after.pdf_ref = None;
         self.apply_edit(AppEdit::RestyleAnnotation { before, after }, true);
         self.message = "已修改标注样式（Ctrl+Z 可撤销；外部注释暂不支持）".to_string();
         true
@@ -376,6 +417,28 @@ impl PdfReaderApp {
     /// 改颜色（旧入口，内部走 [`Self::restyle_annotation`]）。
     pub(super) fn recolor_annotation(&mut self, id: AnnotationId, color: [u8; 3]) -> bool {
         self.restyle_annotation(id, Some(color), None, None)
+    }
+
+    /// 只跳到注释位置（不打开正文浮窗）；侧栏菜单/浮窗 goto 用。
+    pub(super) fn jump_to_annotation(&mut self, id: AnnotationId) {
+        let Some(annotation) = self.annotations.get(id) else {
+            return;
+        };
+        let page = annotation.page;
+        if let Some(bounds) = annotation.bounds() {
+            self.commands.push(ViewerCommand::CenterOnPagePoint {
+                page,
+                point: bounds.center(),
+            });
+        } else {
+            self.commands.push(ViewerCommand::GoToPage(page));
+        }
+        self.annotation_focus = Some((id, self.clock.now() + ANNOTATION_FOCUS));
+        self.message = format!(
+            "已定位到注释 #{}（第 {} 页）",
+            id.get(),
+            page.display_number()
+        );
     }
 
     /// 注释右键菜单（画布与注释列表共用）：颜色、删除。
@@ -388,6 +451,23 @@ impl PdfReaderApp {
         let current_opacity = annotation.opacity;
         let current_width = annotation.kind.ink().map(|(_, width)| width);
         let is_highlight = matches!(annotation.kind, AnnotationKind::Highlight { .. });
+        let uri = self.annotation_link_uri(id);
+        let copy = ui.add_enabled(uri.is_some(), egui::Button::new("复制引用链接"));
+        let copy = if uri.is_some() {
+            copy
+        } else {
+            copy.on_disabled_hover_text("外部注释默认不可引用（可在 ? 中开启跨会话外部注释链接）")
+        };
+        if copy.clicked() {
+            if let Some(uri) = uri {
+                ui.ctx().copy_text(uri);
+                self.message = "已复制注释引用链接，可粘到正文".to_string();
+            }
+            self.context_annotation = None;
+            self.context_menu_pos = None;
+            ui.close();
+            return;
+        }
         if external {
             ui.label("外部注释暂不支持改样式（正文/删除可用）");
         } else {

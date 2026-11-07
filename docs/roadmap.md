@@ -18,7 +18,7 @@
 ## 2. 已决定但还没做
 
 推荐实现顺序：行内基线/完整布局（后者需改上游渲染器，成本高）。
-`app.rs` 拆分、Markdown 空正文双击、文本浮窗跳转已完成，见 [status.md](status.md) §2。
+`app.rs` 拆分、Markdown 空正文双击、文本/图片浮窗跳转与稳定链接已完成，见 [status.md](status.md) §2 与 [float-links.md](float-links.md)。
 
 - **Linux Wayland 文件拖放**：winit 0.30 Wayland 后端不支持；触发条件：升级 eframe/winit 或实现 Wayland data-device。
   临时 `env -u WAYLAND_DISPLAY`。目前不改。
@@ -28,6 +28,10 @@
 - **多文件拖放**：当前只打开 `dropped_files.first()`。
 - **Adobe 兼容性人工验证**：作者/时间/便签在 Acrobat 的显示与再保存（Okular 已验证）。
 - **图片预览/截图的更多来源**（目前只有页内引用点截图与手动文字/图片 preview）。
+- **引用点（dest mark）链接**：目前只链接注释/preview；若要做，可用 `DestMark.image_id` 做
+  `pd-float://dest/<id>`，但需处理“新 dest 每次打开生成新 id”和 PDF 链接表变化；
+  暂不做。
+
 - **注释正文参与页面搜索**：当前刻意不索引（`/Contents` 不在页面内容流里），侧栏搜索才覆盖。
 - **LaTeX 数学后续**：`latex-rust` 默认 SVG（PNG 可 env 回退），数学纹理按 key 缓存/淘汰已完成；
   行内基线仍受 CommonMark row 布局限制；CJK `\text{}` 依赖系统字体或 `RATEX_UNICODE_FONT`。

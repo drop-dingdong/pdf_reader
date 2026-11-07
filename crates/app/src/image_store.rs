@@ -189,6 +189,34 @@ impl ImageStore {
         self.inner.lock().map(|inner| inner.bytes).unwrap_or(0)
     }
 
+    /// 删除某个记录的全部 revision，并返回被删掉的 revision（供 `forget_image`）。
+    ///
+    /// 用于“图片 preview 被删除后，仍打开的文字浮窗里还留着 pd-img 引用”：
+    /// 下一次 owner 扫描必须重新判定不可获取，而不是继续用缓存里的旧图。
+    pub fn remove_record(&self, record_id: &str) -> Vec<u64> {
+        let Ok(mut inner) = self.inner.lock() else {
+            return Vec::new();
+        };
+        let prefix = format!("{record_id}@");
+        let keyed: Vec<(String, usize)> = inner
+            .map
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .map(|(key, png)| (key.clone(), png.len()))
+            .collect();
+        let mut removed = Vec::with_capacity(keyed.len());
+        for (key, bytes) in keyed {
+            inner.map.remove(&key);
+            inner.bytes = inner.bytes.saturating_sub(bytes);
+            if let Ok(revision) = key[prefix.len()..].parse::<u64>() {
+                removed.push(revision);
+            }
+        }
+        inner.order.retain(|key| !key.starts_with(&prefix));
+        inner.latest.remove(record_id);
+        removed
+    }
+
     /// 清空（切换文档时调用）。
     pub fn clear(&self) {
         if let Ok(mut inner) = self.inner.lock() {
@@ -378,6 +406,31 @@ mod tests {
                 revision: 7
             })
         );
+    }
+
+    #[test]
+    fn remove_record_drops_all_revisions() {
+        let store = ImageStore::default();
+        for revision in [1, 2] {
+            store.insert(
+                &ImageRef {
+                    record_id: "custom-1".to_string(),
+                    revision,
+                },
+                Arc::from(vec![revision as u8, 2, 3]),
+            );
+        }
+        assert!(store
+            .get(&ImageRef {
+                record_id: "custom-1".to_string(),
+                revision: 2
+            })
+            .is_some());
+        let mut removed = store.remove_record("custom-1");
+        removed.sort_unstable();
+        assert_eq!(removed, vec![1, 2]);
+        assert!(store.latest_revision("custom-1").is_none());
+        assert_eq!(store.bytes(), 0);
     }
 
     #[test]

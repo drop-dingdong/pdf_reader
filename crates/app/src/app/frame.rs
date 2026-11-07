@@ -466,6 +466,7 @@ impl PdfReaderApp {
         self.draw_note_dialog(&ctx);
         self.draw_custom_dialog(&ctx);
         self.draw_edit_dialogs(&ctx);
+        self.draw_external_link_dialog(&ctx);
         // 样式/视图改动不抢在拖动中写盘：指针空闲时再落一次。
         // 这里**不要**再 remember_document_view：刚打开新文档时视图还在等两帧恢复，
         // 此时记下来会把"第 1 页"写进设置，反而把上次位置覆盖掉。

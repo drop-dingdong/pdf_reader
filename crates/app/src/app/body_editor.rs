@@ -350,7 +350,7 @@ impl PdfReaderApp {
         let Some(position) = ui.ctx().pointer_interact_pos() else {
             return;
         };
-        if crate::app::floats::pointer_over_overlay(ui.ctx(), position) {
+        if crate::app::floats::pointer_over_overlay(ui.ctx(), self.canvas_layer, position) {
             return;
         }
         let Some(index) = self.topmost_float_at(position) else {

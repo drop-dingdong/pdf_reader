@@ -183,16 +183,19 @@ unsafe fn read_annotation(
         }
     };
 
-    // 用模型的构造函数做一次几何校验；顺手拿到种类默认色/透明度作回退
+    // 用模型的构造函数做一次几何校验；顺手拿到种类默认色/透明度作回退。
+    // `/NM` 同时决定“这条注释是不是本程序写的”：内部注释的显式 `/CA 1.0`
+    // 要按 100% 处理，外部注释则保留旧的兼容回退（高亮 1.0 → 0.35）。
     let model = Annotation::new(page, kind.clone())?;
-    let (color, opacity) = read_color_and_opacity(ffi, annot, &model);
+    let id = read_marker(ffi, annot);
+    let (color, opacity) = read_color_and_opacity(ffi, annot, &model, id.is_some());
 
     Some(ReadAnnotation {
         author: read_string(ffi, annot, "T"),
         created: read_string(ffi, annot, "CreationDate").and_then(|text| parse_pdf_date(&text)),
         modified: read_string(ffi, annot, "M").and_then(|text| parse_pdf_date(&text)),
         page,
-        id: read_marker(ffi, annot),
+        id,
         kind,
         color,
         opacity,
@@ -202,7 +205,10 @@ unsafe fn read_annotation(
 }
 
 /// 颜色/透明度：颜色先 `GetColor`（带 AP 时它必失败），失败再从外观流解析 `RG/rg/G/g`；
-/// 透明度**优先读显式的 `/CA`**，缺失或 =1 时按种类默认值（高亮 0.35，其它 1.0）。
+/// 透明度**优先读显式的 `/CA`**：
+/// * 内部注释（有 `pd-fr:` `/NM`）显式值优先，`1.0` 就是 100%；
+/// * 外部注释保留旧兼容规则：`/CA` 缺失或 `1.0` 时高亮按 0.35，其它按显式值；
+/// * 非高亮缺失 `/CA` 时按 1.0。
 ///
 /// 为什么不能直接用 `GetColor` 的 alpha：外部阅读器的高亮大多没有 `/CA`（或写成 1），
 /// 但 Okular 等按"高亮默认半透明"绘制；统一成我们自己的 0.35 才能和本软件的高亮一致。
@@ -210,6 +216,7 @@ unsafe fn read_color_and_opacity(
     ffi: &Ffi,
     annot: *mut c_void,
     model: &Annotation,
+    internal: bool,
 ) -> ([u8; 3], f32) {
     let mut red = 0u32;
     let mut green = 0u32;
@@ -230,7 +237,12 @@ unsafe fn read_color_and_opacity(
         AnnotationKind::Highlight { .. } => 0.35,
         _ => 1.0,
     };
+    // `/CA` 显式存在时以它为准；不能把 1.0 当成"缺省"回退到 highlight 的 0.35，
+    // 否则用户把透明度改成 100% 后保存/重开又变回 35%。
     let opacity = match explicit {
+        // 本程序写出的注释：显式值就是用户选择，100% 也保留。
+        Some(value) if internal => value.clamp(0.0, 1.0),
+        // 外部注释：继续把 1.0 当作“未显式设置”的旧兼容写法，高亮回退 0.35。
         Some(value) if value < 0.999 => value.clamp(0.0, 1.0),
         _ => fallback,
     };
