@@ -286,6 +286,8 @@ impl PdfReaderApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                // 行宽在整个列表里固定；否则行内容/光标变化会让右侧 ⋯ 逐行漂移。
+                let row_width = ui.available_width();
                 for row in rows {
                     let AnnotationRow {
                         page,
@@ -336,9 +338,10 @@ impl PdfReaderApp {
                     // 与 preview 行一致：先按整行宽度占位，再在行内做交互；
                     // 不再嵌套 `ui.horizontal`，否则 available_width 会随文字宽度变化，
                     // 右侧 ⋯ 每行越挪越靠右。
-                    let width = ui.available_width();
-                    let (row_rect, _) = ui
-                        .allocate_exact_size(EVec2::new(width, OUTLINE_ROW_HEIGHT), Sense::hover());
+                    let (row_rect, _) = ui.allocate_exact_size(
+                        EVec2::new(row_width, OUTLINE_ROW_HEIGHT),
+                        Sense::hover(),
+                    );
                     let rect =
                         egui::Rect::from_min_max(row_rect.min + EVec2::new(8.0, 0.0), row_rect.max);
                     let response = ui.interact(
@@ -372,7 +375,11 @@ impl PdfReaderApp {
                         egui::pos2(rect.max.x - 10.0, rect.center().y),
                         EVec2::new(menu_width, OUTLINE_ROW_HEIGHT),
                     );
-                    let menu_response = ui.put(menu_rect, egui::Button::new("").frame(false));
+                    let menu_response = ui.interact(
+                        menu_rect,
+                        Id::unique(("annotation-more", id.get())),
+                        Sense::click(),
+                    );
                     let color = if menu_response.hovered() {
                         ui.visuals().strong_text_color()
                     } else {
@@ -489,6 +496,7 @@ impl PdfReaderApp {
         let mut hovered: Option<(usize, egui::Rect)> = None;
         let count = self.custom_previews.len();
         egui::ScrollArea::vertical().show_rows(ui, row_height, count, |ui, range| {
+            let row_width = ui.available_width();
             for index in range {
                 let Some(preview) = self.custom_previews.get(index) else {
                     continue;
@@ -507,9 +515,8 @@ impl PdfReaderApp {
 
                 // 1) 先占位（整行宽度），2) 再画，3) 最后在该矩形上注册交互。
                 // 顺序很重要：交互最后注册才会盖在内容之上、稳定收到点击。
-                let width = ui.available_width();
                 let (rect, _) =
-                    ui.allocate_exact_size(EVec2::new(width, row_height), Sense::hover());
+                    ui.allocate_exact_size(EVec2::new(row_width, row_height), Sense::hover());
                 let response = ui.interact(rect, Id::unique(("pin-row", index)), Sense::click());
                 if response.hovered() {
                     ui.painter().rect_filled(
@@ -575,7 +582,11 @@ impl PdfReaderApp {
                     egui::pos2(rect.max.x - 10.0, rect.center().y),
                     EVec2::new(menu_width, row_height),
                 );
-                let menu_response = ui.put(menu_rect, egui::Button::new("").frame(false));
+                let menu_response = ui.interact(
+                    menu_rect,
+                    Id::unique(("preview-more", index)),
+                    Sense::click(),
+                );
                 let color = if menu_response.hovered() {
                     ui.visuals().strong_text_color()
                 } else {
