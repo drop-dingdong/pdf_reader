@@ -167,6 +167,13 @@ pub enum Action {
         /// 目标透明度（0–1）。
         value: f32,
     },
+    /// 给指定 dest mark 塞一张测试用白色快照（避免回放等待真实渲染）。
+    SeedDestSnapshot {
+        /// 页号（0 起）。
+        page: u32,
+        /// 该页 dest mark 下标。
+        index: usize,
+    },
     /// 保存所有有改动的文件（等价于点"保存"或 Ctrl+S）。
     Save,
     /// 撤销一步（等价于 Ctrl+Z）。
@@ -199,6 +206,7 @@ impl Action {
             Self::SeedInk { .. } => "seed_ink",
             Self::Highlight { .. } => "highlight",
             Self::Opacity { .. } => "opacity",
+            Self::SeedDestSnapshot { .. } => "seed_dest_snapshot",
             Self::Save => "save",
             Self::Undo => "undo",
             Self::Redo => "redo",
@@ -248,6 +256,9 @@ impl Action {
                 format!("highlight p{page} ({x},{y},{width},{height})")
             }
             Self::Opacity { value } => format!("opacity {value:.2}"),
+            Self::SeedDestSnapshot { page, index } => {
+                format!("seed_dest_snapshot p{page} #{index}")
+            }
             Self::Save => "save".to_string(),
             Self::Undo => "undo".to_string(),
             Self::Redo => "redo".to_string(),
@@ -697,6 +708,10 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
             },
             "opacity" => Action::Opacity {
                 value: number("value")?,
+            },
+            "seed_dest_snapshot" => Action::SeedDestSnapshot {
+                page: number("page")? as u32,
+                index: number("index").unwrap_or(0.0) as usize,
             },
             "save" => Action::Save,
             "undo" => Action::Undo,
@@ -1323,6 +1338,21 @@ impl Harness {
             }
             return;
         }
+        if let Action::SeedDestSnapshot { page, index } = action {
+            let texture = self.ctx.load_texture(
+                format!("seed-dest-{page}-{index}"),
+                egui::ColorImage::new([32, 32], vec![egui::Color32::WHITE; 32 * 32]),
+                egui::TextureOptions::LINEAR,
+            );
+            if let Some(mark) = app
+                .dest_marks
+                .get_mut(*page as usize)
+                .and_then(|marks| marks.get_mut(*index))
+            {
+                mark.snapshot = Some(texture);
+            }
+            return;
+        }
         if let Action::Opacity { value } = action {
             if let Some(id) = app
                 .annotations
@@ -1393,6 +1423,7 @@ impl Harness {
             | Action::SetTool { .. }
             | Action::SeedInk { .. }
             | Action::Opacity { .. }
+            | Action::SeedDestSnapshot { .. }
             | Action::Save => {}
             Action::HoverLink { .. } | Action::Unhover => {
                 // 指针位置必须走 egui 的输入事件：在 `run_frame` 里按帧重放

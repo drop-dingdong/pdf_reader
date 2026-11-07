@@ -84,7 +84,7 @@ pd-float://preview/<page>/<id>        preview 旧写法（兼容；id 是每页�
 | 文字 preview（`Custom` + Text） | ✅ | 稳定记录 id |
 | 图片 preview（`Custom` + Image） | ✅ | 稳定记录 id（`image_id`） |
 | 注释浮窗（`Annotation`） | ✅ 仅内部注释 | `/NM`；外部注释按 §3.2 |
-| 引用点浮窗（`None` + `origin`） | ❌ | 由 PDF 导航表派生；未来可用 `DestMark.image_id` 做 `pd-float://dest/...` |
+| 引用点浮窗（`None` + `origin`） | ❌ 链接；✅ `→` goto | 由 PDF 导航表派生；`→` 去 `DestMark.point`；未来可用 `DestMark.image_id` 做 `pd-float://dest/...` |
 | 截图结果/测试浮窗（`None`） | ❌ | 没有持久目标 |
 
 > “引用点浮窗是派生的”指它的**生命周期来自 PDF 导航表**（打开时重建，sidecar 只保存覆盖值），

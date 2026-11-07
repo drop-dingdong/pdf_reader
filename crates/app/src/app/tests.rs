@@ -2316,6 +2316,27 @@ mod float_link_tests {
     }
 
     #[test]
+    fn dest_float_gets_goto_but_no_link() {
+        let mut app = app();
+        let page = PageIndex::FIRST;
+        let point = Point::new(10.0, 20.0);
+        app.dest_marks = vec![vec![DestMark {
+            point,
+            rect: Rect::new(10.0, 20.0, 120.0, 80.0),
+            snapshot: None,
+            body_size: egui::vec2(120.0, 80.0),
+            scale: 1.0,
+            image_id: String::new(),
+            image_revision: 0,
+        }]];
+        let mut window = text_float(1, FloatOwner::None, "引用点");
+        window.origin = Some((page, 0));
+        app.floats.push(window);
+        assert_eq!(app.float_goto_target(0), Some((page, point)));
+        assert_eq!(app.float_link_uri(0), None, "dest 暂不提供链接复制");
+    }
+
+    #[test]
     fn annotation_link_uri_round_trips_and_reuses_the_click_helper() {
         let mut app = app();
         app.add_annotation(

@@ -976,26 +976,48 @@ impl PdfReaderApp {
                 StrokeKind::Inside,
             );
             painter.rect_filled(title_rect, CornerRadius::same(4), title_color);
-            // 文字浮窗的引用链接 / goto 目标（按钮在标题右侧，标题按数量预留宽度）。
-            // 可链接的是“持久记录”的浮窗：注释、文字/图片 preview。
-            // 引用点/截图/测试浮窗是派生视图，没有稳定记录 id。
-            let linkable = matches!(
-                self.floats[index].owner,
-                FloatOwner::Annotation(_) | FloatOwner::Custom(_)
-            );
-            let link_uri = if linkable {
+            // 标题栏按钮按固定槽位排：close（固定）→ 主按钮 → link → goto。
+            // 主按钮是 edit（文字浮窗）或 @（图片 preview）；dest 浮窗没有主按钮，
+            // 只有 close + goto，因此 goto 直接占第一槽，不留空洞。
+            let owner = self.floats[index].owner;
+            let editable = text_float_is_editable(owner, &self.floats[index].content);
+            let image_at = self.floats[index]
+                .custom_index()
+                .and_then(|index| self.custom_previews.get(index))
+                .is_some_and(|preview| {
+                    preview.kind == CustomKind::Image && !preview.image_id.is_empty()
+                });
+            let has_primary = editable || image_at;
+            let link_uri = if matches!(owner, FloatOwner::Annotation(_) | FloatOwner::Custom(_)) {
                 self.float_link_uri(index)
             } else {
                 None
             };
-            let goto_target = if linkable {
-                self.float_goto_target(index)
-            } else {
-                None
+            let goto_target = match owner {
+                FloatOwner::Annotation(_) | FloatOwner::Custom(_) => self.float_goto_target(index),
+                // dest 浮窗：owner=None + origin 指向被引用点；截图/测试浮窗没有 origin。
+                FloatOwner::None if self.floats[index].origin.is_some() => {
+                    self.float_goto_target(index)
+                }
+                FloatOwner::None => None,
             };
-            let reserved = 54.0
-                + if link_uri.is_some() { 26.0 } else { 0.0 }
-                + if goto_target.is_some() { 26.0 } else { 0.0 };
+            let mut button_count = usize::from(has_primary)
+                + usize::from(link_uri.is_some())
+                + usize::from(goto_target.is_some());
+            button_count = button_count.max(1);
+            let reserved = 54.0 + 26.0 * (button_count.saturating_sub(1)) as f32;
+            let link_center_x = if has_primary {
+                close_center.x - 52.0
+            } else {
+                close_center.x - 26.0
+            };
+            let goto_center_x = if link_uri.is_some() {
+                link_center_x - 26.0
+            } else if has_primary {
+                close_center.x - 52.0
+            } else {
+                close_center.x - 26.0
+            };
             // 标题：**单行截断**（长标题不再压到关闭按钮上）
             let title_font = egui::FontId::proportional(13.0);
             let title_job = overflow_layout(
@@ -1052,8 +1074,6 @@ impl PdfReaderApp {
             }
             // 标题栏编辑按钮：双击正文在 Markdown 模式下可能被文字选择/链接抢走，
             // 这里提供一个稳定入口；图标与侧栏 Pin 条目的「编辑标题」一致。
-            let editable =
-                text_float_is_editable(self.floats[index].owner, &self.floats[index].content);
             if editable && self.editing_body.is_none() {
                 let edit_center = egui::pos2(close_center.x - 26.0, title_rect.center().y);
                 let edit_rect = egui::Rect::from_center_size(edit_center, EVec2::splat(18.0));
@@ -1081,7 +1101,7 @@ impl PdfReaderApp {
             }
             // 浮窗：复制 `pd-float://` 引用链接（注释/文字/图片 preview）。
             if let Some(uri) = link_uri {
-                let center = egui::pos2(close_center.x - 52.0, title_rect.center().y);
+                let center = egui::pos2(link_center_x, title_rect.center().y);
                 let button_rect = egui::Rect::from_center_size(center, EVec2::splat(18.0));
                 let response =
                     ui.interact(button_rect, Id::unique(("float-link", id)), Sense::click());
@@ -1103,7 +1123,7 @@ impl PdfReaderApp {
             }
             // 浮窗：跳到来源页/位置（与侧栏菜单同一动作）。
             if let Some((page, point)) = goto_target {
-                let center = egui::pos2(close_center.x - 78.0, title_rect.center().y);
+                let center = egui::pos2(goto_center_x, title_rect.center().y);
                 let button_rect = egui::Rect::from_center_size(center, EVec2::splat(18.0));
                 let response =
                     ui.interact(button_rect, Id::unique(("float-goto", id)), Sense::click());

@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-07　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（523 个测试）。
+> 快照：2026-11-07　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（525 个测试）。
 
 ## 1. 它是什么
 
@@ -68,6 +68,9 @@
   无行为变化。
 - **UI 样式共识（未实施）**：新增按钮/侧栏行/图标/主题颜色的约定落在
   [ui-standards.md](ui-standards.md)；当前代码仍使用部分 Unicode 图标和未统一侧栏行。
+- **UI 第一步：hover 固定 + dest goto**：链接 hover 的临时预览在按下帧不再被
+  `using_pointer` 清掉，点击/拖动可固定；引用点/dest 浮窗增加 `→`，目标为
+  `DestMark.point`（不是截图 rect 中心），仍不提供 `↗`。新增回放回归与单测。
 - **图片可获取性重检**：文字浮窗引用的 `pd-img` 每次 owner 扫描都重新判定来源
   preview/dest 是否还在；来源被删时清掉 `ImageStore` 的旧 revision 并 `forget_image`，
   不再继续显示缓存里的已删除图片。

@@ -24,13 +24,18 @@ impl PdfReaderApp {
 
         // 统一归属：画布内的链接 hover 也必须先排除编辑窗口/弹层/面板/浮窗。
         // 之前只判断了滚动、浮窗和画墨迹，编辑窗口盖住的链接仍会触发临时预览。
+        //
+        // 例外：指针按在**临时预览自身**上时必须保留 hover_tip，否则按下帧就把
+        // tip 清掉，release 时 `draw_hover_preview` 看不到它，点击无法固定。
+        let over_tip = pointer.is_some_and(|position| {
+            self.hover_tip
+                .as_ref()
+                .and_then(|tip| tip.rect)
+                .is_some_and(|rect| rect.contains(position))
+        });
+        let pointer_down = ui.input(|input| input.pointer.any_down());
         let pointer_allowed = pointer.is_some_and(|position| {
-            self.canvas_hover_allowed(
-                ui.ctx(),
-                canvas,
-                position,
-                ui.input(|input| input.pointer.any_down()),
-            )
+            self.canvas_hover_allowed(ui.ctx(), canvas, position, pointer_down && !over_tip)
         });
         if !pointer_allowed {
             self.hover_tip = None;

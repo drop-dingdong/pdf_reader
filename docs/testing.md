@@ -28,7 +28,7 @@ cargo test -p pdfcore --lib tiling   # 单模块
 | UI 联调 | `crates/app/tests/*.rs` | 真实 `DocumentSession` + `view`、注释往返、replay 脚本、CLI 写回 |
 | 回放 | `crates/app/src/app/replay.rs` + `scripts/replay/` | 驱动真实 `App::ui`，逐帧检查绘制输出 |
 
-测试数量会变，以 `cargo test` 输出为准；当前 523 个。
+测试数量会变，以 `cargo test` 输出为准；当前 525 个。
 
 ## 3. 基础设施
 
@@ -133,6 +133,8 @@ cargo run -p app -- --replay scripts/replay/tiling_800.json --timing
 | 15l | 把高亮透明度改成 100%，保存并重开 | 重开后仍是 100%，不是 35%；其它透明度值同样保持 |
 | 15n | 打开一份由其它阅读器写出的高亮（显式 `/CA 1.0` 或无 `/CA`） | 仍按旧的 35% 兼容显示；本程序自己保存的 100% 高亮显示 100% |
 | 15m | 编辑窗口盖住带链接 hover 的画布，移动指针到链接上 | 不出现链接 hover/临时预览；也不触发点击链接/注释/选字 |
+| 15o | 链接 hover 出现临时预览后，单击/拖动预览 | 固定为正式浮窗；不新建重复浮窗 |
+| 15p | 引用点/dest 浮窗标题栏 `→` | 跳到链接目的地 point（不是截图 rect 中心）；没有 `↗` |
 | 16 | 保存 → 重开 → Okular 查看 | 注释可见可改；id 不重复；再保存不叠对象 |
 | 17 | 移动墨迹 → 保存 → 撤销 → 保存 | 回到原位（不消失）；重做回移动位置 |
 | 18 | 保存后 Okular 修改正文/便签，再回本程序保存 | 修改保留；同一 id 取最后一份 |
