@@ -1,11 +1,13 @@
 # Phase 3 评估：`PdfReaderApp` 状态分组
 
-> 状态：2026-11-07 评估；**RuntimeState、SaveFlowState 已实施，其余两组未实施**。
+> 状态：2026-11-07 评估；**RuntimeState、SaveFlowState、MarkdownState 已实施，
+> AnnotationPdfState 未实施**。
 > 当前行为以 [architecture.md](architecture.md) / [app-ui.md](app-ui.md) 为准。
 
 ## 1. 结论摘要
 
-`PdfReaderApp` 当前约 **133 个字段**（RuntimeState 收 14 个、SaveFlowState 收 14 个），
+`PdfReaderApp` 当前约 **125 个字段**（RuntimeState 14 个、SaveFlowState 14 个、
+MarkdownState 9 个），
 但 `app.rs` 已经拆成 20 多个子模块；
 真正的维护成本不在“单文件太长”，而在：
 
@@ -15,7 +17,8 @@
 - 大量测试直接访问 `app.floats` / `app.annotations` / `app.custom_previews`。
 
 **建议：只做“目标分组”（Runtime / SaveFlow / Markdown / AnnotationPdf 四组），
-不做全量多级状态树。** RuntimeState、SaveFlowState 已完成，下一组是 MarkdownState。
+不做全量多级状态树。** RuntimeState、SaveFlowState、MarkdownState 已完成，
+下一组是 AnnotationPdfState。
 全量分组的收益主要是字段数量好看，代价是大量 `self.` 路径、借用冲突和测试改动；
 当前不划算。
 
@@ -23,7 +26,7 @@
 
 1. `RuntimeState`（诊断/时间/上一帧观察值）——最低风险；
 2. `SaveFlowState`（另存为/整理副本/关闭确认）——低风险；
-3. `MarkdownState`（Markdown/数学/图片缓存）——中等，需处理借用；
+3. ~~`MarkdownState`（Markdown/数学/图片缓存）——已完成；~~
 4. `AnnotationPdfState`（对象号/读回/内外注释簿记）——中等偏高，测试最多。
 
 `session`、`floats`、`annotations`、`custom_previews`、`settings` 这些热点字段
@@ -33,7 +36,7 @@
 
 | 指标 | 当前 |
 | --- | --- |
-| `PdfReaderApp` 字段 | 约 133（RuntimeState + SaveFlowState 各收 14 个） |
+| `PdfReaderApp` 字段 | 约 125（Runtime 14 + SaveFlow 14 + Markdown 9） |
 | `app.rs` | 状态/构造/`App::ui` 入口，约 0.6k 行 |
 | `app/*` 子模块 | 约 16.7k 行（含 tests/replay） |
 | 最大业务模块 | `floats.rs` ~1.5k、`model.rs` ~1.1k、`dialogs.rs` ~0.8k |
@@ -214,16 +217,17 @@ app.markdown_floats...
    已完成：`app/state.rs`，顶层字段 159 → 146，523 测试通过。
 2. ~~`SaveFlowState`：另存为/整理/关闭确认；确认 `Settings` 序列化不变。~~
    已完成：`app/state.rs`，顶层字段 146 → 133，523 测试通过。
-3. **搬 `MarkdownState`**：先搬缓存字段，保留 `markdown_floats` 等设置值在顶层；
-   处理 `ensure_markdown_image_owners` 的借用；提交。
+3. ~~`MarkdownState`：搬 Markdown/数学/图片缓存，保留 `markdown_floats` 等设置值在顶层；
+   处理 `ensure_markdown_image_owners` 的借用。~~
+   已完成：`MarkdownState`，顶层字段 133 → 125，523 测试通过。
 4. **搬 `AnnotationPdfState`**：对象号/读回/内联/`pdf_ref_ids`；`merge_readback`、
    `pdf_ref_changes` 相关测试全部跑；提交。
 5. 每步只做字段移动，不顺手改行为；文档随该步更新状态。
 
 ## 7. 决策与触发条件
 
-**当前建议：不做全量 Phase 3；RuntimeState、SaveFlowState 已完成，剩余组按收益逐步做。**
-如果维护痛点继续出现，按 B 的 3–4 步继续；做到哪一步由收益决定。
+**当前建议：不做全量 Phase 3；RuntimeState、SaveFlowState、MarkdownState 已完成，
+剩余 AnnotationPdfState 按收益决定是否继续。** 如果维护痛点继续出现，按 B 的第 4 步做。
 
 触发条件：
 

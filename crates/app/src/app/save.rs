@@ -115,30 +115,30 @@ impl PdfReaderApp {
             self.message = "先打开一个 PDF 再导出".to_string();
             return;
         };
-        let rows: Vec<crate::annotations_md::Row> =
-            self.annotations
-                .iter()
-                .map(|annotation| {
-                    let (kind, _) = annotation_kind_label(&annotation.kind);
-                    let bounds = annotation.bounds();
-                    let external = self.external_ids.contains(&annotation.id);
-                    crate::annotations_md::Row {
-                        page: annotation.page.get(),
-                        y: bounds.map(|rect| rect.y).unwrap_or(0.0),
-                        x: bounds.map(|rect| rect.x).unwrap_or(0.0),
-                        id: annotation.id.get(),
-                        kind,
-                        author: annotation.author.clone(),
-                        created: annotation.created,
-                        modified: annotation.modified,
-                        body: annotation.body.as_ref().map(|body| {
-                            crate::image_store::materialize_markdown(body, &self.images)
-                        }),
-                        external,
-                        readonly: external && annotation.pdf_ref.is_none(),
-                    }
-                })
-                .collect();
+        let rows: Vec<crate::annotations_md::Row> = self
+            .annotations
+            .iter()
+            .map(|annotation| {
+                let (kind, _) = annotation_kind_label(&annotation.kind);
+                let bounds = annotation.bounds();
+                let external = self.external_ids.contains(&annotation.id);
+                crate::annotations_md::Row {
+                    page: annotation.page.get(),
+                    y: bounds.map(|rect| rect.y).unwrap_or(0.0),
+                    x: bounds.map(|rect| rect.x).unwrap_or(0.0),
+                    id: annotation.id.get(),
+                    kind,
+                    author: annotation.author.clone(),
+                    created: annotation.created,
+                    modified: annotation.modified,
+                    body: annotation.body.as_ref().map(|body| {
+                        crate::image_store::materialize_markdown(body, &self.markdown.images)
+                    }),
+                    external,
+                    readonly: external && annotation.pdf_ref.is_none(),
+                }
+            })
+            .collect();
         if rows.is_empty() {
             self.message = "没有可导出的注释".to_string();
             return;

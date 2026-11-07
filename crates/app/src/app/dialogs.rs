@@ -468,7 +468,7 @@ impl PdfReaderApp {
         if !self.math_help {
             return;
         }
-        let caps = self.math_cache.borrow().capabilities();
+        let caps = self.markdown.math_cache.borrow().capabilities();
         let mut open = true;
         egui::Window::new("Markdown 与数学支持")
             .id(Id::unique("math-help"))
@@ -574,7 +574,7 @@ impl PdfReaderApp {
                         ui.label("失败时显示原文，并在状态栏提示原因；其他消息会直接顶替。");
                         ui.label(format!(
                             "当前缓存 {} 条；超过 64 条会整体清空。",
-                            self.math_cache.borrow().len()
+                            self.markdown.math_cache.borrow().len()
                         ));
                     });
             });

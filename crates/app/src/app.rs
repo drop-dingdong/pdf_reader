@@ -46,7 +46,7 @@ mod toolbar;
 use crate::view::{commands_for_destination, outline_node_count, Desired, KeyedStore, PlanStamp};
 pub(super) use model::*;
 use paint::*;
-use state::{RuntimeState, SaveFlowState};
+use state::{MarkdownState, RuntimeState, SaveFlowState};
 
 /// 应用状态。
 pub struct PdfReaderApp {
@@ -272,33 +272,14 @@ pub struct PdfReaderApp {
     document_load_token: u64,
     /// 等待用户确认的外部注释链接（属性不足以完全验证时）。
     pending_external_link: Option<PendingExternalLink>,
-    /// hover Markdown 专用的解析/标题缓存。
-    hover_markdown_cache: egui_commonmark::CommonMarkCache,
-    /// 当前 hover Markdown 对应的 preview 下标；变化时清缓存。
-    hover_markdown_index: Option<usize>,
-    /// egui_commonmark 的排版/图片缓存（每个浮窗用稳定的 `Id` 区分）。
-    /// 每个浮窗独立的 Markdown 缓存：锚点位置不能跨浮窗共享。
-    markdown_caches: std::collections::HashMap<u64, egui_commonmark::CommonMarkCache>,
-    /// 每个 Markdown 浮窗上一帧的滚动偏移/内容尺寸，用于把双击位置映射回源码。
-    markdown_viewports: std::collections::HashMap<u64, (egui::Vec2, egui::Vec2)>,
-    /// 每个浮窗的 Markdown 预处理缓存（按源文本哈希失效）。
-    markdown_prepared: std::collections::HashMap<u64, PreparedMarkdown>,
     /// 拖入文件 hover 日志只打一次，避免 Wayland 调度每帧刷屏。
     drag_hover_logged: bool,
-    /// LaTeX 公式的 PNG 纹理缓存与内嵌字体（全局共用）。
-    math_cache: std::rc::Rc<std::cell::RefCell<crate::math::MathCache>>,
     /// 数学公式支持/限制帮助窗口是否打开。
     math_help: bool,
-    /// Markdown 内部图片的 PNG 字节缓存。
-    images: crate::image_store::ImageStore,
-    /// 保存正文后，下一帧把公式错误合并到“已更新内容”提示里。
-    math_recheck_pending: bool,
     /// 正文编辑会话号：每次打开换一个 ScrollArea id，避免不同文本继承滚动位置。
     body_edit_session: u64,
     /// 首次打开编辑器时要放置的字符光标（双击位置映射；✎ 为 0）。
     body_edit_cursor: Option<usize>,
-    /// 本帧是否有 Markdown 浮窗渲染过；用于把外部链接的 `OpenUrl` 改成状态栏提示。
-    markdown_rendered: bool,
     /// 侧栏 Pin 列表里正在被悬浮的条目（下标 + 该行的屏幕矩形，用于定位临时浮窗）。
     custom_hover: Option<(usize, egui::Rect)>,
     /// 上一帧主视图（画布）的矩形：侧栏先于画布绘制，用它给浮窗定位。
@@ -309,6 +290,8 @@ pub struct PdfReaderApp {
     runtime: RuntimeState,
     /// 保存/关闭流程的对话框与一次性状态。
     save_flow: SaveFlowState,
+    /// Markdown/数学/内部图片的会话内缓存。
+    markdown: MarkdownState,
     /// 点击 Pin 条目后的一次性高亮（浮窗 id + 截止时刻）。
     click_highlight: Option<(u64, std::time::Instant)>,
     /// 状态栏文本与错误提示。
@@ -502,24 +485,16 @@ impl PdfReaderApp {
             allow_external_annotation_links: ui_settings.allow_external_annotation_links,
             document_load_token: 0,
             pending_external_link: None,
-            hover_markdown_cache: egui_commonmark::CommonMarkCache::default(),
-            hover_markdown_index: None,
-            markdown_caches: std::collections::HashMap::new(),
-            markdown_viewports: std::collections::HashMap::new(),
-            markdown_prepared: std::collections::HashMap::new(),
             drag_hover_logged: false,
-            math_cache: std::rc::Rc::new(std::cell::RefCell::new(crate::math::MathCache::new())),
             math_help: false,
-            images: crate::image_store::ImageStore::default(),
-            math_recheck_pending: false,
             body_edit_session: 1,
             body_edit_cursor: None,
-            markdown_rendered: false,
             custom_hover: None,
             canvas_rect: egui::Rect::NOTHING,
             canvas_layer: egui::LayerId::background(),
             runtime: RuntimeState::new(clock, diag),
             save_flow: SaveFlowState::default(),
+            markdown: MarkdownState::default(),
             click_highlight: None,
             message: String::new(),
             error: None,

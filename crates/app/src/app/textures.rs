@@ -337,7 +337,7 @@ impl PdfReaderApp {
         }
         if let Some(image_ref) = image_ref {
             if let Some(png) = crate::image_store::encode_png(&image) {
-                self.images.insert(&image_ref, png);
+                self.markdown.images.insert(&image_ref, png);
                 ui.ctx().forget_image(&crate::image_store::image_uri(
                     &image_ref.record_id,
                     image_ref.revision,

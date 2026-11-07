@@ -65,7 +65,8 @@ impl PdfReaderApp {
             if let FloatContent::Text(text) = &window.content {
                 if !text.is_empty() {
                     let cached = self
-                        .markdown_prepared
+                        .markdown
+                        .prepared
                         .get(&window.id)
                         .filter(|prepared| prepared.source_hash == markdown_source_hash(text));
                     let image_refs = cached
@@ -105,7 +106,7 @@ impl PdfReaderApp {
                     .any(|mark| mark.image_id == reference.record_id)
             });
             if !has_owner {
-                for revision in self.images.remove_record(&reference.record_id) {
+                for revision in self.markdown.images.remove_record(&reference.record_id) {
                     ui.ctx().forget_image(&crate::image_store::image_uri(
                         &reference.record_id,
                         revision,
@@ -133,14 +134,15 @@ impl PdfReaderApp {
                     record_id: preview.image_id.clone(),
                     revision: preview.image_revision,
                 };
-                self.images
+                self.markdown
+                    .images
                     .set_revision(&current.record_id, current.revision);
-                if current == reference && self.images.get(&reference).is_some() {
+                if current == reference && self.markdown.images.get(&reference).is_some() {
                     continue;
                 }
                 if current != reference {
-                    if let Some(png) = self.images.get(&current) {
-                        self.images.insert(&reference, png);
+                    if let Some(png) = self.markdown.images.get(&current) {
+                        self.markdown.images.insert(&reference, png);
                         ui.ctx().forget_image(&crate::image_store::image_uri(
                             &reference.record_id,
                             reference.revision,
@@ -158,8 +160,8 @@ impl PdfReaderApp {
                 // 旧 Markdown 引用可能还带旧 revision：把当前图作为别名登记，
                 // 避免改正文；下次编辑/导出时可再迁移 URI。
                 if current != reference {
-                    if let Some(png) = self.images.get(&current) {
-                        self.images.insert(&reference, png);
+                    if let Some(png) = self.markdown.images.get(&current) {
+                        self.markdown.images.insert(&reference, png);
                         ui.ctx().forget_image(&crate::image_store::image_uri(
                             &reference.record_id,
                             reference.revision,
@@ -197,14 +199,15 @@ impl PdfReaderApp {
                     record_id: image_id.clone(),
                     revision,
                 };
-                self.images
+                self.markdown
+                    .images
                     .set_revision(&current.record_id, current.revision);
-                if current == reference && self.images.get(&reference).is_some() {
+                if current == reference && self.markdown.images.get(&reference).is_some() {
                     continue;
                 }
                 if current != reference {
-                    if let Some(png) = self.images.get(&current) {
-                        self.images.insert(&reference, png);
+                    if let Some(png) = self.markdown.images.get(&current) {
+                        self.markdown.images.insert(&reference, png);
                         ui.ctx().forget_image(&crate::image_store::image_uri(
                             &reference.record_id,
                             reference.revision,
@@ -242,8 +245,8 @@ impl PdfReaderApp {
                     }
                 }
                 if current != reference {
-                    if let Some(png) = self.images.get(&register) {
-                        self.images.insert(&reference, png);
+                    if let Some(png) = self.markdown.images.get(&register) {
+                        self.markdown.images.insert(&reference, png);
                         ui.ctx().forget_image(&crate::image_store::image_uri(
                             &reference.record_id,
                             reference.revision,
@@ -787,9 +790,9 @@ impl PdfReaderApp {
             .find(|window| window.id == id)
             .map(|w| w.owner);
         self.floats.retain(|window| window.id != id);
-        self.markdown_caches.remove(&id);
-        self.markdown_viewports.remove(&id);
-        self.markdown_prepared.remove(&id);
+        self.markdown.caches.remove(&id);
+        self.markdown.viewports.remove(&id);
+        self.markdown.prepared.remove(&id);
         if owner.is_some() && self.body_edit_owner() == owner {
             self.editing_body = None;
         }
@@ -802,7 +805,7 @@ impl PdfReaderApp {
     /// （用户要求"后出现的浮窗更高"）。子区域（标题栏/把手/关闭按钮）在主提之后注册，
     /// 因此优先于主体，不会被主体吞掉。
     pub(super) fn draw_floats(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
-        self.markdown_rendered = false;
+        self.markdown.rendered = false;
         if self.floats.is_empty() {
             return;
         }
@@ -1205,7 +1208,7 @@ impl PdfReaderApp {
     pub(super) fn ensure_image_loaders(&self, ctx: &egui::Context) {
         if !ctx.is_loader_installed(crate::image_store::InternalImageLoader::ID) {
             ctx.add_bytes_loader(std::sync::Arc::new(
-                crate::image_store::InternalImageLoader::new(self.images.clone()),
+                crate::image_store::InternalImageLoader::new(self.markdown.images.clone()),
             ));
         }
         egui_extras::install_image_loaders(ctx);
@@ -1213,8 +1216,8 @@ impl PdfReaderApp {
 
     /// 取走公式后端的首次失败错误，写入状态栏（短暂提示，后续消息可顶替）。
     pub(super) fn take_math_error(&mut self) {
-        let after_save = std::mem::take(&mut self.math_recheck_pending);
-        if let Some(error) = self.math_cache.borrow_mut().take_error() {
+        let after_save = std::mem::take(&mut self.markdown.math_recheck_pending);
+        if let Some(error) = self.markdown.math_cache.borrow_mut().take_error() {
             let line = error.status_line();
             self.message = if after_save {
                 format!("已更新内容；{line}")
@@ -1231,10 +1234,10 @@ impl PdfReaderApp {
     /// `egui_commonmark` 没有链接钩子的情况下，这是官方文档给出的检查方式
     /// （`ctx.output_mut` 遍历 `OutputCommand::OpenUrl`）。
     pub(super) fn consume_markdown_links(&mut self, ctx: &egui::Context) {
-        if !self.markdown_rendered {
+        if !self.markdown.rendered {
             return;
         }
-        self.markdown_rendered = false;
+        self.markdown.rendered = false;
         let mut opened = Vec::new();
         ctx.output_mut(|output| {
             output.commands.retain(|command| match command {
@@ -1342,7 +1345,8 @@ impl PdfReaderApp {
                     rect.max - EVec2::new(18.0, 16.0),
                 );
                 let viewport = self
-                    .markdown_viewports
+                    .markdown
+                    .viewports
                     .get(&self.floats[index].id)
                     .copied()
                     .unwrap_or((egui::Vec2::ZERO, egui::Vec2::ZERO));
@@ -1371,7 +1375,7 @@ impl PdfReaderApp {
                 if text.is_empty() {
                     // 空正文没有 CommonMark 内容；不创建 ScrollArea（它会吞掉双击），
                     // 用一个明确的正文点击层作为唯一响应。
-                    self.markdown_rendered = true;
+                    self.markdown.rendered = true;
                     if body_area.width() > 0.0 && body_area.height() > 0.0 {
                         let hit = ui.interact(
                             body_area,
@@ -1385,7 +1389,7 @@ impl PdfReaderApp {
                     }
                 } else if body_area.width() > 0.0 && body_area.height() > 0.0 {
                     let source_hash = markdown_source_hash(text);
-                    let prepared = self.markdown_prepared.remove(&id);
+                    let prepared = self.markdown.prepared.remove(&id);
                     let prepared = match prepared {
                         Some(prepared) if prepared.source_hash == source_hash => prepared,
                         _ => {
@@ -1424,9 +1428,9 @@ impl PdfReaderApp {
                     let min_width = prepared.min_width;
                     let text = crate::image_store::canonicalize_markdown(
                         &prepared.normalized,
-                        &self.images,
+                        &self.markdown.images,
                     );
-                    self.markdown_prepared.insert(id, prepared);
+                    self.markdown.prepared.insert(id, prepared);
                     let view_id = Id::unique(("float-md", id));
                     let default_width = if min_width > body_area.width() {
                         Some(
@@ -1437,7 +1441,7 @@ impl PdfReaderApp {
                     } else {
                         None
                     };
-                    let mut md_cache = self.markdown_caches.remove(&id).unwrap_or_default();
+                    let mut md_cache = self.markdown.caches.remove(&id).unwrap_or_default();
                     ui.scope_builder(
                         egui::UiBuilder::new().max_rect(body_area).id_salt(view_id),
                         |ui| {
@@ -1451,7 +1455,7 @@ impl PdfReaderApp {
                             ui.spacing_mut().item_spacing = EVec2::new(0.0, 4.0);
                             // 数学公式走 render_math_fn（egui_commonmark 会在
                             // 有回调时启用 ENABLE_MATH）；缓存按公式/行内/DPI。
-                            let math_cache = self.math_cache.clone();
+                            let math_cache = self.markdown.math_cache.clone();
                             let math_fn = move |ui: &mut egui::Ui, tex: &str, inline: bool| {
                                 crate::math::paint(ui, &math_cache, tex, inline);
                             };
@@ -1471,7 +1475,7 @@ impl PdfReaderApp {
                                         .render_math_fn(Some(&math_fn))
                                         .show(ui, &mut md_cache, &text);
                                 });
-                            self.markdown_viewports.insert(
+                            self.markdown.viewports.insert(
                                 id,
                                 (
                                     scroll_output.state.clamped_offset(),
@@ -1480,8 +1484,8 @@ impl PdfReaderApp {
                             );
                         },
                     );
-                    self.markdown_caches.insert(id, md_cache);
-                    self.markdown_rendered = true;
+                    self.markdown.caches.insert(id, md_cache);
+                    self.markdown.rendered = true;
                 }
             }
             FloatContent::Text(text) => {

@@ -1,4 +1,4 @@
-//! `PdfReaderApp` 的状态组：运行时诊断/时钟、保存/关闭流程。
+//! `PdfReaderApp` 的状态组：运行时诊断/时钟、保存/关闭流程、Markdown/数学/图片缓存。
 //!
 //! 这些字段不参与持久化，也不决定文档内容；把它们收在明确的组里，避免继续散落在
 //! `PdfReaderApp` 的平面字段中。热点字段（session/floats/annotations 等）仍留在顶层。
@@ -112,6 +112,47 @@ impl Default for SaveFlowState {
             pending_action_error: None,
             closing_after_decision: false,
             pending_save: false,
+        }
+    }
+}
+
+/// Markdown / 数学 / 内部图片的会话内缓存。
+///
+/// 这些数据都能从正文/图片记录重建，不持久化；放在一组是为了让“按需重建”
+/// 的生命周期清晰，并避免和文档/浮窗字段混在一起。
+pub(super) struct MarkdownState {
+    /// hover Markdown 专用的解析/标题缓存。
+    pub(super) hover_cache: egui_commonmark::CommonMarkCache,
+    /// 当前 hover Markdown 对应的 preview 下标；变化时清缓存。
+    pub(super) hover_index: Option<usize>,
+    /// 每个浮窗独立的 `egui_commonmark` 排版/图片缓存。
+    pub(super) caches: std::collections::HashMap<u64, egui_commonmark::CommonMarkCache>,
+    /// 每个 Markdown 浮窗上一帧的滚动偏移/内容尺寸。
+    pub(super) viewports: std::collections::HashMap<u64, (egui::Vec2, egui::Vec2)>,
+    /// 每个浮窗的 Markdown 预处理缓存（按源文本哈希失效）。
+    pub(super) prepared: std::collections::HashMap<u64, PreparedMarkdown>,
+    /// 本帧是否有 Markdown 浮窗渲染过；用于把外部链接改成状态栏提示。
+    pub(super) rendered: bool,
+    /// LaTeX 公式的 PNG 纹理缓存与内嵌字体（全局共用）。
+    pub(super) math_cache: std::rc::Rc<std::cell::RefCell<crate::math::MathCache>>,
+    /// 保存正文后，下一帧把公式错误合并到“已更新内容”提示里。
+    pub(super) math_recheck_pending: bool,
+    /// Markdown 内部图片的 PNG 字节缓存。
+    pub(super) images: crate::image_store::ImageStore,
+}
+
+impl Default for MarkdownState {
+    fn default() -> Self {
+        Self {
+            hover_cache: egui_commonmark::CommonMarkCache::default(),
+            hover_index: None,
+            caches: std::collections::HashMap::new(),
+            viewports: std::collections::HashMap::new(),
+            prepared: std::collections::HashMap::new(),
+            rendered: false,
+            math_cache: std::rc::Rc::new(std::cell::RefCell::new(crate::math::MathCache::new())),
+            math_recheck_pending: false,
+            images: crate::image_store::ImageStore::default(),
         }
     }
 }

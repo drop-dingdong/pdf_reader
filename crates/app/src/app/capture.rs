@@ -197,7 +197,7 @@ impl PdfReaderApp {
                     record_id: after.image_id.clone(),
                     revision: after.image_revision,
                 };
-                self.images.insert(&image_ref, png);
+                self.markdown.images.insert(&image_ref, png);
                 ui.ctx().forget_image(&crate::image_store::image_uri(
                     &image_ref.record_id,
                     image_ref.revision,
@@ -425,7 +425,7 @@ impl PdfReaderApp {
                 record_id: after.image_id.clone(),
                 revision: after.image_revision,
             };
-            self.images.insert(&image_ref, png);
+            self.markdown.images.insert(&image_ref, png);
             ui.ctx().forget_image(&crate::image_store::image_uri(
                 &image_ref.record_id,
                 image_ref.revision,

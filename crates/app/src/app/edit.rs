@@ -80,7 +80,7 @@ impl PdfReaderApp {
                     annotation.modified = Some(unix_now());
                 }
                 // 正文变化可能带来新的公式错误；让下一帧重新渲染/提示。
-                self.math_cache.borrow_mut().clear();
+                self.markdown.math_cache.borrow_mut().clear();
             }
             AppEdit::DeletePreview { key, .. } => {
                 if let Some(index) = self.preview_index(*key) {
@@ -118,7 +118,7 @@ impl PdfReaderApp {
                         preview.text = after.clone();
                     }
                 }
-                self.math_cache.borrow_mut().clear();
+                self.markdown.math_cache.borrow_mut().clear();
             }
             AppEdit::ResizePreview { key, after, .. } => {
                 if let Some(index) = self.preview_index(*key) {

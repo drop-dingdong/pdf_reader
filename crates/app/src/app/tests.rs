@@ -231,7 +231,7 @@ mod annotation_body_tests {
             app.draw_sidebar_hover_float(ui, canvas);
         });
         output.drop_without_applying_deltas();
-        assert!(app.markdown_rendered, "开启后 hover 临时预览应走 Markdown");
+        assert!(app.markdown.rendered, "开启后 hover 临时预览应走 Markdown");
     }
 
     #[test]
@@ -339,7 +339,7 @@ mod annotation_body_tests {
             app.draw_floats(ui, canvas);
         });
         output.drop_without_applying_deltas();
-        assert!(app.markdown_rendered, "文字浮窗应走 Markdown 渲染分支");
+        assert!(app.markdown.rendered, "文字浮窗应走 Markdown 渲染分支");
     }
 
     #[test]
@@ -413,7 +413,7 @@ mod annotation_body_tests {
             app.draw_floats(ui, canvas);
         });
         output.drop_without_applying_deltas();
-        let prepared = app.markdown_prepared.get(&1).expect("应缓存预处理结果");
+        let prepared = app.markdown.prepared.get(&1).expect("应缓存预处理结果");
         assert!(
             !prepared.normalized.contains("\n\n\\frac"),
             "块内空行应已规范化"
@@ -448,7 +448,7 @@ mod annotation_body_tests {
             app.draw_floats(ui, canvas);
         });
         output.drop_without_applying_deltas();
-        assert_eq!(app.markdown_caches.len(), 2, "每个浮窗必须有独立缓存");
+        assert_eq!(app.markdown.caches.len(), 2, "每个浮窗必须有独立缓存");
     }
 
     #[test]
@@ -564,7 +564,7 @@ mod annotation_body_tests {
         });
         output.drop_without_applying_deltas();
         assert!(
-            !app.math_cache.borrow().is_empty(),
+            !app.markdown.math_cache.borrow().is_empty(),
             "公式应生成至少一张纹理或失败占位"
         );
     }
@@ -2522,7 +2522,7 @@ mod float_link_tests {
         );
         let ctx = egui::Context::default();
 
-        app.markdown_rendered = true;
+        app.markdown.rendered = true;
         ctx.output_mut(|output| {
             output
                 .commands
@@ -2535,7 +2535,7 @@ mod float_link_tests {
             "pd-float 链接应被内部分发"
         );
 
-        app.markdown_rendered = true;
+        app.markdown.rendered = true;
         ctx.output_mut(|output| {
             output
                 .commands

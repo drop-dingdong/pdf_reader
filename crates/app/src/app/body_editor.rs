@@ -175,7 +175,7 @@ impl PdfReaderApp {
         if save {
             self.commit_body_edit(owner, text);
             self.editing_body = None;
-            self.math_recheck_pending = true;
+            self.markdown.math_recheck_pending = true;
             self.message = "已更新内容".to_string();
             return;
         }
@@ -316,7 +316,7 @@ impl PdfReaderApp {
         if save {
             if let Some((owner, text)) = self.editing_body.take() {
                 self.commit_body_edit(owner, text);
-                self.math_recheck_pending = true;
+                self.markdown.math_recheck_pending = true;
                 self.message = "已更新内容".to_string();
             }
         } else if discard {

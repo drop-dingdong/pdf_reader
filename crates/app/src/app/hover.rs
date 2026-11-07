@@ -420,11 +420,11 @@ impl PdfReaderApp {
         index: usize,
         text: &str,
     ) {
-        if self.hover_markdown_index != Some(index) {
-            self.hover_markdown_cache = egui_commonmark::CommonMarkCache::default();
-            self.hover_markdown_index = Some(index);
+        if self.markdown.hover_index != Some(index) {
+            self.markdown.hover_cache = egui_commonmark::CommonMarkCache::default();
+            self.markdown.hover_index = Some(index);
         }
-        self.markdown_rendered = true;
+        self.markdown.rendered = true;
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(body)
@@ -437,7 +437,7 @@ impl PdfReaderApp {
                 visuals.hyperlink_color = Color32::from_rgb(120, 180, 255);
                 *ui.visuals_mut() = visuals;
                 ui.spacing_mut().item_spacing = EVec2::new(0.0, 4.0);
-                let math_cache = self.math_cache.clone();
+                let math_cache = self.markdown.math_cache.clone();
                 let math_fn = move |ui: &mut egui::Ui, tex: &str, inline: bool| {
                     crate::math::paint(ui, &math_cache, tex, inline);
                 };
@@ -448,7 +448,7 @@ impl PdfReaderApp {
                         egui_commonmark::CommonMarkViewer::new()
                             .enable_scroll_to_heading(true)
                             .render_math_fn(Some(&math_fn))
-                            .show(ui, &mut self.hover_markdown_cache, text);
+                            .show(ui, &mut self.markdown.hover_cache, text);
                     });
             },
         );

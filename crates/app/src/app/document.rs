@@ -284,11 +284,11 @@ impl PdfReaderApp {
                         self.click_highlight = None;
                         self.hover_tip = None;
                         self.floats.clear();
-                        self.markdown_caches.clear();
-                        self.markdown_viewports.clear();
-                        self.markdown_prepared.clear();
+                        self.markdown.caches.clear();
+                        self.markdown.viewports.clear();
+                        self.markdown.prepared.clear();
                         if !preserve_history {
-                            self.images.clear();
+                            self.markdown.images.clear();
                         }
                         self.data_dirty = false;
                         self.sidecar_migrated = false;
