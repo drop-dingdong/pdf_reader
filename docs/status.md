@@ -85,6 +85,8 @@
   （复制图标与图片类型图标区分）；侧栏标题改用 strong text 提升深色对比；
   注释行去掉嵌套 `ui.horizontal`，整表固定行宽 + `interact` 菜单，右侧 `⋯`
   不再逐行右移。
+- **`view.rs` 拆分评估（未实施）**：4.26k 行中测试约 2.26k/73 个；建议先做
+  `view/tests.rs` 只拆测试，生产模块拆分暂缓；见 [view-split-evaluation.md](view-split-evaluation.md)。
 - **图片可获取性重检**：文字浮窗引用的 `pd-img` 每次 owner 扫描都重新判定来源
   preview/dest 是否还在；来源被删时清掉 `ImageStore` 的旧 revision 并 `forget_image`，
   不再继续显示缓存里的已删除图片。
