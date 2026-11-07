@@ -2,7 +2,8 @@
 
 > `app` crate = `view`（纯逻辑，可单测）+ `app`（egui 胶水，需真机）+ 存档/设置/写回/整理等无 UI 模块。
 > 这里的每条"每帧顺序"与"层级"都直接对应代码；改动请同步本文。
-> 浮窗链接的语法、身份与失败语义见 [float-links.md](float-links.md)。
+> 浮窗链接的语法、身份与失败语义见 [float-links.md](float-links.md)；
+> 新增按钮/侧栏行/图标/主题颜色的约定见 [ui-standards.md](ui-standards.md)。
 
 ## 1. 模块划分
 

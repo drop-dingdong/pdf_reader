@@ -22,6 +22,8 @@
 推荐实现顺序：行内基线/完整布局（后者需改上游渲染器，成本高）。
 `app.rs` 拆分、Markdown 空正文双击、文本/图片浮窗跳转与稳定链接已完成，见 [status.md](status.md) §2 与 [float-links.md](float-links.md)。
 
+- **UI 样式统一（SVG 图标 / 侧栏行 / 主题）**：共识见 [ui-standards.md](ui-standards.md)；
+  按“hover 固定 bug + dest goto → SVG 图标 → 侧栏统一 → 主题”实施；页面背景色暂不做。
 - **Linux Wayland 文件拖放**：winit 0.30 Wayland 后端不支持；触发条件：升级 eframe/winit 或实现 Wayland data-device。
   临时 `env -u WAYLAND_DISPLAY`。目前不改。
 - **便签几何编辑**：拖动/缩放便签图标；目前只有固定 18pt，不能移动。

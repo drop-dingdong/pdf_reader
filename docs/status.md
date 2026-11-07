@@ -66,6 +66,8 @@
   AnnotationPdfState（对象号/读回/内外注释簿记）；`PdfReaderApp` 顶层字段
   159 → 118。热点字段（session/floats/annotations/previews/settings）保持顶层，
   无行为变化。
+- **UI 样式共识（未实施）**：新增按钮/侧栏行/图标/主题颜色的约定落在
+  [ui-standards.md](ui-standards.md)；当前代码仍使用部分 Unicode 图标和未统一侧栏行。
 - **图片可获取性重检**：文字浮窗引用的 `pd-img` 每次 owner 扫描都重新判定来源
   preview/dest 是否还在；来源被删时清掉 `ImageStore` 的旧 revision 并 `forget_image`，
   不再继续显示缓存里的已删除图片。
