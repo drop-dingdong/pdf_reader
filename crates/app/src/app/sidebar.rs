@@ -232,7 +232,7 @@ impl PdfReaderApp {
             if !enabled {
                 continue;
             }
-            let external = self.external_ids.contains(&annotation.id);
+            let external = self.annotation_pdf.external_ids.contains(&annotation.id);
             if self.annotation_only_external && !external {
                 continue;
             }

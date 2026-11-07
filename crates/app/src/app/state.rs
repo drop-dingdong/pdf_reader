@@ -156,3 +156,30 @@ impl Default for MarkdownState {
         }
     }
 }
+
+/// 注释与 PDF 对象号之间的会话内簿记。
+///
+/// 这组字段只在“打开/读回 → 编辑 → 写回/重开”之间有意义；集中后，
+/// `merge_readback`、`pdf_ref_changes` 和重开逻辑的输入边界更清楚。
+#[derive(Default)]
+pub(super) struct AnnotationPdfState {
+    /// 本会话里“来自 PDF、但不属于 overlay”的注释 id。
+    pub(super) external_ids: std::collections::HashSet<AnnotationId>,
+    /// 打开时 PDF 里所有支持注释的对象号（用于计算待删除集合）。
+    pub(super) opened_pdf_refs: std::collections::BTreeSet<pdfcore::annotation::PdfObjectRef>,
+    /// 打开时每个对象号的正文（用于外部注释正文差分）。
+    pub(super) opened_pdf_bodies:
+        std::collections::HashMap<pdfcore::annotation::PdfObjectRef, Option<String>>,
+    /// 打开时对象号 → 标记 id（撤销/重做后快照可能暂时没有 pdf_ref）。
+    pub(super) opened_id_by_ref:
+        std::collections::HashMap<pdfcore::annotation::PdfObjectRef, AnnotationId>,
+    /// 外部内联注释：id → (页号, 该页可见支持注释中的位置)。
+    pub(super) inline_refs: std::collections::HashMap<AnnotationId, (PageIndex, usize)>,
+    /// 打开时内联注释的正文，用于判断是否需要页级正文 patch。
+    pub(super) opened_inline_bodies: std::collections::HashMap<(PageIndex, usize), Option<String>>,
+    /// 外部注释对象号 → 稳定本地 id（写回重开时复用，撤销栈才能对上）。
+    pub(super) pdf_ref_ids:
+        std::collections::HashMap<pdfcore::annotation::PdfObjectRef, AnnotationId>,
+    /// 上次打开时 PDF 里带 `pd-fr:` 标记的注释数（决定空 overlay 能否写回/导出）。
+    pub(super) pdf_marked_annotations: usize,
+}

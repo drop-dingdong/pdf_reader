@@ -693,7 +693,7 @@ mod annotation_body_tests {
             "外部便签也要拿到对象号"
         );
         assert!(
-            !(app.external_ids.contains(&external.id) && external.pdf_ref.is_none()),
+            !(app.annotation_pdf.external_ids.contains(&external.id) && external.pdf_ref.is_none()),
             "外部便签不能被判成内联只读"
         );
     }
@@ -773,7 +773,7 @@ mod annotation_body_tests {
         if let Some(annotation) = app.annotations.get_mut(id) {
             annotation.pdf_ref = Some(old_ref);
         }
-        app.opened_pdf_refs.insert(old_ref);
+        app.annotation_pdf.opened_pdf_refs.insert(old_ref);
 
         let before = app.annotations.get(id).cloned().unwrap();
         let mut after = before.clone();
@@ -786,8 +786,8 @@ mod annotation_body_tests {
 
         // 模拟"写入成功并重开"：该 id 在文件里的对象号变成 new_ref。
         let new_ref = pdfcore::annotation::PdfObjectRef { num: 99, gen: 0 };
-        app.opened_pdf_refs.insert(new_ref);
-        app.opened_id_by_ref.insert(new_ref, id);
+        app.annotation_pdf.opened_pdf_refs.insert(new_ref);
+        app.annotation_pdf.opened_id_by_ref.insert(new_ref, id);
         if let Some(annotation) = app.annotations.get_mut(id) {
             annotation.pdf_ref = Some(new_ref);
         }
@@ -901,8 +901,8 @@ mod annotation_body_tests {
         if let Some(annotation) = app.annotations.get_mut(id) {
             annotation.pdf_ref = Some(reference);
         }
-        app.opened_pdf_refs.insert(reference);
-        app.opened_id_by_ref.insert(reference, id);
+        app.annotation_pdf.opened_pdf_refs.insert(reference);
+        app.annotation_pdf.opened_id_by_ref.insert(reference, id);
 
         let before = app.annotations.get(id).cloned().unwrap();
         let mut after = before.clone();
@@ -1019,7 +1019,7 @@ mod annotation_body_tests {
         if let Some(annotation) = app.annotations.get_mut(old_id) {
             annotation.pdf_ref = Some(reference);
         }
-        app.opened_pdf_refs.insert(reference);
+        app.annotation_pdf.opened_pdf_refs.insert(reference);
         assert!(app.recolor_annotation(old_id, [70, 180, 90]));
         let current = app.annotations.iter().next().expect("新注释");
         assert_eq!(current.color, [70, 180, 90]);
@@ -1038,7 +1038,7 @@ mod annotation_body_tests {
             },
         ));
         let id = app.annotations.iter().next().unwrap().id;
-        app.external_ids.insert(id);
+        app.annotation_pdf.external_ids.insert(id);
         assert!(!app.recolor_annotation(id, [235, 70, 70]));
         assert_eq!(app.annotations.get(id).unwrap().color, [255, 214, 0]);
     }
@@ -1120,9 +1120,12 @@ mod annotation_body_tests {
         assert!(app.annotations.get(id).is_some());
 
         let id = app.annotations.iter().next().unwrap().id;
-        app.external_ids.insert(id);
-        app.inline_refs.insert(id, (PageIndex::FIRST, 2));
-        app.opened_inline_bodies
+        app.annotation_pdf.external_ids.insert(id);
+        app.annotation_pdf
+            .inline_refs
+            .insert(id, (PageIndex::FIRST, 2));
+        app.annotation_pdf
+            .opened_inline_bodies
             .insert((PageIndex::FIRST, 2), Some("旧正文".to_string()));
         if let Some(annotation) = app.annotations.get_mut(id) {
             annotation.pdf_ref = None;
@@ -2184,7 +2187,7 @@ mod float_link_tests {
             },
         );
         let id = app.annotations.iter().next().expect("annotation").id;
-        app.external_ids.insert(id);
+        app.annotation_pdf.external_ids.insert(id);
         app.document_load_token = 42;
         if let Some(annotation) = app.annotations.get_mut(id) {
             annotation.created = Some(123);
@@ -2590,9 +2593,10 @@ mod external_annotation_tests {
             annotation.pdf_ref = Some(reference);
             annotation.body = Some("旧".to_string());
         }
-        app.external_ids.insert(id);
-        app.opened_pdf_refs.insert(reference);
-        app.opened_pdf_bodies
+        app.annotation_pdf.external_ids.insert(id);
+        app.annotation_pdf.opened_pdf_refs.insert(reference);
+        app.annotation_pdf
+            .opened_pdf_bodies
             .insert(reference, Some("旧".to_string()));
         app.saved_pdf_revision = app.history.current_pdf_revision();
         app.refresh_dirty();
@@ -2617,11 +2621,11 @@ mod external_annotation_tests {
         if let Some(annotation) = app.annotations.get_mut(id) {
             annotation.pdf_ref = Some(reference);
         }
-        app.opened_pdf_refs.insert(reference);
+        app.annotation_pdf.opened_pdf_refs.insert(reference);
         let annotation = app.annotations.get(id).cloned().expect("标注");
         app.apply_edit(AppEdit::DeleteAnnotation { annotation }, true);
         // 模拟删除已经写入 PDF：当前文件里没有这个对象
-        app.opened_pdf_refs.clear();
+        app.annotation_pdf.opened_pdf_refs.clear();
         app.undo_edit();
         assert_eq!(
             app.annotations.get(id).and_then(|a| a.pdf_ref),
@@ -2649,8 +2653,9 @@ mod external_annotation_tests {
             annotation.pdf_ref = Some(reference);
             annotation.body = Some("旧".to_string());
         }
-        app.opened_pdf_refs.insert(reference);
-        app.opened_pdf_bodies
+        app.annotation_pdf.opened_pdf_refs.insert(reference);
+        app.annotation_pdf
+            .opened_pdf_bodies
             .insert(reference, Some("旧".to_string()));
         app.saved_pdf_revision = app.history.current_pdf_revision();
         app.refresh_dirty();
@@ -2673,12 +2678,12 @@ mod external_annotation_tests {
     fn undoing_external_delete_after_save_requeues_it_as_new() {
         let (mut app, id, _reference) = app_with_external();
         // 模拟“删除已经写入 PDF”：当前 PDF 里已经没有这个对象
-        app.opened_pdf_refs.clear();
+        app.annotation_pdf.opened_pdf_refs.clear();
         let annotation = app.annotations.get(id).cloned().expect("标注");
         app.apply_edit(AppEdit::DeleteAnnotation { annotation }, true);
         app.undo_edit();
         assert!(
-            !app.external_ids.contains(&id),
+            !app.annotation_pdf.external_ids.contains(&id),
             "恢复的注释不能继续当外部对象"
         );
         assert_eq!(
@@ -2734,7 +2739,11 @@ mod external_annotation_tests {
         let refs = vec![entries.iter().map(|(_, entry)| *entry).collect()];
         let _ = app.merge_readback(&readback, &refs);
         assert_eq!(app.annotations.len(), 3, "三条都要存在，不能被 id 覆盖");
-        assert_eq!(app.external_ids.len(), 2, "只有无标记的两条是外部");
+        assert_eq!(
+            app.annotation_pdf.external_ids.len(),
+            2,
+            "只有无标记的两条是外部"
+        );
         assert_eq!(
             app.annotations
                 .get(AnnotationId(1))

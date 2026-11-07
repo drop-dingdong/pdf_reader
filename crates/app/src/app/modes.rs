@@ -57,7 +57,7 @@ impl PdfReaderApp {
         if required.is_some_and(|required| required != id) {
             return false;
         }
-        if self.external_ids.contains(&id) {
+        if self.annotation_pdf.external_ids.contains(&id) {
             self.message = "外部注释暂不支持移动".to_string();
             return false;
         }

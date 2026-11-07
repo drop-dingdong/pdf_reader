@@ -57,7 +57,7 @@ impl PdfReaderApp {
                 if canvas.contains(position) {
                     let content = canvas_to_content(canvas, position, session.viewport().scroll);
                     if self.annotation_at(session, content).is_some_and(|id| {
-                        !self.external_ids.contains(&id)
+                        !self.annotation_pdf.external_ids.contains(&id)
                             && self
                                 .annotations
                                 .get(id)

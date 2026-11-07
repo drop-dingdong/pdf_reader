@@ -121,7 +121,7 @@ impl PdfReaderApp {
             .map(|annotation| {
                 let (kind, _) = annotation_kind_label(&annotation.kind);
                 let bounds = annotation.bounds();
-                let external = self.external_ids.contains(&annotation.id);
+                let external = self.annotation_pdf.external_ids.contains(&annotation.id);
                 crate::annotations_md::Row {
                     page: annotation.page.get(),
                     y: bounds.map(|rect| rect.y).unwrap_or(0.0),
@@ -272,7 +272,8 @@ impl PdfReaderApp {
             .annotations
             .iter()
             .filter(|annotation| {
-                !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
+                !self.annotation_pdf.external_ids.contains(&annotation.id)
+                    && annotation.pdf_ref.is_none()
             })
             .map(|annotation| crate::export::ExportItem {
                 id: Some(annotation.id.get()),
@@ -545,18 +546,21 @@ impl PdfReaderApp {
             .filter_map(|annotation| annotation.pdf_ref)
             .collect();
         let deletes = self
+            .annotation_pdf
             .opened_pdf_refs
             .iter()
-            .filter(|reference| match self.opened_id_by_ref.get(reference) {
-                // 标记注释按 id 判断：撤销/重做后的快照可能暂时没有 pdf_ref，
-                // 但它仍在当前集合里，不能当“已删除”。
-                Some(id) => match self.annotations.get(*id) {
-                    // 同一条注释换了对象（移动/重建后 pdf_ref = None）→ 旧对象要删。
-                    Some(annotation) => annotation.pdf_ref != Some(**reference),
-                    None => true,
+            .filter(
+                |reference| match self.annotation_pdf.opened_id_by_ref.get(reference) {
+                    // 标记注释按 id 判断：撤销/重做后的快照可能暂时没有 pdf_ref，
+                    // 但它仍在当前集合里，不能当“已删除”。
+                    Some(id) => match self.annotations.get(*id) {
+                        // 同一条注释换了对象（移动/重建后 pdf_ref = None）→ 旧对象要删。
+                        Some(annotation) => annotation.pdf_ref != Some(**reference),
+                        None => true,
+                    },
+                    None => !current.contains(reference),
                 },
-                None => !current.contains(reference),
-            })
+            )
             .cloned()
             .collect();
         let updates = self
@@ -564,7 +568,7 @@ impl PdfReaderApp {
             .iter()
             .filter_map(|annotation| {
                 let reference = annotation.pdf_ref?;
-                let before = self.opened_pdf_bodies.get(&reference)?;
+                let before = self.annotation_pdf.opened_pdf_bodies.get(&reference)?;
                 (before != &annotation.body).then(|| crate::export::RefUpdate {
                     reference,
                     body: annotation.body.clone(),
@@ -645,7 +649,7 @@ impl PdfReaderApp {
             .collect();
         let mut updates = Vec::new();
         let mut deletes = Vec::new();
-        for (id, (page, position)) in &self.inline_refs {
+        for (id, (page, position)) in &self.annotation_pdf.inline_refs {
             if !current.contains(id) {
                 deletes.push(backend_pdfium::pdf_patch::InlineDelete {
                     page: page.get(),
@@ -657,6 +661,7 @@ impl PdfReaderApp {
                 continue;
             };
             if self
+                .annotation_pdf
                 .opened_inline_bodies
                 .get(&(*page, *position))
                 .is_some_and(|before| before != &annotation.body)

@@ -570,7 +570,7 @@ impl PdfReaderApp {
     /// 注释的 `pd-float://` URI；外部注释默认返回 None（设置关闭时不给复制入口）。
     pub(super) fn annotation_link_uri(&self, id: AnnotationId) -> Option<String> {
         let annotation = self.annotations.get(id)?;
-        let external = self.external_ids.contains(&id);
+        let external = self.annotation_pdf.external_ids.contains(&id);
         if external && !self.allow_external_annotation_links {
             return None;
         }
@@ -658,7 +658,7 @@ impl PdfReaderApp {
                     );
                     return;
                 }
-                if self.external_ids.contains(&id) {
+                if self.annotation_pdf.external_ids.contains(&id) {
                     let token = query_value(url, "s").and_then(|value| value.parse::<u64>().ok());
                     if token == Some(self.document_load_token) {
                         let at = self.next_float_position();

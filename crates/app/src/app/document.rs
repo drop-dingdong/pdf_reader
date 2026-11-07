@@ -57,12 +57,12 @@ impl PdfReaderApp {
         readback: &backend_pdfium::readback::Readback,
         ref_pages: &[Vec<backend_pdfium::pdf_index::PageAnnot>],
     ) -> usize {
-        self.external_ids.clear();
-        self.opened_pdf_refs.clear();
-        self.opened_pdf_bodies.clear();
-        self.opened_id_by_ref.clear();
-        self.inline_refs.clear();
-        self.opened_inline_bodies.clear();
+        self.annotation_pdf.external_ids.clear();
+        self.annotation_pdf.opened_pdf_refs.clear();
+        self.annotation_pdf.opened_pdf_bodies.clear();
+        self.annotation_pdf.opened_id_by_ref.clear();
+        self.annotation_pdf.inline_refs.clear();
+        self.annotation_pdf.opened_inline_bodies.clear();
         let mut by_page: std::collections::BTreeMap<
             u32,
             Vec<&backend_pdfium::readback::ReadAnnotation>,
@@ -98,13 +98,18 @@ impl PdfReaderApp {
                 let inline =
                     (refs_ok && reference.is_none()).then_some((PageIndex::new(page), position));
                 if let Some(inline) = inline {
-                    self.opened_inline_bodies.insert(inline, item.body.clone());
+                    self.annotation_pdf
+                        .opened_inline_bodies
+                        .insert(inline, item.body.clone());
                 }
                 if let Some(reference) = reference {
-                    self.opened_pdf_refs.insert(reference);
-                    self.opened_pdf_bodies.insert(reference, item.body.clone());
+                    self.annotation_pdf.opened_pdf_refs.insert(reference);
+                    self.annotation_pdf
+                        .opened_pdf_bodies
+                        .insert(reference, item.body.clone());
                     if let Some(raw_id) = item.id {
-                        self.opened_id_by_ref
+                        self.annotation_pdf
+                            .opened_id_by_ref
                             .insert(reference, AnnotationId(raw_id));
                     }
                 }
@@ -156,7 +161,7 @@ impl PdfReaderApp {
                 continue;
             }
             let reused = reference
-                .and_then(|reference| self.pdf_ref_ids.get(&reference).copied())
+                .and_then(|reference| self.annotation_pdf.pdf_ref_ids.get(&reference).copied())
                 .filter(|id| self.annotations.get(*id).is_none());
             let id = if let Some(id) = reused {
                 id
@@ -183,12 +188,12 @@ impl PdfReaderApp {
                 annotation.pdf_ref = *reference;
             }
             if let Some(reference) = reference {
-                self.pdf_ref_ids.insert(*reference, id);
+                self.annotation_pdf.pdf_ref_ids.insert(*reference, id);
             }
             if let Some(position) = inline {
-                self.inline_refs.insert(id, *position);
+                self.annotation_pdf.inline_refs.insert(id, *position);
             }
-            self.external_ids.insert(id);
+            self.annotation_pdf.external_ids.insert(id);
         }
         restored
     }
@@ -196,6 +201,7 @@ impl PdfReaderApp {
     /// 写回重开后，把撤销栈里注释快照的 `pdf_ref` 重新绑到新 PDF 对象号。
     pub(super) fn reconcile_history_refs(&mut self) {
         let refs: std::collections::HashMap<AnnotationId, pdfcore::annotation::PdfObjectRef> = self
+            .annotation_pdf
             .opened_id_by_ref
             .iter()
             .map(|(reference, id)| (*id, *reference))
@@ -232,7 +238,7 @@ impl PdfReaderApp {
         }
         if !preserve_history {
             self.history.clear();
-            self.pdf_ref_ids.clear();
+            self.annotation_pdf.pdf_ref_ids.clear();
             // 换文档：旧文档的数据脏位不能带过来；迁移/升级会在加载时重新置脏。
             self.data_dirty = false;
         }
@@ -255,7 +261,7 @@ impl PdfReaderApp {
                     }
                 };
                 Self::normalize_readback_geometry(&mut readback, &origins);
-                self.pdf_marked_annotations = readback
+                self.annotation_pdf.pdf_marked_annotations = readback
                     .annotations
                     .iter()
                     .filter(|annotation| annotation.id.is_some())

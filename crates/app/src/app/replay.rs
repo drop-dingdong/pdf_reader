@@ -1175,6 +1175,7 @@ pub fn run(
         }
         action_report.annotations = app.annotations.len();
         action_report.foreign_annotations = app
+            .annotation_pdf
             .external_ids
             .iter()
             .filter(|id| app.annotations.get(**id).is_some())

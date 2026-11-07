@@ -379,7 +379,7 @@ impl PdfReaderApp {
         let Some(before) = self.annotations.get(id).cloned() else {
             return false;
         };
-        if self.external_ids.contains(&id) {
+        if self.annotation_pdf.external_ids.contains(&id) {
             self.message = "外部注释暂不支持修改样式".to_string();
             return false;
         }
@@ -446,7 +446,7 @@ impl PdfReaderApp {
         let Some(annotation) = self.annotations.get(id) else {
             return;
         };
-        let external = self.external_ids.contains(&id);
+        let external = self.annotation_pdf.external_ids.contains(&id);
         let current = annotation.color;
         let current_opacity = annotation.opacity;
         let current_width = annotation.kind.ink().map(|(_, width)| width);

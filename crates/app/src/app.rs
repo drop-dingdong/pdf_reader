@@ -46,7 +46,7 @@ mod toolbar;
 use crate::view::{commands_for_destination, outline_node_count, Desired, KeyedStore, PlanStamp};
 pub(super) use model::*;
 use paint::*;
-use state::{MarkdownState, RuntimeState, SaveFlowState};
+use state::{AnnotationPdfState, MarkdownState, RuntimeState, SaveFlowState};
 
 /// 应用状态。
 pub struct PdfReaderApp {
@@ -74,20 +74,6 @@ pub struct PdfReaderApp {
     show_annotations: bool,
     /// 页面标注（会话内；S2 才落盘）。
     annotations: AnnotationStore,
-    /// 本会话里“来自 PDF、但不属于 overlay”的注释 id（不写回 `.annot.json`）。
-    external_ids: std::collections::HashSet<AnnotationId>,
-    /// 打开时 PDF 里所有四种注释的对象号（用于计算待删除集合）。
-    opened_pdf_refs: std::collections::BTreeSet<pdfcore::annotation::PdfObjectRef>,
-    /// 打开时每个对象号的正文（用于外部注释正文差分）。
-    opened_pdf_bodies: std::collections::HashMap<pdfcore::annotation::PdfObjectRef, Option<String>>,
-    /// 打开时对象号 → 标记 id（撤销/重做后快照可能暂时没有 pdf_ref）。
-    opened_id_by_ref: std::collections::HashMap<pdfcore::annotation::PdfObjectRef, AnnotationId>,
-    /// 外部内联注释：id → (页号, 该页可见支持注释中的位置)。
-    inline_refs: std::collections::HashMap<AnnotationId, (PageIndex, usize)>,
-    /// 打开时内联注释的正文，用于判断是否需要页级正文 patch。
-    opened_inline_bodies: std::collections::HashMap<(PageIndex, usize), Option<String>>,
-    /// 外部注释的对象号 → 稳定本地 id（写回重开时复用，撤销栈才能对上）。
-    pdf_ref_ids: std::collections::HashMap<pdfcore::annotation::PdfObjectRef, AnnotationId>,
     /// 下一次 `open` 是写回后的重开：保留撤销栈与对象号映射。
     reopening_after_write: bool,
     /// 正在画的一笔墨迹（S4b）；**抬笔之前它不是标注**，取消只要丢掉它。
@@ -106,8 +92,6 @@ pub struct PdfReaderApp {
     ink_color: [u8; 3],
     /// 进入标记模式前的工具，退出时恢复。
     tool_before_annotation: Option<Tool>,
-    /// 上次打开时 PDF 里带 `pd-fr:` 标记的注释数（决定空 overlay 能否写回/导出）。
-    pdf_marked_annotations: usize,
     /// 原地写入重开后要恢复的视图（页、缩放、滚动、剩余帧数）。
     ///
     /// 延迟两帧：**先让新会话收到真实的视口尺寸**，否则 `SetScroll` 会被按旧/默认视口夹紧，
@@ -292,6 +276,8 @@ pub struct PdfReaderApp {
     save_flow: SaveFlowState,
     /// Markdown/数学/内部图片的会话内缓存。
     markdown: MarkdownState,
+    /// 注释/PDF 对象号的会话内簿记。
+    annotation_pdf: AnnotationPdfState,
     /// 点击 Pin 条目后的一次性高亮（浮窗 id + 截止时刻）。
     click_highlight: Option<(u64, std::time::Instant)>,
     /// 状态栏文本与错误提示。
@@ -388,13 +374,6 @@ impl PdfReaderApp {
             show_links: ui_settings.show_links,
             show_annotations: ui_settings.show_annotations,
             annotations: AnnotationStore::new(),
-            external_ids: std::collections::HashSet::new(),
-            opened_pdf_refs: std::collections::BTreeSet::new(),
-            opened_pdf_bodies: std::collections::HashMap::new(),
-            opened_id_by_ref: std::collections::HashMap::new(),
-            inline_refs: std::collections::HashMap::new(),
-            opened_inline_bodies: std::collections::HashMap::new(),
-            pdf_ref_ids: std::collections::HashMap::new(),
             reopening_after_write: false,
             ink: None,
             pending_annotate: None,
@@ -410,7 +389,6 @@ impl PdfReaderApp {
             pending_window_size: None,
             pending_open: None,
             tool_before_annotation: None,
-            pdf_marked_annotations: 0,
             pending_view_restore: None,
             pdf_dirty: false,
             saved_pdf_revision: 0,
@@ -495,6 +473,7 @@ impl PdfReaderApp {
             runtime: RuntimeState::new(clock, diag),
             save_flow: SaveFlowState::default(),
             markdown: MarkdownState::default(),
+            annotation_pdf: AnnotationPdfState::default(),
             click_highlight: None,
             message: String::new(),
             error: None,

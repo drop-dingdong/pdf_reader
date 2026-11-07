@@ -32,7 +32,8 @@ impl PdfReaderApp {
             .annotations
             .iter()
             .filter(|annotation| {
-                !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
+                !self.annotation_pdf.external_ids.contains(&annotation.id)
+                    && annotation.pdf_ref.is_none()
             })
             .count();
         let updated = ref_updates.len() + inline_updates.len();
@@ -127,7 +128,8 @@ impl PdfReaderApp {
             .annotations
             .iter()
             .filter(|annotation| {
-                !self.external_ids.contains(&annotation.id) && annotation.pdf_ref.is_none()
+                !self.annotation_pdf.external_ids.contains(&annotation.id)
+                    && annotation.pdf_ref.is_none()
             })
             .count();
         let conflict = self.pdf_dirty && self.pdf_conflict();

@@ -40,8 +40,8 @@ impl PdfReaderApp {
                 // 删除并写回后，旧对象已不在 PDF；撤销恢复时必须按新注释写回。
                 // 这不只对外部注释成立：自有注释的旧 pdf_ref 同样会失效。
                 if let Some(reference) = annotation.pdf_ref {
-                    if !self.opened_pdf_refs.contains(&reference) {
-                        self.external_ids.remove(&annotation.id);
+                    if !self.annotation_pdf.opened_pdf_refs.contains(&reference) {
+                        self.annotation_pdf.external_ids.remove(&annotation.id);
                         if let Some(restored) = self.annotations.get_mut(annotation.id) {
                             restored.pdf_ref = None;
                         }
@@ -63,7 +63,7 @@ impl PdfReaderApp {
                     }
                 }
                 if let Some(reference) = after.pdf_ref {
-                    if !self.opened_pdf_refs.contains(&reference) {
+                    if !self.annotation_pdf.opened_pdf_refs.contains(&reference) {
                         if let Some(restored) = self.annotations.get_mut(after.id) {
                             restored.pdf_ref = None;
                         }
