@@ -219,7 +219,9 @@ app::compact::run_child → app --compact <in> <out>
 ## 9. 架构层面的已知限制
 
 - 纹理层按条目数限额，没有显存字节预算；上传/像素转换没有字节预算。
-- `app.rs` 已拆成 `app/` 子模块（~0.6k 行只剩状态/构造/入口）；`view.rs` 仍有 ~4.2k 行
+- `app.rs` 已拆成 `app/` 子模块（~0.6k 行只剩状态/构造/入口）；`PdfReaderApp` 仍有
+  约 159 个字段，状态分组的 Phase 3 评估见
+  [state-grouping-evaluation.md](state-grouping-evaluation.md)（未实施）；`view.rs` 仍有 ~4.2k 行
   （拆分的可行性评估见 [roadmap.md](roadmap.md)）。
 - 无头回放只覆盖主视图渲染主线；UI 对话框、浮窗、便签、保存提示依赖人工验收。
 - `.pdf.json` 不保留未知字段；新旧版本互读会有字段丢失（只做加法迁移，不做无损往返）。
