@@ -91,7 +91,7 @@ slot 3: close_center.x - 78
 | 注释 | close → edit → link → goto |
 | 文字 preview | close → edit → link → goto |
 | 图片 preview | close → `@`（图片引用）→ link → goto |
-| 引用点/dest 浮窗 | close → goto |
+| 引用点/dest 浮窗 | close → 图片引用（有图片时）→ goto |
 | 外部注释且未开启外部链接 | close → edit → goto（没有 link 槽） |
 | 截图/测试浮窗 | 仅 close |
 
@@ -118,6 +118,7 @@ title_width = title_rect.width() - reserved
 
 - 不加 `↗`，因为 `pd-float://dest/<id>` 尚未定义；
 - `→` 使用 `float_goto_target` 的 `(page, mark.point)`；
+- 有 `DestMark.image_id` 时也提供图片引用复制（与图片 preview 共用 `image-ref` 图标）；
 - 临时 hover 浮窗点击固定的 bug 在加 goto 前修复，并补回归测试。
 
 ## 4. 侧栏行规范

@@ -695,7 +695,13 @@ impl Default for MathCache {
 }
 
 /// 在 `egui_commonmark` 的 math 回调里绘制公式。
-pub fn paint(ui: &mut egui::Ui, cache: &RefCell<MathCache>, tex: &str, inline: bool) {
+pub fn paint(
+    ui: &mut egui::Ui,
+    cache: &RefCell<MathCache>,
+    tex: &str,
+    inline: bool,
+    tint: Color32,
+) {
     match cache.borrow_mut().render(ui.ctx(), tex, inline) {
         Ok(image) => {
             // 行内公式按图片尺寸占位；块级公式占满当前可用宽度并居中。
@@ -728,7 +734,7 @@ pub fn paint(ui: &mut egui::Ui, cache: &RefCell<MathCache>, tex: &str, inline: b
                 image.texture.id(),
                 target,
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
+                tint,
             );
         }
         Err(_) => {

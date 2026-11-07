@@ -443,7 +443,7 @@ impl PdfReaderApp {
                 ui.spacing_mut().item_spacing = EVec2::new(0.0, 4.0);
                 let math_cache = self.markdown.math_cache.clone();
                 let math_fn = move |ui: &mut egui::Ui, tex: &str, inline: bool| {
-                    crate::math::paint(ui, &math_cache, tex, inline);
+                    crate::math::paint(ui, &math_cache, tex, inline, palette.text);
                 };
                 egui::ScrollArea::both()
                     .id_salt(("hover-md-scroll", index))

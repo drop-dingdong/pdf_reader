@@ -80,6 +80,10 @@
   `ctx.set_theme(Theme::Light/Dark)`；顶栏「样式」菜单；自绘浮窗/临时预览使用
   `FloatPalette`（深浅两套），Markdown 局部 Visuals 随主题；`PDF_READER_DIAGNOSE=1`
   启动打印实际 panel/window/text 色。
+- **UI 实机修正**：关闭按钮在标题栏背景之后绘制；link/goto 图标改用调色板；
+  标题文字在浅色下用深色；Markdown 公式按主题 tint；dest 浮窗增加图片引用按钮
+  （复制图标与图片类型图标区分）；侧栏标题改用 strong text 提升深色对比；
+  注释行去掉嵌套 `ui.horizontal`，按整行宽度占位，右侧 `⋯` 不再逐行右移。
 - **图片可获取性重检**：文字浮窗引用的 `pd-img` 每次 owner 扫描都重新判定来源
   preview/dest 是否还在；来源被删时清掉 `ImageStore` 的旧 revision 并 `forget_image`，
   不再继续显示缓存里的已删除图片。

@@ -333,77 +333,77 @@ impl PdfReaderApp {
                     if readonly {
                         text.push_str("  [内联]");
                     }
-                    ui.horizontal(|ui| {
-                        ui.add_space(8.0);
-                        let width = ui.available_width();
-                        let (rect, _) = ui.allocate_exact_size(
-                            EVec2::new(width, OUTLINE_ROW_HEIGHT),
-                            Sense::hover(),
-                        );
-                        let response = ui.interact(
+                    // 与 preview 行一致：先按整行宽度占位，再在行内做交互；
+                    // 不再嵌套 `ui.horizontal`，否则 available_width 会随文字宽度变化，
+                    // 右侧 ⋯ 每行越挪越靠右。
+                    let width = ui.available_width();
+                    let (row_rect, _) = ui
+                        .allocate_exact_size(EVec2::new(width, OUTLINE_ROW_HEIGHT), Sense::hover());
+                    let rect =
+                        egui::Rect::from_min_max(row_rect.min + EVec2::new(8.0, 0.0), row_rect.max);
+                    let response = ui.interact(
+                        rect,
+                        Id::unique(("annotation-row", id.get())),
+                        Sense::click(),
+                    );
+                    if response.hovered() {
+                        ui.painter().rect_filled(
                             rect,
-                            Id::unique(("annotation-row", id.get())),
-                            Sense::click(),
+                            CornerRadius::ZERO,
+                            ui.visuals().widgets.hovered.weak_bg_fill,
                         );
-                        if response.hovered() {
-                            ui.painter().rect_filled(
-                                rect,
-                                CornerRadius::ZERO,
-                                ui.visuals().widgets.hovered.weak_bg_fill,
-                            );
-                        }
-                        let menu_width = 24.0;
-                        let text_width = (rect.width() - menu_width - 8.0).max(24.0);
-                        let job = overflow_layout(
-                            &text,
-                            egui::FontId::proportional(13.0),
-                            ui.visuals().text_color(),
-                            text_width,
-                            1,
-                        );
-                        let galley = ui.painter().layout_job(job);
-                        ui.painter().galley(
-                            egui::pos2(rect.min.x, rect.center().y - galley.size().y * 0.5),
-                            galley,
-                            ui.visuals().text_color(),
-                        );
-                        let menu_rect = egui::Rect::from_center_size(
-                            egui::pos2(rect.max.x - 10.0, rect.center().y),
-                            EVec2::new(menu_width, OUTLINE_ROW_HEIGHT),
-                        );
-                        let menu_response = ui.put(menu_rect, egui::Button::new("").frame(false));
-                        let color = if menu_response.hovered() {
-                            ui.visuals().strong_text_color()
-                        } else {
-                            ui.visuals().weak_text_color()
-                        };
-                        self.paint_icon(ui, icons::Icon::More, menu_rect.center(), 16.0, color);
-                        let menu_response = menu_response.on_hover_text("更多操作");
-                        egui::Popup::menu(&menu_response).show(|ui| {
-                            self.annotation_row_menu(ui, id);
-                        });
-
-                        let response = response.on_hover_text({
-                            // 列表已按页分组，"第 N 页"冗余：这里换成作者；时间单独一行。
-                            let mut text = format!(
-                                "{preview}\n\n{label} · {}{}{}",
-                                author.as_deref().unwrap_or("未署名"),
-                                if external { " · 外部" } else { " · 自有" },
-                                if readonly { " · 内联" } else { "" }
-                            );
-                            if let Some(line) = annotation_time_line(created, modified) {
-                                text.push('\n');
-                                text.push_str(&line);
-                            }
-                            text
-                        });
-                        response.context_menu(|ui| {
-                            self.annotation_row_menu(ui, id);
-                        });
-                        if response.clicked() {
-                            self.focus_annotation(id, session);
-                        }
+                    }
+                    let menu_width = 24.0;
+                    let text_width = (rect.width() - menu_width - 8.0).max(24.0);
+                    let job = overflow_layout(
+                        &text,
+                        egui::FontId::proportional(13.0),
+                        ui.visuals().strong_text_color(),
+                        text_width,
+                        1,
+                    );
+                    let galley = ui.painter().layout_job(job);
+                    ui.painter().galley(
+                        egui::pos2(rect.min.x, rect.center().y - galley.size().y * 0.5),
+                        galley,
+                        ui.visuals().strong_text_color(),
+                    );
+                    let menu_rect = egui::Rect::from_center_size(
+                        egui::pos2(rect.max.x - 10.0, rect.center().y),
+                        EVec2::new(menu_width, OUTLINE_ROW_HEIGHT),
+                    );
+                    let menu_response = ui.put(menu_rect, egui::Button::new("").frame(false));
+                    let color = if menu_response.hovered() {
+                        ui.visuals().strong_text_color()
+                    } else {
+                        ui.visuals().weak_text_color()
+                    };
+                    self.paint_icon(ui, icons::Icon::More, menu_rect.center(), 16.0, color);
+                    let menu_response = menu_response.on_hover_text("更多操作");
+                    egui::Popup::menu(&menu_response).show(|ui| {
+                        self.annotation_row_menu(ui, id);
                     });
+
+                    let response = response.on_hover_text({
+                        // 列表已按页分组，"第 N 页"冗余：这里换成作者；时间单独一行。
+                        let mut text = format!(
+                            "{preview}\n\n{label} · {}{}{}",
+                            author.as_deref().unwrap_or("未署名"),
+                            if external { " · 外部" } else { " · 自有" },
+                            if readonly { " · 内联" } else { "" }
+                        );
+                        if let Some(line) = annotation_time_line(created, modified) {
+                            text.push('\n');
+                            text.push_str(&line);
+                        }
+                        text
+                    });
+                    response.context_menu(|ui| {
+                        self.annotation_row_menu(ui, id);
+                    });
+                    if response.clicked() {
+                        self.focus_annotation(id, session);
+                    }
                 }
             });
     }
@@ -544,7 +544,7 @@ impl PdfReaderApp {
                 let job = overflow_layout(
                     &title,
                     egui::FontId::proportional(13.0),
-                    ui.visuals().text_color(),
+                    ui.visuals().strong_text_color(),
                     title_width,
                     1,
                 );
@@ -555,7 +555,7 @@ impl PdfReaderApp {
                         rect.center().y - galley.size().y * 0.5,
                     ),
                     galley,
-                    ui.visuals().text_color(),
+                    ui.visuals().strong_text_color(),
                 );
                 painter.text(
                     egui::pos2(rect.max.x - menu_width - 4.0, rect.center().y),

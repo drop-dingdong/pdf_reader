@@ -935,8 +935,6 @@ impl PdfReaderApp {
             } else {
                 palette.muted
             };
-            ui.painter().circle_filled(close_center, 8.5, close_color);
-            self.paint_icon(ui, icons::Icon::Close, close_center, 13.0, Color32::WHITE);
             if interactive && close_response.on_hover_text("关闭浮窗").clicked() {
                 let owner = self.floats[index].owner;
                 if self.body_edit_owner() == Some(owner) && self.body_edit_dirty() {
@@ -971,6 +969,9 @@ impl PdfReaderApp {
                 StrokeKind::Inside,
             );
             painter.rect_filled(title_rect, CornerRadius::same(4), title_color);
+            // 关闭按钮必须在背景/标题填充之后画，否则会被后面的标题栏盖住。
+            ui.painter().circle_filled(close_center, 8.5, close_color);
+            self.paint_icon(ui, icons::Icon::Close, close_center, 13.0, Color32::WHITE);
             // 标题栏按钮按固定槽位排：close（固定）→ 主按钮 → link → goto。
             // 主按钮是 edit（文字浮窗）或 @（图片 preview）；dest 浮窗没有主按钮，
             // 只有 close + goto，因此 goto 直接占第一槽，不留空洞。
@@ -982,7 +983,20 @@ impl PdfReaderApp {
                 .is_some_and(|preview| {
                     preview.kind == CustomKind::Image && !preview.image_id.is_empty()
                 });
-            let has_primary = editable || image_at;
+            let dest_image = match owner {
+                FloatOwner::None => self.floats[index].origin.and_then(|(page, mark_index)| {
+                    self.dest_marks
+                        .get(page.get() as usize)
+                        .and_then(|marks| marks.get(mark_index))
+                        .filter(|mark| !mark.image_id.is_empty())
+                        .map(|mark| crate::image_store::ImageRef {
+                            record_id: mark.image_id.clone(),
+                            revision: mark.image_revision,
+                        })
+                }),
+                _ => None,
+            };
+            let has_primary = editable || image_at || dest_image.is_some();
             let link_uri = if matches!(owner, FloatOwner::Annotation(_) | FloatOwner::Custom(_)) {
                 self.float_link_uri(index)
             } else {
@@ -1015,10 +1029,15 @@ impl PdfReaderApp {
             };
             // 标题：**单行截断**（长标题不再压到关闭按钮上）
             let title_font = egui::FontId::proportional(13.0);
+            let title_text_color = if highlighted {
+                Color32::WHITE
+            } else {
+                palette.title_text
+            };
             let title_job = overflow_layout(
                 &self.floats[index].title,
                 title_font,
-                Color32::WHITE,
+                title_text_color,
                 (title_rect.width() - reserved).max(24.0),
                 1,
             );
@@ -1029,11 +1048,7 @@ impl PdfReaderApp {
                     title_rect.center().y - title_galley.size().y * 0.5,
                 ),
                 title_galley,
-                if highlighted {
-                    Color32::WHITE
-                } else {
-                    palette.title_text
-                },
+                title_text_color,
             );
             // 缩放手柄示意
             painter.rect_filled(handle_rect.shrink(5.0), CornerRadius::ZERO, palette.handle);
@@ -1095,9 +1110,9 @@ impl PdfReaderApp {
                 let response =
                     ui.interact(button_rect, Id::unique(("float-link", id)), Sense::click());
                 let color = if response.hovered() {
-                    Color32::from_gray(235)
+                    palette.icon_hover
                 } else {
-                    Color32::from_gray(190)
+                    palette.icon
                 };
                 self.paint_icon(ui, icons::Icon::Link, center, 13.0, color);
                 if interactive && response.on_hover_text("复制引用链接").clicked() {
@@ -1112,9 +1127,9 @@ impl PdfReaderApp {
                 let response =
                     ui.interact(button_rect, Id::unique(("float-goto", id)), Sense::click());
                 let color = if response.hovered() {
-                    Color32::from_gray(235)
+                    palette.icon_hover
                 } else {
-                    Color32::from_gray(190)
+                    palette.icon
                 };
                 self.paint_icon(ui, icons::Icon::Goto, center, 13.0, color);
                 if interactive && response.on_hover_text("跳到来源页/位置").clicked() {
@@ -1126,6 +1141,27 @@ impl PdfReaderApp {
                             Some((annotation, self.runtime.clock.now() + ANNOTATION_FOCUS));
                     }
                     self.message = format!("已跳转到来源（第 {} 页）", page.display_number());
+                }
+            }
+            // 引用点/dest 浮窗：如果该点有内部图片记录，也可以复制图片引用。
+            if let Some(image_ref) = dest_image {
+                let uri = crate::image_store::image_uri(&image_ref.record_id, image_ref.revision);
+                let center = egui::pos2(close_center.x - 26.0, title_rect.center().y);
+                let button_rect = egui::Rect::from_center_size(center, EVec2::splat(18.0));
+                let response = ui.interact(
+                    button_rect,
+                    Id::unique(("float-dest-image-ref", id)),
+                    Sense::click(),
+                );
+                let color = if response.hovered() {
+                    palette.icon_hover
+                } else {
+                    palette.icon
+                };
+                self.paint_icon(ui, icons::Icon::ImageRef, center, 13.0, color);
+                if interactive && response.on_hover_text("复制 Markdown 图片引用").clicked() {
+                    ui.ctx().copy_text(uri);
+                    self.message = "已复制图片引用，可粘到正文".to_string();
                 }
             }
             // 图片 preview 浮窗：@ 复制内部图片引用，便于粘进注释正文。
@@ -1456,7 +1492,7 @@ impl PdfReaderApp {
                             // 有回调时启用 ENABLE_MATH）；缓存按公式/行内/DPI。
                             let math_cache = self.markdown.math_cache.clone();
                             let math_fn = move |ui: &mut egui::Ui, tex: &str, inline: bool| {
-                                crate::math::paint(ui, &math_cache, tex, inline);
+                                crate::math::paint(ui, &math_cache, tex, inline, palette.text);
                             };
                             let scroll_source = egui::scroll_area::ScrollSource {
                                 mouse_wheel: wheel_owner,
