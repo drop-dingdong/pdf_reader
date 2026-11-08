@@ -1,4 +1,4 @@
-# 下载 PDFium 预编译库到 vendor\pdfium-<平台>\lib\（Windows 用；不需要 bash）
+﻿# 下载 PDFium 预编译库到 vendor\pdfium-<平台>\lib\（Windows 用；不需要 bash）
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\fetch-pdfium.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\fetch-pdfium.ps1 win-x64

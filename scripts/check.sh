@@ -26,6 +26,15 @@ else
   done
 fi
 
+echo "== PowerShell UTF-8 BOM =="
+for f in scripts/*.ps1; do
+  bom="$(head -c 3 "$f" | od -An -tx1 | tr -d ' \n')"
+  if [ "$bom" != "efbbbf" ]; then
+    echo "缺少 UTF-8 BOM：$f（Windows PowerShell 5.1 会按本地代码页读中文）" >&2
+    exit 1
+  fi
+done
+
 echo "== 文档链接 =="
 ./scripts/check-docs.sh
 

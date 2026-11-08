@@ -514,19 +514,7 @@ pub fn append_new_highlights(pdf: &[u8], highlights: &[NewHighlight]) -> Result<
             number_f32(highlight.rect.x + highlight.rect.width),
             number_f32(highlight.rect.y + highlight.rect.height),
         );
-        for quad in &highlight.quads {
-            dict.push_str(&format!(
-                "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2}",
-                number_f32(quad.x),
-                number_f32(quad.y + quad.height),
-                number_f32(quad.x + quad.width),
-                number_f32(quad.y + quad.height),
-                number_f32(quad.x),
-                number_f32(quad.y),
-                number_f32(quad.x + quad.width),
-                number_f32(quad.y),
-            ));
-        }
+        push_quad_points(&mut dict, &highlight.quads);
         dict.push_str(&format!(
             "]/C[{:.3} {:.3} {:.3}]/CA {:.3}/F 4",
             highlight.color[0] as f32 / 255.0,
@@ -664,6 +652,27 @@ fn number_f32(value: f32) -> f32 {
         value
     } else {
         0.0
+    }
+}
+
+/// 写一组 `/QuadPoints` 的 8 个数字，**每个数字后都留空格**。
+///
+/// 不能只在数字之间加空格：上一 quad 的最后一个数与下一 quad 的第一个数
+/// 会粘成 `638.46109.10`，PDF 解析器要么当坏 token、要么错位，
+/// 表现为高亮/下划线的选中区域和保存后重开的位置不一致。
+fn push_quad_points(dict: &mut String, quads: &[pdfcore::prelude::Rect]) {
+    for quad in quads {
+        dict.push_str(&format!(
+            "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} ",
+            number_f32(quad.x),
+            number_f32(quad.y + quad.height),
+            number_f32(quad.x + quad.width),
+            number_f32(quad.y + quad.height),
+            number_f32(quad.x),
+            number_f32(quad.y),
+            number_f32(quad.x + quad.width),
+            number_f32(quad.y),
+        ));
     }
 }
 
@@ -807,19 +816,7 @@ pub fn append_new_annotations(
             number_f32(display_rect.x + display_rect.width),
             number_f32(display_rect.y + display_rect.height),
         );
-        for quad in &markup.quads {
-            dict.push_str(&format!(
-                "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2}",
-                number_f32(quad.x),
-                number_f32(quad.y + quad.height),
-                number_f32(quad.x + quad.width),
-                number_f32(quad.y + quad.height),
-                number_f32(quad.x),
-                number_f32(quad.y),
-                number_f32(quad.x + quad.width),
-                number_f32(quad.y),
-            ));
-        }
+        push_quad_points(&mut dict, &markup.quads);
         dict.push_str(&format!(
             "]/C[{:.3} {:.3} {:.3}]/CA {:.3}/F 4",
             markup.color[0] as f32 / 255.0,
@@ -1167,19 +1164,7 @@ pub fn append_new_markups(pdf: &[u8], markups: &[NewMarkup]) -> Result<Vec<u8>, 
             number_f32(display_rect.x + display_rect.width),
             number_f32(display_rect.y + display_rect.height),
         );
-        for quad in &markup.quads {
-            dict.push_str(&format!(
-                "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2}",
-                number_f32(quad.x),
-                number_f32(quad.y + quad.height),
-                number_f32(quad.x + quad.width),
-                number_f32(quad.y + quad.height),
-                number_f32(quad.x),
-                number_f32(quad.y),
-                number_f32(quad.x + quad.width),
-                number_f32(quad.y),
-            ));
-        }
+        push_quad_points(&mut dict, &markup.quads);
         dict.push_str(&format!(
             "]/C[{:.3} {:.3} {:.3}]/CA {:.3}/F 4",
             markup.color[0] as f32 / 255.0,

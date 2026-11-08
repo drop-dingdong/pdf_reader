@@ -37,6 +37,9 @@ app（编排） --job.json--> app --writeback（子进程，裸 FFI） --输出-
 
 外观约定：
 
+- **`/QuadPoints` 每个 quad 的 8 个数字之间和末尾都必须有空白**；漏掉末尾空格会让
+  相邻 quad 的数字粘成坏 token（高亮/下划线位置错乱）。新注释统一用
+  `pdf_patch::push_quad_points`。
 - 高亮不写 AP，让阅读器按 `/QuadPoints` 半透明合成（写 AP 会盖住文字）；
 - 下划线/删除线写线段 Form；墨迹用 PDFium 路径对象生成带 `/Resources`/`/Matrix` 的 Form；
 - 便签靠阅读器自己画图标，不写 AP；

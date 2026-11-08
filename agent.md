@@ -11,7 +11,12 @@
 
 - 交付前必须 `git commit`。**只提交本次改动的文件**；工作区里的临时样本、模式位变化不要一起提交。
 
-## 3. 文档
+## 3. Windows 脚本
+
+- 所有 `.ps1` 必须带 **UTF-8 BOM**（`EF BB BF`）；Windows PowerShell 5.1 没有 BOM 时
+  会按本地代码页读取，中文注释/字符串会乱码。`scripts/check.sh` 会检查。
+
+## 4. 文档
 
 - 文档集见 [docs/README.md](docs/README.md)，只描述现状；历史原因写提交说明或留在 git 历史。
 - 触及架构、契约、可观察行为、持久化格式或阈值时，同步更新：

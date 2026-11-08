@@ -1,4 +1,4 @@
-# 在 Windows 上构建并打包（自带 pdfium.dll）。只能在**当前平台**打包 —— 交叉编译不在此脚本范围内。
+﻿# 在 Windows 上构建并打包（自带 pdfium.dll）。只能在**当前平台**打包 —— 交叉编译不在此脚本范围内。
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\package.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\package.ps1 -Backend ratex

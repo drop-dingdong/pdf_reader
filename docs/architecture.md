@@ -218,6 +218,7 @@ app::compact::run_child → app --compact <in> <out>
 | INV-22 | 外部注释只读几何/颜色；改正文/删除可以写回 | `readback`/UI 人工验收 |
 | INV-23 | Markdown 只影响文字浮窗的显示：不改 `Float.body`、不改源文本/持久化/写回；LaTeX 纹理只是临时缓存；滚轮不穿透浮窗；外部链接不打开浏览器 | `markdown`/`math` 单测 + 浮窗人工验收 |
 | INV-24 | 浮窗链接“要么正确、要么断链”：内部注释 id 不复用且除删除外的编辑保持 id；preview 用稳定记录 id；外部注释仅会话 token/校验后可用；不可验证时提示而不按 id 猜 | `float_link_tests`、`annot_roundtrip`、人工验收 |
+| INV-25 | 新注释 `/QuadPoints` 每个 quad 后必须有空白；否则数字粘连会让高亮/下划线位置错乱 | `multi_quad_highlight_keeps_quad_separators` |
 
 ## 9. 架构层面的已知限制
 

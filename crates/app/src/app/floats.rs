@@ -1074,6 +1074,25 @@ impl PdfReaderApp {
                     self.floats[index].title = title;
                 }
             }
+            // 引用点浮窗：重选 dest rect 后 snapshot 已更新，已有浮窗也要换图，
+            // 否则浮窗一直显示旧截图（用户实测）。
+            if let Some((page, mark_index)) = self.floats[index].origin {
+                if let Some(mark) = self
+                    .dest_marks
+                    .get(page.get() as usize)
+                    .and_then(|marks| marks.get(mark_index))
+                {
+                    if let Some(texture) = mark.snapshot.clone() {
+                        let stale = match &self.floats[index].content {
+                            FloatContent::Image(current) => current.id() != texture.id(),
+                            FloatContent::Text(_) => true,
+                        };
+                        if stale {
+                            self.floats[index].content = FloatContent::Image(texture);
+                        }
+                    }
+                }
+            }
             // 注释正文：每帧从 Annotation.body 刷新（编辑/撤销后立即同步）
             if let FloatOwner::Annotation(id) = self.floats[index].owner {
                 if let Some(annotation) = self.annotations.get(id) {

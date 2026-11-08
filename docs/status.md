@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-07　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（525 个测试）。
+> 快照：2026-11-08　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（526 个测试）。
 
 ## 1. 它是什么
 
@@ -87,6 +87,13 @@
   不再逐行右移。
 - **`view.rs` 拆分评估（未实施）**：4.26k 行中测试约 2.26k/73 个；建议先做
   `view/tests.rs` 只拆测试，生产模块拆分暂缓；见 [view-split-evaluation.md](view-split-evaluation.md)。
+- **注释几何写回修复**：`/QuadPoints` 的每个 quad 末尾补空格，避免上一段最后一个数字
+  与下一段第一个数字粘成坏 token；三处新注释写入统一走 `push_quad_points`，并补
+  多 quad 回读回归测试。
+- **dest 浮窗换图**：重选 dest rect 后，已有浮窗从 `DestMark.snapshot` 刷新图片，
+  不再停留在旧截图。
+- **PowerShell BOM**：`scripts/*.ps1` 加 UTF-8 BOM；`scripts/check.sh` 增加 BOM 门禁；
+  agent.md 记录规则。
 - **图片可获取性重检**：文字浮窗引用的 `pd-img` 每次 owner 扫描都重新判定来源
   preview/dest 是否还在；来源被删时清掉 `ImageStore` 的旧 revision 并 `forget_image`，
   不再继续显示缓存里的已删除图片。

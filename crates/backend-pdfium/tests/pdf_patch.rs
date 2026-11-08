@@ -280,3 +280,52 @@ fn inline_annotation_body_update_and_delete() {
     assert!(page_annotations(&deleted).expect("index")[0].is_empty());
     let _ = std::fs::remove_file("/tmp/pdf-inline-test.pdf");
 }
+
+#[test]
+fn multi_quad_highlight_keeps_quad_separators() {
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    if backend_pdfium::pdfium().is_err() {
+        return;
+    }
+    let source = std::fs::read(fixture("okular.pdf")).expect("读样本");
+    let quads = vec![
+        pdfcore::prelude::Rect::new(100.0, 700.0, 200.0, 12.0),
+        pdfcore::prelude::Rect::new(100.0, 680.0, 180.0, 12.0),
+    ];
+    let rect = quads
+        .iter()
+        .copied()
+        .reduce(|a, b| a.union(b))
+        .expect("quads");
+    let output = backend_pdfium::pdf_patch::append_new_markups(
+        &source,
+        &[backend_pdfium::pdf_patch::NewMarkup {
+            page: 0,
+            id: Some(123),
+            rect,
+            quads: quads.clone(),
+            kind: backend_pdfium::pdf_patch::MarkupKind::Highlight,
+            color: [255, 214, 0],
+            opacity: 0.35,
+            body: None,
+        }],
+    )
+    .expect("写多 quad 高亮");
+    let read = read_bytes(&output);
+    let annotation = read
+        .annotations
+        .iter()
+        .find(|annotation| annotation.id == Some(123))
+        .expect("读回新注释");
+    let pdfcore::annotation::AnnotationKind::Highlight { quads: read_quads } = &annotation.kind
+    else {
+        panic!("应为高亮");
+    };
+    assert_eq!(read_quads.len(), 2, "两个 quad 不能粘成一个坏 token");
+    for (actual, expected) in read_quads.iter().zip(&quads) {
+        assert!((actual.x - expected.x).abs() < 0.02);
+        assert!((actual.y - expected.y).abs() < 0.02);
+        assert!((actual.width - expected.width).abs() < 0.02);
+        assert!((actual.height - expected.height).abs() < 0.02);
+    }
+}

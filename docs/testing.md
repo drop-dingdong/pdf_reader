@@ -28,7 +28,7 @@ cargo test -p pdfcore --lib tiling   # 单模块
 | UI 联调 | `crates/app/tests/*.rs` | 真实 `DocumentSession` + `view`、注释往返、replay 脚本、CLI 写回 |
 | 回放 | `crates/app/src/app/replay.rs` + `scripts/replay/` | 驱动真实 `App::ui`，逐帧检查绘制输出 |
 
-测试数量会变，以 `cargo test` 输出为准；当前 525 个。
+测试数量会变，以 `cargo test` 输出为准；当前 526 个。
 
 ## 3. 基础设施
 
@@ -141,6 +141,10 @@ cargo run -p app -- --replay scripts/replay/tiling_800.json --timing
 | 15t | 浅色主题下看浮窗关闭/标题/公式/侧栏；深色下看侧栏 | 关闭按钮可见；link/goto/编辑图标颜色一致；标题不是白字；公式清楚；侧栏文字对比足够 |
 | 15u | 有图片记录的 dest 浮窗 | 显示图片引用按钮，图标与图片 preview 类型图标可区分；复制 URI 可粘贴 |
 | 15v | 注释列表多行，观察右侧 `⋯` | 所有行的 `⋯` 在同一竖线上；与 preview 列表一致 |
+| 15w | Windows PowerShell：`cargo run -p app -- <pdf>`；再拖入 PDF | 能打开；若停在空状态，先跑 `cargo run -p app -- --selftest` 看 PDFium 候选路径 |
+| 15x | arXiv 样本：多行选中高亮/下划线，保存重开 | 选中区域与保存后位置一致；多个 QuadPoints 不粘连 |
+| 15y | 已固定 dest 浮窗，重新框选该 dest rect | 浮窗图片立即更新；缩放清晰度与临时预览一致 |
+| 15z | Windows PowerShell 运行 `scripts\fetch-pdfium.ps1` 等 | 中文输出正常；脚本首部为 UTF-8 BOM（`scripts/check.sh` 会检查） |
 | 16 | 保存 → 重开 → Okular 查看 | 注释可见可改；id 不重复；再保存不叠对象 |
 | 17 | 移动墨迹 → 保存 → 撤销 → 保存 | 回到原位（不消失）；重做回移动位置 |
 | 18 | 保存后 Okular 修改正文/便签，再回本程序保存 | 修改保留；同一 id 取最后一份 |
