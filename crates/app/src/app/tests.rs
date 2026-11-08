@@ -631,10 +631,10 @@ mod annotation_body_tests {
         );
     }
 
-    /// 合成读回结果 + 页对象条目：便签必须按对象号配对，外部便签不能被判成"内联只读"；
-    /// 同一 id 出现多次时以最后一版为准。
+    /// 合成读回结果 + 页对象条目：便签必须按对象号配对；同一 id 出现多次时
+    /// 保留第一条、后续重编号并标脏，保存时重建，不能静默覆盖。
     #[test]
-    fn notes_pair_with_objects_and_duplicates_take_the_last() {
+    fn notes_pair_with_objects_and_duplicates_are_renumbered() {
         let mut app = app();
         let note = |page: PageIndex, id: Option<u64>, body: &str| {
             backend_pdfium::readback::ReadAnnotation {
@@ -670,32 +670,34 @@ mod annotation_body_tests {
         let refs = vec![vec![entry(50), entry(60)], vec![entry(70)]];
         let _ = app.merge_readback(&readback, &refs);
 
-        let own = app
+        let first = app
             .annotations
             .iter()
             .find(|annotation| annotation.id == AnnotationId(5))
-            .expect("自有便签");
-        assert_eq!(own.body.as_deref(), Some("新正文"), "重复 id 取最后一版");
+            .expect("第一条自有便签");
+        assert_eq!(first.body.as_deref(), Some("旧正文"));
         assert_eq!(
-            own.pdf_ref,
-            Some(pdfcore::annotation::PdfObjectRef { num: 60, gen: 0 }),
-            "应配对到最新的对象"
+            first.pdf_ref,
+            Some(pdfcore::annotation::PdfObjectRef { num: 50, gen: 0 })
         );
+        assert!(app.annotation_pdf.repair_needed, "重复标记必须置修复脏位");
+
+        let repaired = app
+            .annotations
+            .iter()
+            .find(|annotation| annotation.body.as_deref() == Some("新正文"))
+            .expect("重复条目应保留并重编号");
+        assert_ne!(repaired.id, AnnotationId(5));
+        assert_eq!(repaired.pdf_ref, None, "重复条目保存时应重建对象");
 
         let external = app
             .annotations
             .iter()
-            .find(|annotation| annotation.id != AnnotationId(5))
+            .find(|annotation| {
+                annotation.pdf_ref == Some(pdfcore::annotation::PdfObjectRef { num: 70, gen: 0 })
+            })
             .expect("外部便签");
-        assert_eq!(
-            external.pdf_ref,
-            Some(pdfcore::annotation::PdfObjectRef { num: 70, gen: 0 }),
-            "外部便签也要拿到对象号"
-        );
-        assert!(
-            !(app.annotation_pdf.external_ids.contains(&external.id) && external.pdf_ref.is_none()),
-            "外部便签不能被判成内联只读"
-        );
+        assert!(app.annotation_pdf.external_ids.contains(&external.id));
     }
 
     #[test]

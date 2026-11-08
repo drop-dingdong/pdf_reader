@@ -182,4 +182,6 @@ pub(super) struct AnnotationPdfState {
         std::collections::HashMap<pdfcore::annotation::PdfObjectRef, AnnotationId>,
     /// 上次打开时 PDF 里带 `pd-fr:` 标记的注释数（决定空 overlay 能否写回/导出）。
     pub(super) pdf_marked_annotations: usize,
+    /// 读回发现重复 `/NM`，需要在下次保存时重建对象并重写标记。
+    pub(super) repair_needed: bool,
 }

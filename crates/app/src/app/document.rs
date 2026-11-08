@@ -125,19 +125,37 @@ impl PdfReaderApp {
                 continue;
             };
             let id = AnnotationId(raw_id);
+            // 旧版本/异常写入可能给多条注释相同的 `pd-fr:<id>`。保留第一条，
+            // 后续条目分配新 id 并强制重建对象，否则 merge 会覆盖/丢注释，
+            // 保存时还会触发“期望数/实际数”不一致。
+            if seen_ids.contains(&raw_id) {
+                let Some(new_id) = self.insert_internal_annotation(item.page, item.kind.clone())
+                else {
+                    continue;
+                };
+                if let Some(annotation) = self.annotations.get_mut(new_id) {
+                    annotation.color = item.color;
+                    annotation.opacity = item.opacity;
+                    annotation.body = item.body.clone();
+                    annotation.author = item.author.clone();
+                    annotation.created = item.created;
+                    annotation.modified = item.modified;
+                    // 旧对象仍带重复的 /NM；保存时要走“重建对象”路径。
+                    annotation.pdf_ref = None;
+                }
+                if let Some(reference) = reference {
+                    self.annotation_pdf
+                        .opened_id_by_ref
+                        .insert(*reference, new_id);
+                    self.annotation_pdf.pdf_ref_ids.insert(*reference, new_id);
+                }
+                self.annotation_pdf.repair_needed = true;
+                restored += 1;
+                seen_ids.insert(new_id.get());
+                continue;
+            }
             if let Some(existing) = self.annotations.get_mut(id) {
                 existing.pdf_ref = *reference;
-                if seen_ids.contains(&raw_id) {
-                    // 同一 id 在页面 /Annots 里出现多次（历史写入/其它阅读器重复保存）：
-                    // 数组顺序就是追加顺序，**以最后一个为准**，否则会拿旧正文覆盖新修改。
-                    existing.kind = item.kind.clone();
-                    existing.color = item.color;
-                    existing.opacity = item.opacity;
-                    existing.body = item.body.clone();
-                    existing.author = item.author.clone();
-                    existing.created = item.created;
-                    existing.modified = item.modified;
-                }
             } else {
                 let Some(mut annotation) = Annotation::new(item.page, item.kind.clone()) else {
                     continue;
@@ -239,6 +257,7 @@ impl PdfReaderApp {
         if !preserve_history {
             self.history.clear();
             self.annotation_pdf.pdf_ref_ids.clear();
+            self.annotation_pdf.repair_needed = false;
             // 换文档：旧文档的数据脏位不能带过来；迁移/升级会在加载时重新置脏。
             self.data_dirty = false;
         }
@@ -542,6 +561,10 @@ impl PdfReaderApp {
                         if restored > 0 {
                             self.message
                                 .push_str(&format!("（已从 PDF 恢复 {restored} 条标注）"));
+                        }
+                        if self.annotation_pdf.repair_needed {
+                            self.message
+                                .push_str("（检测到重复注释标记，保存后将重建）");
                         }
                         self.settle_dirty_after_open();
                         self.sidecar_migrated = false;

@@ -111,11 +111,7 @@ impl PdfReaderApp {
                 // 文件操作收进一个菜单：少了 5 个按钮，窄窗口不再挤。
                 let can_write = self.document_path.is_some() && self.is_dirty();
                 let can_compact = self.document_path.is_some();
-                let marker = if self.pdf_dirty || self.data_dirty {
-                    " *"
-                } else {
-                    ""
-                };
+                let marker = if self.is_dirty() { " *" } else { "" };
                 ui.menu_button(format!("文件{marker}"), |ui| {
                     let save = ui.add_enabled(can_write, egui::Button::new("保存"));
                     let save = if can_write {

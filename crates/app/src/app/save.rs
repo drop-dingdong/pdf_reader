@@ -14,7 +14,7 @@ impl PdfReaderApp {
     /// 写回本身在子进程里（见 `docs/writeback.md`）。
     /// 有未保存改动（注释或自定义数据）。
     pub(super) fn is_dirty(&self) -> bool {
-        self.pdf_dirty || self.data_dirty
+        self.pdf_dirty || self.data_dirty || self.annotation_pdf.repair_needed
     }
 
     /// 请求打开另一个文件：脏就先弹提示，干净就直接延后打开。
@@ -89,7 +89,7 @@ impl PdfReaderApp {
             self.message = "先打开一个 PDF 再写入".to_string();
             return;
         };
-        if !self.pdf_dirty && !self.data_dirty {
+        if !self.pdf_dirty && !self.data_dirty && !self.annotation_pdf.repair_needed {
             self.message = "无改动：没有需要写入的内容".to_string();
             return;
         }
@@ -314,7 +314,7 @@ impl PdfReaderApp {
                 self.data_dirty = false;
                 self.data_clean_hash = Some(self.data_fingerprint());
             }
-            if !self.pdf_dirty {
+            if !self.pdf_dirty && !self.annotation_pdf.repair_needed {
                 self.mark_pdf_saved();
                 self.message = format!("已保存自定义数据：{}", sidecar.display());
                 return Ok(());
@@ -519,6 +519,7 @@ impl PdfReaderApp {
     /// 保存成功后把当前修订号记成保存点。
     pub(super) fn mark_pdf_saved(&mut self) {
         self.saved_pdf_revision = self.history.current_pdf_revision();
+        self.annotation_pdf.repair_needed = false;
         self.refresh_dirty();
     }
 
