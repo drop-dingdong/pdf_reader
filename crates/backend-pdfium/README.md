@@ -25,8 +25,9 @@ scripts/fetch-pdfium.sh linux-x64  # 或显式指定
 
 > **Windows 的坑**：bblanchon 的 tar 包里，运行库 `pdfium.dll` 在 **`bin/`** 下，
 > 而 `lib/pdfium.dll.lib` 是**导入库**（链接期用，运行时不加载）。
-> `scripts/fetch-pdfium.sh` 会把运行库归位到 `lib/` 并删掉导入库/静态库；
-> 读取顺序里也包含 `bin/`，所以两种布局都能用。
+> `scripts/fetch-pdfium.sh` / `scripts\fetch-pdfium.ps1` 会把运行库归位到 `lib/`；
+> 开发目录要求它在 `vendor/pdfium-<平台>/lib/`。可执行文件同级的 `bin/` 也仍是候选，
+> 但仓库内 vendor 的 `bin/` 不作为开发查找路径。
 >
 > **Windows 上推荐用 PowerShell 脚本**（不依赖 bash）：
 > `scripts\fetch-pdfium.ps1`（下载并归位）、`scripts\package.ps1`（构建+打包+`--selftest`）。

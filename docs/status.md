@@ -136,6 +136,14 @@
 - **旧格式移除**：不再读取/创建 `.annot.json`，也不会再产生 `.annot.json.bak-*`；遗留文件忽略。
 
 ## 3. 当前已知限制
+- **旧版重复 `/NM`**：`annotation_loss.pdf` 中两页都存在 `pd-fr:1`；当前新注释分配器
+  不会再生重复 id，但既有文件的重复标记尚未自动修复，打开后可能看到“期望数/实际数”。
+- **既有坏 QuadPoints**：`annotation_error.pdf` 旧对象已经粘连；新写入已修复，
+  旧对象本身无法可靠还原，需要重新添加或等修复扫描。
+- **Adobe 高亮兼容**：高亮不写 AP，依赖 `/QuadPoints`；有效 QuadPoints 下仍待 Acrobat 实测。
+- **dest 重选后清晰度**：已有浮窗会换图；若仍比临时预览糊，需要继续查快照 scale/body。
+- **窗口整体拖动黑帧/迟滞**：疑似 eframe/winit/GPU 交换链，非主视图重排；待 Windows/Linux 对照。
+
 
 - **Linux Wayland 外部文件拖放不可用**：winit 0.30 的 Wayland 后端不投递 DnD 事件；
   用 `env -u WAYLAND_DISPLAY` 走 X11/XWayland 可用。Windows 正常。
