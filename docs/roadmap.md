@@ -19,6 +19,10 @@
 | `PdfReaderApp` 全量多级状态树 | 四组目标分组已完成（159 → 118 字段，见 [state-grouping-evaluation.md](state-grouping-evaluation.md)）；全量分组收益低，暂不做 | 字段继续增长，或跨组借用明显变难 |
 
 
+- **PDF 1.5 注释兼容（P0-C）**：1.5 vs 1.7 的五类注释字段差异很小，问题在
+  xref/object stream 解析；字段矩阵与版本策略见
+  [annotation-versions.md](annotation-versions.md)。先做 P1，再做 P0-C。
+
 ## 2. 已决定但还没做
 
 推荐实现顺序：行内基线/完整布局（后者需改上游渲染器，成本高）。

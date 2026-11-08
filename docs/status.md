@@ -85,6 +85,8 @@
   （复制图标与图片类型图标区分）；侧栏标题改用 strong text 提升深色对比；
   注释行去掉嵌套 `ui.horizontal`，整表固定行宽 + `interact` 菜单，右侧 `⋯`
   不再逐行右移。
+- **PDF 注释版本矩阵（文档）**：1.4–2.0 的五类注释字段差异、文件结构差异与
+  `<1.5` 拒绝注释而非拒绝打开的策略，见 [annotation-versions.md](annotation-versions.md)。
 - **`view.rs` 拆分评估（未实施）**：4.26k 行中测试约 2.26k/73 个；建议先做
   `view/tests.rs` 只拆测试，生产模块拆分暂缓；见 [view-split-evaluation.md](view-split-evaluation.md)。
 - **注释几何写回修复**：`/QuadPoints` 的每个 quad 末尾补空格，避免上一段最后一个数字

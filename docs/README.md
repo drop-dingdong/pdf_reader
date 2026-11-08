@@ -15,6 +15,7 @@
 | 浮窗链接语法/身份规则/外部注释策略/失败语义 | [float-links.md](float-links.md) |
 | `PdfReaderApp` 状态分组的 Phase 3 评估（未实施） | [state-grouping-evaluation.md](state-grouping-evaluation.md) |
 | `view.rs` 拆分评估（未实施；建议先拆测试） | [view-split-evaluation.md](view-split-evaluation.md) |
+| PDF 1.4–2.0 注释字段差异（实现/排查查表） | [annotation-versions.md](annotation-versions.md) |
 | UI 样式/图标/侧栏/主题的规范（已实施） | [ui-standards.md](ui-standards.md) |
 | 文件格式与持久化：PDF 注释字段、`<pdf>.json`、`settings.json` | [persistence.md](persistence.md) / [readback.md](readback.md) / [writeback.md](writeback.md) |
 | 写回 PDF（子进程、FFI、外观、校验、排查） | [writeback.md](writeback.md) |

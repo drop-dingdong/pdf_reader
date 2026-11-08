@@ -209,7 +209,7 @@ app::compact::run_child → app --compact <in> <out>
 | INV-13 | `encrypted` 只在 security handler 非 Unprotected 时为真 | `unencrypted_documents…` |
 | INV-14 | 页面位图不含 PDF 注释（注释只由应用叠层绘制） | `annotations_are_not_baked…` |
 | INV-15 | 注释几何存未旋转页面空间；旋转只在显示/写回边界 | `readback`/`writeback` 测试 |
-| INV-16 | 写回幂等：`/NM = pd-fr:<id>`；同一 id 多份以最后一份为准 | `annotation_meta.rs`、`merge_readback` 测试 |
+| INV-16 | 写回幂等：`/NM = pd-fr:<id>`；重复 id 由 INV-26 重编号，不静默覆盖 | `annotation_meta.rs`、`duplicate_annotation_markers_are_renumbered_and_saved` |
 | INV-17 | `pdf_ref = None` 表示“下次保存重建对象”；样式/几何快照写回重开后都按重建 | `undo_after_writeback_rebuilds_moved_ink` |
 | INV-18 | 脏位 = PDF 修订号 vs 保存点；preview 编辑不推进 PDF 修订号 | `redo_back_to_the_save_point_is_clean`、`preview_edits…` |
 | INV-19 | 设置恢复顺序：`GoToPage` → `SetZoom` → 可选 `SetScroll(anchor)` | `settings` 单测 + 人工验收 |
@@ -224,6 +224,8 @@ app::compact::run_child → app --compact <in> <out>
 ## 9. 架构层面的已知限制
 
 - 纹理层按条目数限额，没有显存字节预算；上传/像素转换没有字节预算。
+- 各 PDF 版本（1.4–2.0）的注释字段差异与版本策略见
+  [annotation-versions.md](annotation-versions.md)。
 - `app.rs` 已拆成 `app/` 子模块（~0.6k 行只剩状态/构造/入口）；`PdfReaderApp` 仍有
   约 118 个字段，Runtime/SaveFlow/Markdown/AnnotationPdf 四组已分组；Phase 3 评估见
   [state-grouping-evaluation.md](state-grouping-evaluation.md)；`view.rs` 仍有 ~4.2k 行，
