@@ -282,10 +282,28 @@ impl PdfReaderApp {
         let backend = PdfiumBackend::new();
         match backend.open(Source::Path(path), password) {
             Ok(opened) => {
+                // PDFium 可能“打开成功但页数为 0”（空页树、损坏对象、未启用的过滤器）。
+                // 必须在建 DocumentSession / 访问第 1 页之前拒绝，否则会报 page#1/0。
+                let source_bytes = std::fs::read(path).ok();
+                if opened.page_count() == 0 {
+                    let has_brotli = source_bytes.as_deref().is_some_and(|bytes| {
+                        bytes
+                            .windows(b"/BrotliDecode".len())
+                            .any(|window| window == b"/BrotliDecode")
+                    });
+                    let reason = if has_brotli {
+                        "PDF 页数为 0（可能使用了当前 PDFium 未启用的 Brotli 压缩）"
+                    } else {
+                        "PDF 页数为 0（空文档或页面树损坏）"
+                    };
+                    self.error = Some(format!("无法打开 {}：{reason}", path.display()));
+                    self.message = "文档没有可显示的页面".to_string();
+                    return;
+                }
                 // 版本只用于注释能力提示；实际能否写回还看 pdf_index 的对象配对。
-                let version = std::fs::read(path)
-                    .ok()
-                    .and_then(|bytes| backend_pdfium::pdf_index::PdfVersion::document(&bytes));
+                let version = source_bytes
+                    .as_deref()
+                    .and_then(backend_pdfium::pdf_index::PdfVersion::document);
                 self.annotation_pdf.version = version;
                 self.annotation_pdf.annotations_disabled =
                     version.is_some_and(|version| version.below_annotation_support());

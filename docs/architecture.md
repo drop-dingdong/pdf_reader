@@ -223,6 +223,7 @@ app::compact::run_child → app --compact <in> <out>
 | INV-27 | `<1.5` 只拒绝注释编辑，不拒绝打开/阅读；信息栏说明 | `below_1_5_disables_annotation_creation`、人工 |
 | INV-28 | `pdf_index` 配对失败时保留 readback 显示并禁用 PDF 注释写回，不能静默丢成 0 条 | `readback_without_refs_is_kept_and_blocks_pdf_writeback`、`annotation_loss` |
 | INV-29 | 注释索引按页判断：不完整页只读，完整页仍可新建/改注释；只有整份索引不可用才全局只读 | `incomplete_page_is_read_only_but_complete_page_allows_new_annotations`、`annotation_loss` |
+| INV-30 | 打开成功但 `page_count == 0` 时不建会话/不访问第 1 页，直接提示空文档或未启用过滤器 | `zero_page_pdf_is_rejected_before_layout`、`2.0_Brotli` 人工 |
 
 
 ## 9. 架构层面的已知限制

@@ -10,13 +10,13 @@
 
 | 文件 | 版本 | 现象 | 类别 |
 | --- | --- | --- | --- |
-| `2.0_Brotli-Prototype-FileA.pdf` | 2.0 | PDFium 打开但 0 页；应用会报 `页号越界：page#1（共0页）` | 空文档/损坏 PDF；应用应拒绝打开而不是访问第 1 页 |
+| `2.0_Brotli-Prototype-FileA.pdf` | 2.0 | PDFium 打开但 0 页；应用现在提示“页数为 0/可能 Brotli 未启用”，不再报 page#1/0 | 0 页防御已修；Brotli 过滤器支持另议 |
 | `issue19484_1.pdf` | 1.6 | 打开但 0 页；`pdf_index` 页面对象不存在 | 页树/对象索引 |
 | `issue19484_2.pdf` | 1.6 | 同上 | 页树/对象索引 |
 | `poppler-395-0-fuzzed.pdf` | 1.7 | 打开但 0 页；页面对象不存在 | fuzzed/页树 |
 | `Pages-tree-refs.pdf` | 1.7 | PDFium `Unknown` 打开失败；页面树深度/结构异常 | 页树 |
 
-`2.0_Brotli` 值得单独修一个防御：**打开阶段或布局前若 `page_count == 0`，直接给出“空文档/不支持”提示，不能进入第 1 页。**
+`2.0_Brotli` 的 0 页访问已加防御：**`page_count == 0` 直接提示，不进入第 1 页。** Brotli 过滤器本身是否支持仍需后端能力。
 
 ## 2. 打开失败（建议明确拒绝，不追注释）
 

@@ -632,6 +632,25 @@ mod annotation_body_tests {
     }
 
     #[test]
+    fn zero_page_pdf_is_rejected_before_layout() {
+        if backend_pdfium::pdfium().is_err() {
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("pdf-zero-page-{}.pdf", std::process::id()));
+        std::fs::write(
+            &path,
+            backend_pdfium::fixtures::many_page_pdf(0, 595.0, 842.0),
+        )
+        .expect("写空文档");
+        let mut app = app();
+        app.open(&path, None);
+        let error = app.error.as_deref().unwrap_or_default();
+        assert!(error.contains("页数为 0"), "应提示空页数，实际：{error:?}");
+        assert!(app.session.is_none(), "0 页文档不应建会话/布局");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn readback_without_refs_is_kept_and_blocks_pdf_writeback() {
         let mut app = app();
         let readback = backend_pdfium::readback::Readback {
