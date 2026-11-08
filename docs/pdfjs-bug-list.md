@@ -60,10 +60,10 @@ poppler-937-0-fuzzed.pdf
 
 | 文件 | 现象 |
 | --- | --- |
-| `issue17215.pdf` | 只有 Caret（不支持类型）；新建 Highlight 写入成功但 readback 读不回 |
+| `issue17215.pdf` | 只有 Caret（不支持类型）；文件是**空用户密码的加密 PDF**，权限禁止修改注释，应用拒绝写回 |
 | `issue9418.pdf` | 文件损坏，`/Pages` 找不到 |
 
-`issue12504` / `issue14565` 已由“直接对象不被旧 ObjStm 覆盖”修复。
+`issue12504` / `issue14565` 已由“直接对象不被旧 ObjStm 覆盖”修复。`issue17215` 不属于 C2 索引 bug，而是加密/权限限制。
 
 ### 1.6
 
