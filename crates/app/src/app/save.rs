@@ -58,6 +58,18 @@ impl PdfReaderApp {
             }
             _ => {
                 let detail: String = text.chars().take(1200).collect();
+                // qpdf 无法打开暂存文件（权限、杀毒软件/文件占用等）不是 PDF
+                // 完整性失败；不能因此阻断保存。
+                let lower = detail.to_ascii_lowercase();
+                if lower.contains("permission denied")
+                    || lower.contains("access is denied")
+                    || lower.contains("unable to open")
+                {
+                    self.push_message_log(&format!(
+                        "qpdf 无法读取暂存文件（权限/占用），跳过完整性检查：{label}"
+                    ));
+                    return Ok(());
+                }
                 self.push_message_log(&format!("qpdf 检查失败：{label}（exit {code:?}）{detail}"));
                 Err(format!(
                     "qpdf 完整性检查失败（exit {code:?}），未替换目标文件：\n{detail}"

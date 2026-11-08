@@ -24,6 +24,8 @@
 
 `CHECK_PDF_FILE` 的检查结果是**消息记录**侧栏中的一条历史；它不改变正常保存消息。
 qpdf 退出码 0/3（有警告）放行，其它退出码删除临时文件并保留原文件。
+若 qpdf 报 `Permission denied`/`Access is denied`/`unable to open`（暂存文件权限、
+杀毒软件或文件占用），视为**检查不可用**，只记录跳过，不阻断保存。
 
 示例：
 
