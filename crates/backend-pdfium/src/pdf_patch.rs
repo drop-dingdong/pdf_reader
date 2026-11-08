@@ -51,7 +51,13 @@ pub fn append_content_updates(
         .map(|(reference, _)| reference.num)
         .max()
         .unwrap_or(0);
-    let size = trailer.size.max(max_number + 1);
+    // 原文件可能含比上一个 trailer /Size 更大的对象（例如 xref stream 自身）；
+    // 增量 xref 的 /Size 必须覆盖所有现存对象，否则 Adobe 等严格阅读器会拒绝。
+    let highest_existing = crate::pdf_index::highest_object_number(&out);
+    let size = trailer
+        .size
+        .max(max_number + 1)
+        .max(highest_existing.saturating_add(1));
     out.extend_from_slice(
         format!(
             "trailer\n<</Size {size} /Root {} {} R /Prev {}>>\nstartxref\n{xref_offset}\n%%EOF\n",

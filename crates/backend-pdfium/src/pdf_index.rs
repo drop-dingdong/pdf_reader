@@ -205,6 +205,30 @@ pub(crate) struct Trailer {
     pub startxref: usize,
 }
 
+/// 扫描文件里出现过的最大对象号（含 xref stream 自身等未进入新 xref 的对象）。
+///
+/// 增量写回只追加新对象，但 `/Size` 必须覆盖**所有现存对象**；只取上一个
+/// trailer 的 `/Size` 会在原文件含更高编号对象（常见于 xref stream）时写出
+/// 非法 `/Size`，Adobe 等严格阅读器会拒绝后续页面/注释。
+pub(crate) fn highest_object_number(pdf: &[u8]) -> u32 {
+    let mut highest = 0;
+    let mut cursor = 0;
+    while let Some(found) = find_from(pdf, cursor, b" obj") {
+        let mut line_start = found;
+        while line_start > 0 && pdf[line_start - 1] != b'\n' && pdf[line_start - 1] != b'\r' {
+            line_start -= 1;
+        }
+        let header = String::from_utf8_lossy(&pdf[line_start..found]);
+        if let Some(token) = header.split_whitespace().next() {
+            if let Ok(number) = token.parse::<u32>() {
+                highest = highest.max(number);
+            }
+        }
+        cursor = found + 4;
+    }
+    highest
+}
+
 /// 解析最后一个 trailer 的 `/Root`、`/Size`、`startxref`。
 pub(crate) fn trailer(pdf: &[u8]) -> Result<Trailer, String> {
     let text = String::from_utf8_lossy(pdf);
@@ -732,6 +756,12 @@ mod tests {
             );
             assert_eq!(pages.len(), 2, "{name}: 应有 2 页");
         }
+    }
+
+    #[test]
+    fn highest_object_number_covers_xref_stream_objects() {
+        let bytes = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n1318 0 obj\n<< /Type /XRef >>\nendobj\n";
+        assert_eq!(highest_object_number(bytes), 1318);
     }
 
     #[test]

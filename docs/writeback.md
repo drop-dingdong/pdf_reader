@@ -85,6 +85,9 @@ app（编排） --job.json--> app --writeback（子进程，裸 FFI） --输出-
 ## 5. 文件对象层面的注意点
 
 - 增量写回追加经典 xref 表 + trailer `/Prev`；不重写整个文件。
+- 追加的 xref trailer `/Size` 必须覆盖原文件所有对象，包括 xref stream 自身；
+  只沿用上一个 trailer 的 `/Size` 会写出 `Size < 最高对象号+1` 的非法增量，
+  Adobe 会在多次保存后拒绝页面/注释。
 - 页面对象以追加新版本的方式修改 `/Annots`，旧版本仍在历史链里。
 - `/Length` 等流长度必须精确；写 AP 时由 PDFium 生成流对象。
 - 注释的 `/Rect` 必须覆盖外观（下划线会向下扩 `UNDERLINE_GAP`，否则 AP 被裁剪）。

@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-08　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（534 个测试）。
+> 快照：2026-11-08　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（535 个测试）。
 
 ## 1. 它是什么
 
@@ -94,6 +94,8 @@
   `bug1868759.pdf` 这类 1.5 对象流可正常建立索引；另外直接对象优先于
   ObjStm 旧版本，`issue12504` / `issue14565` 的页对象/Annots 已能完整解析。
   扫描完全成功率 1036 → 1042，1.5 完全成功 100 → 105。
+- **增量 xref `/Size` 修复**：写回 trailer 的 `/Size` 取“现有最高对象号+1”，
+  不再被原文件旧 `/Size` 截断；针对 Adobe 多次保存后正文/注释异常。
 - **0 页防御**：PDFium 打开成功但 `page_count == 0` 时直接拒绝并提示；
   若原始字节含 `/BrotliDecode`，提示可能是当前 PDFium 未启用 Brotli，
   不再进入第 1 页触发“page#1/0”。
