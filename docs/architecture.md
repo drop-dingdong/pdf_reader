@@ -227,6 +227,8 @@ app::compact::run_child → app --compact <in> <out>
 ## 9. 架构层面的已知限制
 
 - 纹理层按条目数限额，没有显存字节预算；上传/像素转换没有字节预算。
+- 本地 pdf.js 测试集扫描（不随仓库分发）见 [pdfjs-corpus.md](pdfjs-corpus.md)；
+  问题文件清单见 [pdfjs-bug-list.md](pdfjs-bug-list.md)。
 - 各 PDF 版本（1.4–2.0）的注释字段差异与版本策略见
   [annotation-versions.md](annotation-versions.md)。
 - `app.rs` 已拆成 `app/` 子模块（~0.6k 行只剩状态/构造/入口）；`PdfReaderApp` 仍有

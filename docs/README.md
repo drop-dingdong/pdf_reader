@@ -16,6 +16,9 @@
 | `PdfReaderApp` 状态分组的 Phase 3 评估（未实施） | [state-grouping-evaluation.md](state-grouping-evaluation.md) |
 | `view.rs` 拆分评估（未实施；建议先拆测试） | [view-split-evaluation.md](view-split-evaluation.md) |
 | PDF 1.4–2.0 注释字段差异（实现/排查查表） | [annotation-versions.md](annotation-versions.md) |
+| pdf.js 测试集扫描说明（本地集合，不随仓库分发） | [pdfjs-corpus.md](pdfjs-corpus.md) |
+| pdf.js 测试集问题文件清单 | [pdfjs-bug-list.md](pdfjs-bug-list.md) |
+| pdf.js 扫描结果 TSV | [pdfjs-corpus-scan.tsv](pdfjs-corpus-scan.tsv) |
 | UI 样式/图标/侧栏/主题的规范（已实施） | [ui-standards.md](ui-standards.md) |
 | 文件格式与持久化：PDF 注释字段、`<pdf>.json`、`settings.json` | [persistence.md](persistence.md) / [readback.md](readback.md) / [writeback.md](writeback.md) |
 | 写回 PDF（子进程、FFI、外观、校验、排查） | [writeback.md](writeback.md) |

@@ -483,6 +483,13 @@ fn dict_length(dict: &[u8]) -> Option<usize> {
     while cursor < dict.len() && dict[cursor].is_ascii_digit() {
         cursor += 1;
     }
+    // `/Length 154 0 R` 是间接长度，不是 154 字节；直接按 154 截断会把
+    // 整个 object stream 截坏（PDF 1.5 的对象流常见这种写法）。
+    let mut rest = cursor;
+    skip_space(dict, &mut rest);
+    if dict.get(rest).is_some_and(|b| b.is_ascii_digit()) {
+        return None;
+    }
     std::str::from_utf8(&dict[start..cursor]).ok()?.parse().ok()
 }
 
@@ -726,6 +733,12 @@ mod tests {
             );
             assert_eq!(pages.len(), 2, "{name}: 应有 2 页");
         }
+    }
+
+    #[test]
+    fn indirect_stream_length_is_not_treated_as_bytes() {
+        assert_eq!(dict_length(b"<< /Length 123 >>"), Some(123));
+        assert_eq!(dict_length(b"<< /Length 154 0 R >>"), None);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-08　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（531 个测试）。
+> 快照：2026-11-08　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（532 个测试）。
 
 ## 1. 它是什么
 
@@ -87,6 +87,11 @@
   不再逐行右移。
 - **PDF 注释版本矩阵（文档）**：1.4–2.0 的五类注释字段差异、文件结构差异与
   `<1.5` 拒绝注释而非拒绝打开的策略，见 [annotation-versions.md](annotation-versions.md)。
+- **pdf.js 测试集扫描留存**：新增 `cargo run -p app --example pdfjs_scan`，结果与
+  问题文件清单见 [pdfjs-corpus.md](pdfjs-corpus.md)、[pdfjs-bug-list.md](pdfjs-bug-list.md)；
+  测试集本身通过 `.gitignore` 排除。
+- **PDF 对象流间接 `/Length` 修复**：`/Length 154 0 R` 不再被误当 154 字节，
+  `bug1868759.pdf` 这类 1.5 对象流可正常建立索引；扫描完全成功率 1036 → 1042。
 - **P0-C1 版本/索引降级**：读取有效版本；低于 1.5 时只拒绝注释编辑、不拒绝打开；
   `pdf_index` 配对失败时保留 readback 显示、禁止 PDF 注释写回；`annotation_loss.pdf`
   由 0 条变为 2 条只读。
