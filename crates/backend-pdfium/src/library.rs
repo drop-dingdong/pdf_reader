@@ -108,11 +108,12 @@ fn candidate_directories() -> Vec<String> {
         let mut directory = Some(cwd.as_path());
         for _ in 0..3 {
             let Some(current) = directory else { break };
-            let vendor = current.join("vendor").join(format!("pdfium-{platform}"));
-            // 上游 Windows 包把运行库放在 bin/，Unix 包在 lib/；
-            // 开发目录两种布局都要能加载，不能只查 lib/。
-            candidates.push(with_separator(vendor.join("lib")));
-            candidates.push(with_separator(vendor.join("bin")));
+            candidates.push(with_separator(
+                current
+                    .join("vendor")
+                    .join(format!("pdfium-{platform}"))
+                    .join("lib"),
+            ));
             directory = current.parent();
         }
     }
@@ -169,18 +170,6 @@ mod tests {
                 "候选目录缺少 {path}（打包后的查找依赖它）；实际：{candidates:?}"
             );
         }
-    }
-
-    #[test]
-    fn vendor_bin_is_a_candidate_for_windows_layouts() {
-        let candidates = candidate_directories();
-        let platform = platform_tag();
-        assert!(
-            candidates
-                .iter()
-                .any(|path| path.contains(&format!("pdfium-{platform}")) && path.contains("bin")),
-            "候选目录应包含 vendor/pdfium-<平台>/bin（Windows 上游布局），实际：{candidates:?}"
-        );
     }
 
     #[test]

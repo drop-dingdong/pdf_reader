@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-07　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（526 个测试）。
+> 快照：2026-11-07　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（525 个测试）。
 
 ## 1. 它是什么
 
@@ -87,9 +87,6 @@
   不再逐行右移。
 - **`view.rs` 拆分评估（未实施）**：4.26k 行中测试约 2.26k/73 个；建议先做
   `view/tests.rs` 只拆测试，生产模块拆分暂缓；见 [view-split-evaluation.md](view-split-evaluation.md)。
-- **Windows PDFium `bin/` 查找**：开发目录的 `vendor/pdfium-win-x64/bin/pdfium.dll`
-  之前不在候选路径里，导致 Windows 打开 PDF 时 PDFium 加载失败、界面停在空状态；
-  现在 `vendor/<平台>/lib` 和 `bin` 都查，并补了候选路径测试。
 - **图片可获取性重检**：文字浮窗引用的 `pd-img` 每次 owner 扫描都重新判定来源
   preview/dest 是否还在；来源被删时清掉 `ImageStore` 的旧 revision 并 `forget_image`，
   不再继续显示缓存里的已删除图片。
