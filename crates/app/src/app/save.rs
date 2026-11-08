@@ -218,7 +218,9 @@ impl PdfReaderApp {
         if self.annotation_pdf.index_unavailable
             && (self.pdf_dirty || self.annotation_pdf.repair_needed)
         {
-            return Err("注释对象索引不完整，已禁用 PDF 注释写回；请另存或修复原文件".to_string());
+            return Err(
+                "注释对象索引不完整，PDF 注释写回已禁用；请修复原文件或重新导出 PDF".to_string(),
+            );
         }
         if self
             .session
