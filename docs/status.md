@@ -1,6 +1,6 @@
 # 项目现状
 
-> 快照：2026-11-08　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（527 个测试）。
+> 快照：2026-11-08　分支：`refactor/app-split`　门禁：`./scripts/check.sh` 通过（531 个测试）。
 
 ## 1. 它是什么
 
@@ -87,6 +87,9 @@
   不再逐行右移。
 - **PDF 注释版本矩阵（文档）**：1.4–2.0 的五类注释字段差异、文件结构差异与
   `<1.5` 拒绝注释而非拒绝打开的策略，见 [annotation-versions.md](annotation-versions.md)。
+- **P0-C1 版本/索引降级**：读取有效版本；低于 1.5 时只拒绝注释编辑、不拒绝打开；
+  `pdf_index` 配对失败时保留 readback 显示、禁止 PDF 注释写回；`annotation_loss.pdf`
+  由 0 条变为 2 条只读。
 - **`view.rs` 拆分评估（未实施）**：4.26k 行中测试约 2.26k/73 个；建议先做
   `view/tests.rs` 只拆测试，生产模块拆分暂缓；见 [view-split-evaluation.md](view-split-evaluation.md)。
 - **注释几何写回修复**：`/QuadPoints` 的每个 quad 末尾补空格，避免上一段最后一个数字
@@ -139,8 +142,9 @@
 - **旧格式移除**：不再读取/创建 `.annot.json`，也不会再产生 `.annot.json.bak-*`；遗留文件忽略。
 
 ## 3. 当前已知限制
-- **旧版重复 `/NM`**：格式正常但含重复 `pd-fr` 的文件现在会在打开时重编号、标脏，
-  保存时重建对象（`annotation_loss.pdf` 的坏 QuadPoints 破坏对象索引，仍需重加/后续处理）。
+- **PDF 1.5 object stream**：P0-C1 已保留 readback 结果并标为只读；`annotation_loss.pdf`
+  能显示 2 条，但 `pdf_index` 仍拿不到对象 ref，PDF 注释写回被禁用。完整 xref/object
+  stream 兼容属于 P0-C2。
 
 - **既有坏 QuadPoints**：`annotation_error.pdf` 旧对象已经粘连；新写入已修复，
   旧对象本身无法可靠还原，需要重新添加或等修复扫描。

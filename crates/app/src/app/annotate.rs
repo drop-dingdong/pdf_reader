@@ -330,6 +330,10 @@ impl PdfReaderApp {
         kind: AnnotationKind,
         style: Option<([u8; 3], f32)>,
     ) -> bool {
+        if self.annotation_pdf.annotations_disabled {
+            self.message = "当前 PDF 版本低于 1.5，注释功能不启用；文档仍可阅读".to_string();
+            return false;
+        }
         // 时间戳/单调 id：删除注释后旧 id 不会被新注释复用，`pd-float://` 链接
         // 才不会在重开后静默指向另一条注释。外部注释仍由读回按加载顺序分配。
         let Some(id) = self.insert_internal_annotation(page, kind) else {

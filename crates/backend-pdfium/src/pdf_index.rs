@@ -12,6 +12,71 @@ use std::collections::HashMap;
 use flate2::read::ZlibDecoder;
 use std::io::Read;
 
+/// PDF 版本（用于注释能力判断；只比较主/次版本）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PdfVersion {
+    /// 主版本，例如 1、2。
+    pub major: u8,
+    /// 次版本，例如 4、5、7。
+    pub minor: u8,
+}
+
+impl PdfVersion {
+    /// 1.5：本软件开始支持注释编辑的版本边界。
+    pub const ANNOTATION_MIN: Self = Self { major: 1, minor: 5 };
+
+    /// 从 `%PDF-1.x` 文件头读取版本。
+    pub fn from_header(pdf: &[u8]) -> Option<Self> {
+        let start = find_from(pdf, 0, b"%PDF-")? + b"%PDF-".len();
+        let end = pdf[start..]
+            .iter()
+            .position(|byte| !byte.is_ascii_digit() && *byte != b'.')
+            .map(|offset| start + offset)
+            .unwrap_or(pdf.len());
+        Self::parse(&pdf[start..end])
+    }
+
+    /// 从任意 `1.7` / `2.0` 文本解析。
+    pub fn parse(text: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(text).ok()?;
+        let (major, minor) = text.split_once('.')?;
+        let minor = minor.split(|ch: char| !ch.is_ascii_digit()).next()?;
+        Some(Self {
+            major: major.parse().ok()?,
+            minor: minor.parse().ok()?,
+        })
+    }
+
+    /// 有效版本：文件头与 Catalog `/Version` 取较高者（Catalog 可覆盖文件头）。
+    pub fn document(pdf: &[u8]) -> Option<Self> {
+        let header = Self::from_header(pdf);
+        let catalog = find_from(pdf, 0, b"/Version").and_then(|index| {
+            let mut cursor = index + b"/Version".len();
+            skip_space(pdf, &mut cursor);
+            if pdf.get(cursor) == Some(&b'/') {
+                cursor += 1;
+            }
+            Self::parse(&pdf[cursor..])
+        });
+        match (header, catalog) {
+            (Some(header), Some(catalog)) => Some(header.max(catalog)),
+            (Some(header), None) => Some(header),
+            (None, Some(catalog)) => Some(catalog),
+            (None, None) => None,
+        }
+    }
+
+    /// 是否低于注释支持边界。
+    pub fn below_annotation_support(self) -> bool {
+        self < Self::ANNOTATION_MIN
+    }
+
+    /// 用于信息栏/诊断的文本。
+    pub fn label(self) -> String {
+        format!("{}.{}", self.major, self.minor)
+    }
+}
+
 /// 注释的对象号 + generation。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PdfObjectRef {
@@ -661,5 +726,34 @@ mod tests {
             );
             assert_eq!(pages.len(), 2, "{name}: 应有 2 页");
         }
+    }
+
+    #[test]
+    fn reads_header_and_catalog_versions() {
+        assert_eq!(
+            PdfVersion::document(b"%PDF-1.4\n..."),
+            Some(PdfVersion { major: 1, minor: 4 })
+        );
+        assert_eq!(
+            PdfVersion::document(b"%PDF-1.7\n..."),
+            Some(PdfVersion { major: 1, minor: 7 })
+        );
+        assert_eq!(
+            PdfVersion::document(b"%PDF-1.5\n... /Version /1.7 ..."),
+            Some(PdfVersion { major: 1, minor: 7 })
+        );
+        assert_eq!(
+            PdfVersion::document(b"%PDF-2.0\n..."),
+            Some(PdfVersion { major: 2, minor: 0 })
+        );
+        assert_eq!(PdfVersion::document(b"not a pdf"), None);
+    }
+
+    #[test]
+    fn annotation_min_boundary_is_1_5() {
+        assert!(PdfVersion { major: 1, minor: 4 }.below_annotation_support());
+        assert!(!PdfVersion { major: 1, minor: 5 }.below_annotation_support());
+        assert!(!PdfVersion { major: 1, minor: 7 }.below_annotation_support());
+        assert!(!PdfVersion { major: 2, minor: 0 }.below_annotation_support());
     }
 }

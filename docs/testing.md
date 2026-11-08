@@ -28,7 +28,7 @@ cargo test -p pdfcore --lib tiling   # 单模块
 | UI 联调 | `crates/app/tests/*.rs` | 真实 `DocumentSession` + `view`、注释往返、replay 脚本、CLI 写回 |
 | 回放 | `crates/app/src/app/replay.rs` + `scripts/replay/` | 驱动真实 `App::ui`，逐帧检查绘制输出 |
 
-测试数量会变，以 `cargo test` 输出为准；当前 527 个。
+测试数量会变，以 `cargo test` 输出为准；当前 531 个。
 
 ## 3. 基础设施
 
@@ -146,6 +146,8 @@ cargo run -p app -- --replay scripts/replay/tiling_800.json --timing
 | 15y | 已固定 dest 浮窗，重新框选该 dest rect | 浮窗图片立即更新；清晰度与临时 hover 预览一致（同 overscan 分辨率） |
 | 15z | Windows PowerShell 运行 `scripts\fetch-pdfium.ps1` 等 | 中文输出正常；脚本首部为 UTF-8 BOM（`scripts/check.sh` 会检查） |
 | 15aa | 打开格式正常但两页 `/NM` 相同的 PDF | 侧栏显示两条；状态提示重复标记；保存后两条都在且 `/NM` 唯一 |
+| 15ab | 打开 PDF 1.4 | 文档可阅读；信息栏提示注释不启用；新建/编辑/删除注释无效 |
+| 15ac | 打开 `annotation_loss.pdf`（1.5 object stream） | 侧栏显示 2 条只读；信息栏提示索引不完整；保存注释写回被拒绝且不出现计数错误 |
 | 16 | 保存 → 重开 → Okular 查看 | 注释可见可改；id 不重复；再保存不叠对象 |
 | 17 | 移动墨迹 → 保存 → 撤销 → 保存 | 回到原位（不消失）；重做回移动位置 |
 | 18 | 保存后 Okular 修改正文/便签，再回本程序保存 | 修改保留；同一 id 取最后一份 |

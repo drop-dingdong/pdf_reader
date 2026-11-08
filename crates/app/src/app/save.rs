@@ -215,6 +215,11 @@ impl PdfReaderApp {
                 return Err(format!("目标目录不存在：{}", parent.display()));
             }
         }
+        if self.annotation_pdf.index_unavailable
+            && (self.pdf_dirty || self.annotation_pdf.repair_needed)
+        {
+            return Err("注释对象索引不完整，已禁用 PDF 注释写回；请另存或修复原文件".to_string());
+        }
         if self
             .session
             .as_ref()

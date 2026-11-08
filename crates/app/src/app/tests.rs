@@ -631,6 +631,46 @@ mod annotation_body_tests {
         );
     }
 
+    #[test]
+    fn readback_without_refs_is_kept_and_blocks_pdf_writeback() {
+        let mut app = app();
+        let readback = backend_pdfium::readback::Readback {
+            annotations: vec![backend_pdfium::readback::ReadAnnotation {
+                page: PageIndex::FIRST,
+                id: Some(7),
+                kind: AnnotationKind::Highlight {
+                    quads: vec![Rect::new(10.0, 20.0, 30.0, 12.0)],
+                },
+                color: [255, 214, 0],
+                opacity: 0.35,
+                body: None,
+                author: None,
+                created: None,
+                modified: None,
+                ink_strokes: Vec::new(),
+            }],
+            skipped: 0,
+            extra_ink_strokes: 0,
+        };
+        assert_eq!(app.merge_readback(&readback, &[]), 1);
+        assert_eq!(app.annotations.len(), 1, "没有 ref 也要保留读回注释");
+        assert!(app.annotation_pdf.index_unavailable);
+    }
+
+    #[test]
+    fn below_1_5_disables_annotation_creation() {
+        let mut app = app();
+        app.annotation_pdf.annotations_disabled = true;
+        let added = app.add_annotation(
+            PageIndex::FIRST,
+            AnnotationKind::Highlight {
+                quads: vec![Rect::new(10.0, 20.0, 30.0, 12.0)],
+            },
+        );
+        assert!(!added, "低于 1.5 时不应创建注释");
+        assert!(app.annotations.is_empty());
+    }
+
     /// 合成读回结果 + 页对象条目：便签必须按对象号配对；同一 id 出现多次时
     /// 保留第一条、后续重编号并标脏，保存时重建，不能静默覆盖。
     #[test]

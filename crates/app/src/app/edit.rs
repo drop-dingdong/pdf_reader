@@ -31,6 +31,19 @@ impl PdfReaderApp {
     /// 只有这一处修改"标注 + 配对正文"，撤销/重做因此共用同一条代码路径 ——
     /// 否则"删除标注忘了删正文"这类不对称会从两个方向各犯一次。
     pub(super) fn apply_edit(&mut self, edit: AppEdit, record: bool) {
+        if self.annotation_pdf.annotations_disabled
+            && matches!(
+                edit,
+                AppEdit::AddAnnotation { .. }
+                    | AppEdit::DeleteAnnotation { .. }
+                    | AppEdit::RestyleAnnotation { .. }
+                    | AppEdit::MoveAnnotation { .. }
+                    | AppEdit::SetBody { .. }
+            )
+        {
+            self.message = "当前 PDF 版本低于 1.5，注释功能不启用".to_string();
+            return;
+        }
         let description = edit.describe();
         match &edit {
             AppEdit::AddAnnotation { annotation } => {

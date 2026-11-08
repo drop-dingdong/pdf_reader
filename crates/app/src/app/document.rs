@@ -63,6 +63,7 @@ impl PdfReaderApp {
         self.annotation_pdf.opened_id_by_ref.clear();
         self.annotation_pdf.inline_refs.clear();
         self.annotation_pdf.opened_inline_bodies.clear();
+        self.annotation_pdf.index_unavailable = false;
         let mut by_page: std::collections::BTreeMap<
             u32,
             Vec<&backend_pdfium::readback::ReadAnnotation>,
@@ -87,16 +88,23 @@ impl PdfReaderApp {
                 })
                 .unwrap_or_default();
             let refs_ok = page_entries.len() == items.len();
-            for (position, (item, entry)) in items.into_iter().zip(page_entries).enumerate() {
-                let reference = refs_ok
-                    .then_some(entry.reference)
-                    .flatten()
-                    .map(|reference| pdfcore::annotation::PdfObjectRef {
+            if !refs_ok && !items.is_empty() {
+                // 页对象索引拿不到 subtype/ref（常见于 object stream）：
+                // 不再 zip 到空数组把整页读回结果丢掉，至少保留显示；写回由
+                // `index_unavailable` 禁止，避免拿不到旧 ref 时重复追加。
+                self.annotation_pdf.index_unavailable = true;
+            }
+            for (position, item) in items.into_iter().enumerate() {
+                // refs_ok=false 时 reference=None，但仍保留 item 进入 entries。
+                let entry = refs_ok.then(|| page_entries.get(position)).flatten();
+                let reference = entry.and_then(|entry| entry.reference).map(|reference| {
+                    pdfcore::annotation::PdfObjectRef {
                         num: reference.num,
                         gen: reference.gen,
-                    });
-                let inline =
-                    (refs_ok && reference.is_none()).then_some((PageIndex::new(page), position));
+                    }
+                });
+                let inline = (refs_ok && reference.is_none() && entry.is_some())
+                    .then_some((PageIndex::new(page), position));
                 if let Some(inline) = inline {
                     self.annotation_pdf
                         .opened_inline_bodies
@@ -258,12 +266,22 @@ impl PdfReaderApp {
             self.history.clear();
             self.annotation_pdf.pdf_ref_ids.clear();
             self.annotation_pdf.repair_needed = false;
+            self.annotation_pdf.version = None;
+            self.annotation_pdf.annotations_disabled = false;
+            self.annotation_pdf.index_unavailable = false;
             // 换文档：旧文档的数据脏位不能带过来；迁移/升级会在加载时重新置脏。
             self.data_dirty = false;
         }
         let backend = PdfiumBackend::new();
         match backend.open(Source::Path(path), password) {
             Ok(opened) => {
+                // 版本只用于注释能力提示；实际能否写回还看 pdf_index 的对象配对。
+                let version = std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| backend_pdfium::pdf_index::PdfVersion::document(&bytes));
+                self.annotation_pdf.version = version;
+                self.annotation_pdf.annotations_disabled =
+                    version.is_some_and(|version| version.below_annotation_support());
                 // S6a：读回 PDF 注释。裸 FFI 不经过 pdfium-render 的全局锁，
                 // 所以**必须先放掉旧会话**（它的渲染 worker 可能还在跑）——D-134 选择的方案。
                 self.session = None;
@@ -565,6 +583,23 @@ impl PdfReaderApp {
                         if self.annotation_pdf.repair_needed {
                             self.message
                                 .push_str("（检测到重复注释标记，保存后将重建）");
+                        }
+                        if let Some(version) = self.annotation_pdf.version {
+                            if self.annotation_pdf.annotations_disabled {
+                                self.message.push_str(&format!(
+                                    "（PDF {}：低于 1.5，注释功能不启用，文档仍可阅读）",
+                                    version.label()
+                                ));
+                            } else if self.annotation_pdf.index_unavailable {
+                                self.message.push_str(
+                                    "（注释对象索引不完整：已按只读载入，PDF 注释写回禁用）",
+                                );
+                            } else if version.major >= 2 {
+                                self.message.push_str("（PDF 2.0：注释按统一模型读取）");
+                            }
+                        } else if self.annotation_pdf.index_unavailable {
+                            self.message
+                                .push_str("（注释对象索引不完整：已按只读载入）");
                         }
                         self.settle_dirty_after_open();
                         self.sidecar_migrated = false;

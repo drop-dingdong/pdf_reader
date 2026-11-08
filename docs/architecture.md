@@ -220,6 +220,9 @@ app::compact::run_child → app --compact <in> <out>
 | INV-24 | 浮窗链接“要么正确、要么断链”：内部注释 id 不复用且除删除外的编辑保持 id；preview 用稳定记录 id；外部注释仅会话 token/校验后可用；不可验证时提示而不按 id 猜 | `float_link_tests`、`annot_roundtrip`、人工验收 |
 | INV-25 | 新注释 `/QuadPoints` 每个 quad 后必须有空白；否则数字粘连会让高亮/下划线位置错乱 | `multi_quad_highlight_keeps_quad_separators` |
 | INV-26 | 读回重复 `pd-fr:<id>` 时保留第一条，后续重编号并重建对象；不能静默覆盖/丢失 | `duplicate_annotation_markers_are_renumbered_and_saved` |
+| INV-27 | `<1.5` 只拒绝注释编辑，不拒绝打开/阅读；信息栏说明 | `below_1_5_disables_annotation_creation`、人工 |
+| INV-28 | `pdf_index` 配对失败时保留 readback 显示并禁用 PDF 注释写回，不能静默丢成 0 条 | `readback_without_refs_is_kept_and_blocks_pdf_writeback`、`annotation_loss` |
+
 
 ## 9. 架构层面的已知限制
 

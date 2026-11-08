@@ -184,4 +184,10 @@ pub(super) struct AnnotationPdfState {
     pub(super) pdf_marked_annotations: usize,
     /// 读回发现重复 `/NM`，需要在下次保存时重建对象并重写标记。
     pub(super) repair_needed: bool,
+    /// 打开的 PDF 有效版本（文件头 + Catalog `/Version`）。
+    pub(super) version: Option<backend_pdfium::pdf_index::PdfVersion>,
+    /// 版本低于 1.5：保留打开/阅读，但不启用注释编辑。
+    pub(super) annotations_disabled: bool,
+    /// `pdf_index` 无法把读回结果与对象 ref 对上：保留显示，但禁止 PDF 写回。
+    pub(super) index_unavailable: bool,
 }
