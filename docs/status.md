@@ -171,6 +171,9 @@
 
 - **Linux Wayland 外部文件拖放不可用**：winit 0.30 的 Wayland 后端不投递 DnD 事件；
   用 `env -u WAYLAND_DISPLAY` 走 X11/XWayland 可用。Windows 正常。
+- **Linux XWayland 窗口移动黑帧/迟滞**：原生 Wayland、Windows 均无；XWayland 下窗口移动
+  出现整窗黑帧/网格感，软件渲染仍复现，暂按 XWayland/合成环境限制接受，不改应用绘制。
+  icewm 等无合成器会话的 resize 暗区是另一类环境现象。
 - 外部注释的几何/颜色/样式仍只读；改正文/删除会写回 PDF。
 - 便签不支持拖动/缩放；墨迹平移没有吸附、页面边界夹取，浮窗不跟随。
 - 页面文本搜索不索引注释正文；侧栏搜索覆盖注释正文/作者。
