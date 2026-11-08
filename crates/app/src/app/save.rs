@@ -17,6 +17,55 @@ impl PdfReaderApp {
         self.pdf_dirty || self.data_dirty || self.annotation_pdf.repair_needed
     }
 
+    /// `CHECK_PDF_FILE` 存在且 qpdf 可用时，检查即将替换目标文件的临时 PDF。
+    ///
+    /// qpdf 退出码：0 正常，3 有警告；两者放行并记录。其它错误拒绝替换，
+    /// 避免把最新版本换成结构性损坏的文件。qpdf 不存在时只记录跳过，不阻断保存。
+    fn check_staged_pdf(
+        &mut self,
+        path: &std::path::Path,
+        label: &str,
+    ) -> std::result::Result<(), String> {
+        if std::env::var_os("CHECK_PDF_FILE").is_none() {
+            return Ok(());
+        }
+        let output = match std::process::Command::new("qpdf")
+            .arg("--check")
+            .arg(path)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.push_message_log("CHECK_PDF_FILE 已设置，但 PATH 中没有 qpdf；跳过完整性检查");
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(format!("无法运行 qpdf：{error}"));
+            }
+        };
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        let text = text.trim();
+        let code = output.status.code();
+        match code {
+            Some(0) => {
+                self.push_message_log(&format!("qpdf 检查通过：{label}"));
+                Ok(())
+            }
+            Some(3) => {
+                self.push_message_log(&format!("qpdf 检查通过（有警告）：{label}"));
+                Ok(())
+            }
+            _ => {
+                let detail: String = text.chars().take(1200).collect();
+                self.push_message_log(&format!("qpdf 检查失败：{label}（exit {code:?}）{detail}"));
+                Err(format!(
+                    "qpdf 完整性检查失败（exit {code:?}），未替换目标文件：\n{detail}"
+                ))
+            }
+        }
+    }
+
     /// 请求打开另一个文件：脏就先弹提示，干净就直接延后打开。
     pub(super) fn request_open(&mut self, path: PathBuf) {
         if self.document_path.as_ref() == Some(&path) {
@@ -334,6 +383,10 @@ impl PdfReaderApp {
                 &inline,
                 pages,
             )?;
+            if let Err(error) = self.check_staged_pdf(&temporary, "原地写入") {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(error);
+            }
             if !request.allow_conflict {
                 if let Some(opened) = self.pdf_file_stamp {
                     let changed = match pdf_file_stamp(&source) {
@@ -391,6 +444,10 @@ impl PdfReaderApp {
                 .map(|_| ())
             };
             if let Err(error) = written {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(error);
+            }
+            if let Err(error) = self.check_staged_pdf(&temporary, "另存为") {
                 let _ = std::fs::remove_file(&temporary);
                 return Err(error);
             }

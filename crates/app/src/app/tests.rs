@@ -632,6 +632,24 @@ mod annotation_body_tests {
     }
 
     #[test]
+    fn message_log_keeps_recent_100_and_deduplicates() {
+        let mut app = app();
+        app.message = "第一条".to_string();
+        app.record_message();
+        app.record_message();
+        assert_eq!(app.runtime.messages.len(), 1, "连续相同消息不重复");
+        for index in 0..105 {
+            app.message = format!("消息 {index}");
+            app.record_message();
+        }
+        assert_eq!(app.runtime.messages.len(), 100, "最多保留 100 条");
+        assert_eq!(
+            app.runtime.messages.back().map(|entry| entry.text.as_str()),
+            Some("消息 104")
+        );
+    }
+
+    #[test]
     fn zero_page_pdf_is_rejected_before_layout() {
         if backend_pdfium::pdfium().is_err() {
             return;

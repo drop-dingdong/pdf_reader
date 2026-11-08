@@ -208,6 +208,8 @@ impl PdfReaderApp {
         ui.horizontal(|ui| {
             ui.toggle_value(&mut self.show_outline, "侧栏")
                 .on_hover_text("显示/隐藏侧边栏（目录 / 自定义preview）");
+            ui.toggle_value(&mut self.runtime.show_messages, "消息")
+                .on_hover_text("显示/隐藏最近 100 条消息");
             ui.separator();
             ui.label("添加预览：");
             if self

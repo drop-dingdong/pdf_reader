@@ -23,3 +23,6 @@ dist/
 
 # 本地 pdf.js 测试集（不随仓库分发；扫描结果见 docs/pdfjs-corpus-scan.tsv）
 pdfjs_test_pdfs/
+
+# 本地兼容性/Adobe 样本（不随仓库分发）
+scripts/replay/error/

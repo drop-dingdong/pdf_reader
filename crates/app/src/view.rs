@@ -843,6 +843,15 @@ pub fn format_local_time(seconds: i64) -> String {
         .to_string()
 }
 
+/// 本地时间 `HH:MM:SS`（消息侧栏用）。
+pub fn format_local_clock(seconds: i64) -> String {
+    let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds.max(0) as u64);
+    let utc: chrono::DateTime<chrono::Utc> = time.into();
+    utc.with_timezone(&chrono::Local)
+        .format("%H:%M:%S")
+        .to_string()
+}
+
 /// 注释 tooltip 里的时间行；`None` = 没有任何时间可用。
 ///
 /// 时间字符串比较长，单独一行；创建与修改相同就只显示一次。

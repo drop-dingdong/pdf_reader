@@ -20,10 +20,15 @@
 | `PDF_READER_DIAGNOSE=1` | 打开全部运行期诊断（下文所有前缀） | 关 |
 | `PDF_READER_TILE_BORDERS=1`（或 `true`） | 给每块瓦片描 2px 红线，便于肉眼分辨块范围与接缝 | 关 |
 | `PDFIUM_PATH` | 指定 PDFium 动态库（见 [`../crates/backend-pdfium/README.md`](../crates/backend-pdfium/README.md)） | 自动查找 |
+| `CHECK_PDF_FILE` | 只要存在，就在每次把临时 PDF 替换目标前调用 `qpdf --check`；qpdf 缺失只记录跳过，检查失败则不替换 | 关 |
+
+`CHECK_PDF_FILE` 的检查结果是**消息记录**侧栏中的一条历史；它不改变正常保存消息。
+qpdf 退出码 0/3（有警告）放行，其它退出码删除临时文件并保留原文件。
 
 示例：
 
 ```bash
+CHECK_PDF_FILE=1 cargo run -p app -- <文件.pdf>
 PDF_READER_DIAGNOSE=1 cargo run -p app -- <文件.pdf>
 PDF_READER_DIAGNOSE=1 PDF_READER_TILE_BORDERS=1 cargo run -p app -- <文件.pdf>
 ```

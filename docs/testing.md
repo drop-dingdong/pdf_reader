@@ -28,7 +28,7 @@ cargo test -p pdfcore --lib tiling   # 单模块
 | UI 联调 | `crates/app/tests/*.rs` | 真实 `DocumentSession` + `view`、注释往返、replay 脚本、CLI 写回 |
 | 回放 | `crates/app/src/app/replay.rs` + `scripts/replay/` | 驱动真实 `App::ui`，逐帧检查绘制输出 |
 
-测试数量会变，以 `cargo test` 输出为准；当前 535 个。
+测试数量会变，以 `cargo test` 输出为准；当前 536 个。
 
 ## 3. 基础设施
 
@@ -151,6 +151,7 @@ cargo run -p app -- --replay scripts/replay/tiling_800.json --timing
 | 15ae | 1.5 文件中某页索引不完整，另一页正常 | 坏页旧注释只读、不能新建；完整页仍可新建/保存，不再整份 PDF 全局只读 |
 | 15af | 打开 `2.0_Brotli-Prototype-FileA.pdf` 或任意 0 页 PDF | 提示页数为 0 / 可能 Brotli 未启用；不进入第 1 页、不报 page#1/0 |
 | 15ag | 在 `2601.19991v3-1.pdf` 上连续添加 4 条注释并保存，用 Adobe 打开 | 四条注释都能显示；正文不被破坏；`qpdf --check` 无 `/Size` 小于最高对象号警告 |
+| 15ah | 顶栏「消息」；连续保存；`CHECK_PDF_FILE=1` 保存 | 侧栏最多 100 条、可滚动/清空；qpdf 检查结果显示在历史；qpdf 失败时不替换原文件 |
 | 15ac | 打开 `annotation_loss.pdf`（1.5 object stream） | 侧栏显示 2 条只读；信息栏提示索引不完整；保存注释写回被拒绝且不出现计数错误 |
 | 16 | 保存 → 重开 → Okular 查看 | 注释可见可改；id 不重复；再保存不叠对象 |
 | 17 | 移动墨迹 → 保存 → 撤销 → 保存 | 回到原位（不消失）；重做回移动位置 |

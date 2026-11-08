@@ -6,9 +6,22 @@
 use super::*;
 
 /// 运行时诊断/时间状态。
+/// 消息侧栏的一条历史。
+pub(super) struct MessageLogEntry {
+    /// 本地时间 `HH:MM:SS`。
+    pub(super) at: String,
+    pub(super) text: String,
+}
+
 pub(super) struct RuntimeState {
     /// 诊断输出（环境变量 `PDF_READER_DIAGNOSE=1` 开启）。
     pub(super) diag: crate::diag::Diagnostics,
+    /// 最近消息（最多 100 条），供消息侧栏回看。
+    pub(super) messages: std::collections::VecDeque<MessageLogEntry>,
+    /// 上一条已入历史的消息文本，避免同一状态每帧重复。
+    pub(super) last_logged_message: String,
+    /// 消息侧栏是否展开。
+    pub(super) show_messages: bool,
     /// 行为性截止时间用的时钟（真实时间；回放器注入可推进的时钟）。
     pub(super) clock: crate::clock::Clock,
     /// 进程/回放启动时刻；时序诊断相对于它。
@@ -43,6 +56,9 @@ impl RuntimeState {
         let boot = clock.now();
         Self {
             diag,
+            messages: std::collections::VecDeque::new(),
+            last_logged_message: String::new(),
+            show_messages: false,
             clock,
             started_at: boot,
             last_report: boot,

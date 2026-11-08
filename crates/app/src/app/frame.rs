@@ -274,6 +274,8 @@ impl PdfReaderApp {
 
 impl PdfReaderApp {
     pub(super) fn frame(&mut self, ui: &mut egui::Ui) {
+        // 上一条状态消息在这里入历史；本帧新产生的消息在下一帧入，避免读到半成品。
+        self.record_message();
         let ctx = ui.ctx().clone();
         // 显式两态主题：不依赖 Linux/Windows 的系统主题上报。
         ctx.set_theme(if self.dark_mode {
@@ -326,6 +328,7 @@ impl PdfReaderApp {
         }
         // 把会话临时取出，避免与 `self` 的其它字段发生借用冲突
         let Some(mut session) = self.session.take() else {
+            self.draw_message_log(ui);
             self.draw_empty(ui);
             self.draw_password_prompt(&ctx);
             return;
@@ -410,6 +413,7 @@ impl PdfReaderApp {
             }
         }
         self.draw_toolbar(ui, &session);
+        self.draw_message_log(ui);
         // Ctrl+F 切换底部搜索框；Esc 关闭
         // F11 切换全屏
         if ctx.input(|input| input.key_pressed(Key::F11)) {
@@ -495,5 +499,71 @@ impl PdfReaderApp {
             self.open(&path, None);
             ctx.request_repaint();
         }
+    }
+
+    /// 把当前状态消息写入历史（最多 100 条；连续相同文本不重复）。
+    pub(super) fn record_message(&mut self) {
+        if self.message.is_empty() || self.message == self.runtime.last_logged_message {
+            return;
+        }
+        let text = self.message.clone();
+        self.push_message_log(&text);
+        self.runtime.last_logged_message = text;
+    }
+
+    /// 直接追加一条历史（例如 qpdf 检查结果），不影响当前状态栏消息。
+    pub(super) fn push_message_log(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let at = crate::view::format_local_clock(unix_now());
+        self.runtime
+            .messages
+            .push_back(super::state::MessageLogEntry {
+                at,
+                text: text.to_string(),
+            });
+        if self.runtime.messages.len() > 100 {
+            self.runtime.messages.pop_front();
+        }
+    }
+
+    /// 右侧消息历史侧栏（可关闭；滚动回看最近 100 条）。
+    pub(super) fn draw_message_log(&mut self, ui: &mut egui::Ui) {
+        if !self.runtime.show_messages {
+            return;
+        }
+        egui::Panel::right("message-log")
+            .resizable(true)
+            .exact_size(320.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("消息记录");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("清空").clicked() {
+                            self.runtime.messages.clear();
+                            self.runtime.last_logged_message.clear();
+                        }
+                        if ui.small_button("关闭").clicked() {
+                            self.runtime.show_messages = false;
+                        }
+                    });
+                });
+                ui.separator();
+                if self.runtime.messages.is_empty() {
+                    ui.weak("暂无消息");
+                    return;
+                }
+                egui::ScrollArea::vertical()
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for entry in &self.runtime.messages {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.weak(&entry.at);
+                                ui.label(&entry.text);
+                            });
+                        }
+                    });
+            });
     }
 }
