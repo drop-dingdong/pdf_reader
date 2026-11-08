@@ -92,8 +92,9 @@
 - **注释几何写回修复**：`/QuadPoints` 的每个 quad 末尾补空格，避免上一段最后一个数字
   与下一段第一个数字粘成坏 token；三处新注释写入统一走 `push_quad_points`，并补
   多 quad 回读回归测试。
-- **dest 浮窗换图**：重选 dest rect 后，已有浮窗从 `DestMark.snapshot` 刷新图片，
-  不再停留在旧截图。
+- **dest 浮窗换图/清晰度**：重选 dest rect 后清空旧截图，按
+  `preview_texture` 的 overscan 区域重新生成（与 hover 预览同一比例），
+  已有浮窗从 `DestMark.snapshot` 刷新；不再用当前视图缓存块直接当固定图。
 - **PowerShell BOM**：`scripts/*.ps1` 加 UTF-8 BOM；`scripts/check.sh` 增加 BOM 门禁；
   agent.md 记录规则。
 - **图片可获取性重检**：文字浮窗引用的 `pd-img` 每次 owner 扫描都重新判定来源

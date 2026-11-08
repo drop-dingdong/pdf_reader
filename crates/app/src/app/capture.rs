@@ -20,7 +20,7 @@ impl PdfReaderApp {
         &mut self,
         ui: &mut egui::Ui,
         canvas: egui::Rect,
-        session: &DocumentSession,
+        session: &mut DocumentSession,
         scroll: Vec2,
     ) {
         // ---- 框选 ----
@@ -138,7 +138,7 @@ impl PdfReaderApp {
     pub(super) fn commit_dest_mark(
         &mut self,
         ui: &mut egui::Ui,
-        session: &DocumentSession,
+        session: &mut DocumentSession,
         page: PageIndex,
         index: usize,
         content_rect: Rect,
@@ -167,19 +167,10 @@ impl PdfReaderApp {
             page_rect.height.round(),
         );
 
-        // 构建快照（只用与该页重叠的部分）
-        let Some(snapshot) = self.snapshot_for(ui, session, overlap) else {
-            self.message = "该区域还没有已渲染的像素（请稍候再试）".to_string();
-            return;
-        };
-        let png = crate::image_store::encode_png(&snapshot);
-        let texture = ui.ctx().load_texture(
-            format!("dest-{}-{}", page.get(), index),
-            snapshot,
-            egui::TextureOptions::LINEAR,
-        );
-
-        // 回写：矩形 + 截图 + **正文尺寸**（= 该选区在**当时缩放比例**下的显示尺寸，用户要求）
+        // 回写：矩形 + **正文尺寸**（= 该选区在**当时缩放比例**下的显示尺寸）。
+        // 不直接用 `snapshot_for` 的缓存块：那是当前视图的渲染分辨率，固定浮窗
+        // 放大后很容易比 hover 预览糊。这里清空快照，交给 `ensure_dest_snapshot`
+        // 用 `preview_texture` 按 overscan 区域渲染，分辨率与临时预览一致。
         let old = self
             .dest_marks
             .get(page.get() as usize)
@@ -189,21 +180,9 @@ impl PdfReaderApp {
         if let Some(old) = old {
             let mut after = old.clone();
             after.rect = page_rect;
-            after.snapshot = Some(texture.clone());
+            after.snapshot = None;
             after.body_size = egui::vec2(overlap.width, overlap.height);
             after.image_revision = old.image_revision.saturating_add(1);
-            if let Some(png) = png.clone() {
-                let image_ref = crate::image_store::ImageRef {
-                    record_id: after.image_id.clone(),
-                    revision: after.image_revision,
-                };
-                self.markdown.images.insert(&image_ref, png);
-                ui.ctx().forget_image(&crate::image_store::image_uri(
-                    &image_ref.record_id,
-                    image_ref.revision,
-                ));
-            }
-            // ▲v2：记录这张图的分辨率（截图时的显示比例）
             after.scale = session.state().zoom;
             self.apply_edit(
                 AppEdit::EditDestMark {
@@ -220,6 +199,8 @@ impl PdfReaderApp {
             self.message = "被引用点已不存在，未保存".to_string();
             return;
         }
+        // 已有固定浮窗时立即尝试生成；没就绪则下一帧由 ensure_pending_dest_snapshots 重试。
+        self.ensure_dest_snapshot(ui, session, page, index);
 
         // **不**自动生成浮窗（用户要求）：截图只写回数据，浮窗由悬停链接或点击标识按需出现
         self.message = format!(

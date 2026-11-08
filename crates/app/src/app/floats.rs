@@ -283,6 +283,76 @@ impl PdfReaderApp {
         }
     }
 
+    /// 确保显示中的 dest 浮窗有截图；重选 rect 后提交 `snapshot=None`，
+    /// 这里按 `preview_texture` 的 overscan 分辨率生成，避免固定浮窗比 hover 糊。
+    pub(super) fn ensure_pending_dest_snapshots(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &mut DocumentSession,
+    ) {
+        let mut shown: Vec<(PageIndex, usize)> = self
+            .floats
+            .iter()
+            .filter_map(|window| window.origin)
+            .collect();
+        shown.sort_unstable();
+        shown.dedup();
+        for (page, index) in shown {
+            let missing = self
+                .dest_marks
+                .get(page.get() as usize)
+                .and_then(|marks| marks.get(index))
+                .is_some_and(|mark| mark.snapshot.is_none());
+            if missing {
+                self.ensure_dest_snapshot(ui, session, page, index);
+            }
+        }
+    }
+
+    /// 按记录的分辨率生成一条 dest 截图。
+    pub(super) fn ensure_dest_snapshot(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &mut DocumentSession,
+        page: PageIndex,
+        index: usize,
+    ) {
+        let Some(mark) = self
+            .dest_marks
+            .get(page.get() as usize)
+            .and_then(|marks| marks.get(index))
+        else {
+            return;
+        };
+        if mark.snapshot.is_some() {
+            return;
+        }
+        let (rect, scale) = (mark.rect, mark.scale);
+        let image_ref = (!mark.image_id.is_empty()).then(|| crate::image_store::ImageRef {
+            record_id: mark.image_id.clone(),
+            revision: mark.image_revision,
+        });
+        let Some(texture) = self.preview_texture(
+            ui,
+            session,
+            page,
+            rect,
+            scale,
+            format!("dest-image-{}-{}", page.get(), index),
+            "被引用点",
+            image_ref,
+        ) else {
+            return;
+        };
+        if let Some(mark) = self
+            .dest_marks
+            .get_mut(page.get() as usize)
+            .and_then(|marks| marks.get_mut(index))
+        {
+            mark.snapshot = Some(texture);
+        }
+    }
+
     /// 确保某个自定义**图片** preview 有可用截图（缺则按**记录的分辨率**重新生成）。
     pub(super) fn ensure_custom_snapshot(
         &mut self,

@@ -143,7 +143,7 @@ cargo run -p app -- --replay scripts/replay/tiling_800.json --timing
 | 15v | 注释列表多行，观察右侧 `⋯` | 所有行的 `⋯` 在同一竖线上；与 preview 列表一致 |
 | 15w | Windows PowerShell：`cargo run -p app -- <pdf>`；再拖入 PDF | 能打开；若停在空状态，先跑 `cargo run -p app -- --selftest` 看 PDFium 候选路径 |
 | 15x | arXiv 样本：多行选中高亮/下划线，保存重开 | 选中区域与保存后位置一致；多个 QuadPoints 不粘连 |
-| 15y | 已固定 dest 浮窗，重新框选该 dest rect | 浮窗图片立即更新；缩放清晰度与临时预览一致 |
+| 15y | 已固定 dest 浮窗，重新框选该 dest rect | 浮窗图片立即更新；清晰度与临时 hover 预览一致（同 overscan 分辨率） |
 | 15z | Windows PowerShell 运行 `scripts\fetch-pdfium.ps1` 等 | 中文输出正常；脚本首部为 UTF-8 BOM（`scripts/check.sh` 会检查） |
 | 15aa | 打开格式正常但两页 `/NM` 相同的 PDF | 侧栏显示两条；状态提示重复标记；保存后两条都在且 `/NM` 唯一 |
 | 16 | 保存 → 重开 → Okular 查看 | 注释可见可改；id 不重复；再保存不叠对象 |

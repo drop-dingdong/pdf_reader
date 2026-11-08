@@ -537,6 +537,7 @@ impl PdfReaderApp {
             // 旧实现只在"悬浮/点击侧栏条目"时重试，于是"点了但渲染还没好"的浮窗
             // 会一直空着（D-101 把初次生成改成了"提交渲染 + 等待"，必须有重试入口）。
             self.ensure_pending_custom_snapshots(ui, session);
+            self.ensure_pending_dest_snapshots(ui, session);
             self.ensure_markdown_image_owners(ui, session);
             self.draw_floats(ui, canvas);
             // 正文编辑：只检测双击并打开正式编辑窗口（编辑窗口在 draw_edit_dialogs 里）
