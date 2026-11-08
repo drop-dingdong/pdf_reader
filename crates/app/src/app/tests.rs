@@ -658,6 +658,19 @@ mod annotation_body_tests {
     }
 
     #[test]
+    fn incomplete_page_is_read_only_but_complete_page_allows_new_annotations() {
+        let mut app = app();
+        app.annotation_pdf.page_index.insert(0, true);
+        app.annotation_pdf.page_index.insert(1, false);
+        let kind = AnnotationKind::Highlight {
+            quads: vec![Rect::new(10.0, 20.0, 30.0, 12.0)],
+        };
+        assert!(app.add_annotation(PageIndex::FIRST, kind.clone()));
+        assert!(!app.add_annotation(PageIndex::new(1), kind));
+        assert_eq!(app.annotations.len(), 1);
+    }
+
+    #[test]
     fn below_1_5_disables_annotation_creation() {
         let mut app = app();
         app.annotation_pdf.annotations_disabled = true;

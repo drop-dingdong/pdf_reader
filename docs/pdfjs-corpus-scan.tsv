@@ -370,7 +370,7 @@ glyph_accent.pdf	1.7	1	1	0	0	1	0	1	1
 gradientfill.pdf	1.5	1	1	0	0	1	0	1	1	
 hello_world_rotated.pdf	1.4	1	5	0	0	1	0	1	1	
 helloworld-bad.pdf	1.7	1	1	0	0	0	0	0	0	 index:找不到 /Pages add:找不到 /Pages
-highlight.pdf	1.6	1	1	2	0	1	1	1	1	
+highlight.pdf	1.6	1	1	2	0	1	0	1	1	
 highlight_popup.pdf	1.6	1	1	1	0	1	0	1	1	
 highlights.pdf	1.6	1	14	8	0	1	0	1	1	
 image-rotated-black-white-ratio.pdf	1.7	1	1	0	0	1	0	1	1	
@@ -434,7 +434,7 @@ issue12337.pdf	1.4	1	14	1	0	1	0	1	1
 issue12399_reduced.pdf	1.5	1	1	0	0	1	0	1	1	
 issue12418_reduced.pdf	1.7	1	1	0	0	1	0	1	1	
 issue1249.pdf	1.4	1	1	0	0	1	0	1	1	
-issue12504.pdf	1.5	1	1	1	0	1	1	1	1	
+issue12504.pdf	1.5	1	1	1	0	1	0	1	1	
 issue12705.pdf	1.7	1	1	0	0	1	0	1	1	
 issue12706.pdf	1.4	1	1	0	0	1	0	1	1	
 issue12750.pdf	1.5	1	1	0	0	1	0	1	1	
@@ -481,7 +481,7 @@ issue14462_reduced.pdf	1.7	1	1	0	0	1	0	1	1
 issue14497.pdf	1.7	1	1	0	0	1	0	1	1	
 issue14502.pdf	1.6	1	1	0	0	1	0	1	1	
 issue1453.pdf	1.6	1	1	0	0	1	0	1	1	
-issue14565.pdf	1.5	1	1	1	0	1	1	1	1	
+issue14565.pdf	1.5	1	1	1	0	1	0	1	1	
 issue14618.pdf	1.7	1	1	0	0	1	0	1	1	
 issue14627.pdf	1.7	1	1	0	0	1	0	1	1	
 issue14705.pdf	1.6	1	1	0	0	1	0	1	1	

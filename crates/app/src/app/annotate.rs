@@ -324,6 +324,15 @@ impl PdfReaderApp {
         Some(id)
     }
 
+    /// 该页的旧注释索引是否完整；没有记录（新建文档/测试）按可用处理。
+    pub(super) fn annotation_page_writable(&self, page: PageIndex) -> bool {
+        self.annotation_pdf
+            .page_index
+            .get(&page.get())
+            .copied()
+            .unwrap_or(true)
+    }
+
     pub(super) fn add_annotation_with_style(
         &mut self,
         page: PageIndex,
@@ -332,6 +341,10 @@ impl PdfReaderApp {
     ) -> bool {
         if self.annotation_pdf.annotations_disabled {
             self.message = "当前 PDF 版本低于 1.5，注释功能不启用；文档仍可阅读".to_string();
+            return false;
+        }
+        if !self.annotation_page_writable(page) {
+            self.message = "该页注释索引不完整，只读；不能在此页新建注释".to_string();
             return false;
         }
         // 时间戳/单调 id：删除注释后旧 id 不会被新注释复用，`pd-float://` 链接

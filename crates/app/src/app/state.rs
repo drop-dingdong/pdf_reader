@@ -190,4 +190,6 @@ pub(super) struct AnnotationPdfState {
     pub(super) annotations_disabled: bool,
     /// `pdf_index` 无法把读回结果与对象 ref 对上：保留显示，但禁止 PDF 写回。
     pub(super) index_unavailable: bool,
+    /// 每页注释索引是否完整；false = 该页旧注释只读、禁止在该页新建/改注释。
+    pub(super) page_index: std::collections::BTreeMap<u32, bool>,
 }

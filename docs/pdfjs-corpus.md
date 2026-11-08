@@ -52,8 +52,8 @@ path version open pages readback skipped index_ok mismatch add_ok add_seen error
 | 1.2 | 7 | 7 |
 | 1.3 | 41 | 38 |
 | 1.4 | 239 | 230 |
-| 1.5 | 107 | 103 |
-| 1.6 | 215 | 208 |
+| 1.5 | 107 | 105 |
+| 1.6 | 215 | 209 |
 | 1.7 | 459 | 434 |
 | 2.0 | 9 | 7 |
 

@@ -575,14 +575,13 @@ fn scan_object_streams(
                 }
                 continue;
             }
-            objects.insert(
-                (*num, 0),
-                RawObject {
-                    offset: offset + index,
-                    dict,
-                    stream: None,
-                },
-            );
+            // 增量更新的直接对象可能比 ObjStm 里的旧版本新；
+            // 已经由直接扫描读到的对象不能被对象流覆盖。
+            objects.entry((*num, 0)).or_insert_with(|| RawObject {
+                offset: offset + index,
+                dict,
+                stream: None,
+            });
         }
     }
 }

@@ -60,12 +60,10 @@ poppler-937-0-fuzzed.pdf
 
 | 文件 | 现象 |
 | --- | --- |
-| `issue12504.pdf` | 页级 readback/index 计数不匹配（1 页） |
-| `issue14565.pdf` | 页级计数不匹配（1 页） |
-| `issue17215.pdf` | 新注释写入成功但 readback 读不回 |
+| `issue17215.pdf` | 只有 Caret（不支持类型）；新建 Highlight 写入成功但 readback 读不回 |
 | `issue9418.pdf` | 文件损坏，`/Pages` 找不到 |
 
-`issue12504` / `issue14565` 是 C2 的页级只读/部分写回重点。
+`issue12504` / `issue14565` 已由“直接对象不被旧 ObjStm 覆盖”修复。
 
 ### 1.6
 

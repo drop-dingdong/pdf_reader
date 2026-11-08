@@ -44,6 +44,23 @@ impl PdfReaderApp {
             self.message = "当前 PDF 版本低于 1.5，注释功能不启用".to_string();
             return;
         }
+        let blocked_page = match &edit {
+            AppEdit::AddAnnotation { annotation } => {
+                !self.annotation_page_writable(annotation.page)
+            }
+            AppEdit::DeleteAnnotation { annotation } => {
+                !self.annotation_page_writable(annotation.page)
+            }
+            AppEdit::RestyleAnnotation { before, .. } | AppEdit::MoveAnnotation { before, .. } => {
+                !self.annotation_page_writable(before.page)
+            }
+            AppEdit::SetBody { page, .. } => !self.annotation_page_writable(*page),
+            _ => false,
+        };
+        if blocked_page {
+            self.message = "该页注释索引不完整，只读；不能修改此页注释".to_string();
+            return;
+        }
         let description = edit.describe();
         match &edit {
             AppEdit::AddAnnotation { annotation } => {
