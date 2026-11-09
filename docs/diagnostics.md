@@ -20,12 +20,14 @@
 | `PDF_READER_DIAGNOSE=1` | 打开全部运行期诊断（下文所有前缀） | 关 |
 | `PDF_READER_TILE_BORDERS=1`（或 `true`） | 给每块瓦片描 2px 红线，便于肉眼分辨块范围与接缝 | 关 |
 | `PDFIUM_PATH` | 指定 PDFium 动态库（见 [`../crates/backend-pdfium/README.md`](../crates/backend-pdfium/README.md)） | 自动查找 |
-| `CHECK_PDF_FILE` | 只要存在，就在每次把临时 PDF 替换目标前调用 `qpdf --check`；qpdf 缺失只记录跳过，检查失败则不替换 | 关 |
+| `CHECK_PDF_FILE` | 只要存在，就在每次保存替换目标前，把暂存 PDF 复制成 0644 临时副本并调用 `qpdf --check`；qpdf 缺失只记录跳过，检查失败则不替换 | 关 |
 
 `CHECK_PDF_FILE` 的检查结果是**消息记录**侧栏中的一条历史；它不改变正常保存消息。
 qpdf 退出码 0/3（有警告）放行，其它退出码删除临时文件并保留原文件。
-若 qpdf 报 `Permission denied`/`Access is denied`/`unable to open`（暂存文件权限、
-杀毒软件或文件占用），视为**检查不可用**，只记录跳过，不阻断保存。
+检查副本放在系统临时目录、校验后立即删除；这样可绕开 qpdf 无法读取目标目录
+隐藏暂存名（`Permission denied`）的问题。若副本本身仍报
+`Permission denied`/`Access is denied`/`unable to open`，视为**检查不可用**，
+只记录跳过，不阻断保存。
 
 示例：
 

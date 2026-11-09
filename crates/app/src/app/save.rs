@@ -29,20 +29,45 @@ impl PdfReaderApp {
         if std::env::var_os("CHECK_PDF_FILE").is_none() {
             return Ok(());
         }
+        // qpdf 在某些桌面/沙箱/文件系统上打不开目标目录里的隐藏临时名
+        // （用户实测 Permission denied，但最终文件手动 qpdf 可读）。
+        // 检查副本而不是直接检查暂存文件；副本用 0644，校验后立即删除。
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let check_path = std::env::temp_dir().join(format!(
+            "pdf-reader-qpdf-check-{}-{suffix}.pdf",
+            std::process::id()
+        ));
+        if let Err(error) = std::fs::copy(path, &check_path) {
+            self.push_message_log(&format!(
+                "qpdf 检查副本创建失败，跳过完整性检查：{label}（{error}）"
+            ));
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&check_path, std::fs::Permissions::from_mode(0o644));
+        }
         let output = match std::process::Command::new("qpdf")
             .arg("--check")
-            .arg(path)
+            .arg(&check_path)
             .output()
         {
             Ok(output) => output,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let _ = std::fs::remove_file(&check_path);
                 self.push_message_log("CHECK_PDF_FILE 已设置，但 PATH 中没有 qpdf；跳过完整性检查");
                 return Ok(());
             }
             Err(error) => {
+                let _ = std::fs::remove_file(&check_path);
                 return Err(format!("无法运行 qpdf：{error}"));
             }
         };
+        let _ = std::fs::remove_file(&check_path);
         let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&output.stderr));
         let text = text.trim();
@@ -58,15 +83,14 @@ impl PdfReaderApp {
             }
             _ => {
                 let detail: String = text.chars().take(1200).collect();
-                // qpdf 无法打开暂存文件（权限、杀毒软件/文件占用等）不是 PDF
-                // 完整性失败；不能因此阻断保存。
                 let lower = detail.to_ascii_lowercase();
+                // qpdf 连副本都打不开：检查不可用，不是 PDF 损坏。
                 if lower.contains("permission denied")
                     || lower.contains("access is denied")
                     || lower.contains("unable to open")
                 {
                     self.push_message_log(&format!(
-                        "qpdf 无法读取暂存文件（权限/占用），跳过完整性检查：{label}"
+                        "qpdf 无法读取检查副本（权限/占用），跳过完整性检查：{label}"
                     ));
                     return Ok(());
                 }
