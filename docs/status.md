@@ -111,8 +111,9 @@
 - **P0-C1 版本/索引降级**：读取有效版本；低于 1.5 时只拒绝注释编辑、不拒绝打开；
   `pdf_index` 配对失败时保留 readback 显示、禁止 PDF 注释写回；`annotation_loss.pdf`
   由 0 条变为 2 条只读。
-- **`view.rs` 拆分评估（未实施）**：4.26k 行中测试约 2.26k/73 个；建议先做
-  `view/tests.rs` 只拆测试，生产模块拆分暂缓；见 [view-split-evaluation.md](view-split-evaluation.md)。
+- **`view.rs` 只拆测试**：生产代码 2008 行，73 个测试移到
+  `crates/app/src/view/tests.rs`（2245 行）；生产模块拆分仍暂缓，见
+  [view-split-evaluation.md](view-split-evaluation.md)。
 - **注释几何写回修复**：`/QuadPoints` 的每个 quad 末尾补空格，避免上一段最后一个数字
   与下一段第一个数字粘成坏 token；三处新注释写入统一走 `push_quad_points`，并补
   多 quad 回读回归测试。

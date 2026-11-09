@@ -53,7 +53,8 @@
 
 ### app
 - `view.rs`：坐标换算、输入映射、`KeyedStore`、画法决策 `plan_page`、快照拼合、浮窗几何、
- 摘要文案；**能脱离窗口验证的逻辑一律在这里**（当前 ~4.2k 行）。
+ 摘要文案；**能脱离窗口验证的逻辑一律在这里**（生产 2008 行；测试在
+ [`view/tests.rs`](../crates/app/src/view/tests.rs)，2245 行）。
 - `app.rs`（~0.6k）：`PdfReaderApp` 状态/构造 + `eframe::App::ui` 转发到 `app::frame::frame`。
 - `app/model.rs`（~1.0k）：`app` 子模块共用类型/常量/纯函数（`Float`/`AppEdit`/`Tool`/
   `CaptureState` 等；字段 `pub(super)`）。
@@ -235,8 +236,9 @@ app::compact::run_child → app --compact <in> <out>
   [annotation-versions.md](annotation-versions.md)。
 - `app.rs` 已拆成 `app/` 子模块（~0.6k 行只剩状态/构造/入口）；`PdfReaderApp` 仍有
   约 118 个字段，Runtime/SaveFlow/Markdown/AnnotationPdf 四组已分组；Phase 3 评估见
-  [state-grouping-evaluation.md](state-grouping-evaluation.md)；`view.rs` 仍有 ~4.2k 行，
-  拆分评估见 [view-split-evaluation.md](view-split-evaluation.md)（建议先只拆测试）。
+  [state-grouping-evaluation.md](state-grouping-evaluation.md)；`view.rs` 生产 2008 行，
+  测试已拆到 `view/tests.rs`；生产模块拆分评估见
+  [view-split-evaluation.md](view-split-evaluation.md)。
 - 无头回放只覆盖主视图渲染主线；UI 对话框、浮窗、便签、保存提示依赖人工验收。
 - `.pdf.json` 不保留未知字段；新旧版本互读会有字段丢失（只做加法迁移，不做无损往返）。
 - 性能基线只能在同类机器上比较，未接 CI。

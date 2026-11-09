@@ -14,7 +14,7 @@
 | UI：面板、每帧顺序、交互状态机、浮窗/侧栏/便签/拖拽、保存提示 | [app-ui.md](app-ui.md) |
 | 浮窗链接语法/身份规则/外部注释策略/失败语义 | [float-links.md](float-links.md) |
 | `PdfReaderApp` 状态分组的 Phase 3 评估（未实施） | [state-grouping-evaluation.md](state-grouping-evaluation.md) |
-| `view.rs` 拆分评估（未实施；建议先拆测试） | [view-split-evaluation.md](view-split-evaluation.md) |
+| `view.rs` 只拆测试（已实施）；生产模块拆分暂缓 | [view-split-evaluation.md](view-split-evaluation.md) |
 | PDF 1.4–2.0 注释字段差异（实现/排查查表） | [annotation-versions.md](annotation-versions.md) |
 | pdf.js 测试集扫描说明（本地集合，不随仓库分发） | [pdfjs-corpus.md](pdfjs-corpus.md) |
 | pdf.js 测试集问题文件清单 | [pdfjs-bug-list.md](pdfjs-bug-list.md) |
