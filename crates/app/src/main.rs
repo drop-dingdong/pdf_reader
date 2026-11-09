@@ -12,6 +12,47 @@ use app::PdfReaderApp;
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // 写回模式（S5b）：隐藏子进程入口。**必须在主进程之外执行**——这个分支直接调 PDFium 的
+    // 注释 API，与主进程的后台渲染线程并发会崩（见 docs/writeback.md）。
+    if args.first().map(String::as_str) == Some("--writeback") {
+        let Some(job) = args.get(1).map(PathBuf::from) else {
+            eprintln!("用法：app --writeback <job.json>");
+            std::process::exit(2);
+        };
+        // 先初始化 PDFium（writeback 模块的契约：调用方负责初始化）
+        match backend_pdfium::pdfium() {
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("写回失败：{error}");
+                std::process::exit(1);
+            }
+        }
+        match app::writeback::run_job(&job) {
+            Ok(summary) => println!("{summary}"),
+            Err(error) => {
+                eprintln!("写回失败：{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
+    // 整理副本（S8a）：无窗口，供调试/脚本使用
+    if args.first().map(String::as_str) == Some("--compact") {
+        let (Some(input), Some(output)) = (args.get(1), args.get(2)) else {
+            eprintln!("用法：app --compact <输入.pdf> <输出.pdf>");
+            std::process::exit(2);
+        };
+        match app::compact::run(std::path::Path::new(input), std::path::Path::new(output)) {
+            Ok(message) => println!("{message}"),
+            Err(error) => {
+                eprintln!("整理失败：{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     // 回放模式：不需要窗口，也不需要 PDFium 的窗口集成
     if args.first().map(String::as_str) == Some("--replay") {
         let Some(script) = args.get(1).map(PathBuf::from) else {
@@ -176,7 +217,9 @@ fn main() -> eframe::Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 900.0])
             .with_min_inner_size([600.0, 400.0])
-            .with_title("PDF Reader"),
+            .with_title("PDF Reader")
+            // Windows 上 winit 默认可能关闭拖放；显式打开，Linux/Wayland 无副作用。
+            .with_drag_and_drop(true),
         ..Default::default()
     };
 

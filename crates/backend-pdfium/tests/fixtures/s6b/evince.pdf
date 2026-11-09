@@ -1,0 +1,156 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /Outlines 8 0 R /PageMode /UseOutlines >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R /Annots [9 0 R] >>
+endobj
+4 0 obj
+<< /Length 43 >>
+stream
+BT /F1 24 Tf 72 700 Td (Hello World) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 400] /Rotate 90 /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 43 >>
+stream
+BT /F1 12 Tf 20 300 Td (Second page) Tj ET
+endstream
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+8 0 obj
+<< /Type /Outlines /First 10 0 R /Last 10 0 R /Count 1 >>
+endobj
+9 0 obj
+<< /Type /Annot /Subtype /Link /Rect [72 690 300 730] /Border [0 0 1] /Dest [5 0 R /Fit] >>
+endobj
+10 0 obj
+<< /Title (Chapter One) /Parent 8 0 R /Dest [3 0 R /Fit] >>
+endobj
+xref
+0 11
+0000000000 65535 f 
+0000000009 00000 n 
+0000000097 00000 n 
+0000000160 00000 n 
+0000000302 00000 n 
+0000000394 00000 n 
+0000000531 00000 n 
+0000000623 00000 n 
+0000000693 00000 n 
+0000000766 00000 n 
+0000000873 00000 n 
+trailer
+<< /Size 11 /Root 1 0 R >>
+startxref
+949
+%%EOF
+3 0 obj
+<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792 ] /Resources <</Font <</F1 7 0 R >> >> /Contents 4 0 R /Annots [9 0 R 11 0 R 12 0 R ] >> 
+endobj
+5 0 obj
+<</Type /Page /Parent 2 0 R /MediaBox [0 0 200 400 ] /Rotate 90 /Resources <</Font <</F1 7 0 R >> >> /Contents 6 0 R /Annots 15 0 R >> 
+endobj
+11 0 obj
+<</Type /Annot /Rect [133 692 178 721 ] /Subtype /Highlight /QuadPoints [133 721 178 721 133 692 178 692 ] /M (D:20261028132600+08'00') /C [1 1 0 ] /Popup 12 0 R /T <feff00710069007500790075002d006c0069006e00750078> /P 3 0 R /Contents <feff0068006900670068006c0069006700680074> >> 
+endobj
+12 0 obj
+<</Type /Annot /Rect [178 542 378 692 ] /Subtype /Popup /M (D:20261028132548+08'00') /Parent 11 0 R /P 3 0 R >> 
+endobj
+13 0 obj
+<</Type /Annot /Rect [20 296 55 311 ] /Subtype /Highlight /QuadPoints [20 296 20 311 55 296 55 311 ] /M (D:20261028132644+08'00') /C [1 1 0 ] /Popup 14 0 R /T <feff00710069007500790075002d006c0069006e00750078> /P 5 0 R /Contents <feff0072006f00740061007400650020003900300020007000610067006500200068006900670068006c0069006700680074> >> 
+endobj
+14 0 obj
+<</Type /Annot /Rect [317.8867924528 -1.6226415094 517.8867924528 148.3773584906 ] /Subtype /Popup /M (D:20261028132632+08'00') /Parent 13 0 R /P 5 0 R >> 
+endobj
+15 0 obj
+[13 0 R 14 0 R ] 
+endobj
+xref
+0 1
+0000000001 65535 f
+3 1
+0000001234 00000 n
+5 1
+0000001393 00000 n
+11 5
+0000001547 00000 n
+0000001848 00000 n
+0000001980 00000 n
+0000002335 00000 n
+0000002510 00000 n
+trailer
+<</Size 16 /Root 1 0 R /Prev 949 >> 
+startxref
+2547
+%%EOF
+3 0 obj
+<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792 ] /Resources <</Font <</F1 7 0 R >> >> /Contents 4 0 R /Annots [9 0 R 11 0 R 12 0 R 18 0 R 19 0 R 20 0 R 21 0 R ] >> 
+endobj
+18 0 obj
+<</Type /Annot /Rect [72 692 108 721 ] /Subtype /Underline /QuadPoints [72 721 108 721 72 692 108 692 ] /M (D:20261028132829+08'00') /Contents <feff> /C [1 1 0 ] /T <feff00710069007500790075002d006c0069006e00750078> /CA 1 /Popup 19 0 R /P 3 0 R >> 
+endobj
+19 0 obj
+<</Type /Annot /Rect [108 542 308 692 ] /Subtype /Popup /M (D:20261028132829+08'00') /Parent 18 0 R /P 3 0 R >> 
+endobj
+20 0 obj
+<</Type /Annot /Rect [182 692 197 721 ] /Subtype /StrikeOut /QuadPoints [182 721 197 721 182 692 197 692 ] /M (D:20261028132847+08'00') /Contents <feff> /C [1 1 0 ] /T <feff00710069007500790075002d006c0069006e00750078> /CA 1 /Popup 21 0 R /P 3 0 R >> 
+endobj
+21 0 obj
+<</Type /Annot /Rect [197 542 397 692 ] /Subtype /Popup /M (D:20261028132847+08'00') /Parent 20 0 R /P 3 0 R >> 
+endobj
+xref
+0 1
+0000000001 65535 f
+3 1
+0000002805 00000 n
+16 8
+0000000017 00003 f
+0000000022 00003 f
+0000002992 00000 n
+0000003260 00000 n
+0000003392 00000 n
+0000003663 00000 n
+0000000023 00001 f
+0000000000 00001 f
+trailer
+<</Size 24 /Root 1 0 R /Prev 2547 >> 
+startxref
+3795
+%%EOF
+11 0 obj
+<</Type /Annot /Rect [133 692 178 721 ] /Subtype /Highlight /QuadPoints [133 721 178 721 133 692 178 692 ] /M (D:20261028133024+08'00') /C [1 1 0 ] /Popup 12 0 R /T <feff00710069007500790075002d006c0069006e00750078> /P 3 0 R /Contents <feff0068006900670068006c0069006700680074> /NM (okular-{9b29d485-5f9c-4c95-9dfe-fefe298a9f07}) >> 
+endobj
+13 0 obj
+<</Type /Annot /Rect [20 296 55 311 ] /Subtype /Highlight /QuadPoints [20 296 20 311 55 296 55 311 ] /M (D:20261028133024+08'00') /C [1 1 0 ] /Popup 14 0 R /T <feff00710069007500790075002d006c0069006e00750078> /P 5 0 R /Contents <feff0072006f00740061007400650020003900300020007000610067006500200068006900670068006c0069006700680074> /NM (okular-{ae7fd75e-71a1-4865-9c57-2e5ffa7d94b6}) >> 
+endobj
+18 0 obj
+<</Type /Annot /Rect [72 692 108 721 ] /Subtype /Underline /QuadPoints [72 721 108 721 72 692 108 692 ] /M (D:20261028133024+08'00') /Contents <feff0075006e006400650072006c0069006e0065> /C [1 1 0 ] /T <feff00710069007500790075002d006c0069006e00750078> /CA 1 /Popup 19 0 R /P 3 0 R /F 0 /Border [0 0 1 ] /NM (okular-{2d949cab-a046-44a5-82d8-f141ef341bc7}) >> 
+endobj
+20 0 obj
+<</Type /Annot /Rect [182 692 197 721 ] /Subtype /StrikeOut /QuadPoints [182 721 197 721 182 692 197 692 ] /M (D:20261028133024+08'00') /Contents <feff0073007400720069006b00650020006f00750074> /C [1 1 0 ] /T <feff00710069007500790075002d006c0069006e00750078> /CA 1 /Popup 21 0 R /P 3 0 R /F 0 /Border [0 0 1 ] /NM (okular-{9376ebea-ed06-4741-99c4-5dcc717b3afa}) >> 
+endobj
+xref
+0 1
+0000000001 65535 f
+11 1
+0000004089 00000 n
+13 1
+0000004442 00000 n
+18 1
+0000004849 00000 n
+20 1
+0000005227 00000 n
+trailer
+<</Size 24 /Root 1 0 R /Prev 3795 >> 
+startxref
+5612
+%%EOF

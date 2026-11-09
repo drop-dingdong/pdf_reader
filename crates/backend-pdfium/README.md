@@ -2,14 +2,14 @@
 
 把 [`pdfium-render`](https://crates.io/crates/pdfium-render) 适配成 [`pdfcore`](../pdfcore) 的 trait 实现。
 本文件只讲**怎么把 PDFium 跑起来**与适配层的取舍；架构现状见
-[docs/current/architecture.md](../../docs/current/architecture.md) 与
-[docs/current/rendering.md](../../docs/current/rendering.md)（§4 后端渲染路径与校验）。
+[docs/architecture.md](../../docs/architecture.md) 与
+[docs/rendering.md](../../docs/rendering.md)（§4 后端渲染路径与校验）。
 
 | pdfcore trait | 本 crate 的实现 | 关键点 |
 | --- | --- | --- |
 | `PdfBackend` | `PdfiumBackend` | `max_concurrency = 1`（PDFium 非线程安全） |
-| `Document` | `PdfiumDocument` | 打开时一次性备好**页几何表**与**导航索引**（D-01 / D-08） |
-| `PageRaster` | `PdfiumRaster` | 整页 + **真正的部分渲染**块（`set_origin`），块尺寸/整像素有硬校验（D-95） |
+| `Document` | `PdfiumDocument` | 打开时一次性备好**页几何表**与**导航索引** |
+| `PageRaster` | `PdfiumRaster` | 整页 + **真正的部分渲染**块（`set_origin`），块尺寸/整像素有硬校验 |
 | `TextLayer` | `PdfiumTextLayer` | 逐字符包围盒 + 搜索 |
 
 ## 一、准备 PDFium 动态库（必做）
@@ -25,8 +25,9 @@ scripts/fetch-pdfium.sh linux-x64  # 或显式指定
 
 > **Windows 的坑**：bblanchon 的 tar 包里，运行库 `pdfium.dll` 在 **`bin/`** 下，
 > 而 `lib/pdfium.dll.lib` 是**导入库**（链接期用，运行时不加载）。
-> `scripts/fetch-pdfium.sh` 会把运行库归位到 `lib/` 并删掉导入库/静态库；
-> 读取顺序里也包含 `bin/`，所以两种布局都能用。
+> `scripts/fetch-pdfium.sh` / `scripts\fetch-pdfium.ps1` 会把运行库归位到 `lib/`；
+> 开发目录要求它在 `vendor/pdfium-<平台>/lib/`。可执行文件同级的 `bin/` 也仍是候选，
+> 但仓库内 vendor 的 `bin/` 不作为开发查找路径。
 >
 > **Windows 上推荐用 PowerShell 脚本**（不依赖 bash）：
 > `scripts\fetch-pdfium.ps1`（下载并归位）、`scripts\package.ps1`（构建+打包+`--selftest`）。

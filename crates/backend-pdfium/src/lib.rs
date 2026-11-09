@@ -35,8 +35,14 @@ pub mod error;
 #[doc(hidden)]
 pub mod fixtures;
 pub mod library;
+pub mod pdf_compact;
+pub mod pdf_index;
+pub mod pdf_patch;
+pub mod pdf_repair;
 pub mod raster;
+pub mod readback;
 pub mod text;
+pub mod writeback;
 
 pub use backend::PdfiumBackend;
 pub use error::to_core_error;

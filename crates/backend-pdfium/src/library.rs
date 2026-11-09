@@ -74,6 +74,20 @@ fn bind() -> std::result::Result<Pdfium, String> {
     }
 }
 
+/// 已存在的 PDFium 动态库**文件路径**（与 [`pdfium`] 相同的候选顺序）。
+///
+/// 给写回（`writeback`）用：它要用 `libloading` 自己加载同一个库。
+/// 返回 `None` 表示候选目录里没有；调用方可以退回平台默认库名（系统库）。
+pub fn pdfium_library_path() -> Option<PathBuf> {
+    for directory in candidate_directories() {
+        let path = Pdfium::pdfium_platform_library_name_at_path(&directory);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// 候选目录，按优先级排列。
 fn candidate_directories() -> Vec<String> {
     let mut candidates: Vec<String> = Vec::new();

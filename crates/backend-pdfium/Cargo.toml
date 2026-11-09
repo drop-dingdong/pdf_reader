@@ -7,8 +7,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+flate2 = "1"
 pdfcore = { path = "../pdfcore" }
 # 接口层与 UI 都不依赖本 crate；只有 app 在组装时引用它。
 # 说明：pdfium-render 在**运行期**绑定 PDFium 动态库（见 scripts/fetch-pdfium.sh），
 # 因此本 crate 编译不需要 PDFium，只有跑测试/运行程序时需要。
 pdfium-render = "0.9"
+# S5 写回：直接绑定 FPDFAnnot_* 等十几个函数（pdfium-render 0.9.4 没有注释 API）。
+# 只在子进程里调用，详见 `writeback` 模块文档。
+libloading = "0.8"

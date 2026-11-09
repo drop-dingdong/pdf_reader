@@ -14,7 +14,7 @@ use crate::json::{Json, JsonLookup, Parsed};
 
 /// 存档格式的当前版本。
 ///
-/// 约定（加版本时请遵守，见 `docs/current/persistence.md`）：
+/// 约定（加版本时请遵守，见 `docs/persistence.md`）：
 /// * 读取侧必须能读**所有更旧**的版本，并把它升级到当前版本；
 /// * 升级只做**加法**（给新字段填默认值），不删除、不改名、不改变已有字段的语义；
 /// * `to_json` **永远写当前版本**；读到旧版本后由调用方置脏，下次保存即写回新版本。
@@ -24,7 +24,13 @@ use crate::json::{Json, JsonLookup, Parsed};
 /// * **v2**：被引用点与自定义**图片** preview 增加 `scale`（截图时的**显示比例**，`1.0` = 100%）。
 ///   预览图不再"按当前缩放合成"，而是按这个记录值请求渲染 —— 否则缩放到别处后
 ///   缓存里没有那块像素，初次生成会只剩白的/干脆没有图。
-pub const CURRENT_VERSION: u32 = 2;
+/// * **v3**：preview 改为单一有序数组 `custom_previews`（每项带 `kind`），
+///   不再拆成 `custom_images` / `custom_texts`，也不再需要 `order` 字段。
+/// * **v4**：被引用点与图片 preview 增加稳定 `image_id` / `image_revision`，
+///   供 Markdown 内部图片引用；旧档迁移时按页/下标生成 legacy id。
+/// * **v5**：文字 preview 也使用 `image_id` 作为稳定链接记录 id；加载时给空值生成，
+///   保存后写回 v5。旧程序会按 D-107 拒绝加载 v5，避免静默清空文字 id。
+pub const CURRENT_VERSION: u32 = 5;
 
 /// 旧存档缺 `scale` 时的默认分辨率（用户要求：按 100% 处理）。
 pub const DEFAULT_SCALE: f32 = 1.0;
@@ -64,6 +70,10 @@ pub struct SavedMark {
     pub body: [f32; 2],
     /// ▲v2 截图时的**显示比例**（`1.0` = 100%）。预览图按它请求渲染。
     pub scale: f32,
+    /// ▲v4/v5 稳定记录 id；图片 preview 用作图片引用，文字 preview 用作链接记录 id。
+    pub image_id: String,
+    /// ▲v4 图片内容版本；影响像素的修改递增（文字 preview 固定 0）。
+    pub image_revision: u64,
 }
 
 /// 一条自定义 preview 的可持久化数据（不含截图）。
@@ -83,6 +93,28 @@ pub struct SavedCustom {
     pub text: Option<String>,
     /// ▲v2 截图时的**显示比例**（`1.0` = 100%）。文字预览用不到，写 1.0。
     pub scale: f32,
+    /// ▲v4 稳定图片记录 id（图片 preview 才有）。
+    pub image_id: String,
+    /// ▲v4 图片内容版本。
+    pub image_revision: u64,
+}
+
+/// preview 的类型；v3 统一列表里显式保存。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SavedCustomKind {
+    /// 图片预览
+    Image,
+    /// 文字预览
+    Text,
+}
+
+/// v3 统一列表里的一条 preview。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedPreview {
+    /// 类型
+    pub kind: SavedCustomKind,
+    /// 数据
+    pub item: SavedCustom,
 }
 
 /// 整个存档。
@@ -98,6 +130,8 @@ pub struct SavedData {
     pub custom_images: Vec<SavedCustom>,
     /// 自定义文字 preview
     pub custom_texts: Vec<SavedCustom>,
+    /// v3：按显示/创建顺序保存的 preview 统一列表。
+    pub custom_previews: Vec<SavedPreview>,
 }
 
 impl Default for SavedData {
@@ -108,6 +142,7 @@ impl Default for SavedData {
             dest_marks: Vec::new(),
             custom_images: Vec::new(),
             custom_texts: Vec::new(),
+            custom_previews: Vec::new(),
         }
     }
 }
@@ -156,10 +191,12 @@ impl SavedData {
                 write_rect(&mut out, "rect", mark.rect);
                 let _ = write!(
                     out,
-                    ", \"body\": [{}, {}], \"scale\": {}",
+                    ", \"body\": [{}, {}], \"scale\": {}, \"image_id\": {:?}, \"image_revision\": {}",
                     num(mark.body[0]),
                     num(mark.body[1]),
-                    num(mark.scale)
+                    num(mark.scale),
+                    mark.image_id,
+                    mark.image_revision
                 );
                 out.push('}');
             }
@@ -167,10 +204,21 @@ impl SavedData {
         }
         out.push_str("\n  ],\n");
 
-        write_customs(&mut out, "custom_images", &self.custom_images);
-        out.push_str(",\n");
-        write_customs(&mut out, "custom_texts", &self.custom_texts);
-        out.push_str("\n}\n");
+        out.push_str("  \"custom_previews\": [");
+        for (index, preview) in self.custom_previews.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str("\n    {\"kind\": ");
+            out.push_str(match preview.kind {
+                SavedCustomKind::Image => "\"image\"",
+                SavedCustomKind::Text => "\"text\"",
+            });
+            out.push_str(", ");
+            write_custom_fields(&mut out, &preview.item);
+            out.push('}');
+        }
+        out.push_str("\n  ]\n}\n");
         out
     }
 
@@ -205,14 +253,37 @@ impl SavedData {
                 data.dest_marks.push(page_marks);
             }
         }
+        if let Some(items) = root.field("custom_previews") {
+            for item in items.as_array().ok_or("custom_previews 不是数组")? {
+                data.custom_previews.push(parse_preview(item)?);
+            }
+        }
         if let Some(items) = root.field("custom_images") {
             for item in items.as_array().ok_or("custom_images 不是数组")? {
-                data.custom_images.push(parse_custom(item)?);
+                let item = parse_custom(item)?;
+                data.custom_previews.push(SavedPreview {
+                    kind: SavedCustomKind::Image,
+                    item: item.clone(),
+                });
+                data.custom_images.push(item);
             }
         }
         if let Some(items) = root.field("custom_texts") {
             for item in items.as_array().ok_or("custom_texts 不是数组")? {
-                data.custom_texts.push(parse_custom(item)?);
+                let item = parse_custom(item)?;
+                data.custom_previews.push(SavedPreview {
+                    kind: SavedCustomKind::Text,
+                    item: item.clone(),
+                });
+                data.custom_texts.push(item);
+            }
+        }
+        if data.custom_images.is_empty() && data.custom_texts.is_empty() {
+            for preview in &data.custom_previews {
+                match preview.kind {
+                    SavedCustomKind::Image => data.custom_images.push(preview.item.clone()),
+                    SavedCustomKind::Text => data.custom_texts.push(preview.item.clone()),
+                }
             }
         }
         Ok(data)
@@ -282,6 +353,22 @@ pub fn migrate(data: &mut SavedData) -> Migration {
     let from = data.version;
     let mut notes = Vec::new();
 
+    // v3 之前 preview 拆成 images/texts；统一列表为空时先按旧顺序补齐。
+    if data.custom_previews.is_empty() {
+        for item in &data.custom_images {
+            data.custom_previews.push(SavedPreview {
+                kind: SavedCustomKind::Image,
+                item: item.clone(),
+            });
+        }
+        for item in &data.custom_texts {
+            data.custom_previews.push(SavedPreview {
+                kind: SavedCustomKind::Text,
+                item: item.clone(),
+            });
+        }
+    }
+
     if data.version < 2 {
         let mut patched = 0usize;
         for mark in data.dest_marks.iter_mut().flatten() {
@@ -290,16 +377,76 @@ pub fn migrate(data: &mut SavedData) -> Migration {
                 patched += 1;
             }
         }
+        for preview in data.custom_previews.iter_mut() {
+            if !(preview.item.scale > 0.0 && preview.item.scale.is_finite()) {
+                preview.item.scale = DEFAULT_SCALE;
+                patched += 1;
+            }
+        }
         for item in data.custom_images.iter_mut() {
             if !(item.scale > 0.0 && item.scale.is_finite()) {
                 item.scale = DEFAULT_SCALE;
-                patched += 1;
+            }
+        }
+        for item in data.custom_texts.iter_mut() {
+            if !(item.scale > 0.0 && item.scale.is_finite()) {
+                item.scale = DEFAULT_SCALE;
             }
         }
         notes.push(format!(
             "v1 → v2：{patched} 处截图没有记录分辨率，按 100% 处理（保存后写回 v{CURRENT_VERSION}）"
         ));
         data.version = 2;
+    }
+
+    if data.version < 3 {
+        data.version = 3;
+        notes.push("v2 → v3：preview 改为单一有序列表（保存后写回 v3）".to_string());
+    }
+
+    if data.version < 4 {
+        let mut generated = 0usize;
+        for (page, marks) in data.dest_marks.iter_mut().enumerate() {
+            for (index, mark) in marks.iter_mut().enumerate() {
+                if mark.image_id.is_empty() {
+                    mark.image_id = format!("legacy-dest-{page}-{index}");
+                    mark.image_revision = 0;
+                    generated += 1;
+                }
+            }
+        }
+        for (index, preview) in data.custom_previews.iter_mut().enumerate() {
+            if preview.kind == SavedCustomKind::Image && preview.item.image_id.is_empty() {
+                preview.item.image_id = format!("legacy-custom-{index}");
+                preview.item.image_revision = 0;
+                generated += 1;
+            }
+        }
+        for (index, item) in data.custom_images.iter_mut().enumerate() {
+            if item.image_id.is_empty() {
+                item.image_id = format!("legacy-custom-{index}");
+                item.image_revision = 0;
+            }
+        }
+        data.version = 4;
+        notes.push(format!(
+            "v3 → v4：{generated} 张图片生成稳定 id（保存后写回 v{CURRENT_VERSION}）"
+        ));
+    }
+
+    if data.version < 5 {
+        // 文字 preview 的记录 id 需要应用层生成（保证唯一），这里只升级版本并让调用方置脏；
+        // 加载时会给缺 id 的文字 preview 补值（见 `document::open`）。
+        data.version = 5;
+        let text_count = data
+            .custom_previews
+            .iter()
+            .filter(|preview| preview.kind == SavedCustomKind::Text)
+            .count()
+            + data.custom_texts.len();
+        notes.push(format!(
+            "v4 → v5：{text_count} 条文字preview 使用稳定链接 id（加载时生成，保存后写回 v{CURRENT_VERSION}）"
+        ));
     }
 
     Migration {
@@ -363,32 +510,26 @@ fn write_destination(out: &mut String, destination: &Destination) {
     }
 }
 
-fn write_customs(out: &mut String, key: &str, items: &[SavedCustom]) {
-    let _ = write!(out, "  \"{key}\": [");
-    for (index, item) in items.iter().enumerate() {
-        if index > 0 {
-            out.push(',');
-        }
-        out.push_str("\n    {\"page\": ");
-        let _ = write!(out, "{}", item.page.get());
-        out.push_str(", ");
-        write_point(out, "point", item.point);
-        out.push_str(", ");
-        write_rect(out, "rect", item.rect);
-        let _ = write!(
-            out,
-            ", \"body\": [{}, {}], \"scale\": {}, \"title\": {}",
-            num(item.body[0]),
-            num(item.body[1]),
-            num(item.scale),
-            json_string(&item.title)
-        );
-        if let Some(text) = &item.text {
-            let _ = write!(out, ", \"text\": {}", json_string(text));
-        }
-        out.push('}');
+fn write_custom_fields(out: &mut String, item: &SavedCustom) {
+    out.push_str("\"page\": ");
+    let _ = write!(out, "{}", item.page.get());
+    out.push_str(", ");
+    write_point(out, "point", item.point);
+    out.push_str(", ");
+    write_rect(out, "rect", item.rect);
+    let _ = write!(
+        out,
+        ", \"body\": [{}, {}], \"scale\": {}, \"title\": {}, \"image_id\": {}, \"image_revision\": {}",
+        num(item.body[0]),
+        num(item.body[1]),
+        num(item.scale),
+        json_string(&item.title),
+        json_string(&item.image_id),
+        item.image_revision
+    );
+    if let Some(text) = &item.text {
+        let _ = write!(out, ", \"text\": {}", json_string(text));
     }
-    out.push(']');
 }
 
 fn json_string(value: &str) -> String {
@@ -453,6 +594,16 @@ fn parse_mark(value: &Json) -> Parsed<SavedMark> {
         rect: parse_rect(object.field("rect").ok_or("mark 缺 rect")?)?,
         body: parse_pair(object.field("body").ok_or("mark 缺 body")?)?,
         scale: parse_scale(object),
+        image_id: object
+            .field("image_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        image_revision: object
+            .field("image_revision")
+            .and_then(|v| v.as_number())
+            .map(|v| v.max(0.0) as u64)
+            .unwrap_or(0),
     })
 }
 
@@ -463,6 +614,23 @@ fn parse_scale(object: &[(String, Json)]) -> f32 {
         .and_then(|value| value.as_number())
         .filter(|value| *value > 0.0 && value.is_finite())
         .unwrap_or(DEFAULT_SCALE)
+}
+
+fn parse_preview(value: &Json) -> Parsed<SavedPreview> {
+    let object = value.as_object().ok_or("preview 不是对象")?;
+    let kind = object
+        .field("kind")
+        .and_then(|value| value.as_str())
+        .ok_or("preview 缺 kind")?;
+    let kind = match kind {
+        "image" => SavedCustomKind::Image,
+        "text" => SavedCustomKind::Text,
+        other => return Err(format!("未知 preview kind: {other}")),
+    };
+    Ok(SavedPreview {
+        kind,
+        item: parse_custom(value)?,
+    })
 }
 
 fn parse_custom(value: &Json) -> Parsed<SavedCustom> {
@@ -486,6 +654,16 @@ fn parse_custom(value: &Json) -> Parsed<SavedCustom> {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
         scale: parse_scale(object),
+        image_id: object
+            .field("image_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        image_revision: object
+            .field("image_revision")
+            .and_then(|v| v.as_number())
+            .map(|v| v.max(0.0) as u64)
+            .unwrap_or(0),
     })
 }
 
@@ -546,6 +724,8 @@ mod tests {
                     rect: Rect::new(40.0, 170.0, 120.0, 60.0),
                     body: [120.0, 60.0],
                     scale: 8.0,
+                    image_id: "dest-test".to_string(),
+                    image_revision: 0,
                 }],
                 Vec::new(),
             ],
@@ -557,6 +737,8 @@ mod tests {
                 title: "图 \"一\"".into(),
                 text: None,
                 scale: 2.5,
+                image_id: "custom-image-test".to_string(),
+                image_revision: 3,
             }],
             custom_texts: vec![SavedCustom {
                 page: PageIndex::new(2),
@@ -566,7 +748,39 @@ mod tests {
                 title: "题\n目".into(),
                 text: Some("内容\\带转义".into()),
                 scale: DEFAULT_SCALE,
+                image_id: "preview-test".to_string(),
+                image_revision: 0,
             }],
+            custom_previews: vec![
+                SavedPreview {
+                    kind: SavedCustomKind::Image,
+                    item: SavedCustom {
+                        page: PageIndex::new(1),
+                        point: Point::new(50.0, 60.0),
+                        rect: Rect::new(10.0, 20.0, 30.0, 40.0),
+                        body: [30.0, 40.0],
+                        title: "图 \"一\"".into(),
+                        text: None,
+                        scale: 2.5,
+                        image_id: "custom-image-test".to_string(),
+                        image_revision: 3,
+                    },
+                },
+                SavedPreview {
+                    kind: SavedCustomKind::Text,
+                    item: SavedCustom {
+                        page: PageIndex::new(2),
+                        point: Point::new(5.0, 6.0),
+                        rect: Rect::new(5.0, 6.0, 0.0, 0.0),
+                        body: [300.0, 170.0],
+                        title: "题\n目".into(),
+                        text: Some("内容\\带转义".into()),
+                        scale: DEFAULT_SCALE,
+                        image_id: "preview-test".to_string(),
+                        image_revision: 0,
+                    },
+                },
+            ],
         }
     }
 
@@ -626,6 +840,30 @@ mod tests {
         assert!(text.contains(&format!("\"version\": {CURRENT_VERSION}")));
         let back = SavedData::from_json(&text).expect("v2 应能解析");
         assert_eq!(back, data);
+    }
+
+    /// v4 的文字 preview 没有记录 id：v5 迁移必须置脏，加载时再生成 id。
+    #[test]
+    fn v4_text_preview_migrates_to_v5_and_marks_dirty() {
+        let mut data = sample();
+        data.version = 4;
+        for preview in &mut data.custom_previews {
+            if preview.kind == SavedCustomKind::Text {
+                preview.item.image_id.clear();
+            }
+        }
+        let migration = migrate(&mut data);
+        assert_eq!((migration.from, migration.to), (4, CURRENT_VERSION));
+        assert!(migration.changed, "文字 preview 升级必须置脏");
+        assert!(
+            migration
+                .notes
+                .iter()
+                .any(|note| note.contains("文字preview")),
+            "{:?}",
+            migration.notes
+        );
+        assert_eq!(data.version, CURRENT_VERSION);
     }
 
     /// v2 的 `scale` 必须原样往返，不能被迁移改写。
@@ -706,5 +944,665 @@ mod tests {
         assert!(SavedData::from_json("[]").is_err(), "根必须是对象");
         assert!(SavedData::from_json("{\"links\": 3}").is_err());
         assert!(SavedData::from_json("{}").is_ok(), "空对象是合法的最小存档");
+    }
+}
+
+// ====================================================================== 标注图层（D-118）
+//
+// 与 `<pdf>.json` **分开**存放：v3 起标注的几何、颜色、透明度与**正文**都在这里；
+// `<pdf>.json` 只保存自定义 preview、链接与被引用点。
+
+/// 标注图层的格式版本（与 `SavedData` 独立）。
+///
+/// * **v1**：只有文本类标注（高亮 / 下划线 / 删除线），几何是 `quads`。
+/// * **v2**（S4）：增加墨迹（`points` + `width`）。v1 文件仍可读；v1 的读取端
+///   会把墨迹条目当成"未知种类"静默丢掉，再保存就真丢了 —— 所以必须升版本，
+///   让旧程序按既有规则**拒读且不覆盖**。
+/// * **v3**（S7）：正文从 `custom_texts` 的 `#annot:<id>` 搬进注释自己的 `body` 字段。
+/// * **v4**（2026-10-31）：增加 `author` / `created` / `modified`（只做加法）。
+///   v3 文件按"字段缺失"读入（`None`），保存时写 v4；v1/v2 仍按已关闭的迁移通道拒绝。
+pub const ANNOT_VERSION: u32 = 4;
+
+/// `<pdf>.annot.json` 里的一条标注。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedAnnotation {
+    /// 标注 id（与正文的哨兵标题 `#annot:<id>` 对应）。
+    pub id: u64,
+    /// 种类：`highlight` / `underline` / `strike_out` / `ink`。
+    pub kind: String,
+    /// 每行的矩形（**未旋转页面空间**）；墨迹为空。
+    pub quads: Vec<pdfcore::prelude::Rect>,
+    /// 墨迹的折线顶点（**未旋转页面空间**）；文本类标注为空。
+    pub points: Vec<pdfcore::prelude::Point>,
+    /// 墨迹的线宽（页面空间）；文本类标注为 `None`。
+    pub width: Option<f32>,
+    /// RGB。
+    pub color: [u8; 3],
+    /// 不透明度。
+    pub opacity: f32,
+    /// 正文（直接属于注释）。
+    pub body: Option<String>,
+    /// 作者（`/T`）。
+    pub author: Option<String>,
+    /// 创建时间（Unix 秒，UTC）。
+    pub created: Option<i64>,
+    /// 最后修改时间（Unix 秒，UTC）。
+    pub modified: Option<i64>,
+}
+
+/// 整份标注图层。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SavedOverlay {
+    /// 格式版本。
+    pub version: u32,
+    /// 逐页的标注（下标 = 页号）。
+    pub pages: Vec<Vec<SavedAnnotation>>,
+}
+
+impl SavedOverlay {
+    /// 空图层（当前版本）。
+    pub fn new() -> Self {
+        Self {
+            version: ANNOT_VERSION,
+            pages: Vec::new(),
+        }
+    }
+
+    /// 标注总数。
+    pub fn len(&self) -> usize {
+        self.pages.iter().map(Vec::len).sum()
+    }
+
+    /// 是否没有任何标注。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// 序列化成 JSON（逐页数组，便于人工检查与 diff）。
+    pub fn to_json(&self) -> String {
+        let mut out = String::from("{\n");
+        out.push_str(&format!("  \"version\": {},\n", self.version));
+        out.push_str("  \"pages\": [\n");
+        for (page, annotations) in self.pages.iter().enumerate() {
+            out.push_str("    [");
+            for (index, annotation) in annotations.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(",\n     ");
+                }
+                out.push_str(&format!(
+                    "{{\"id\":{}, \"kind\":\"{}\", \"color\":[{},{},{}], \"opacity\":{:.2}, ",
+                    annotation.id,
+                    json_string(&annotation.kind).trim_matches('"'),
+                    annotation.color[0],
+                    annotation.color[1],
+                    annotation.color[2],
+                    annotation.opacity
+                ));
+                if annotation.points.is_empty() {
+                    out.push_str("\"quads\":[");
+                    for (quad_index, quad) in annotation.quads.iter().enumerate() {
+                        if quad_index > 0 {
+                            out.push_str(", ");
+                        }
+                        out.push_str(&format!(
+                            "[{:.2},{:.2},{:.2},{:.2}]",
+                            quad.x, quad.y, quad.width, quad.height
+                        ));
+                    }
+                    out.push(']');
+                } else {
+                    out.push_str("\"points\":[");
+                    for (point_index, point) in annotation.points.iter().enumerate() {
+                        if point_index > 0 {
+                            out.push_str(", ");
+                        }
+                        out.push_str(&format!("[{:.2},{:.2}]", point.x, point.y));
+                    }
+                    out.push(']');
+                    out.push_str(&format!(
+                        ", \"width\":{:.2}",
+                        annotation.width.unwrap_or(2.0)
+                    ));
+                }
+                if let Some(body) = &annotation.body {
+                    out.push_str(&format!(", \"body\": {}", json_string(body)));
+                }
+                if let Some(author) = &annotation.author {
+                    out.push_str(&format!(", \"author\": {}", json_string(author)));
+                }
+                if let Some(created) = annotation.created {
+                    out.push_str(&format!(", \"created\": \"{}\"", iso_from_unix(created)));
+                }
+                if let Some(modified) = annotation.modified {
+                    out.push_str(&format!(", \"modified\": \"{}\"", iso_from_unix(modified)));
+                }
+                out.push('}');
+            }
+            out.push(']');
+            if page + 1 < self.pages.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ]\n}\n");
+        out
+    }
+
+    /// 解析（版本高于 [`ANNOT_VERSION`] 时返回 [`LoadError::NewerVersion`]）。
+    pub fn from_json(text: &str) -> std::result::Result<Self, LoadError> {
+        let parsed = parse_overlay(text)?;
+        if parsed.version > ANNOT_VERSION {
+            return Err(LoadError::NewerVersion {
+                found: parsed.version,
+                supported: ANNOT_VERSION,
+            });
+        }
+        if parsed.version < 3 {
+            return Err(LoadError::Parse(format!(
+                "标注图层是 v{}（本程序只支持 v3/v{}；v2→v3 迁移通道已关闭）",
+                parsed.version, ANNOT_VERSION
+            )));
+        }
+        // v3 → v4 只做加法：缺 author/created/modified 就留空，下次保存写 v4。
+        Ok(parsed)
+    }
+}
+
+/// Unix 秒 → `YYYY-MM-DDTHH:MM:SSZ`（UTC）。
+fn iso_from_unix(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds_of_day / 3_600,
+        (seconds_of_day % 3_600) / 60,
+        seconds_of_day % 60
+    )
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` → Unix 秒；只认我们自己写的格式。
+fn unix_from_iso(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    if bytes.len() < 10 {
+        return None;
+    }
+    let number =
+        |start: usize, len: usize| -> Option<i64> { text.get(start..start + len)?.parse().ok() };
+    let year = number(0, 4)?;
+    let month = number(5, 2)? as u32;
+    let day = number(8, 2)? as u32;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let (hour, minute, second) = if bytes.len() >= 19 {
+        (number(11, 2)?, number(14, 2)?, number(17, 2)?)
+    } else {
+        (0, 0, 0)
+    };
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let shifted_month = (i64::from(month) + 9) % 12;
+    let day_of_year = (153 * shifted_month + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    (
+        if month <= 2 { year + 1 } else { year },
+        month as u32,
+        day as u32,
+    )
+}
+
+/// 原子写：先写同目录的临时文件，再 `rename` 覆盖。
+///
+/// 存档变成"每次 Ctrl+S 都写"的高频操作之后，`fs::write` 中途崩溃会留下截断的 JSON
+/// （下一次打开就解析失败）。`rename` 在同一文件系统上是原子的，因此要么是旧内容、
+/// 要么是完整的新内容。
+pub fn write_atomic(target: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    let mut temporary = target.as_os_str().to_owned();
+    temporary.push(".tmp");
+    let temporary = std::path::PathBuf::from(temporary);
+    std::fs::write(&temporary, contents)?;
+    std::fs::rename(&temporary, target)
+}
+
+/// 极简解析：只认本文件自己的格式（字段名固定、顺序不限、忽略未知字段）。
+fn parse_overlay(text: &str) -> std::result::Result<SavedOverlay, LoadError> {
+    use crate::json::Json;
+    let root = Json::parse(text).map_err(|error| LoadError::Parse(format!("解析失败：{error}")))?;
+    let Json::Object(root) = root else {
+        return Err(LoadError::Parse("标注文件顶层不是对象".to_string()));
+    };
+    let root = root.as_slice();
+    let version = root
+        .field("version")
+        .and_then(|value| value.as_number())
+        .map(|value| value.round().max(1.0) as u32)
+        .unwrap_or(1);
+    let mut pages = Vec::new();
+    let page_items = root
+        .field("pages")
+        .and_then(|value| value.as_array())
+        .unwrap_or(&[]);
+    for (page, item) in page_items.iter().enumerate() {
+        let mut annotations = Vec::new();
+        for annotation in item.as_array().unwrap_or(&[]) {
+            let Json::Object(annotation) = annotation else {
+                continue;
+            };
+            let annotation = annotation.as_slice();
+            let id = annotation
+                .field("id")
+                .and_then(|value| value.as_number())
+                .unwrap_or(0.0) as u64;
+            let kind = annotation
+                .field("kind")
+                .and_then(|value| value.as_str())
+                .unwrap_or("highlight")
+                .to_string();
+            let mut color = [255u8, 214, 0];
+            if let Some(channels) = annotation.field("color").and_then(|value| value.as_array()) {
+                for (index, channel) in channels.iter().take(3).enumerate() {
+                    if let Some(number) = channel.as_number() {
+                        color[index] = number.clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+            let opacity = annotation
+                .field("opacity")
+                .and_then(|value| value.as_number())
+                .unwrap_or(0.35)
+                .clamp(0.0, 1.0);
+            let mut quads = Vec::new();
+            for quad in annotation
+                .field("quads")
+                .and_then(|value| value.as_array())
+                .unwrap_or(&[])
+            {
+                let numbers: Vec<f32> = quad
+                    .as_array()
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|value| value.as_number())
+                    .collect();
+                if numbers.len() == 4 {
+                    quads.push(pdfcore::prelude::Rect::new(
+                        numbers[0], numbers[1], numbers[2], numbers[3],
+                    ));
+                }
+            }
+            let mut points = Vec::new();
+            for point in annotation
+                .field("points")
+                .and_then(|value| value.as_array())
+                .unwrap_or(&[])
+            {
+                let numbers: Vec<f32> = point
+                    .as_array()
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|value| value.as_number())
+                    .collect();
+                if numbers.len() == 2 {
+                    points.push(pdfcore::prelude::Point::new(numbers[0], numbers[1]));
+                }
+            }
+            let width = annotation
+                .field("width")
+                .and_then(|value| value.as_number());
+            if quads.is_empty() && points.is_empty() {
+                continue; // 几何缺失的条目直接跳过（不因为一条坏数据整份加载失败）
+            }
+            let body = annotation
+                .field("body")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            let author = annotation
+                .field("author")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            let created = annotation
+                .field("created")
+                .and_then(|value| value.as_str())
+                .and_then(unix_from_iso);
+            let modified = annotation
+                .field("modified")
+                .and_then(|value| value.as_str())
+                .and_then(unix_from_iso);
+            annotations.push(SavedAnnotation {
+                id,
+                kind,
+                quads,
+                points,
+                width,
+                color,
+                opacity,
+                body,
+                author,
+                created,
+                modified,
+            });
+        }
+        pages.push(annotations);
+        let _ = page;
+    }
+    Ok(SavedOverlay { version, pages })
+}
+
+/// 标注种类 → 存档里的字符串。
+pub fn annotation_kind_name(kind: &pdfcore::annotation::AnnotationKind) -> &'static str {
+    use pdfcore::annotation::AnnotationKind;
+    match kind {
+        AnnotationKind::Highlight { .. } => "highlight",
+        AnnotationKind::Underline { .. } => "underline",
+        AnnotationKind::StrikeOut { .. } => "strike_out",
+        AnnotationKind::Ink { .. } => "ink",
+        AnnotationKind::Note { .. } => "note",
+    }
+}
+
+/// 存档里的一条 → 标注种类（未知种类按高亮处理，避免一条坏数据毁掉整份图层）。
+///
+/// **几何是否有效不在这里判断**：交给 `Annotation::new` 的不变量检查，
+/// 这样"缺几何 / 单点墨迹 / 零宽矩形"的跳过规则只有一处。
+pub fn annotation_kind_from_saved(saved: &SavedAnnotation) -> pdfcore::annotation::AnnotationKind {
+    use pdfcore::annotation::AnnotationKind;
+    if saved.kind == "note" {
+        return match saved.quads.first() {
+            Some(rect) => AnnotationKind::Note { rect: *rect },
+            None => AnnotationKind::Highlight { quads: Vec::new() },
+        };
+    }
+    if saved.kind == "ink" {
+        return AnnotationKind::Ink {
+            points: saved.points.clone(),
+            width: saved.width.unwrap_or(2.0),
+        };
+    }
+    match saved.kind.as_str() {
+        "underline" => AnnotationKind::Underline {
+            quads: saved.quads.clone(),
+        },
+        "strike_out" => AnnotationKind::StrikeOut {
+            quads: saved.quads.clone(),
+        },
+        _ => AnnotationKind::Highlight {
+            quads: saved.quads.clone(),
+        },
+    }
+}
+
+/// 把内存里的标注写成图层文件结构。
+pub fn overlay_from_store(store: &pdfcore::annotation::AnnotationStore) -> SavedOverlay {
+    let mut pages: Vec<Vec<SavedAnnotation>> = Vec::new();
+    for annotation in store.iter() {
+        let page = annotation.page.get() as usize;
+        if pages.len() <= page {
+            pages.resize_with(page + 1, Vec::new);
+        }
+        let (quads, points, width) = match &annotation.kind {
+            pdfcore::annotation::AnnotationKind::Ink { points, width } => {
+                (Vec::new(), points.clone(), Some(*width))
+            }
+            _ => (annotation.kind.quads().to_vec(), Vec::new(), None),
+        };
+        pages[page].push(SavedAnnotation {
+            id: annotation.id.get(),
+            kind: annotation_kind_name(&annotation.kind).to_string(),
+            quads,
+            points,
+            width,
+            color: annotation.color,
+            opacity: annotation.opacity,
+            body: annotation.body.clone(),
+            author: annotation.author.clone(),
+            created: annotation.created,
+            modified: annotation.modified,
+        });
+    }
+    SavedOverlay {
+        version: ANNOT_VERSION,
+        pages,
+    }
+}
+
+/// 从图层文件结构恢复标注（保留 id，撤销栈因此仍能对上）。
+pub fn store_from_overlay(overlay: &SavedOverlay) -> pdfcore::annotation::AnnotationStore {
+    let mut store = pdfcore::annotation::AnnotationStore::new();
+    for (page, annotations) in overlay.pages.iter().enumerate() {
+        for saved in annotations {
+            let kind = annotation_kind_from_saved(saved);
+            let mut annotation = match pdfcore::annotation::Annotation::new(
+                pdfcore::prelude::PageIndex::new(page as u32),
+                kind,
+            ) {
+                Some(annotation) => annotation,
+                None => continue,
+            };
+            annotation.id = pdfcore::annotation::AnnotationId(saved.id);
+            annotation.color = saved.color;
+            annotation.opacity = saved.opacity;
+            annotation.body = saved.body.clone();
+            annotation.author = saved.author.clone();
+            annotation.created = saved.created;
+            annotation.modified = saved.modified;
+            store.insert(annotation);
+        }
+    }
+    store
+}
+
+#[cfg(test)]
+mod annot_tests {
+    use super::*;
+    use pdfcore::annotation::{AnnotationKind, AnnotationStore};
+    use pdfcore::prelude::{PageIndex, Point, Rect};
+
+    fn store_with_one() -> AnnotationStore {
+        let mut store = AnnotationStore::new();
+        store
+            .add(
+                PageIndex::FIRST,
+                AnnotationKind::Highlight {
+                    quads: vec![Rect::new(10.0, 20.0, 30.0, 8.0)],
+                },
+            )
+            .expect("有效几何");
+        store
+    }
+
+    #[test]
+    fn overlay_round_trips_through_json() {
+        let mut store = store_with_one();
+        let id = store.iter().next().expect("一条").id;
+        store.set_body(id, Some("正文".to_string()));
+
+        let overlay = overlay_from_store(&store);
+        let text = overlay.to_json();
+        let parsed = SavedOverlay::from_json(&text).expect("应当能解析");
+        assert_eq!(parsed, overlay, "解析结果必须与写出的结构一致");
+
+        let restored = store_from_overlay(&parsed);
+        let item = restored.iter().next().expect("恢复一条");
+        assert_eq!(item.id, id, "id 必须保留（撤销栈要对得上）");
+        assert_eq!(item.kind.quads()[0], Rect::new(10.0, 20.0, 30.0, 8.0));
+        assert_eq!(item.body.as_deref(), Some("正文"));
+    }
+
+    #[test]
+    fn v2_overlay_is_refused_after_channel_close() {
+        let text = r##"{"version":2,"pages":[[
+          {"id":7,"kind":"highlight","color":[255,255,0],"opacity":0.35,
+           "quads":[[10,20,30,8]],"body":"#annot:7"}
+        ]]}"##;
+        assert!(SavedOverlay::from_json(text).is_err(), "v2 通道已关闭");
+    }
+
+    #[test]
+    fn annotation_meta_round_trips() {
+        let mut store = store_with_one();
+        let id = store.iter().next().expect("一条").id;
+        if let Some(annotation) = store.get_mut(id) {
+            annotation.author = Some("张三".to_string());
+            annotation.created = Some(1_700_000_000);
+            annotation.modified = Some(1_700_000_600);
+        }
+        let overlay = overlay_from_store(&store);
+        let text = overlay.to_json();
+        assert!(text.contains("\"author\": \"张三\""), "应写出作者：{text}");
+        assert!(
+            text.contains("\"created\": \"2023-11-14T22:13:20Z\""),
+            "应写出创建时间：{text}"
+        );
+        let parsed = SavedOverlay::from_json(&text).expect("应当能解析");
+        let restored = store_from_overlay(&parsed);
+        let item = restored.get(id).expect("恢复一条");
+        assert_eq!(item.author.as_deref(), Some("张三"));
+        assert_eq!(item.created, Some(1_700_000_000));
+        assert_eq!(item.modified, Some(1_700_000_600));
+    }
+
+    #[test]
+    fn version_3_overlay_loads_without_meta() {
+        let text = r#"{
+  "version": 3,
+  "pages": [
+    [ {"id":1, "kind":"highlight", "color":[255,214,0], "opacity":0.35,
+       "quads":[[50,690,450,50]], "body":"旧正文"} ]
+  ]
+}"#;
+        let overlay = SavedOverlay::from_json(text).expect("v3 应当能读");
+        let restored = store_from_overlay(&overlay);
+        let item = restored.iter().next().expect("一条");
+        assert_eq!(item.body.as_deref(), Some("旧正文"));
+        assert_eq!(item.author, None, "v3 没有作者");
+        assert_eq!(item.created, None);
+        assert_eq!(item.modified, None);
+    }
+
+    #[test]
+    fn newer_overlay_version_is_refused() {
+        let text = "{\"version\": 99, \"pages\": []}";
+        match SavedOverlay::from_json(text) {
+            Err(LoadError::NewerVersion { found, supported }) => {
+                assert_eq!((found, supported), (99, ANNOT_VERSION));
+            }
+            other => panic!("应当拒绝更新的版本，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entries_without_geometry_are_skipped_instead_of_failing() {
+        let text = r#"{"version":3,"pages":[[
+            {"id":1,"kind":"highlight","quads":[]},
+            {"id":2,"kind":"underline","quads":[[1,2,3,4]],"color":[1,2,3],"opacity":1.0}
+        ]]}"#;
+        let overlay = SavedOverlay::from_json(text).expect("坏条目不应让整份失败");
+        assert_eq!(overlay.len(), 1, "缺几何的条目应被跳过");
+        assert_eq!(overlay.pages[0][0].id, 2);
+    }
+
+    #[test]
+    fn ink_round_trips_through_json_with_points_and_width() {
+        let mut store = AnnotationStore::new();
+        store
+            .add(
+                PageIndex::FIRST,
+                AnnotationKind::Ink {
+                    points: vec![Point::new(10.0, 20.0), Point::new(60.0, 28.0)],
+                    width: 3.5,
+                },
+            )
+            .expect("有效墨迹");
+
+        let overlay = overlay_from_store(&store);
+        assert_eq!(overlay.version, ANNOT_VERSION, "新写的图层用当前版本");
+        let text = overlay.to_json();
+        assert!(text.contains("\"points\""), "墨迹必须写成 points：{text}");
+        assert!(text.contains("\"width\":3.50"), "线宽要落盘：{text}");
+        assert!(
+            !text.contains("\"quads\""),
+            "墨迹条目不该再写一个空的 quads：{text}"
+        );
+
+        let parsed = SavedOverlay::from_json(&text).expect("应当能解析");
+        assert_eq!(parsed, overlay, "解析结果必须与写出的结构一致");
+
+        let restored = store_from_overlay(&parsed);
+        let item = restored.iter().next().expect("恢复一条");
+        match &item.kind {
+            AnnotationKind::Ink { points, width } => {
+                assert_eq!(points.len(), 2, "顶点数必须保留");
+                assert!((points[0].x - 10.0).abs() < 0.01);
+                assert!((points[1].y - 28.0).abs() < 0.01);
+                assert!((width - 3.5).abs() < 0.001, "线宽必须保留");
+            }
+            other => panic!("应当恢复成墨迹，实际 {other:?}"),
+        }
+        assert_eq!(
+            item.bounds().map(|rect| rect.width),
+            Some(53.5),
+            "恢复后的包围盒仍按半线宽外扩"
+        );
+    }
+
+    #[test]
+    fn a_version_1_overlay_is_refused() {
+        let text = r#"{"version":1,"pages":[[
+            {"id":1,"kind":"highlight","quads":[[1,2,3,4]],"color":[1,2,3],"opacity":1.0}
+        ]]}"#;
+        assert!(SavedOverlay::from_json(text).is_err(), "v1 通道已关闭");
+    }
+
+    #[test]
+    fn ink_with_too_few_points_is_skipped_at_the_model_layer() {
+        let text = r#"{"version":3,"pages":[[
+            {"id":1,"kind":"ink","points":[[1,2]],"width":3}
+        ]]}"#;
+        let overlay = SavedOverlay::from_json(text).expect("坏条目不应让整份失败");
+        assert_eq!(overlay.len(), 1, "解析层保留原始条目");
+        assert!(
+            store_from_overlay(&overlay).is_empty(),
+            "单点墨迹在模型层被拒（不变量只有一处）"
+        );
+    }
+
+    #[test]
+    fn atomic_write_replaces_content_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("pdf-annot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let target = dir.join("a.annot.json");
+        write_atomic(&target, "{\"version\":1,\"pages\":[]}").expect("第一次写");
+        write_atomic(&target, "{\"version\":1,\"pages\":[[]]}").expect("覆盖写");
+        let text = std::fs::read_to_string(&target).expect("读回");
+        assert!(text.contains("[[]]"), "应当是新内容，实际 {text}");
+        assert!(
+            !dir.join("a.annot.json.tmp").exists(),
+            "临时文件必须被 rename 掉"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

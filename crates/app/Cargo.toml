@@ -6,8 +6,22 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# 可选：RaTeX 后端，不参与默认编译。
+math-latex-png = []
+math-ratex = [
+    "dep:ratex-parser",
+    "dep:ratex-layout",
+    "dep:ratex-render",
+    "dep:ratex-types",
+    "dep:ratex-unicode-font",
+    "dep:ab_glyph",
+]
+
 [dependencies]
 pdfcore = { path = "../pdfcore" }
+# 时间显示：把 Unix 秒按系统时区格式化（注释 tooltip 用）。
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 backend-pdfium = { path = "../backend-pdfium" }
 # UI：默认特性会带上 wgpu；这里显式选 glow（OpenGL）后端以缩小体积、提升老机器兼容性。
 # x11/wayland 必须显式开启（关闭默认特性后 winit 没有平台后端，会直接编译失败）；
@@ -22,3 +36,23 @@ eframe = { version = "0.37", default-features = false, features = [
     "wayland",
 ] }
 egui = "0.37"
+# 只安装 PNG image loader；不开启 file/http，避免 Markdown 读本地/网络图片。
+egui_extras = { version = "0.37", default-features = false, features = ["image"] }
+# 文字浮窗的 Markdown 阅读视图。默认特性会带图片加载/正则/语法高亮，
+# 这里全部关掉：注释正文来自外部 PDF，不允许读本地图片，也不需要搜索高亮。
+egui_commonmark = { version = "0.26.0", default-features = false, features = ["pulldown_cmark"] }
+# 把注释正文里的单个换行改写成硬换行（见 src/markdown.rs）。
+pulldown-cmark = "0.13"
+# LaTeX 数学：纯 Rust 排版 + PNG 光栅（P1.5 先用 PNG 原型，后续再评估 SVG）。
+resvg = { version = "0.49", default-features = false }
+latex-rust = { version = "3.0.1", default-features = false, features = ["std", "png"] }
+# 解码 latex-rust 输出的透明 PNG；只保留 PNG 格式。
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# 可选 RaTeX 后端（`--features math-ratex`）；不进入默认构建。
+ratex-parser = { version = "0.1.15", optional = true }
+ratex-layout = { version = "0.1.15", optional = true }
+ratex-render = { version = "0.1.15", default-features = false, features = ["embed-fonts"], optional = true }
+ratex-types = { version = "0.1.15", optional = true }
+ratex-unicode-font = { version = "0.1.15", optional = true }
+ab_glyph = { version = "0.2", optional = true }

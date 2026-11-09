@@ -20,11 +20,12 @@
 //! * **确定性**：注入 `Clock::manual()`，每帧推进固定时长（默认 20ms）→ 缩放预览窗口、
 //!   就绪兜底、静默窗口都按"帧"精确复现；
 //! * **性能**：同一份脚本在真机上跑（`cargo run -p app -- --replay …`），采集
-//!   帧耗时/上传字节/内存，作为本机基线（见 `docs/current/testing.md`）。
+//!   帧耗时/上传字节/内存，作为本机基线（见 `docs/testing.md`）。
 //!
 //! ## 边界
-//! * 只驱动"主视图渲染"相关动作（打开/缩放/滚动/跳页/调整视口/悬停链接）；
-//!   浮窗、侧栏、编辑等交互不在范围内。
+//! * 驱动"主视图 + 标注"相关动作（打开/缩放/滚动/跳页/调整视口/悬停链接/点击/拖拽/
+//!   墨迹/保存/撤销/重做）；无窗口下可复现的编辑都在范围内。
+//! * **不在**范围内：浮窗内部的拖动/改大小、侧栏行点击、正文编辑器（需要真实窗口，交人工验收）。
 //! * 没有 GPU：测不到纹理上传的真实开销；`textures_delta` 只反映"打算上传多少字节"。
 
 pub mod baseline;
@@ -37,7 +38,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use pdfcore::prelude::*;
 
-use super::{CustomKind, PdfReaderApp};
+use super::{CustomKind, PdfReaderApp, Tool, DEFAULT_INK_WIDTH};
 use crate::clock::Clock;
 use crate::diag::Diagnostics;
 use crate::json::{Json, JsonLookup};
@@ -92,6 +93,93 @@ pub enum Action {
         /// 自定义 preview 的下标（来自 sidecar 的加载顺序）。
         index: usize,
     },
+    /// 在页面上点击一次（**页面空间**坐标，左下原点）。
+    ///
+    /// 用页面空间而不是屏幕坐标：脚本因此与缩放、窗口尺寸、页边距无关
+    /// （S0 的目的：让注释等"点/拖"交互可以被自动化复现）。
+    Click {
+        /// 页号（0 起）。
+        page: u32,
+        /// 页内 x（PDF 页面单位）。
+        x: f32,
+        /// 页内 y（PDF 页面单位，左下原点）。
+        y: f32,
+    },
+    /// 在页面上拖拽（**页面空间**坐标）；按下 → `steps` 次插值移动 → 抬起。
+    Drag {
+        /// 页号（0 起）。
+        page: u32,
+        /// 起点 x（页面空间）。
+        from_x: f32,
+        /// 起点 y（页面空间）。
+        from_y: f32,
+        /// 终点 x（页面空间）。
+        to_x: f32,
+        /// 终点 y（页面空间）。
+        to_y: f32,
+        /// 中间移动帧数（默认 6；越大越接近真实拖拽）。
+        steps: u32,
+    },
+    /// 画一笔墨迹（**页面空间**折线；S4b 起走**真实拖拽**）。
+    ///
+    /// 脚本必须先 `set_tool ink`：按下 → 逐点移动 → 抬起，**抬手时**才产生标注
+    /// （一笔 = 一条标注 = 一次撤销）。
+    Ink {
+        /// 页号（0 起）。
+        page: u32,
+        /// 折线顶点（页面空间，左下原点；至少两个点）。
+        points: Vec<Point>,
+        /// 拖到最后一帧时按 Esc（验证"整笔丢弃、不留半条"）。
+        cancel: bool,
+    },
+    /// 切换工具（`pan` / `select` / `ink`）。
+    SetTool {
+        /// 工具名。
+        tool: String,
+    },
+    /// **压力测试专用**：直接造 `count` 笔墨迹（不走手势，否则造 1000 笔要上万帧）。
+    ///
+    /// 走与真实绘制相同的 `annotate_ink` 入口，所以每条都带配对正文；
+    /// 几何是页内确定性的小折线（40 行 × 每行 25 列），便于比较不同笔数下的帧耗时。
+    SeedInk {
+        /// 页号（0 起）。
+        page: u32,
+        /// 笔数。
+        count: u32,
+        /// 线宽（页面空间）。
+        width: f32,
+    },
+    /// 把页面上的一块矩形变成高亮标注（**页面空间**；S1 用它在回放里造标注）。
+    Highlight {
+        /// 页号（0 起）。
+        page: u32,
+        /// 区域左上角 x（页面空间）。
+        x: f32,
+        /// 区域左上角 y（页面空间，注意 PDF 左下原点）。
+        y: f32,
+        /// 区域宽。
+        width: f32,
+        /// 区域高。
+        height: f32,
+    },
+    /// 把最后一条注释的透明度改成 `value`（测试用；走真实 restyle 路径）。
+    Opacity {
+        /// 目标透明度（0–1）。
+        value: f32,
+    },
+    /// 给指定 dest mark 塞一张测试用白色快照（避免回放等待真实渲染）。
+    SeedDestSnapshot {
+        /// 页号（0 起）。
+        page: u32,
+        /// 该页 dest mark 下标。
+        index: usize,
+    },
+    /// 保存所有有改动的文件（等价于点"保存"或 Ctrl+S）。
+    Save,
+    /// 撤销一步（等价于 Ctrl+Z）。
+    Undo,
+    /// 重做一步（等价于 Ctrl+Shift+Z）。
+    Redo,
     /// 指针移出画布。
     Unhover,
     /// 什么都不做，只跑若干帧（用来观察"稳定后"的状态）。
@@ -112,6 +200,17 @@ impl Action {
             Self::GoToPage { .. } => "go_to_page",
             Self::HoverLink { .. } => "hover_link",
             Self::OpenPreview { .. } => "open_preview",
+            Self::Click { .. } => "click",
+            Self::Ink { .. } => "ink",
+            Self::SetTool { .. } => "set_tool",
+            Self::SeedInk { .. } => "seed_ink",
+            Self::Highlight { .. } => "highlight",
+            Self::Opacity { .. } => "opacity",
+            Self::SeedDestSnapshot { .. } => "seed_dest_snapshot",
+            Self::Save => "save",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
+            Self::Drag { .. } => "drag",
             Self::Unhover => "unhover",
             Self::Wait { .. } => "wait",
         }
@@ -126,6 +225,43 @@ impl Action {
             Self::GoToPage { page } => format!("go_to_page {page}"),
             Self::HoverLink { page, link } => format!("hover_link p{page} #{link}"),
             Self::OpenPreview { index } => format!("open_preview #{index}"),
+            Self::Click { page, x, y } => format!("click p{page} ({x},{y})"),
+            Self::Drag {
+                page,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                ..
+            } => {
+                format!("drag p{page} ({from_x},{from_y})→({to_x},{to_y})")
+            }
+            Self::Ink {
+                page,
+                points,
+                cancel,
+            } => {
+                let suffix = if *cancel { "（Esc 取消）" } else { "" };
+                format!("ink p{page} {} 点{suffix}", points.len())
+            }
+            Self::SetTool { tool } => format!("set_tool {tool}"),
+            Self::SeedInk { page, count, .. } => format!("seed_ink p{page} ×{count}"),
+            Self::Highlight {
+                page,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                format!("highlight p{page} ({x},{y},{width},{height})")
+            }
+            Self::Opacity { value } => format!("opacity {value:.2}"),
+            Self::SeedDestSnapshot { page, index } => {
+                format!("seed_dest_snapshot p{page} #{index}")
+            }
+            Self::Save => "save".to_string(),
+            Self::Undo => "undo".to_string(),
+            Self::Redo => "redo".to_string(),
             Self::Unhover => "unhover".to_string(),
             Self::Wait { frames } => format!("wait {frames}"),
         }
@@ -249,6 +385,20 @@ pub struct ActionReport {
     pub busy_cpu_ms: (f64, f64, f64, f64),
     /// 忙帧的 CPU 时间合计（毫秒）—— 这个动作一共烧了多少 CPU。
     pub busy_cpu_ms_total: f64,
+    /// 动作结束时当前页（0 起）。用于断言"点击链接跳页"这类由交互触发的导航。
+    pub page_after: u32,
+    /// 动作结束时的滚动偏移（内容空间像素）。用于断言拖拽平移。
+    pub scroll_after: (f32, f32),
+    /// 动作结束时的标注数量（overlay，可编辑）。
+    pub annotations: usize,
+    /// 动作结束时读到的外部注释条数（S6b 只读层）。
+    pub foreign_annotations: usize,
+    /// 最后一条标注的页面空间包围盒（`x,y,w,h`）—— 用于断言"几何与缩放无关"。
+    pub annotation_bounds: Option<(f32, f32, f32, f32)>,
+    /// 动作结束时的浮窗数量（断言"重复点击不重复开窗"）。
+    pub floats: usize,
+    /// 动作结束时的自定义 preview 条目数（含标注正文；断言"撤销/重做带着正文一起走"）。
+    pub previews_total: usize,
 }
 
 /// 整次回放的报告。
@@ -496,6 +646,76 @@ pub fn parse_script(text: &str) -> std::result::Result<Script, String> {
             "open_preview" => Action::OpenPreview {
                 index: number("index").unwrap_or(0.0) as usize,
             },
+            "click" => Action::Click {
+                page: number("page")? as u32,
+                x: number("x")?,
+                y: number("y")?,
+            },
+            "drag" => Action::Drag {
+                page: number("page")? as u32,
+                from_x: number("from_x")?,
+                from_y: number("from_y")?,
+                to_x: number("to_x")?,
+                to_y: number("to_y")?,
+                steps: number("steps").unwrap_or(6.0) as u32,
+            },
+            "ink" => {
+                let list = object
+                    .field("points")
+                    .ok_or_else(|| format!("{id}: 缺 points"))?
+                    .as_array()
+                    .ok_or_else(|| format!("{id}: points 不是数组"))?;
+                let mut points = Vec::with_capacity(list.len());
+                for (point_index, point) in list.iter().enumerate() {
+                    let numbers: Vec<f32> = point
+                        .as_array()
+                        .unwrap_or(&[])
+                        .iter()
+                        .filter_map(|value| value.as_number())
+                        .collect();
+                    if numbers.len() != 2 {
+                        return Err(format!("{id}: points[{point_index}] 必须是 [x,y]"));
+                    }
+                    points.push(Point::new(numbers[0], numbers[1]));
+                }
+                Action::Ink {
+                    page: number("page")? as u32,
+                    points,
+                    cancel: object
+                        .field("cancel")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false),
+                }
+            }
+            "set_tool" => Action::SetTool {
+                tool: object
+                    .field("tool")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| format!("{id}: 缺 tool"))?
+                    .to_string(),
+            },
+            "seed_ink" => Action::SeedInk {
+                page: number("page")? as u32,
+                count: number("count")? as u32,
+                width: number("width").unwrap_or(DEFAULT_INK_WIDTH),
+            },
+            "highlight" => Action::Highlight {
+                page: number("page")? as u32,
+                x: number("x")?,
+                y: number("y")?,
+                width: number("width")?,
+                height: number("height")?,
+            },
+            "opacity" => Action::Opacity {
+                value: number("value")?,
+            },
+            "seed_dest_snapshot" => Action::SeedDestSnapshot {
+                page: number("page")? as u32,
+                index: number("index").unwrap_or(0.0) as usize,
+            },
+            "save" => Action::Save,
+            "undo" => Action::Undo,
+            "redo" => Action::Redo,
             "unhover" => Action::Unhover,
             "wait" => Action::Wait {
                 frames: number("frames").unwrap_or(3.0) as u64,
@@ -817,6 +1037,7 @@ pub fn run(
         pending: Vec::new(),
         screen: options.screen,
         pending_pointer: None,
+        gesture: None,
     };
 
     // 打开文档：直接走 app 自己的入口（与命令行/拖放同一条路径）
@@ -859,10 +1080,17 @@ pub fn run(
             busy_frames: 0,
             busy_cpu_ms: (0.0, 0.0, 0.0, 0.0),
             busy_cpu_ms_total: 0.0,
+            page_after: 0,
+            scroll_after: (0.0, 0.0),
+            annotations: 0,
+            foreign_annotations: 0,
+            annotation_bounds: None,
+            floats: 0,
+            previews_total: 0,
         };
         harness.apply_action(app, action);
         // 每个动作开始时清空诊断缓冲：这一行只属于这个动作
-        let _ = app.diag.take();
+        let _ = app.runtime.diag.take();
 
         let mut quiet = 0u32;
         let mut last_state = (usize::MAX, 0usize, BTreeMap::new());
@@ -895,7 +1123,11 @@ pub fn run(
             // 少了"预览窗口"这一条，动作会在窗口还没结束时就判定稳定 —— 此时渲染请求
             // 还没提交，后面自然看不到新瓦片（第一版回放就踩了这个坑）。
             let previewing = app.previewing();
-            let quiet_now = !previewing && stat.pending == 0 && state == last_state;
+            // 手势（点击/拖拽）还在逐帧投喂时**不算稳定**：否则 3 个静止帧就会让动作提前结束，
+            // 按下/抬起根本来不及发出（实测：点击动作只跑了 3 帧，一次 click 都没发生）。
+            let gesture_busy = harness.gesture.is_some();
+            let quiet_now =
+                !previewing && !gesture_busy && stat.pending == 0 && state == last_state;
             action_report.frames_data.push(stat);
             if quiet_now {
                 quiet += 1;
@@ -918,7 +1150,7 @@ pub fn run(
             }
         }
         action_report.elapsed_ms = action_started.elapsed().as_secs_f64() * 1000.0;
-        action_report.diag = app.diag.take();
+        action_report.diag = app.runtime.diag.take();
         // 结构指标（与硬件无关，可做硬门禁）：
         let first = action_report.frames_data.first();
         let last = action_report.frames_data.last();
@@ -952,6 +1184,25 @@ pub fn run(
         action_report.busy_frames = busy.len() as u64;
         action_report.busy_cpu_ms_total = busy.iter().sum();
         action_report.busy_cpu_ms = percentiles(&busy);
+        if let Some(session) = app.session.as_ref() {
+            action_report.page_after = session.state().current_page.get();
+            action_report.scroll_after = (session.viewport().scroll.x, session.viewport().scroll.y);
+        }
+        action_report.annotations = app.annotations.len();
+        action_report.foreign_annotations = app
+            .annotation_pdf
+            .external_ids
+            .iter()
+            .filter(|id| app.annotations.get(**id).is_some())
+            .count();
+        action_report.floats = app.floats.len();
+        action_report.previews_total = app.custom_previews.len();
+        action_report.annotation_bounds = app
+            .annotations
+            .iter()
+            .last()
+            .and_then(|annotation| annotation.bounds())
+            .map(|rect| (rect.x, rect.y, rect.width, rect.height));
         action_report.previews = app
             .custom_previews
             .iter()
@@ -982,6 +1233,65 @@ pub fn run(
     report
 }
 
+/// 一次指针手势：每帧消费一条，用真实事件流驱动 egui。
+///
+/// 为什么不是"一帧内按下+抬起"：egui 的点击判定依赖 `any_pressed()` / `any_released()`
+/// 两个**按帧**的布尔量，同一帧里先后发生会被合并掉，点击可能根本不会被识别。
+struct Gesture {
+    /// 逐帧的指针（+ 可选的同帧键盘事件）。
+    frames: std::collections::VecDeque<GestureFrame>,
+    /// 手势结束后指针停在哪里（保持悬停状态，避免下一帧状态抖动）。
+    rest: Option<egui::Pos2>,
+}
+
+/// 手势里的一帧。
+struct GestureFrame {
+    /// 指针位置。
+    position: egui::Pos2,
+    /// `Some(true)` = 按下，`Some(false)` = 抬起，`None` = 只移动。
+    button: Option<bool>,
+    /// 该帧要同时注入的键盘事件（墨迹的 Esc 丢弃用它）。
+    keys: Vec<egui::Event>,
+}
+
+impl GestureFrame {
+    fn moved(position: egui::Pos2) -> Self {
+        Self {
+            position,
+            button: None,
+            keys: Vec::new(),
+        }
+    }
+
+    fn pressed(position: egui::Pos2) -> Self {
+        Self {
+            position,
+            button: Some(true),
+            keys: Vec::new(),
+        }
+    }
+
+    fn released(position: egui::Pos2) -> Self {
+        Self {
+            position,
+            button: Some(false),
+            keys: Vec::new(),
+        }
+    }
+
+    /// 在这一帧之前再按一个键（例如拖拽中途 Esc）。
+    fn with_key(mut self, key: egui::Key) -> Self {
+        self.keys.push(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        self
+    }
+}
+
 struct Harness {
     ctx: egui::Context,
     frame: eframe::Frame,
@@ -999,10 +1309,81 @@ struct Harness {
     screen: (f32, f32),
     /// 当前动作要求的指针位置（悬停链接时持续保持；`None` = 移出画布）。
     pending_pointer: Option<egui::Pos2>,
+    /// 正在进行的"点击/拖拽"手势（逐帧消费事件）。
+    gesture: Option<Gesture>,
 }
 
 impl Harness {
     fn apply_action(&mut self, app: &mut crate::PdfReaderApp, action: &Action) {
+        // 点击/拖拽：先把页面空间坐标换算成屏幕坐标、建好手势，再让 `run_frame` 逐帧喂事件。
+        // 这里必须**先**于 `app.session.as_mut()` 借用，否则拿不到 `canvas_rect`。
+        if let Action::Highlight {
+            page,
+            x,
+            y,
+            width,
+            height,
+        } = action
+        {
+            app.annotate_page_rect(PageIndex::new(*page), Rect::new(*x, *y, *width, *height));
+            return;
+        }
+        if let Action::SeedInk { page, count, width } = action {
+            app.seed_ink_strokes(PageIndex::new(*page), *count, *width);
+            return;
+        }
+        if let Action::SetTool { tool } = action {
+            if let Some(tool) = Tool::from_key(tool) {
+                app.switch_tool(tool);
+            }
+            return;
+        }
+        if let Action::SeedDestSnapshot { page, index } = action {
+            let texture = self.ctx.load_texture(
+                format!("seed-dest-{page}-{index}"),
+                egui::ColorImage::new([32, 32], vec![egui::Color32::WHITE; 32 * 32]),
+                egui::TextureOptions::LINEAR,
+            );
+            if let Some(mark) = app
+                .dest_marks
+                .get_mut(*page as usize)
+                .and_then(|marks| marks.get_mut(*index))
+            {
+                mark.snapshot = Some(texture);
+            }
+            return;
+        }
+        if let Action::Opacity { value } = action {
+            if let Some(id) = app
+                .annotations
+                .iter()
+                .last()
+                .map(|annotation| annotation.id)
+            {
+                app.restyle_annotation(id, None, Some(*value), None);
+            }
+            return;
+        }
+        if let Action::Save = action {
+            app.save_all();
+            return;
+        }
+        if let Action::Undo = action {
+            app.undo_edit();
+            return;
+        }
+        if let Action::Redo = action {
+            app.redo_edit();
+            return;
+        }
+        if matches!(
+            action,
+            Action::Click { .. } | Action::Drag { .. } | Action::Ink { .. }
+        ) {
+            self.pending_pointer = None;
+            self.gesture = self.gesture_for(app, action);
+            return;
+        }
         let Some(session) = app.session.as_mut() else {
             return;
         };
@@ -1034,13 +1415,110 @@ impl Harness {
                 );
                 app.spawn_custom_float(*index, rect);
             }
+            // 已在函数开头处理（不借用 session）
+            Action::Click { .. }
+            | Action::Drag { .. }
+            | Action::Highlight { .. }
+            | Action::Ink { .. }
+            | Action::SetTool { .. }
+            | Action::SeedInk { .. }
+            | Action::Opacity { .. }
+            | Action::SeedDestSnapshot { .. }
+            | Action::Save => {}
             Action::HoverLink { .. } | Action::Unhover => {
                 // 指针位置必须走 egui 的输入事件：在 `run_frame` 里按帧重放
                 self.pending_pointer = self.pointer_for_action(app, action);
             }
-            Action::Wait { .. } => {}
+            Action::Wait { .. } | Action::Undo | Action::Redo => {}
         }
         app.events.extend(events);
+    }
+
+    /// 把"点击/拖拽"动作变成一串逐帧的指针事件（页面空间 → 内容空间 → 屏幕空间）。
+    fn gesture_for(&self, app: &crate::PdfReaderApp, action: &Action) -> Option<Gesture> {
+        let session = app.session.as_ref()?;
+        let canvas = app.canvas_rect;
+        let scroll = session.viewport().scroll;
+        let to_screen = |page: u32, point: Point| -> Option<egui::Pos2> {
+            let placement = session.placement(PageIndex::new(page))?;
+            let content = placement.page_to_content(point);
+            Some(egui::pos2(
+                canvas.min.x + content.x - scroll.x,
+                canvas.min.y + content.y - scroll.y,
+            ))
+        };
+        match action {
+            Action::Click { page, x, y } => {
+                let position = to_screen(*page, Point::new(*x, *y))?;
+                let mut frames = std::collections::VecDeque::new();
+                // **两帧**移动：egui 的 `hovered` 需要指针到达后的稳定一帧，按下发生在
+                // 到达帧会判定"没有悬停在控件上"而丢掉这次点击（实测 3 帧版本点击数为 0）
+                frames.push_back(GestureFrame::moved(position));
+                frames.push_back(GestureFrame::moved(position));
+                frames.push_back(GestureFrame::pressed(position));
+                frames.push_back(GestureFrame::released(position));
+                Some(Gesture {
+                    frames,
+                    rest: Some(position),
+                })
+            }
+            Action::Drag {
+                page,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                steps,
+            } => {
+                let start = to_screen(*page, Point::new(*from_x, *from_y))?;
+                let end = to_screen(*page, Point::new(*to_x, *to_y))?;
+                let steps = (*steps).clamp(1, 64);
+                let mut frames = std::collections::VecDeque::new();
+                // 同 Click：两帧移动，确保按下时控件已经 hovered（否则拖拽起点无效）
+                frames.push_back(GestureFrame::moved(start));
+                frames.push_back(GestureFrame::moved(start));
+                frames.push_back(GestureFrame::pressed(start));
+                for step in 1..=steps {
+                    let t = step as f32 / steps as f32;
+                    frames.push_back(GestureFrame::moved(start + (end - start) * t));
+                }
+                frames.push_back(GestureFrame::released(end));
+                Some(Gesture {
+                    frames,
+                    rest: Some(end),
+                })
+            }
+            // 墨迹：走**真实的按下 → 移动 → 抬起**（S4b）。脚本里必须先 `set_tool ink`，
+            // 否则按下的还是平移工具（拖拽会滚页而不是画线）。
+            Action::Ink {
+                page,
+                points,
+                cancel,
+            } => {
+                let start = to_screen(*page, *points.first()?)?;
+                let mut frames = std::collections::VecDeque::new();
+                frames.push_back(GestureFrame::moved(start));
+                frames.push_back(GestureFrame::moved(start));
+                frames.push_back(GestureFrame::pressed(start));
+                for (index, point) in points.iter().enumerate().skip(1) {
+                    let position = to_screen(*page, *point)?;
+                    let frame = GestureFrame::moved(position);
+                    // 最后一帧移动时按 Esc：验证"拖到一半取消 → 整笔丢弃、不留半条"
+                    frames.push_back(if *cancel && index + 1 == points.len() {
+                        frame.with_key(egui::Key::Escape)
+                    } else {
+                        frame
+                    });
+                }
+                let end = to_screen(*page, *points.last()?)?;
+                frames.push_back(GestureFrame::released(end));
+                Some(Gesture {
+                    frames,
+                    rest: Some(end),
+                })
+            }
+            _ => None,
+        }
     }
 
     /// 指针位置（悬停链接/移出画布）—— 由动作换算成屏幕坐标，回放时每帧沿用。
@@ -1074,8 +1552,27 @@ impl Harness {
             max_texture_side: Some(16_384),
             ..Default::default()
         };
-        // 指针：上一帧动作可能要求悬停某链接；这里用"当前动作"的位置（持续保持）
-        if let Some(position) = self.pending_pointer {
+        // 指针：手势（点击/拖拽）优先，逐帧消费；否则沿用"悬停位置"
+        if let Some(gesture) = &mut self.gesture {
+            if let Some(frame) = gesture.frames.pop_front() {
+                // 键盘事件先于指针事件：Esc 必须在"这一帧的指针移动"之前被处理，
+                // 否则拖拽会先采样一个点再取消（结果一样，但诊断顺序会误导）。
+                input.events.extend(frame.keys);
+                input.events.push(egui::Event::PointerMoved(frame.position));
+                if let Some(pressed) = frame.button {
+                    input.events.push(egui::Event::PointerButton {
+                        pos: frame.position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    });
+                }
+                if gesture.frames.is_empty() {
+                    self.pending_pointer = gesture.rest;
+                    self.gesture = None;
+                }
+            }
+        } else if let Some(position) = self.pending_pointer {
             input.events.push(egui::Event::PointerMoved(position));
             input.events.push(egui::Event::PointerButton {
                 pos: position,
@@ -1098,12 +1595,15 @@ impl Harness {
         let mut output = self.ctx.end_pass();
         let cpu_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-        // 上传字节：egui 只是排队，这里统计"打算上传多少"，不代表真实 GPU 耗时
+        // 上传字节：egui 只是排队，这里统计"打算上传多少"，不代表真实 GPU 耗时。
+        // **排除字体图集**（egui 约定 `TextureId::Managed(0)`）：它的上传取决于 UI
+        // 文本/字形缓存，与页面渲染无关；混进来会让结构基线随“侧栏多一行文字”抖动。
         let upload_bytes = output
             .textures_delta
             .set
-            .values()
-            .flat_map(|deltas| deltas.iter())
+            .iter()
+            .filter(|(id, _)| !matches!(id, egui::TextureId::Managed(0)))
+            .flat_map(|(_, deltas)| deltas.iter())
             .map(|delta| delta.image.width() * delta.image.height() * 4)
             .sum::<usize>() as u64;
 
@@ -1435,6 +1935,14 @@ fn action_json(report: &Report, action: &ActionReport) -> String {
                 action.busy_cpu_ms_total
             ),
         ),
+        ("page_after", action.page_after.to_string()),
+        (
+            "scroll_after",
+            format!(
+                "{{\"x\":{:.1},\"y\":{:.1}}}",
+                action.scroll_after.0, action.scroll_after.1
+            ),
+        ),
         ("submitted", action.submitted.to_string()),
         ("upload_bytes", action.upload_bytes.to_string()),
         ("texture_bytes_peak", action.texture_bytes_peak.to_string()),
@@ -1446,6 +1954,19 @@ fn action_json(report: &Report, action: &ActionReport) -> String {
                 .map_or(0, |frame| frame.textures)
                 .to_string(),
         ),
+        ("annotations", action.annotations.to_string()),
+        ("foreign_annotations", action.foreign_annotations.to_string()),
+        (
+            "annotation_bounds",
+            match action.annotation_bounds {
+                Some((x, y, width, height)) => {
+                    format!("{{\"x\":{x:.2},\"y\":{y:.2},\"width\":{width:.2},\"height\":{height:.2}}}")
+                }
+                None => "null".to_string(),
+            },
+        ),
+        ("floats", action.floats.to_string()),
+        ("previews_total", action.previews_total.to_string()),
         ("violations", serde_free_array(&action.violations)),
         ("notes", serde_free_array(&action.notes)),
         ("previews", format!("[{}]", previews.join(","))),
@@ -1526,6 +2047,13 @@ mod tests {
             busy_frames: 3,
             busy_cpu_ms: (5.0, 18.5, 22.7, 22.7),
             busy_cpu_ms_total: 41.6,
+            page_after: 2,
+            scroll_after: (10.0, 20.0),
+            annotations: 0,
+            foreign_annotations: 0,
+            annotation_bounds: None,
+            floats: 0,
+            previews_total: 0,
         };
         action.frames_data.push(FrameStat {
             frame: 1,

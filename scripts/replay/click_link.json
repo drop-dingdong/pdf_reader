@@ -1,0 +1,11 @@
+{
+  "name": "click_link",
+  "pdf": "rotated_2p.pdf",
+  "actions": [
+    { "id": "resize", "op": "resize", "width": 700, "height": 800 },
+    { "id": "top", "op": "set_scroll", "x": 0, "y": 0 },
+    { "id": "settle", "op": "wait", "frames": 5 },
+    { "id": "click_link", "op": "click", "page": 0, "x": 186, "y": 710 },
+    { "id": "after", "op": "wait", "frames": 5 }
+  ]
+}

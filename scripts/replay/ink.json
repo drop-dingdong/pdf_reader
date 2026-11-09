@@ -1,0 +1,20 @@
+{
+  "name": "ink",
+  "pdf": "rotated_2p.pdf",
+  "actions": [
+    { "id": "resize", "op": "resize", "width": 700, "height": 800 },
+    { "id": "top", "op": "set_scroll", "x": 0, "y": 0 },
+    { "id": "settle", "op": "wait", "frames": 8 },
+    { "id": "tool", "op": "set_tool", "tool": "ink" },
+    { "id": "stroke", "op": "ink", "page": 0,
+      "points": [[280, 400], [320, 410], [360, 390]] },
+    { "id": "undo1", "op": "undo" },
+    { "id": "redo1", "op": "redo" },
+    { "id": "cancel", "op": "ink", "page": 0, "cancel": true,
+      "points": [[300, 430], [340, 440], [380, 420]] },
+    { "id": "zoom_200", "op": "zoom", "value": 2.0 },
+    { "id": "settle_200", "op": "wait", "frames": 8 },
+    { "id": "stroke_200", "op": "ink", "page": 0,
+      "points": [[280, 400], [320, 410], [360, 390]] }
+  ]
+}

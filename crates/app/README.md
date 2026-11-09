@@ -60,14 +60,18 @@ pdf_reader_linux_x64/
 | `view.rs` | 坐标换算、输入映射、`KeyedStore`、画法决策（`plan_page`）、快照拼合、浮窗几何 | `cargo test -p app --lib`（纯逻辑） |
 | `app.rs` | egui 胶水：面板、画布、交互、浮窗、侧栏、截图、对话框 | **需要真实窗口 → 人工验收** |
 | `persist.rs` | 自定义数据存档（手写 JSON + 版本迁移） | `cargo test -p app --lib persist::` |
+| `settings.rs` | `settings.json`（全局 UI、注释默认样式、每文件阅读状态、保存选项） | `cargo test -p app --lib settings::` |
+| `annotations_md.rs` | 注释摘要 Markdown | `cargo test -p app --lib annotations_md` |
+| `export.rs` / `writeback.rs` | 写回任务编排、子进程、校验 | `cargo test -p app --test annot_roundtrip` 等 |
+| `app/replay.rs` | 脚本驱动真实 UI 的回放器 | `cargo run -p app -- --replay …` |
 
 约定：**能脱离窗口验证的逻辑一律放 `view.rs`**，`app.rs` 只留"读输入、调会话、画"。
 
 ## 文档
 
-* 现状：[docs/current/app-ui.md](../../docs/current/app-ui.md)（每帧顺序、面板结构、交互状态机、浮窗）
-* 渲染与画法：[docs/current/rendering.md](../../docs/current/rendering.md)
-* 存档与预览图：[docs/current/persistence.md](../../docs/current/persistence.md)
-* 诊断开关与排查路径：[docs/current/diagnostics.md](../../docs/current/diagnostics.md)
-* **人工验收清单**：[docs/current/testing.md](../../docs/current/testing.md) §6
+* 现状：[docs/app-ui.md](../../docs/app-ui.md)（每帧顺序、面板结构、交互状态机、浮窗）
+* 渲染与画法：[docs/rendering.md](../../docs/rendering.md)
+* 存档与预览图：[docs/persistence.md](../../docs/persistence.md)
+* 诊断开关与排查路径：[docs/diagnostics.md](../../docs/diagnostics.md)
+* **人工验收清单**：[docs/testing.md](../../docs/testing.md) §6
 * 工作约定（测试/提交/验收分工）：[agent.md](../../agent.md)

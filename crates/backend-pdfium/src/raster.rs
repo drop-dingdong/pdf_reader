@@ -23,7 +23,11 @@ use crate::document::{to_pdfium_rotation, SharedDocument};
 use crate::error::to_core_error;
 
 /// [`PageRaster`] 的 PDFium 实现。
-pub struct PdfiumRaster(pub(crate) Arc<SharedDocument>);
+pub struct PdfiumRaster {
+    pub(crate) shared: Arc<SharedDocument>,
+    /// 是否把 PDF 注释渲染进位图；应用默认关闭（叠层自己画），测试可开。
+    pub(crate) render_annotations: bool,
+}
 
 impl PageRaster for PdfiumRaster {
     fn render(&self, request: &RenderRequest) -> Result<Arc<RasterImage>> {
@@ -31,9 +35,9 @@ impl PageRaster for PdfiumRaster {
             return Err(CoreError::Cancelled);
         }
 
-        let page_count = self.0.geometries.len() as u32;
+        let page_count = self.shared.geometries.len() as u32;
         let geometry = self
-            .0
+            .shared
             .geometries
             .get(request.page.get() as usize)
             .copied()
@@ -41,7 +45,7 @@ impl PageRaster for PdfiumRaster {
                 page: request.page,
                 page_count,
             })?;
-        let page = self.0.page(request.page)?;
+        let page = self.shared.page(request.page)?;
 
         let scale = request.scale.0;
         if !(scale > 0.0) {
@@ -89,6 +93,14 @@ impl PageRaster for PdfiumRaster {
         let mut bitmap = PdfBitmap::empty(bitmap_size.0, bitmap_size.1, PdfBitmapFormat::BGRA)
             .map_err(to_core_error)?;
 
+        // **只把"用户旋转"交给 PDFium**：`FPDF_RenderPageBitmap` 会自己应用页面自带的
+        // `/Rotate`（见 pdfium-render 的注释：display transform 已包含 intrinsic rotation）。
+        // `request.rotation` 是"页面 /Rotate ⊕ 用户旋转"的**最终**旋转，直接传会叠加两次：
+        // /Rotate 90 的页会显示成 180°，而且目标位图按 90° 算、内容按 180° 画 → 被压扁。
+        // 这里先减掉页面自带的旋转，剩下的才是要额外施加的旋转。
+        let page_rotation = geometry.rotation;
+        let extra_rotation = request.rotation.compose(page_rotation.inverse());
+        //
         // 旋转由本适配层全权负责（`automatic_orientation = false`）：
         // 位图方向因此严格等于 `request.rotation`，与 `PagePlacement` 的约定一一对应。
         // **必须显式关闭**：`PdfRenderConfig::new()` 默认打开
@@ -97,10 +109,11 @@ impl PageRaster for PdfiumRaster {
         // 红蓝就对调了（实测现象：黄色页显示成青色、蓝色字显示成红色）。
         // 关掉它，`PdfBitmapFormat::BGRA` 才真的是 B,G,R,A，与 `PixelFormat::Bgra8` 一致。
         let config = PdfRenderConfig::new()
+            .render_annotations(self.render_annotations)
             .set_reverse_byte_order(false)
             .set_fixed_size(page_px.0, page_px.1)
             .set_origin(origin.0, origin.1)
-            .rotate(to_pdfium_rotation(request.rotation), false);
+            .rotate(to_pdfium_rotation(extra_rotation), false);
 
         page.render_into_bitmap_with_config(&mut bitmap, &config)
             .map_err(to_core_error)?;

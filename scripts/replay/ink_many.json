@@ -1,0 +1,17 @@
+{
+  "name": "ink_many",
+  "pdf": "rotated_2p.pdf",
+  "actions": [
+    { "id": "resize", "op": "resize", "width": 700, "height": 800 },
+    { "id": "top", "op": "set_scroll", "x": 0, "y": 0 },
+    { "id": "settle", "op": "wait", "frames": 8 },
+    { "id": "seed_100", "op": "seed_ink", "page": 0, "count": 100 },
+    { "id": "settle_100", "op": "wait", "frames": 8 },
+    { "id": "seed_900", "op": "seed_ink", "page": 0, "count": 900 },
+    { "id": "settle_1000", "op": "wait", "frames": 8 },
+    { "id": "tool", "op": "set_tool", "tool": "ink" },
+    { "id": "stroke", "op": "ink", "page": 0,
+      "points": [[300, 300], [360, 320], [420, 290]] },
+    { "id": "undo1", "op": "undo" }
+  ]
+}

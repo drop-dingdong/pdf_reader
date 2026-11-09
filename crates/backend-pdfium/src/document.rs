@@ -7,7 +7,7 @@ use pdfcore::prelude::*;
 use pdfium_render::prelude::{
     PdfBookmark, PdfDestination, PdfDestinationViewSettings, PdfDocument,
     PdfDocumentMetadataTagType, PdfPage, PdfPageIndex, PdfPageRenderRotation, PdfPoints, PdfRect,
-    Pdfium,
+    PdfSecurityHandlerRevision, Pdfium,
 };
 
 use crate::error::to_core_error;
@@ -150,8 +150,15 @@ fn collect_info(document: &PdfDocument<'static>, page_count: u32) -> DocumentInf
             .can_add_or_modify_text_annotations()
             .unwrap_or(true),
     };
-    // 有安全处理器（security handler）= 文档加密。未加密时该查询失败，正好用作判据。
-    let encrypted = permissions_api.security_handler_revision().is_ok();
+    // 有安全处理器（security handler）= 文档加密。
+    //
+    // **坑**：pdfium-render 对未加密文档返回的是 `Ok(Unprotected)`（PDFium 的 -1），
+    // 不是 `Err`。早先写成 `.is_ok()` 把每个文档都判成"加密"，导出时被一律拒绝。
+    let encrypted = match permissions_api.security_handler_revision() {
+        Ok(PdfSecurityHandlerRevision::Unprotected) => false,
+        // Revision2/3/4 是加密；未知修订号（例如 AES-256 的 5/6）按加密保守处理
+        Ok(_) | Err(_) => true,
+    };
 
     DocumentInfo {
         page_count,

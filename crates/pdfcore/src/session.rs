@@ -1399,7 +1399,7 @@ impl DocumentSession {
             .filter(|key| !thumbnails.contains(key))
             .filter(|key| visible.contains(&key.page))
             .filter(|key| {
-                self.layout.placement(key.page).map_or(true, |placement| {
+                self.layout.placement(key.page).is_none_or(|placement| {
                     let render = Scale::from_zoom(self.render_scale_of(placement));
                     let current = RenderKey::new(key.page, render, placement.rotation);
                     key.scale_milli != current.scale_milli || key.rotation != placement.rotation

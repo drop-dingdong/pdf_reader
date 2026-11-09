@@ -603,7 +603,7 @@ fn tiling_routes_to_tiles_and_limits_requests_to_the_viewport() {
 
 /// D-05 端到端：缩放前后"视野中心对应的页内位置"必须不变。
 ///
-/// 数值取自文档场景 4（旧 data-flow.md，现见 `docs/decisions/log.md` D-05）：
+/// 数值取自文档场景 4（旧 data-flow 场景）：
 /// 612×792pt 页、zoom 1.5、视口 900×1000、scroll (0,0)
 /// → 中心对应页 0 的 PDF (292.00, 466.67)。
 /// 注意用**单页**文档：demo 文档第 3 页带 /Rotate 90，会让内容宽度变大并水平居中，

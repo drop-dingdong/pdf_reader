@@ -5,6 +5,13 @@ vendor/
 # 回放器样本（现场生成，不入库）
 scripts/replay/*.pdf
 scripts/replay/*.pdf.json
+# 标注图层 sidecar（手工测试/回放会生成，不入库）
+scripts/replay/*.annot.json
+scripts/replay/*.pdf*.json
+# 用户采集的外部阅读器样本（测试 fixture 已单独复制到 crates/ 下）
+scripts/replay/sample/
+# 原地写回的备份（手工测试会生成，不入库）
+scripts/replay/*.bak-*
 
 # 性能基线（每台机器自己记录，不入库）
 perf/*
@@ -13,3 +20,9 @@ perf/*
 
 # 打包产物
 dist/
+
+# 本地 pdf.js 测试集（不随仓库分发；扫描结果见 docs/pdfjs-corpus-scan.tsv）
+pdfjs_test_pdfs/
+
+# 本地兼容性/Adobe 样本（不随仓库分发）
+scripts/replay/error/

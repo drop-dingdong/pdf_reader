@@ -825,3 +825,19 @@ fn geometry_text_and_links_are_normalized_to_the_rendered_box() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// 未加密文档不得被判定为"加密"。
+///
+/// 这条守的是一个真实事故：pdfium-render 对未加密文档返回 `Ok(Unprotected)`（PDFium 的 -1），
+/// 早先的 `.is_ok()` 让**每个**文档都显示成加密，导出被一律拒绝。
+#[test]
+fn unencrypted_documents_are_not_reported_as_encrypted() {
+    let Some(backend) = backend() else { return };
+    let bytes = common::two_page_pdf();
+    let opened = backend
+        .open(Source::Bytes(&bytes), None)
+        .expect("打开普通 PDF");
+    let info = opened.document.info();
+    assert!(!info.encrypted, "普通 PDF 被误判为加密");
+    assert!(info.permissions.annotate, "未加密文档应当允许批注");
+}

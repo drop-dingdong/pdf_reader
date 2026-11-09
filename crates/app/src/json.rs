@@ -14,7 +14,7 @@ pub(crate) enum Json {
     /// 布尔
     Bool(bool),
     /// 数字
-    Number(f32),
+    Number(f64),
     /// 字符串
     Str(String),
     /// 数组
@@ -87,7 +87,22 @@ impl Json {
 
     pub(crate) fn as_number(&self) -> Option<f32> {
         match self {
-            Json::Number(value) => Some(*value),
+            Json::Number(value) => Some(*value as f32),
+            _ => None,
+        }
+    }
+
+    /// 精确整数（Unix 秒这类值不能用 f32 读，会把分钟级精度丢掉）。
+    pub(crate) fn as_i64(&self) -> Option<i64> {
+        match self {
+            Json::Number(value) if value.is_finite() && value.fract() == 0.0 => Some(*value as i64),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_bool(&self) -> Option<bool> {
+        match self {
+            Json::Bool(value) => Some(*value),
             _ => None,
         }
     }
@@ -256,7 +271,7 @@ impl Parser<'_> {
         }
         let text =
             std::str::from_utf8(&self.bytes[start..self.position]).map_err(|e| e.to_string())?;
-        text.parse::<f32>()
+        text.parse::<f64>()
             .map(Json::Number)
             .map_err(|e| e.to_string())
     }

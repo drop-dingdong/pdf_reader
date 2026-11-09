@@ -1,0 +1,11 @@
+{
+  "name": "drag_pan",
+  "pdf": "a4_3p.pdf",
+  "actions": [
+    { "id": "resize", "op": "resize", "width": 700, "height": 800 },
+    { "id": "top", "op": "set_scroll", "x": 0, "y": 0 },
+    { "id": "settle", "op": "wait", "frames": 5 },
+    { "id": "drag", "op": "drag", "page": 0, "from_x": 300, "from_y": 400, "to_x": 300, "to_y": 700, "steps": 6 },
+    { "id": "after", "op": "wait", "frames": 5 }
+  ]
+}

@@ -1,37 +1,34 @@
-# agent.md —— 本项目协作约定
+# agent.md —— 协作约定
 
-> 适用于本仓库的全部改动（人工与 AI 协作均适用）。
+> 适用于本仓库全部改动（人工与 AI 协作均适用）。
 
-## 1. 测试
+## 1. 测试与门禁
 
-- 每次改动后，**必须**编写或更新相关测试。
-- 交付之前，**必须**确保所有测试通过。
+- 每次改动必须编写或更新相关测试；交付前必须让 `./scripts/check.sh` 通过。
+- 依赖真实窗口/GPU/人工观察的验证项交给用户，并说明“怎么看、看什么”。
 
-## 2. 涉及 UI 的测试
+## 2. 提交
 
-- 如果测试必须依赖 UI 界面，**将这部分测试交由用户处理**，并接受用户反馈。
-- 即：自动化测试覆盖逻辑层（几何、布局、选区、调度、缓存、后端适配），
-  需要真实窗口/GPU/人工观察的部分由用户验收。
+- 交付前必须 `git commit`。**只提交本次改动的文件**；工作区里的临时样本、模式位变化不要一起提交。
 
-## 3. 提交
+## 3. Windows 脚本
 
-- 每次交付之前，**必须** `commit` 提交。
+- 所有 `.ps1` 必须带 **UTF-8 BOM**（`EF BB BF`）；Windows PowerShell 5.1 没有 BOM 时
+  会按本地代码页读取，中文注释/字符串会乱码。`scripts/check.sh` 会检查。
 
 ## 4. 文档
 
-- 文档分两类（见 [docs/README.md](docs/README.md)）：**现状**（`docs/current/`，写"现在是什么样"，
-  代码改了必须同步）与**决策与背景**（`docs/decisions/`，只追加：决策索引、架构理由、演进史）。
-- 改动触及架构、契约、可观察行为、持久化格式或阈值时，**必须**在
-  [docs/decisions/log.md](docs/decisions/log.md) 追加一条决策（下一个编号）。
-- 不要再引用工作区里已不存在的旧文档；历史原文用 `git show 778dc60:docs/...` 取。
+- 文档集见 [docs/README.md](docs/README.md)，只描述现状；历史原因写提交说明或留在 git 历史。
+- 触及架构、契约、可观察行为、持久化格式或阈值时，同步更新：
+  - [docs/architecture.md](docs/architecture.md) 的不变量清单；
+  - [docs/app-ui.md](docs/app-ui.md) 的交互/保存语义；
+  - [docs/status.md](docs/status.md) 与 [docs/roadmap.md](docs/roadmap.md)（完成/新增未决项）。
+- 不要再引用已删除的 `docs/current/`、`docs/decisions/`；需要时用 `git show` 取历史。
 
-## 交付前自检清单
+## 交付前自检
 
-- [ ] 改动是否附带新增或更新的测试？
-- [ ] 全部测试是否通过？（`cargo test`）
-- [ ] 必须依赖 UI 的验证项是否已明确交给用户，并说明了「怎么看、看什么」？
-- [ ] 改动触及绘制/缓存/预览时，是否跑过回放器？
-      先 `cargo run -p app -- --sample a4 scripts/replay/a4_3p.pdf` 备样本，
-      再 `cargo run -p app -- --replay scripts/replay/tiling_800.json`（D-103，四条断言）
-- [ ] 现状文档（`docs/current/`）是否已同步？新决策是否已追加到 `docs/decisions/log.md`？
-- [ ] 是否已完成 `git commit`？
+- [ ] 新增/更新了测试？`./scripts/check.sh` 全绿？
+- [ ] UI/真机项已列出人工验收集？
+- [ ] 触及绘制/缓存/分块时跑过回放器与基线比较？
+- [ ] 文档已同步（架构/UI/status/roadmap）？
+- [ ] 已按“只提交本次改动”提交？

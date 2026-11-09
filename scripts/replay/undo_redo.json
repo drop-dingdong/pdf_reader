@@ -1,0 +1,15 @@
+{
+  "name": "undo_redo",
+  "pdf": "rotated_2p.pdf",
+  "actions": [
+    { "id": "resize", "op": "resize", "width": 700, "height": 800 },
+    { "id": "top", "op": "set_scroll", "x": 0, "y": 0 },
+    { "id": "settle", "op": "wait", "frames": 8 },
+    { "id": "a1", "op": "highlight", "page": 0, "x": 50, "y": 690, "width": 450, "height": 50 },
+    { "id": "a2", "op": "highlight", "page": 0, "x": 60, "y": 690, "width": 400, "height": 50 },
+    { "id": "a3", "op": "highlight", "page": 0, "x": 70, "y": 690, "width": 350, "height": 50 },
+    { "id": "undo1", "op": "undo" },
+    { "id": "undo2", "op": "undo" },
+    { "id": "redo1", "op": "redo" }
+  ]
+}

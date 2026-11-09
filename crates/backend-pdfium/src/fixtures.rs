@@ -47,7 +47,7 @@ pub fn two_page_pdf() -> Vec<u8> {
         "<< /Title (Chapter One) /Parent 8 0 R /Dest [3 0 R /Fit] >>".to_string(),
     ];
 
-    let mut out = String::from("%PDF-1.4\n");
+    let mut out = String::from("%PDF-1.5\n");
     let mut offsets = Vec::with_capacity(objects.len());
     for (index, body) in objects.iter().enumerate() {
         offsets.push(out.len());
@@ -108,7 +108,7 @@ pub fn nested_outline_pdf() -> Vec<u8> {
         "<< /Title (B) /Parent 8 0 R /Prev 9 0 R /Dest [5 0 R /Fit] >>".to_string(),
     ];
 
-    let mut out = String::from("%PDF-1.4\n");
+    let mut out = String::from("%PDF-1.5\n");
     let mut offsets = Vec::with_capacity(objects.len());
     for (index, body) in objects.iter().enumerate() {
         offsets.push(out.len());
@@ -143,7 +143,7 @@ pub fn colored_page_pdf() -> Vec<u8> {
         stream_object(content),
     ];
 
-    let mut out = String::from("%PDF-1.4\n");
+    let mut out = String::from("%PDF-1.5\n");
     let mut offsets = Vec::with_capacity(objects.len());
     for (index, body) in objects.iter().enumerate() {
         offsets.push(out.len());
@@ -212,7 +212,7 @@ pub fn many_page_pdf(page_count: usize, width: f32, height: f32) -> Vec<u8> {
     }
     objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string());
 
-    let mut out = String::from("%PDF-1.4\n");
+    let mut out = String::from("%PDF-1.5\n");
     let mut offsets = Vec::with_capacity(objects.len());
     for (index, body) in objects.iter().enumerate() {
         offsets.push(out.len());
@@ -266,7 +266,7 @@ pub fn offset_media_box_pdf() -> Vec<u8> {
             .to_string(),
     ];
 
-    let mut out = String::from("%PDF-1.4\n");
+    let mut out = String::from("%PDF-1.5\n");
     let mut offsets = Vec::with_capacity(objects.len());
     for (index, body) in objects.iter().enumerate() {
         offsets.push(out.len());
