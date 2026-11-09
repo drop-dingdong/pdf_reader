@@ -51,7 +51,7 @@ Linux：
 
 ```bash
 ./scripts/fetch-pdfium.sh          # → vendor/pdfium-<平台>/lib/
-cargo run -p app --                 # 空状态启动；拖入 PDF 或 Ctrl+O 打开
+cargo run -p app --                 # 空状态启动；拖入 PDF 打开
 cargo run -p app -- some.pdf       # 直接打开
 ```
 
@@ -140,7 +140,7 @@ cargo build --release -p app           # target/release/app；不带 lib/pdfium
   Adobe 视觉兼容性。
 
 导出注释摘要：`文件 → 导出注释摘要…`，生成同目录 `<stem>.annotations.md`（不覆盖；递增）。
-摘要中的内部图片会转成 `data:image/png;base64,...`。
+如果注释摘要的正文中引用了内部图片，图片会转成 `data:image/png;base64,...`。
 
 <a id="undo"></a>
 ## 编辑与撤销
@@ -149,7 +149,7 @@ cargo build --release -p app           # target/release/app；不带 lib/pdfium
 
 - 注释新增/删除/改正文/改样式/移动墨迹；
 - 自定义 preview 的标题/正文/尺寸/位置/图片替换；
-- dest 矩形/尺寸/引用图。
+- dest 矩形/尺寸。
 
 不覆盖页面导航、缩放、滚动、侧栏筛选等视图操作。历史保存点与 PDF/自定义数据的脏位联动：
 撤销回到保存点会重新变干净；保存后历史点更新。
@@ -181,7 +181,8 @@ cargo build --release -p app           # target/release/app；不带 lib/pdfium
 
 - **PDF 脏位**：注释新增/删除/样式/几何/正文、外部注释正文更新；
 - **数据脏位**：preview/dest/sidecar 迁移等；
-- **修复脏位**：重复 `/NM` 等需要在保存时重建对象的情况。
+- **修复标记**：打开时发现重复 `/NM` 等需要保存时重建对象的异常；不是普通用户开关，
+  保存成功后自动清除。
 
 保存按钮/关闭提示会区分“只保存数据”和“同时写 PDF”。未保存时关闭/打开另一个文件会提示。
 
@@ -241,7 +242,7 @@ cargo run -p app -- --compact in.pdf out.pdf
 
 - dest 引用点截图；
 - 自定义图片 preview；
-- 可复用为 Markdown 图片引用（内部 `pd-img:` URI）。
+- 可复用为 Markdown 图片引用（内部 `pd-img:` URI），也可复制为浮窗链接。
 
 ### 文字类
 
@@ -252,13 +253,19 @@ cargo run -p app -- --compact in.pdf out.pdf
   - 代码块/表格/长 URL 会按内容宽度横向滚动；
   - `$...$` / `$$...$$` 数学按 PNG 纹理渲染；
   - 图片引用可插入内部图片；
-  - 链接只做提示，不打开浏览器。
+  - 外部链接只做提示，不打开浏览器；
+  - 支持 Markdown 内部标题链接跳转。
+- 链接跳转范围：
+  - `pd-float://` 可打开/置顶内部注释、文字 preview、图片 preview；
+  - 外部注释默认不提供复制入口，开启“允许跨会话外部注释链接”后才可用；
+  - 引用点/截图/测试浮窗没有可复制链接；引用点只支持 `→` 跳到来源。
+  链接语法、断链和外部注释 token 规则见 [docs/float-links.md](docs/float-links.md)。
 
 ### 编辑与按钮
 
-标题栏提供关闭、编辑正文、图片引用、链接、跳到来源、更多操作等按钮；正文编辑使用可调整
-大小的正式窗口，内部可滚动。浮窗的交互限制（滚轮归属、临时预览、点击固定等）见
-[docs/app-ui.md](docs/app-ui.md)。
+标题栏提供关闭、编辑正文、图片引用、复制浮窗链接、跳到来源等按钮；侧栏的 `⋯`/右键
+提供更多操作。正文编辑使用可调整大小的正式窗口，内部可滚动。浮窗的交互限制（滚轮归属、
+临时预览、点击固定等）见 [docs/app-ui.md](docs/app-ui.md)。
 
 数学后端与字体限制见[数学后端](#math-backends)。
 
