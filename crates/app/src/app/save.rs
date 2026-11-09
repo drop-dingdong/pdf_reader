@@ -29,10 +29,9 @@ impl PdfReaderApp {
         if std::env::var_os("CHECK_PDF_FILE").is_none() {
             return Ok(());
         }
-        // qpdf 在某些桌面/沙箱/文件系统上打不开目标目录里的隐藏临时名
-        // （用户实测 Permission denied，但最终文件手动 qpdf 可读）。
-        // 检查系统临时目录里的副本；不要 chmod：部分文件系统/ACL 上把副本
-        // 改权限反而会让 qpdf 打开失败。
+        // 旧流程直接对目标目录里的隐藏暂存名跑 qpdf，实测会 Permission denied；
+        // 复制到系统临时目录后再检查即可通过。差别在 qpdf 打开的文件路径/文件系统
+        // 语义，不是 PDF 内容。副本保持 fs::copy 默认权限，不额外 chmod。
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
@@ -47,8 +46,7 @@ impl PdfReaderApp {
             ));
             return Ok(());
         }
-        // 不在这里 set_permissions：实测 chmod 到 0644 反而可能让 qpdf
-        // Permission denied；fs::copy 的默认权限已足够。副本不可读时只跳过。
+        // 不在这里 set_permissions；fs::copy 的默认权限已足够。副本不可读时只跳过。
         let output = match std::process::Command::new("qpdf")
             .arg("--check")
             .arg(&check_path)

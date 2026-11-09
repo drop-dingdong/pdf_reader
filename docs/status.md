@@ -98,7 +98,7 @@
   连续相同消息去重。
 - **`CHECK_PDF_FILE`**：环境变量存在时，保存暂存 PDF 复制到系统临时目录后调用
   `qpdf --check`；0/3 放行，错误拒绝替换，qpdf 缺失/副本不可读记录跳过。
-  副本**不 chmod**（实测 chmod 会触发 qpdf Permission denied）。
+  副本不 chmod；旧流程直接检查目标目录隐藏暂存名会 Permission denied。
 - **增量 xref `/Size` 修复**：写回 trailer 的 `/Size` 取“现有最高对象号+1”，
   不再被原文件旧 `/Size` 截断；针对 Adobe 多次保存后正文/注释异常。
 - **0 页防御**：PDFium 打开成功但 `page_count == 0` 时直接拒绝并提示；
